@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"bash harness/stage-0-done.sh 2>&1\",\"timeout\":180000,\"description\":\"Run stage-0-done verification script\"}",
+  "error": "Exit code 2\n=== Stage 0 Verification ===\n--- cargo build --workspace ---\n   Compiling agentkeys-core v0.1.0 (/Users/hanwencheng/Projects/agentkeys/crates/agentkeys-core)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.93s\n--- cargo test -p agentkeys-types ---\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s\n     Running unittests src/lib.rs (target/debug/deps/agentkeys_types-29916591ab625731)\n\nrunning 2 tests\ntest tests::session_serialize_roundtrip ......",
+  "timestamp": "2026-04-10T02:28:33.107Z",
+  "retry_count": 1
+}

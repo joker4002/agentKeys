@@ -1,0 +1,12 @@
+{
+  "features": [
+    {"name": "cargo_workspace", "stage": 0, "implemented": true, "test": "workspace_compiles"},
+    {"name": "agentkeys_types", "stage": 0, "implemented": true, "test": "types::session_serialize_roundtrip"},
+    {"name": "agent_identity", "stage": 0, "implemented": true, "test": "types::agent_identity_variants"},
+    {"name": "credential_backend_trait", "stage": 0, "implemented": true, "test": "trait::compiles"},
+    {"name": "cbor_serialization", "stage": 0, "implemented": true, "test": "auth_request::cbor_determinism"},
+    {"name": "cbor_vectors", "stage": 0, "implemented": true, "test": "auth_request::cbor_vectors"},
+    {"name": "otp_derivation", "stage": 0, "implemented": true, "test": "otp::determinism"},
+    {"name": "payment_layer", "stage": 0, "implemented": true, "test": "payment::layer_enum"}
+  ]
+}
