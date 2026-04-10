@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"bash harness/stage-0-done.sh 2>&1\",\"timeout\":180000,\"description\":\"Run stage-0-done verification script\"}",
-  "error": "Exit code 2\n=== Stage 0 Verification ===\n--- cargo build --workspace ---\n   Compiling agentkeys-core v0.1.0 (/Users/hanwencheng/Projects/agentkeys/crates/agentkeys-core)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.93s\n--- cargo test -p agentkeys-types ---\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s\n     Running unittests src/lib.rs (target/debug/deps/agentkeys_types-29916591ab625731)\n\nrunning 2 tests\ntest tests::session_serialize_roundtrip ......",
-  "timestamp": "2026-04-10T02:28:33.107Z",
+  "tool_input_preview": "{\"command\":\"cargo test -p agentkeys-mock-server 2>&1\",\"timeout\":180000,\"description\":\"Run mock-server tests\"}",
+  "error": "Exit code 101\n Downloading crates ...\n  Downloaded pin-project-internal v1.1.11\n  Downloaded pin-project v1.1.11\n  Downloaded tower v0.4.13\n   Compiling pin-project-internal v1.1.11\n   Compiling agentkeys-mock-server v0.1.0 (/Users/hanwencheng/Projects/agentkeys/crates/agentkeys-mock-server)\nwarning: unused import: `rusqlite::params`\n --> crates/agentkeys-mock-server/src/handlers/audit.rs:6:5\n  |\n6 | use rusqlite::params;\n  |     ^^^^^^^^^^^^^^^^\n  |\n  = note: `#[warn(unused_imports)]` (part of ...",
+  "timestamp": "2026-04-10T02:56:43.584Z",
   "retry_count": 1
 }
