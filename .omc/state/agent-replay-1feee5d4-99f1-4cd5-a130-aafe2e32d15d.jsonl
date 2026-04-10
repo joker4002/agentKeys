@@ -8,3 +8,12 @@
 {"t":0,"agent":"ac31781","agent_type":"executor","event":"agent_start","parent_mode":"none"}
 {"t":0,"agent":"ac31781","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":1329760}
 {"t":0,"agent":"a2a0689","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":2014162}
+{"t":0,"agent":"ac9586f","agent_type":"executor","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"ac9586f","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":481282}
+{"t":0,"agent":"a7967db","agent_type":"executor","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a7967db","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":557700}
+{"t":0,"agent":"system","event":"skill_invoked","skill_name":"codex"}
+{"t":0,"agent":"aa0359d","agent_type":"executor","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a33d46b","agent_type":"executor","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"aa0359d","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":490699}
+{"t":0,"agent":"a33d46b","agent_type":"executor","event":"agent_stop","success":true,"duration_ms":458465}
