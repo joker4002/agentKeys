@@ -158,7 +158,9 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 store 0xAGENT_WALL
 ```bash
 cd ~/Projects/agentkeys
 unset AGENTKEYS_SESSION_STORE
-export AGENTKEYS_BACKEND=http://localhost:8090
+
+# Remove any leftover session file so the daemon enters pair flow
+rm -f ~/.agentkeys/session
 
 # Start the daemon with NO session — triggers pair flow
 cargo run -p agentkeys-daemon -- --backend http://localhost:8090
@@ -186,11 +188,10 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve XXXXXXXX -
 ### Back to Terminal 3 — Verify daemon received session
 
 ```
-# After approval, Terminal 3 should print:
+# After approval, Terminal 3 should print and then exit automatically:
 #   Paired. Session received. Daemon ready.
-#
-# The daemon is now running with a valid session.
-# Press Ctrl+C to stop it.
+#   daemon ready, session wallet=0x...
+#   no --stdio flag; daemon exiting (Unix socket mode not yet implemented)
 ```
 
 **Pass criteria:**
@@ -245,6 +246,8 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve FAKE-CODE-
 ### Terminal 3 — Start daemon
 
 ```bash
+rm -f ~/.agentkeys/session
+
 cargo run -p agentkeys-daemon -- --backend http://localhost:8090
 # Note the pair code
 ```
@@ -273,6 +276,8 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve XXXXXXXX -
 ### Terminal 3 — Start daemon
 
 ```bash
+rm -f ~/.agentkeys/session
+
 cargo run -p agentkeys-daemon -- --backend http://localhost:8090
 # Note the pair code
 ```
@@ -365,92 +370,187 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openr
 
 ### Test 6b: Recover Child AgentKey via Master Approval
 
-**What you're testing:** a child agentKey (daemon) can be recovered by
-requesting approval from an existing master Mac.
+**What you're testing:** a child agentKey (daemon) that was previously paired
+can be recovered on a new machine by requesting approval from the master Mac.
+This requires an initial pair to create the child wallet, then a recovery after
+the daemon is killed.
 
-#### Terminal 2 — Setup master + child
+#### Terminal 2 — Init master
 
 ```bash
 unset AGENTKEYS_SESSION_STORE
 
-# Init master
 cargo run -p agentkeys-cli -- --backend http://localhost:8090 init --mock-token recover-child-master
-WALLET=$(ak-keychain-show | jq -r .wallet)
-echo "master wallet: $WALLET"
+MASTER_WALLET=$(ak-keychain-show | jq -r .wallet)
+echo "master wallet: $MASTER_WALLET"
+```
 
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 store $WALLET openrouter sk-or-child-key
+#### Terminal 3 — Pair a child daemon (creates child wallet)
+
+```bash
+unset AGENTKEYS_SESSION_STORE
+
+# Remove any leftover session file from prior tests so the daemon enters pair flow
+rm -f ~/.agentkeys/session
+
+cargo run -p agentkeys-daemon -- --backend http://localhost:8090
+# Expected:
+#   Pair code: XXXXXXXX. Approve on your Master device. OTP: 123456
+# Note the PAIR CODE.
+```
+
+#### Terminal 2 — Approve the initial pair
+
+```bash
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve XXXXXXXX --yes
+# Expected: "Approved. Agent paired successfully."
+```
+
+#### Terminal 3 — Note the child wallet
+
+```
+# After approval, daemon should print and then exit automatically:
+#   Paired. Session received. Daemon ready.
+#   daemon ready, session wallet=0xCHILD_WALLET
+#   no --stdio flag; daemon exiting (Unix socket mode not yet implemented)
+#
+# Note the CHILD_WALLET address from the "session wallet=" line.
+# The daemon exits on its own (no Ctrl+C needed) because Unix socket
+# mode is not yet implemented. With --stdio it would stay running.
+```
+
+#### Terminal 2 — Store credential + link alias on the child wallet
+
+```bash
+# Use the child wallet from Terminal 3 output
+CHILD_WALLET=0xCHILD_WALLET
+
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 store $CHILD_WALLET openrouter sk-or-child-key
 # Expected: "Credential stored"
 
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 link $WALLET --alias my-child-agent
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 link $CHILD_WALLET --alias my-child-agent
 # Expected: "Linked agent=... alias=..."
 ```
 
-#### Terminal 3 — Start daemon in recovery mode (child requests recovery)
+#### Terminal 3 — Start a NEW daemon in recovery mode
 
 ```bash
 cargo run -p agentkeys-daemon -- --backend http://localhost:8090 --recover my-child-agent
 # Expected:
-#   Recovery code: XXXXXXXX. Approve on your Master device. OTP: 123456
+#   Recovery code: YYYYYYYY. Approve on your Master device. OTP: 654321
+# Note the new RECOVERY CODE.
 ```
 
 #### Terminal 2 — Approve recovery from master Mac
 
 ```bash
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve XXXXXXXX --yes
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve YYYYYYYY --yes
 # Expected: "Approved"
 ```
 
 #### Terminal 3 — Verify child recovery
 
 ```
-# Daemon should print:
+# After approval, daemon should print and then exit automatically:
 #   Recovered. Session received. Daemon ready.
+#   daemon ready, session wallet=0xCHILD_WALLET
+#   no --stdio flag; daemon exiting (Unix socket mode not yet implemented)
 ```
 
 **Pass criteria:**
 
-- Child daemon starts in recovery mode, shows recovery code + OTP
+- Initial pair creates a child wallet
+- Alias is linked to the **child** wallet (not the master)
+- Daemon recovers the same child wallet via the alias
 - Master CLI approve succeeds with matching OTP
-- Child daemon receives session and prints "Recovered"
+- Recovered daemon prints "Recovered" and the same child wallet address
 
 ---
 
 ### Test 6c: Recover Child AgentKey via 2FA Recovery
 
-**What you're testing:** a child agentKey can be recovered using a
-second-factor recovery method (e.g., passKey from Mac keychain) when the
-master device is unavailable.
+**What you're testing:** a child agentKey that was previously paired can be
+recovered using a second-factor recovery method (passKey) when the master
+device is unavailable. No master approval needed.
 
-#### Terminal 2 — Setup master + child alias
+#### Terminal 2 — Init master
 
 ```bash
 unset AGENTKEYS_SESSION_STORE
 
 cargo run -p agentkeys-cli -- --backend http://localhost:8090 init --mock-token recover-child-2fa-master
-WALLET=$(ak-keychain-show | jq -r .wallet)
-echo "master wallet: $WALLET"
+MASTER_WALLET=$(ak-keychain-show | jq -r .wallet)
+echo "master wallet: $MASTER_WALLET"
+```
 
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 store $WALLET openrouter sk-or-child-2fa-key
+#### Terminal 3 — Pair a child daemon (creates child wallet)
+
+```bash
+unset AGENTKEYS_SESSION_STORE
+
+# Remove any leftover session file from prior tests so the daemon enters pair flow
+rm -f ~/.agentkeys/session
+
+cargo run -p agentkeys-daemon -- --backend http://localhost:8090
+# Expected:
+#   Pair code: XXXXXXXX. Approve on your Master device. OTP: 123456
+# Note the PAIR CODE.
+```
+
+#### Terminal 2 — Approve the initial pair
+
+```bash
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve XXXXXXXX --yes
+# Expected: "Approved. Agent paired successfully."
+```
+
+#### Terminal 3 — Note the child wallet
+
+```
+# After approval, daemon should print and then exit automatically:
+#   Paired. Session received. Daemon ready.
+#   daemon ready, session wallet=0xCHILD_WALLET
+#   no --stdio flag; daemon exiting (Unix socket mode not yet implemented)
+#
+# Note the CHILD_WALLET address from the "session wallet=" line.
+```
+
+#### Terminal 2 — Store credential + link alias on the child wallet
+
+```bash
+CHILD_WALLET=0xCHILD_WALLET
+
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 store $CHILD_WALLET openrouter sk-or-child-2fa-key
 # Expected: "Credential stored"
 
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 link $WALLET --alias my-child-2fa
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 link $CHILD_WALLET --alias my-child-2fa
 # Expected: "Linked agent=... alias=..."
 ```
 
-#### Terminal 3 — Recover child via 2FA (no master approval needed)
+#### Terminal 3 — Simulate session loss, then recover via 2FA
 
 ```bash
-# Recover the child session using 2FA recovery (passKey from Mac keychain)
+# Simulate the daemon losing its session (machine died, container restarted, etc.)
+rm -f ~/.agentkeys/session
+
+# Recover using 2FA -- the --recover flag bypasses session file check,
+# but we delete the file to simulate a realistic scenario.
 cargo run -p agentkeys-daemon -- --backend http://localhost:8090 --recover my-child-2fa --method passkey
-# Expected:
+# Expected (daemon prints and exits):
 #   Recovered. Session received. Daemon ready.
+#   daemon ready, session wallet=0xCHILD_WALLET
+#   no --stdio flag; daemon exiting (Unix socket mode not yet implemented)
+#
+# The wallet should match the CHILD_WALLET from the original pair.
 ```
 
 **Pass criteria:**
 
-- Child daemon recovers without needing master approval
-- Recovery completes via `--method passkey` (mock auto-verifies; production uses real WebAuthn)
-- Daemon receives session and prints "Recovered"
+- Initial pair creates a child wallet
+- Alias is linked to the **child** wallet (not the master)
+- Child daemon recovers via `--method passkey` without master approval
+- Recovery completes via mock auto-verify (production uses real WebAuthn)
+- Recovered daemon prints the same child wallet address as the original pair
 
 ---
 
@@ -494,57 +594,73 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 store $WALLET open
 
 ## Test 8: Wrong User Approval
 
-**What you're testing:** a different user cannot approve someone else's pair request.
+**What you're testing:** a different user cannot approve someone else's pair
+request when the request has a pre-assigned parent wallet.
 
-Because the session lives in a single keychain slot
-(`service=agentkeys, account=session`), we swap users by stashing the keychain
-blob, wiping the slot, and re-initing as someone else.
+> **Note:** This test requires raw HTTP calls because the daemon's pair request
+> has no pre-assigned parent (any master can claim it). The automated test
+> `pair_wrong_user_approve` in `crates/agentkeys-daemon/tests/pair_tests.rs`
+> covers this via the `InProcessBackend`. The manual version below uses `curl`
+> to simulate the same scenario.
 
-### Terminal 2 — Stash user1
+### Terminal 2 — Create two users
 
 ```bash
 unset AGENTKEYS_SESSION_STORE
 
-# Make sure user1 is currently in the keychain (re-init if needed)
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 init --mock-token user1-token
+# Create user A
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 init --mock-token user-a
+USER_A_TOKEN=$(ak-keychain-show | jq -r .token)
+USER_A_WALLET=$(ak-keychain-show | jq -r .wallet)
+echo "user A: wallet=$USER_A_WALLET token=$USER_A_TOKEN"
 
-# Stash user1's session JSON to a temp file
-ak-keychain-show > /tmp/ak-user1.json
-cat /tmp/ak-user1.json | jq .wallet  # sanity check
-```
-
-### Terminal 3 — Start daemon paired against user1 (current keychain identity)
-
-```bash
-cargo run -p agentkeys-daemon -- --backend http://localhost:8090
-# Note the pair code
-```
-
-### Terminal 2 — Swap to user2 in the keychain, then try to approve
-
-```bash
-# Replace the keychain blob with a fresh user2 session
+# Stash user A, create user B
+ak-keychain-show > /tmp/ak-user-a.json
 ak-keychain-wipe
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 init --mock-token different-user-2
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 init --mock-token user-b
+USER_B_TOKEN=$(ak-keychain-show | jq -r .token)
+echo "user B: token=$USER_B_TOKEN"
+```
 
-# Try to approve user1's pair request as user2
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve XXXXXXXX --yes
-# Expected: UNAUTHORIZED or "permission denied" error — user2 cannot approve user1's request
+### Terminal 2 — Open a pair request with parent_wallet pre-assigned to user A
+
+```bash
+# Open a pair request via raw HTTP, explicitly binding it to user A
+RESPONSE=$(curl -s -X POST http://localhost:8090/auth-request/open \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"child_pubkey\": \"$(echo -n 'dummy-pubkey-32-bytes-padding!!' | base64)\",
+    \"request_type\": \"Pair\",
+    \"request_details\": \"$(echo -n '{}' | base64)\",
+    \"parent_wallet\": \"$USER_A_WALLET\"
+  }")
+echo "$RESPONSE" | jq .
+REQUEST_ID=$(echo "$RESPONSE" | jq -r .id)
+echo "request_id: $REQUEST_ID"
+```
+
+### Terminal 2 — User B tries to approve user A's request
+
+```bash
+# User B (currently in keychain) tries to approve
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 approve \
+  $(echo "$RESPONSE" | jq -r .pair_code) --yes
+# Expected: UNAUTHORIZED or "owned by a different session" error
 ```
 
 ### Cleanup
 
 ```bash
-# Restore user1 to the keychain (optional, if you want to keep using it)
 ak-keychain-wipe
-security add-generic-password -s agentkeys -a session -w "$(cat /tmp/ak-user1.json)"
-rm -f /tmp/ak-user1.json
+security add-generic-password -s agentkeys -a session -w "$(cat /tmp/ak-user-a.json)"
+rm -f /tmp/ak-user-a.json
 ```
 
 **Pass criteria:**
 
-- Approval fails with authorization error
+- User B's approval fails with authorization error ("owned by a different session")
 - Error message is clear (not a generic 500)
+- The automated test `pair_wrong_user_approve` passes (already verified by `cargo test`)
 
 ---
 
@@ -578,21 +694,24 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 store $WALLET open
 cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openrouter
 # Expected: "sk-lifecycle-key"
 
-# Run with env injection
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 run $WALLET -- printenv OPENROUTER_API_KEY
-# Expected: "sk-lifecycle-key"
+# Run with env injection (SKIPPED -- see litentry/agentKeys#15)
+# Master sessions have scope: None, so `run` injects nothing.
+# Blocked until #15 is fixed (query all credentials when scope is None).
+# cargo run -p agentkeys-cli -- --backend http://localhost:8090 run $WALLET -- printenv OPENROUTER_API_KEY
+# Expected (after fix): "sk-lifecycle-key"
 
 # Check audit trail
 cargo run -p agentkeys-cli -- --backend http://localhost:8090 usage $WALLET
 # Expected: table showing store + read events
 
-# Revoke
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 revoke $WALLET
-# Expected: "Session revoked"
+# Revoke (BROKEN -- see litentry/agentKeys#17)
+# cmd_revoke passes wallet address as session token, backend can't find it.
+# cargo run -p agentkeys-cli -- --backend http://localhost:8090 revoke $WALLET
+# Expected (after fix): "Revoked agent=..."
 
-# Try to read after revoke
-cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openrouter
-# Expected: error — session revoked / DENIED
+# Try to read after revoke (SKIPPED -- depends on revoke fix)
+# cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openrouter
+# Expected (after fix): error — session revoked / DENIED
 ```
 
 **Pass criteria:**
@@ -600,10 +719,10 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openr
 - Session is in the keychain (verified)
 - Store succeeds
 - Read returns the stored key
-- `run` injects the env var correctly
+- `run` injects the env var correctly (SKIPPED -- litentry/agentKeys#15)
 - Usage shows audit events
-- Revoke succeeds
-- Read after revoke fails with clear error
+- Revoke succeeds (BROKEN -- litentry/agentKeys#17)
+- Read after revoke fails with clear error (SKIPPED -- depends on #17)
 
 ---
 
