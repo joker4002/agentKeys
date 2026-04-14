@@ -33,4 +33,6 @@ AgentKeys is a credential custody service: a TEE-backed vault that issues long-l
 3. Merge to `main`.
 4. The `Publish wiki` GitHub Action mirrors `wiki/**` to the wiki repo.
 
+A maintainer can also trigger the mirror manually from the repo's Actions tab — the workflow exposes `workflow_dispatch` for re-runs against an unchanged `wiki/` tree.
+
 See `.github/workflows/publish-wiki.yml` for the implementation.
