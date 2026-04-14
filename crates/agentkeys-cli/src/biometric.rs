@@ -1,20 +1,39 @@
 //! Biometric gate for high-security CLI actions.
 //!
-//! macOS: currently logs the reason and proceeds (Touch ID via LAContext requires
-//! the `block2` crate for synchronous evaluation — tracked as a follow-up).
-//! Non-macOS: prompts via stdin, or accepts AGENTKEYS_ALLOW_NO_BIOMETRIC=1 when
-//! stdin is not a TTY.
+//! **Opt-in by default** to preserve pre-#11 behavior for every existing user
+//! on every platform. Scripts and CI see no behavior change until they
+//! explicitly opt in via `AGENTKEYS_BIOMETRIC=on`.
 //!
-//! Set `AGENTKEYS_BIOMETRIC=off` to skip the gate entirely (CI / tests).
+//! Modes (set via `AGENTKEYS_BIOMETRIC`):
+//! - `off` (default when unset) → no gate; `require_biometric` returns `Ok`.
+//! - `on`                        → gate is active. Platform-specific path:
+//!                                  - macOS: real Touch ID (deferred — see
+//!                                    `macos_gate`). Set
+//!                                    `AGENTKEYS_BIOMETRIC_STUB_OK=1` to
+//!                                    acknowledge the stub and proceed.
+//!                                  - non-macOS: stdin y/N confirm; non-TTY
+//!                                    environments must also set
+//!                                    `AGENTKEYS_ALLOW_NO_BIOMETRIC=1`.
 
 use anyhow::{anyhow, Result};
 
 /// Require biometric (or fallback) confirmation before a high-security action.
 ///
-/// `AGENTKEYS_BIOMETRIC=off` skips the gate entirely.
+/// See the module doc for mode selection. Summary: no-op unless
+/// `AGENTKEYS_BIOMETRIC=on` is set.
 pub fn require_biometric(reason: &str) -> Result<()> {
-    if std::env::var("AGENTKEYS_BIOMETRIC").as_deref() == Ok("off") {
-        return Ok(());
+    let mode = std::env::var("AGENTKEYS_BIOMETRIC").ok();
+    match mode.as_deref() {
+        // Explicit opt-out and the default (unset) both skip the gate — no
+        // regression for existing scripts or CI pipelines.
+        Some("off") | None => return Ok(()),
+        Some("on") => {}
+        Some(other) => {
+            return Err(anyhow!(
+                "unknown AGENTKEYS_BIOMETRIC value '{}'. Use 'on' to enable the gate or 'off' (default) to disable.",
+                other
+            ));
+        }
     }
 
     #[cfg(target_os = "macos")]
