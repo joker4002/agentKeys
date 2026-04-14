@@ -704,14 +704,17 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openr
 cargo run -p agentkeys-cli -- --backend http://localhost:8090 usage $WALLET
 # Expected: table showing store + read events
 
-# Revoke (BROKEN -- see litentry/agentKeys#17)
-# cmd_revoke passes wallet address as session token, backend can't find it.
-# cargo run -p agentkeys-cli -- --backend http://localhost:8090 revoke $WALLET
-# Expected (after fix): "Revoked agent=..."
+# Revoke the wallet's active sessions (fixed in #17)
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 revoke $WALLET
+# Expected: "Revoked agent=0x..."
 
-# Try to read after revoke (SKIPPED -- depends on revoke fix)
-# cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openrouter
-# Expected (after fix): error — session revoked / DENIED
+# Read after revoke — session row is revoked=1, backend denies
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openrouter
+# Expected: error — session revoked / DENIED (exact text depends on backend error surface)
+
+# (Optional) Self-revoke form — no args; wipes local session and requires `init` to re-pair.
+# cargo run -p agentkeys-cli -- --backend http://localhost:8090 revoke
+# Expected: "Revoked current session for wallet=0x.... Local session wiped. Run `agentkeys init` to re-pair."
 ```
 
 **Pass criteria:**
@@ -721,8 +724,8 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 usage $WALLET
 - Read returns the stored key
 - `run` injects the env var correctly (SKIPPED -- litentry/agentKeys#15)
 - Usage shows audit events
-- Revoke succeeds (BROKEN -- litentry/agentKeys#17)
-- Read after revoke fails with clear error (SKIPPED -- depends on #17)
+- Revoke succeeds
+- Read after revoke fails with clear error
 
 ---
 
