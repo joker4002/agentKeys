@@ -202,7 +202,11 @@ pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Resul
 }
 
 pub async fn cmd_revoke(ctx: &CommandContext, agent: &str) -> Result<String> {
-    biometric::require_biometric(&format!("Revoke session(s) for {}", agent))?;
+    // The `agent` arg may be a session bearer token on this branch (revoke
+    // accepts a raw token as well as a wallet address). Passing it verbatim
+    // to the biometric prompt would echo a live bearer to stderr / terminal
+    // scrollback / captured logs. Keep the prompt reason target-free.
+    biometric::require_biometric("Revoke an agent session")?;
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
 
     let target_session = Session {

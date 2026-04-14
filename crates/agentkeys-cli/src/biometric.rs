@@ -7,9 +7,7 @@
 //!
 //! Set `AGENTKEYS_BIOMETRIC=off` to skip the gate entirely (CI / tests).
 
-use anyhow::Result;
-#[cfg(not(target_os = "macos"))]
-use anyhow::anyhow;
+use anyhow::{anyhow, Result};
 
 /// Require biometric (or fallback) confirmation before a high-security action.
 ///
@@ -30,17 +28,32 @@ pub fn require_biometric(reason: &str) -> Result<()> {
     }
 }
 
-/// macOS gate: logs the prompt to stderr and proceeds.
+/// macOS gate: fails closed until a real LAContext integration lands.
 ///
-/// A real Touch ID evaluation via `LAContext.evaluatePolicy` requires constructing
-/// an Objective-C block synchronously, which needs the `block2` crate. That is
-/// deferred to a follow-up. For now this provides the escape-hatch scaffolding
-/// (`AGENTKEYS_BIOMETRIC=off`) that tests and CI rely on.
+/// A real Touch ID evaluation via `LAContext.evaluatePolicy` requires
+/// constructing an Objective-C block synchronously, which needs the `block2`
+/// crate. That's tracked as a follow-up. Until that lands, this gate returns
+/// an error rather than silently proceeding — consistent with the PR body's
+/// promise that the command "requires Touch ID" on macOS.
+///
+/// Users who need to run a gated command before Touch ID is wired up can set
+/// `AGENTKEYS_BIOMETRIC=off` (handled in `require_biometric` above) to skip
+/// the gate entirely. The `AGENTKEYS_BIOMETRIC_STUB_OK=1` escape hatch also
+/// exists for tests that specifically want to exercise the post-gate path
+/// without a real Touch ID evaluator available.
 #[cfg(target_os = "macos")]
 fn macos_gate(reason: &str) -> Result<()> {
+    if std::env::var("AGENTKEYS_BIOMETRIC_STUB_OK").as_deref() == Ok("1") {
+        eprintln!("[agentkeys] biometric prompt: {}", reason);
+        eprintln!("[agentkeys] STUB mode (AGENTKEYS_BIOMETRIC_STUB_OK=1) — proceeding");
+        return Ok(());
+    }
     eprintln!("[agentkeys] biometric prompt: {}", reason);
-    eprintln!("[agentkeys] Touch ID evaluation deferred (set AGENTKEYS_BIOMETRIC=off to skip)");
-    Ok(())
+    Err(anyhow!(
+        "Touch ID evaluation is not yet wired (macOS LAContext integration deferred). \
+         To proceed without biometric confirmation, set AGENTKEYS_BIOMETRIC=off. \
+         To acknowledge the stub and proceed, set AGENTKEYS_BIOMETRIC_STUB_OK=1 (not for production)."
+    ))
 }
 
 /// Non-macOS gate: prompt on TTY or require AGENTKEYS_ALLOW_NO_BIOMETRIC=1.
