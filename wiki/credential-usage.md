@@ -150,3 +150,40 @@ After `revoke`: re-running `init` (same mock token / OAuth) gives you a fresh se
 | MCP `get_credential` | Only in daemon memory, delivered over MCP pipe | Cloud LLM agents |
 
 Always prefer `run` or MCP over `read` in production. See `wiki/key-security.md` for detailed security analysis.
+
+## Env-var naming convention
+
+When `agentkeys run` injects credentials it uses the convention:
+
+```
+SERVICE.to_uppercase().replace('-', '_') + "_API_KEY"
+```
+
+Examples:
+
+| Service name stored | Env var injected |
+|---|---|
+| `openrouter` | `OPENROUTER_API_KEY` |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `github` | `GITHUB_API_KEY` |
+| `my-custom-llm` | `MY_CUSTOM_LLM_API_KEY` |
+
+### Overriding with `--env KEY=SERVICE`
+
+Some tools expect non-standard env var names (e.g. the GitHub CLI expects `GITHUB_TOKEN`, not `GITHUB_API_KEY`). Use `--env KEY=SERVICE` to map a credential to an arbitrary env var name:
+
+```bash
+agentkeys run 0xAGENT --env GITHUB_TOKEN=github -- bash deploy.sh
+agentkeys run 0xAGENT --env OPENAI_API_KEY=openrouter -- python agent.py
+```
+
+`--env` overrides take priority over the auto-convention: if the same env var would be set by both the convention and an `--env` flag, the `--env` value wins.
+
+Multiple `--env` flags are supported:
+
+```bash
+agentkeys run 0xAGENT \
+  --env GITHUB_TOKEN=github \
+  --env HF_TOKEN=huggingface \
+  -- python train.py
+```

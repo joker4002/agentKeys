@@ -234,7 +234,7 @@ Both are true at different horizons. But "instantly" in `key-security.md:221` re
 
 **Resolution.** Landed in `fix/issue-17` (PR pending merge). `cmd_revoke` takes `Option<&str>` — no-args self-revokes + wipes local session; wallet form calls new `CredentialBackend::revoke_by_wallet` trait method; backend `/session/revoke` handler now accepts either `target_session` (token) or `target_wallet` (wallet). `wiki/credential-usage.md` now carries the revoke-vs-teardown table. `docs/manual-test-stage4.md` Test 9 passes on the fix branch. See `docs/manual-test-issue-17.md` for the full reproduction + verification walkthrough.
 
-### 4.2 `agentkeys run` broken for master sessions  (MAJOR — issue #15)
+### 4.2 `agentkeys run` broken for master sessions  (PARTIALLY RESOLVED 2026-04-14 — fix/issue-15 parts 1+2)
 
 - `crates/agentkeys-cli/src/lib.rs:156-160`: when `session.scope = None`, `services_to_try = vec![]` → nothing injected.
 - `docs/manual-test-stage4.md:697-701`: Test 9 marks run SKIPPED due to #15.
@@ -242,7 +242,7 @@ Both are true at different horizons. But "instantly" in `key-security.md:221` re
 - `development-stages.md:294` (Stage 2): test `cli::run_injects_env` expects `agentkeys run my-agent -- env` output to contain `OPENROUTER_API_KEY=sk-xxx` — this test cannot pass for master sessions today.
 - Issue #15 also requests: (a) fix scope-None path to query all stored credentials, (b) `agentkeys scope <agent> --add service` CLI command, (c) `--env` override flag.
 
-**Resolution.** Land the scope-None fix from #15 before Stage 8 (small patch). `--env` override can slip to v0.1. Update Stage 2 test description to match. 3 files.
+**Resolution.** Parts (a) and (c) landed in `fix/issue-15` (PR pending merge). `CredentialBackend::list_credentials(session, agent_id)` trait method + mock-server endpoint `GET /credential/list?agent_id=<w>` enable master sessions to enumerate stored services. `cmd_run` takes `--env KEY=service` (repeatable) as an escape hatch for services whose canonical env var doesn't match the auto-convention. Part (b) — scope-edit CLI command — remains open, tracked as story `fix-15b` in `.omc/prd.json`; this entry becomes fully RESOLVED when that follow-up PR lands.
 
 ### 4.3 Wallet-optional CLI + identity aliases  (MAJOR — issue #16)
 

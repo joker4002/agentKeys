@@ -694,11 +694,14 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 store $WALLET open
 cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openrouter
 # Expected: "sk-lifecycle-key"
 
-# Run with env injection (SKIPPED -- see litentry/agentKeys#15)
-# Master sessions have scope: None, so `run` injects nothing.
-# Blocked until #15 is fixed (query all credentials when scope is None).
-# cargo run -p agentkeys-cli -- --backend http://localhost:8090 run $WALLET -- printenv OPENROUTER_API_KEY
-# Expected (after fix): "sk-lifecycle-key"
+# Run with env injection (fixed in #15)
+# Master sessions now query list_credentials and inject all stored keys.
+cargo run -p agentkeys-cli -- --backend http://localhost:8090 run $WALLET -- printenv OPENROUTER_API_KEY
+# Expected: "sk-lifecycle-key"
+
+# (Optional) --env override: override the auto-derived env-var name
+# cargo run -p agentkeys-cli -- --backend http://localhost:8090 run $WALLET --env MY_KEY=openrouter -- printenv MY_KEY
+# Expected: "sk-lifecycle-key"
 
 # Check audit trail
 cargo run -p agentkeys-cli -- --backend http://localhost:8090 usage $WALLET
@@ -722,7 +725,7 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 read $WALLET openr
 - Session is in the keychain (verified)
 - Store succeeds
 - Read returns the stored key
-- `run` injects the env var correctly (SKIPPED -- litentry/agentKeys#15)
+- `run` injects the env var correctly
 - Usage shows audit events
 - Revoke succeeds
 - Read after revoke fails with clear error
