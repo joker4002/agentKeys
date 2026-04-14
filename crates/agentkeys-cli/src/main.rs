@@ -74,7 +74,7 @@ enum Commands {
 
     #[command(
         about = "Revoke an agent's session",
-        long_about = "Immediately invalidate an agent's session token.\n\nExamples:\n  agentkeys revoke 0xAGENT"
+        long_about = "Immediately invalidate an agent's session token.\n\nRequires biometric confirmation (Touch ID on macOS).\nSet AGENTKEYS_BIOMETRIC=off to skip (CI / tests).\n\nExamples:\n  agentkeys revoke 0xAGENT"
     )]
     Revoke {
         #[arg(help = "Agent wallet address or session token to revoke")]
@@ -83,7 +83,7 @@ enum Commands {
 
     #[command(
         about = "Tear down all credentials for an agent",
-        long_about = "Delete all stored credentials and revoke all sessions for an agent.\n\nExamples:\n  agentkeys teardown 0xAGENT"
+        long_about = "Delete all stored credentials and revoke all sessions for an agent.\n\nRequires biometric confirmation (Touch ID on macOS).\nSet AGENTKEYS_BIOMETRIC=off to skip (CI / tests).\n\nExamples:\n  agentkeys teardown 0xAGENT"
     )]
     Teardown {
         #[arg(help = "Agent wallet address")]
@@ -127,7 +127,7 @@ enum Commands {
 
     #[command(
         about = "Approve a pairing request",
-        long_about = "Approve a pending pair request by its pair code.\n\nExamples:\n  agentkeys approve PAIR-CODE-123\n  agentkeys approve PAIR-CODE-123 --yes"
+        long_about = "Approve a pending pair request by its pair code.\n\nRequires biometric confirmation (Touch ID on macOS).\nSet AGENTKEYS_BIOMETRIC=off to skip (CI / tests).\n\nExamples:\n  agentkeys approve PAIR-CODE-123\n  agentkeys approve PAIR-CODE-123 --yes"
     )]
     Approve {
         #[arg(help = "Pair code to approve")]

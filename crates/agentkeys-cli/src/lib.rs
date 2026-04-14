@@ -1,3 +1,4 @@
+pub mod biometric;
 pub mod session_store;
 
 use std::sync::Arc;
@@ -201,6 +202,7 @@ pub async fn cmd_run(ctx: &CommandContext, agent: &str, cmd: &[String]) -> Resul
 }
 
 pub async fn cmd_revoke(ctx: &CommandContext, agent: &str) -> Result<String> {
+    biometric::require_biometric(&format!("Revoke session(s) for {}", agent))?;
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
 
     let target_session = Session {
@@ -229,6 +231,7 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: &str) -> Result<String> {
 }
 
 pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
+    biometric::require_biometric(&format!("Tear down agent {} (deletes all credentials)", agent))?;
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let agent_id = WalletAddress(agent.to_string());
 
@@ -401,6 +404,7 @@ pub async fn cmd_recover(ctx: &CommandContext, identity: &str, method: &str) -> 
 }
 
 pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) -> Result<String> {
+    biometric::require_biometric("Approve pair request (creates a new child session)")?;
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
 
     if ctx.verbose {

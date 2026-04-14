@@ -28,6 +28,7 @@ dependencies = [
  "predicates",
  "reqwest",
  "rusqlite",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "tokio",

@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
-use agentkeys_cli::{cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_store, cmd_teardown, cmd_usage, CommandContext};
+use agentkeys_cli::{cmd_approve, cmd_init, cmd_link, cmd_read, cmd_revoke, cmd_store, cmd_teardown, cmd_usage, CommandContext};
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
 use agentkeys_types::Session;
+
+fn disable_biometric() {
+    unsafe { std::env::set_var("AGENTKEYS_BIOMETRIC", "off") };
+}
 
 fn create_test_backend() -> Arc<InProcessBackend> {
     Arc::new(InProcessBackend::new())
@@ -94,6 +98,7 @@ async fn cli_run_injects_env() {
 // Test 5: revoke then read — exercises the revoke path without blocking on keychain
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_revoke_then_read() {
+    disable_biometric();
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
@@ -112,6 +117,7 @@ async fn cli_revoke_then_read() {
 // Test 6: teardown then read returns error
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_teardown_deletes_all() {
+    disable_biometric();
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
     let context = ctx_with_session(backend, session);
@@ -266,4 +272,54 @@ async fn cli_error_format_unreachable() {
         err.contains("UNREACHABLE") || err.contains("error") || err.contains("connect"),
         "unexpected error: {err}"
     );
+}
+
+// Test 15: biometric gate is skipped when AGENTKEYS_BIOMETRIC=off
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_approve_skips_biometric_in_test_mode() {
+    disable_biometric();
+    let backend = create_test_backend();
+    let (_wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    // approve with a non-existent pair code — biometric gate must not block it;
+    // expect an error from the backend (not a biometric error).
+    let result = cmd_approve(&context, "NONEXISTENT-PAIR-CODE", true).await;
+    assert!(result.is_err(), "expected backend error for unknown pair code");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        !err.contains("biometric") && !err.contains("Biometric") && !err.contains("cancelled"),
+        "unexpected biometric error leaked: {err}"
+    );
+}
+
+// Test 16: cmd_revoke skips biometric when AGENTKEYS_BIOMETRIC=off
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_revoke_skips_biometric_in_test_mode() {
+    disable_biometric();
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    // revoke proceeds past the biometric gate regardless of result
+    let result = cmd_revoke(&context, &wallet).await;
+    // accept ok or backend error — just not a biometric gate error
+    if let Err(ref err) = result {
+        assert!(
+            !err.to_string().contains("biometric") && !err.to_string().contains("cancelled"),
+            "unexpected biometric error: {err}"
+        );
+    }
+}
+
+// Test 17: cmd_teardown skips biometric when AGENTKEYS_BIOMETRIC=off
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_teardown_skips_biometric_in_test_mode() {
+    disable_biometric();
+    let backend = create_test_backend();
+    let (wallet, session) = init_session_direct(&backend).await;
+    let context = ctx_with_session(backend, session);
+
+    let result = cmd_teardown(&context, &wallet).await;
+    assert!(result.is_ok(), "teardown should succeed: {:?}", result.err());
 }
