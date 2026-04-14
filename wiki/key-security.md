@@ -208,13 +208,13 @@ Fix proposal for the test doc: add a minimal `agentkeys whoami` subcommand that 
 
 ## 6. The `agentkeys read` escape hatch
 
-`agentkeys read <agent> <service>` prints a stored credential to stdout. This is intentional — it is the debug / migration / emergency-retrieval path, matching `pass show`, `op item get`, `vault kv get`.
+`agentkeys read [--agent <wallet|alias>] <service>` prints a stored credential to stdout. This is intentional — it is the debug / migration / emergency-retrieval path, matching `pass show`, `op item get`, `vault kv get`. Omit `--agent` to default to the current session wallet.
 
 Important distinction: this applies only to **user-stored credentials** (tier 2), not to the **session bearer token** (tier 1). The session token stays invisible; user credentials are retrievable.
 
 ### Risk accepted
 
-A malicious process running as the user can call `agentkeys read 0xAGENT anthropic` and exfiltrate the key. This is **mitigated, not eliminated**:
+A malicious process running as the user can call `agentkeys read --agent 0xAGENT anthropic` and exfiltrate the key. This is **mitigated, not eliminated**:
 
 - **Audit log** — every `read` writes a row to `audit_log`. See the five `INSERT INTO audit_log` sites in `crates/agentkeys-mock-server/src/handlers/credential.rs`. Compromise leaves a trail.
 - **Session scope** — `session.scope.services` limits which services the session can read. A session scoped to `openrouter` cannot pull `anthropic`.
@@ -227,7 +227,7 @@ A malicious process running as the user can call `agentkeys read 0xAGENT anthrop
 For production agent execution, use `agentkeys run` instead of `agentkeys read`:
 
 ```bash
-agentkeys run 0xAGENT -- python my_agent.py
+agentkeys run --agent 0xAGENT -- python my_agent.py
 ```
 
 `run` injects the credential as a `SERVICE_API_KEY` env var into the child process without ever crossing the user's stdout, terminal buffer, or shell history. `read` is a debug path; `run` is the production path.

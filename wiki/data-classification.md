@@ -139,7 +139,7 @@ The client holds the minimum needed to authenticate and receive results.
 ### Credential store flow
 
 ```
-user types: agentkeys store 0xAGENT openrouter sk-or-v1-abc123
+user types: agentkeys store --agent 0xAGENT openrouter sk-or-v1-abc123
   ↓
 CLI has plaintext credential: "sk-or-v1-abc123"                [CLIENT: plaintext]
   ↓

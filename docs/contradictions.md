@@ -244,14 +244,14 @@ Both are true at different horizons. But "instantly" in `key-security.md:221` re
 
 **Resolution.** Parts (a) and (c) landed in `fix/issue-15` (PR pending merge). `CredentialBackend::list_credentials(session, agent_id)` trait method + mock-server endpoint `GET /credential/list?agent_id=<w>` enable master sessions to enumerate stored services. `cmd_run` takes `--env KEY=service` (repeatable) as an escape hatch for services whose canonical env var doesn't match the auto-convention. Part (b) — scope-edit CLI command — remains open, tracked as story `fix-15b` in `.omc/prd.json`; this entry becomes fully RESOLVED when that follow-up PR lands.
 
-### 4.3 Wallet-optional CLI + identity aliases  (MAJOR — issue #16)
+### 4.3 Wallet-optional CLI + identity aliases  (RESOLVED 2026-04-14 — fix/issue-16)
 
 - Current: every command requires explicit wallet (`agentkeys store 0xAGENT openrouter sk-xxx`).
 - Issue #16: wallet should default to session wallet, and aliases should resolve via `/identity/resolve`.
 - `wiki/credential-usage.md` and `docs/manual-test-stage4.md` consistently show the wallet-required form. Both will need rewriting when #16 lands.
 - `development-stages.md:276, 314` (Stage 2) hard-codes wallet-required syntax in deliverables + E2E checklist.
 
-**Resolution.** If #16 is deferred to v0.1, leave docs as-is. If landed before Stage 8, coordinate edits to Stage 2 deliverables, `credential-usage.md`, and `manual-test-stage4.md`. Flag in Stage 8 scope doc.
+**Resolution.** Landed in `fix/issue-16` (PR #20). New `CredentialBackend::resolve_identity(session, identifier)` trait method + helper `resolve_agent(ctx, session, agent: Option<&str>)` in `agentkeys-cli/src/lib.rs` unify all agent-targeting commands. `store`/`read`/`run` take `--agent <wallet|alias>` as a flag (clap derive can't disambiguate an optional leading positional from required args without panicking; subcommand split or manual parser are the only alternatives, and human design call accepted the `--agent` flag tradeoff per PR #20 thread). `--agent` accepts: 0x-prefixed wallet (passthrough), linked alias/email (resolved via `/identity/resolve`), or omitted (defaults to session wallet). Unknown identities return a clean error. **Breaking change**: existing scripts using `agentkeys store 0xABC openrouter sk-xxx` must migrate to `agentkeys store --agent 0xABC openrouter sk-xxx`. Migration sed: `sed -i '' -E 's/agentkeys (store\|read\|run) (0x[0-9a-fA-F]+\|[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\|[a-zA-Z][a-zA-Z0-9_-]*) /agentkeys \1 --agent \2 /g'`. Wiki + main.rs long_about updated in this PR.
 
 **Human Decision**:
 #16 should landed in v0.0 before Stage 8

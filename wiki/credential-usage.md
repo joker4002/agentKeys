@@ -2,47 +2,57 @@
 
 How to store, read, inject, and manage API keys with AgentKeys.
 
+> **Breaking change in v0.x (issue #16):** the `agent` argument is now a `--agent` flag instead of a leading positional. Existing scripts using `agentkeys store 0xABC openrouter sk-xxx` must migrate to `agentkeys store --agent 0xABC openrouter sk-xxx`. Quick migration: `sed -i '' -E 's/agentkeys (store|read|run) (0x[0-9a-fA-F]+|[a-zA-Z0-9_-]+@[a-zA-Z0-9._-]+|[a-zA-Z][a-zA-Z0-9_-]*) /agentkeys \1 --agent \2 /g' your-scripts/*.sh`. Omit `--agent` entirely to default to the current session wallet.
+
 ## Storing credentials
 
 ```bash
-agentkeys store <agent-wallet> <service-name> <api-key>
+agentkeys store <service-name> <api-key>                    # uses session wallet
+agentkeys store --agent <wallet|alias> <service-name> <api-key>   # explicit target
 ```
 
 The service name is a free-form string you choose. Pick names that match the env var convention your tools expect (see "Env var naming" below).
 
 ```bash
-agentkeys store 0xAGENT openrouter sk-or-v1-abc123
-agentkeys store 0xAGENT anthropic sk-ant-abc123
-agentkeys store 0xAGENT brave-search BSA-abc123
+# Default form: stores against the current session's wallet
+agentkeys store openrouter sk-or-v1-abc123
+agentkeys store anthropic sk-ant-abc123
+
+# Explicit target (sub-agent, alias, or different wallet)
+agentkeys store --agent 0xAGENT openrouter sk-or-v1-abc123
+agentkeys store --agent my-bot brave-search BSA-abc123
 ```
 
 ## Reading credentials (debug path)
 
 ```bash
-agentkeys read <agent-wallet> <service-name>
+agentkeys read <service-name>
+agentkeys read --agent <wallet|alias> <service-name>
 ```
 
 Prints the plaintext credential to stdout. Use for debugging only -- the credential crosses your terminal buffer and may end up in shell history.
 
 ```bash
-agentkeys read 0xAGENT openrouter
+agentkeys read openrouter                  # session wallet
+agentkeys read --agent 0xAGENT openrouter  # specific wallet
+agentkeys read --agent my-bot openrouter   # via alias
 # prints: sk-or-v1-abc123
 ```
 
 ## Running with env injection (production path)
 
 ```bash
-agentkeys run <agent-wallet> -- <command>
+agentkeys run -- <command>
+agentkeys run --agent <wallet|alias> -- <command>
 ```
 
 Spawns a child process with credentials injected as environment variables. The credential never touches stdout, shell history, or the parent process's terminal buffer.
 
 ```bash
-agentkeys run 0xAGENT -- python my_agent.py
+agentkeys run -- python my_agent.py                  # session wallet
+agentkeys run --agent 0xAGENT -- python my_agent.py  # explicit
 # my_agent.py sees OPENROUTER_API_KEY=sk-or-v1-abc123 in its environment
 ```
-
-> **Current limitation (litentry/agentKeys#15):** `run` only injects credentials listed in the session's scope. Master sessions have no scope set, so nothing gets injected. Blocked until scope editing or `--env` override is implemented.
 
 ### Env var naming convention
 
@@ -72,17 +82,17 @@ Some tools expect non-standard env var names:
 | Brave Search | `BRAVE_SEARCH_API_KEY` | `BRAVE_SEARCH_API_KEY` | No |
 | AWS | `AWS_SECRET_ACCESS_KEY` | `AWS_API_KEY` | Yes |
 
-For mismatches, the planned `--env` flag will allow explicit mapping:
+For mismatches, use `--env KEY=service` for explicit mapping:
 
 ```bash
-# Not yet implemented (litentry/agentKeys#15)
-agentkeys run 0xAGENT --env GITHUB_TOKEN=github -- gh pr list
+agentkeys run --env GITHUB_TOKEN=github -- gh pr list
+agentkeys run --agent 0xAGENT --env GITHUB_TOKEN=github -- gh pr list
 ```
 
-Until `--env` is implemented, use `read` + shell wiring as a workaround:
+Or use `read` + shell wiring:
 
 ```bash
-GITHUB_TOKEN=$(agentkeys read 0xAGENT github) gh pr list
+GITHUB_TOKEN=$(agentkeys read --agent 0xAGENT github) gh pr list
 ```
 
 ### Recommended service names
@@ -110,25 +120,25 @@ The agent never sees the raw env var -- it calls the MCP tool and gets the crede
 
 ```bash
 # 1. Store
-agentkeys store 0xAGENT openrouter sk-or-v1-abc123
+agentkeys store --agent 0xAGENT openrouter sk-or-v1-abc123
 
 # 2. Use (pick one)
-agentkeys run 0xAGENT -- python agent.py        # env injection (production)
-agentkeys read 0xAGENT openrouter                # stdout (debug only)
-# or via MCP get_credential("openrouter")        # daemon/cloud path
+agentkeys run --agent 0xAGENT -- python agent.py     # env injection (production)
+agentkeys read --agent 0xAGENT openrouter             # stdout (debug only)
+# or via MCP get_credential("openrouter")             # daemon/cloud path
 
 # 3. Audit
-agentkeys usage 0xAGENT                          # who read what, when
+agentkeys usage 0xAGENT                               # who read what, when
 
 # 4. Rotate
-agentkeys store 0xAGENT openrouter sk-or-v1-NEW  # overwrite with new key
+agentkeys store --agent 0xAGENT openrouter sk-or-v1-NEW  # overwrite with new key
 
 # 5. Revoke access
-agentkeys revoke                                  # self-revoke: invalidate current session + wipe local keychain
-agentkeys revoke 0xAGENT                          # revoke all active sessions for the given wallet
+agentkeys revoke                                      # self-revoke: invalidate current session + wipe local keychain
+agentkeys revoke 0xAGENT                              # revoke all active sessions for the given wallet
 
 # 6. Tear down completely
-agentkeys teardown 0xAGENT                        # delete all credentials + revoke all sessions
+agentkeys teardown 0xAGENT                            # delete all credentials + revoke all sessions
 ```
 
 ### Revoke vs teardown
