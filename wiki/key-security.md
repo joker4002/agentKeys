@@ -29,7 +29,7 @@ The important implication: **user credentials never sit on the user's disk in pl
 
 ## 2. Where the auth token lives
 
-> **Correction (2026-04-12):** An earlier version of this section was titled "Why the session key goes in the OS keychain" and described storing a session private key in the OS keychain via `keyring-rs`. After verifying against the actual Heima source (`tee-worker/omni-executor/core/src/auth/auth_token.rs`), Heima uses **JWT-based auth tokens**, not session keypairs. The client holds a signed JWT string — a bearer token, not a private key. This changes the storage requirements significantly.
+> **Correction (2026-04-12):** An earlier version of this section was titled "Why the session key goes in the OS keychain" and described storing a session private key in the OS keychain via `keyring-rs`. After verifying against the actual Heima source (`tee-worker/omni-executor/core/src/auth/auth_token.rs`), Heima uses **JWT-format session tokens**, not session keypairs. The client holds a signed session token string — a bearer token, not a private key. This changes the storage requirements significantly.
 
 ### v0 (current mock): OS keychain or fallback file
 
@@ -39,16 +39,16 @@ Implementation: `crates/agentkeys-cli/src/session_store.rs`. Keyring service is 
 
 This is what caused the macOS Keychain double-prompt issue that started this investigation (see Section 4). The keychain stores the bearer token as a "generic password" item, and accessing it from a different binary triggers ACL prompts.
 
-### v0.1 (Heima): JWT auth token (keychain recommended, plain file as fallback)
+### v0.1 (Heima): session token (keychain recommended, plain file as fallback)
 
-Under the JWT model, the client holds a signed JWT string like `eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIweD...`. This is:
+Under the session token model, the client holds a signed token string like `eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIweD...` (JWT format on the wire). This is:
 
 - **Not a private key** — it's a signed bearer token. Leaking it gives the attacker temporary access (until expiration), but they cannot forge new tokens or sign extrinsics.
-- **Stateless** — the TEE verifies the JWT cryptographically (RSA signature + expiration). No session table lookup needed.
+- **Stateless** — the TEE verifies the session token cryptographically (RSA signature + expiration). No session table lookup needed.
 - **TTL** — configurable via `AuthOptions.expires_at`. **AgentKeys policy: 30 days** (Heima SDK default is ~24h — AgentKeys sets the longer TTL explicitly). A 30-day bearer is high-value and warrants keychain protection + Stage 8 memory hygiene.
-- **Reissue-able** — re-authenticate and get a new JWT.
+- **Reissue-able** — re-authenticate and get a new session token.
 
-However, a JWT is still a **bearer credential** — anyone with the string can impersonate the user until it expires. The blast radius is bounded (TTL + on-chain revocation list), but it's not zero. Storage recommendations:
+However, a session token is still a **bearer credential** — anyone with the string can impersonate the user until it expires. The blast radius is bounded (TTL + on-chain revocation list), but it's not zero. Storage recommendations:
 
 
 | Context                   | Storage                                          | Why                                                                                                                                                                                                                                            |
@@ -59,7 +59,7 @@ However, a JWT is still a **bearer credential** — anyone with the string can i
 | **CI / testing**          | **Env var or plain file**                        | Ephemeral environment, no keychain. Set `AGENTKEYS_SESSION_STORE=file`.                                                                                                                                                                        |
 
 
-The v0 code's dual-path structure (`session_store.rs`: try keychain first, fall back to file) is correct and should be preserved for v0.1 — just storing a JWT string instead of a session JSON blob.
+The v0 code's dual-path structure (`session_store.rs`: try keychain first, fall back to file) is correct and should be preserved for v0.1 — just storing a session token string instead of a session JSON blob.
 
 What the session token model **does** eliminate (compared to the private-key model):
 
