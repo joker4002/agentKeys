@@ -103,7 +103,7 @@ The client holds the minimum needed to authenticate and receive results.
 
 **Stored locally:**
 
-- JWT auth token — plaintext string in a file (`~/.agentkeys/token`, mode 0600) or OS keychain. NOT a private key. Leakage gives temporary access bounded by JWT expiry (~~24h). Revocable via on-chain revocation list (~~6s).
+- Bearer token (formerly "JWT auth token"; rename tracked in [#10](https://github.com/litentry/agentKeys/issues/10)) — plaintext string. Storage: OS keychain when available (master CLI + desktop/Mac-mini daemons per [#12](https://github.com/litentry/agentKeys/issues/12)), plain file (`~/.agentkeys/token`, mode 0600) otherwise. NOT a private key. Leakage gives temporary access bounded by the AgentKeys 30-day policy (Heima SDK default is ~24h). Revocable via on-chain revocation list (~6s on Heima; instant on the v0 mock).
 - Child session private key (current v0 model only, stored in `~/.agentkeys/session`, mode 0600). In the target JWT model, this becomes just another JWT string.
 
 **Ephemeral memory (during operation only):**

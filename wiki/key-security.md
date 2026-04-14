@@ -45,7 +45,7 @@ Under the JWT model, the client holds a signed JWT string like `eyJhbGciOiJSUzI1
 
 - **Not a private key** — it's a signed bearer token. Leaking it gives the attacker temporary access (until expiration), but they cannot forge new tokens or sign extrinsics.
 - **Stateless** — the TEE verifies the JWT cryptographically (RSA signature + expiration). No session table lookup needed.
-- **Short-lived** — configurable via `AuthOptions.expires_at` (default ~24h).
+- **TTL** — configurable via `AuthOptions.expires_at`. **AgentKeys policy: 30 days** (Heima SDK default is ~24h — AgentKeys sets the longer TTL explicitly). A 30-day bearer is high-value and warrants keychain protection + Stage 8 memory hygiene.
 - **Reissue-able** — re-authenticate and get a new JWT.
 
 However, a JWT is still a **bearer credential** — anyone with the string can impersonate the user until it expires. The blast radius is bounded (TTL + on-chain revocation list), but it's not zero. Storage recommendations:
@@ -54,7 +54,8 @@ However, a JWT is still a **bearer credential** — anyone with the string can i
 | Context                   | Storage                                          | Why                                                                                                                                                                                                                                            |
 | ------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Master CLI on desktop** | **OS keychain** (recommended default)            | Malware-as-same-user is a real threat on developer machines. Keychain provides app-level ACL that plain files don't. The double-prompt issue from Section 4 only affects external inspectors (`security(1)`), not the AgentKeys binary itself. |
-| **Daemon in sandbox**     | **Plain file** (`~/.agentkeys/token`, mode 0600) | No keychain available in most Docker/sandbox environments. Kernel hardening (Stage 3: seccomp, memfd_secret, etc.) compensates.                                                                                                                |
+| **Daemon on desktop / Mac mini / Raspberry Pi** | **OS keychain** (per [#12](https://github.com/litentry/agentKeys/issues/12)), wallet-namespaced account (`service=agentkeys, account=daemon-<wallet>`) | macOS Keychain, gnome-keyring, and KDE Wallet are all reachable via `keyring-rs`. Wallet-based namespacing lets N daemons coexist on one host (multi-agent demo, Demo 1). |
+| **Daemon in Docker/cloud sandbox** | **Plain file** (`~/.agentkeys/daemon-<wallet>/session.json`, mode 0600) | No keychain available in most sandbox environments. Kernel hardening (Stage 3: seccomp, memfd_secret, etc.) compensates. `AGENTKEYS_SESSION_STORE=file` forces this path. |
 | **CI / testing**          | **Env var or plain file**                        | Ephemeral environment, no keychain. Set `AGENTKEYS_SESSION_STORE=file`.                                                                                                                                                                        |
 
 
@@ -217,8 +218,8 @@ A malicious process running as the user can call `agentkeys read 0xAGENT anthrop
 
 - **Audit log** — every `read` writes a row to `audit_log`. See the five `INSERT INTO audit_log` sites in `crates/agentkeys-mock-server/src/handlers/credential.rs`. Compromise leaves a trail.
 - **Session scope** — `session.scope.services` limits which services the session can read. A session scoped to `openrouter` cannot pull `anthropic`.
-- **TTL** — stolen sessions expire in 24h (mock backend default).
-- **Revocation** — `agentkeys revoke` kills a session instantly.
+- **TTL** — stolen sessions expire in 24h (v0 mock backend default); 30 days under the v0.1 AgentKeys policy on Heima.
+- **Revocation** — `agentkeys revoke` kills a session instantly on the v0 mock (SQLite flag flip); ~6s on v0.1 Heima (one block to update the on-chain revocation list). See [#17](https://github.com/litentry/agentKeys/issues/17) for the pending CLI fix.
 - **High-value release gate** — `AuthRequestType::HighValueRelease` in the mock server is designed to wrap sensitive credentials in an explicit approval step (human-in-the-loop), similar to 1Password's unlock-per-access model. Not yet wired on the CLI `read` path.
 
 ### Preferred usage

@@ -129,6 +129,8 @@ The core pattern: **clients talk to the TEE, the TEE talks to the chain.** Clien
 
 ## 2. Worked example: credential retrieval
 
+> **Status:** this example shows the **v0.1** flow (Pattern 4: TEE-as-paymaster per-read sponsored audit). v0 uses the mock backend with a synchronous SQLite audit insert — see `docs/spec/plans/development-stages.md` Stage 1 for the v0 implementation. Pattern 4 is tracked in [#5](https://github.com/litentry/agentKeys/issues/5).
+
 This is the most common operation. An agent daemon needs an API key to call OpenRouter.
 
 ### Step-by-step
@@ -186,7 +188,9 @@ This is the most common operation. An agent daemon needs an API key to call Open
 
 ---
 
-## 3. Worked example: pairing (on-chain transport, decided in Stage 9)
+## 3. Worked example: pairing (on-chain transport — v0.1 target)
+
+> **Status:** this example shows the **v0.1** on-chain pair transport. v0 uses a centralized rendezvous relay (SQLite `rendezvous_registrations` + `auth_requests` tables, 6 REST endpoints) — see `docs/spec/plans/development-stages.md` Stage 1 for the v0 implementation. The v0.1 migration is tracked in [#6](https://github.com/litentry/agentKeys/issues/6).
 
 A new daemon in a sandbox wants to pair with the master user's wallet. This is the on-chain pair design from `[docs/spec/plans/development-stages.md](../docs/spec/plans/development-stages.md)` Stage 9.
 
@@ -270,7 +274,9 @@ Phase 3 — Daemon receives child session
     → obtains child_session_privkey
 
 17. daemon stores child_session_privkey locally
-    (memfd_secret under Stage 3 hardening, file at ~/.agentkeys/session mode 0600)
+    (OS keychain when available per [#12](https://github.com/litentry/agentKeys/issues/12),
+     file fallback at ~/.agentkeys/daemon-<wallet>/session.json mode 0600;
+     runtime copy held in memfd_secret under Stage 3 hardening)
 
 18. daemon starts serving MCP calls
     → every call signed with child_session_privkey
@@ -299,11 +305,30 @@ Phase 3 — Daemon receives child session
 - The TEE did not store the pair request, the approval, or the child session. It processed and submitted. Chain holds everything.
 - After step 16, the daemon holds the child session private key locally. The encrypted version is on chain but only the daemon can decrypt it.
 
+### OTP (v0) vs VVC (v0.1) — two different verification codes
+
+The pair flow uses two distinct human-verification codes at different stages of AgentKeys. They are NOT the same primitive; v0 uses OTP, v0.1 uses VVC. Issue [#6](https://github.com/litentry/agentKeys/issues/6) tracks the v0 → v0.1 migration.
+
+| Property | **OTP** (v0, Stages 0/1/4) | **VVC** (v0.1, on-chain pair) |
+|---|---|---|
+| Derivation | `HMAC(nonce, canonical_CBOR(request_details))` | `decimal(SHA256(pair_request_signature))[..6]` |
+| Where computed | Backend (mock server); also re-derivable client-side from the same inputs | Purely client-side, from the on-chain extrinsic signature |
+| Server-validated? | Yes — stored in `auth_requests` table, single-use enforced | No — server holds no OTP state; any client derives the same VVC from the same signature |
+| Threat it defends against | Tampered request details between `open` and `approve` (canonical-hash mismatch rejects the approval) | Decoy pair requests on-chain — multiple pending pairs look the same, VVC lets the user visually tiebreak |
+| Shipped in | v0 mock backend (current code) | v0.1 on-chain pair transport (not yet implemented) |
+| Referenced in | `development-stages.md` Stages 0, 1, 4; `otp::determinism` test | `development-stages.md` Stage 9; [#6](https://github.com/litentry/agentKeys/issues/6) |
+
+v0.1 does **not** keep OTP: with on-chain pair transport, there is no `auth_requests` table to hold nonces, and tamper detection comes from extrinsic signature verification at the pallet level. VVC replaces OTP as the human-visible code; the security property (protect against request-detail tampering and decoy daemons) shifts from OTP's HMAC-of-details to the pallet's signature check + VVC's signature-fingerprint comparison.
+
 ---
 
-## 4. Auth token lifecycle (JWT model, verified against Heima source)
+## 4. Bearer token lifecycle (JWT model, verified against Heima source)
 
-> **Correction (2026-04-12):** An earlier version of this section described a "session keypair" model where the TEE mints a session keypair and returns the private key to the client. Verification against the actual Heima source (`tee-worker/omni-executor/core/src/auth/auth_token.rs`) shows that Heima uses **JWT-based stateless auth tokens**, not session keypairs. The client holds a signed JWT string, not a private key. This section has been rewritten to match the actual implementation.
+> **Status:** this describes the **v0.1** Heima TEE bearer token (JWT format). v0 uses an opaque random-bearer string stored in the mock backend's SQLite `sessions` table — see `wiki/session-token.md` §8 for the v0 vs v0.1 comparison table.
+>
+> **Terminology:** AgentKeys calls this a **bearer token** ([#10](https://github.com/litentry/agentKeys/issues/10)); Heima-internal code keeps "JWT" / `AuthTokenClaims`. We don't rename Heima.
+>
+> **Correction (2026-04-12):** An earlier version of this section described a "session keypair" model where the TEE mints a session keypair and returns the private key to the client. Verification against the actual Heima source (`tee-worker/omni-executor/core/src/auth/auth_token.rs`) shows that Heima uses **JWT-based stateless bearer tokens**, not session keypairs. The client holds a signed JWT string, not a private key. This section has been rewritten to match the actual implementation.
 
 Auth tokens (JWTs) are the connective tissue between client identity and TEE operations. They are **stateless** — the TEE verifies them cryptographically on every call without maintaining a session table.
 
@@ -324,7 +349,7 @@ TEE signs a JWT with its RSA private key:
   AuthTokenClaims {
     sub: "0x9c3e..." (omni account, hex-encoded),
     typ: "ACCESS",
-    exp: now + 24h (configurable via AuthOptions.expires_at),
+    exp: now + 30 days (AgentKeys policy via AuthOptions.expires_at; Heima SDK default is ~24h),
     aud: "HEIMA" (client ID)
   }
   ↓
@@ -366,7 +391,7 @@ TEE issues a new JWT
 client replaces old JWT with new one
 ```
 
-There is no "refresh token" in the current Heima implementation. Expiration means re-auth. The `AuthOptions.expires_at` field controls the TTL (default ~24h per the client SDK).
+There is no "refresh token" in the current Heima implementation. Expiration means re-auth. The `AuthOptions.expires_at` field controls the TTL — **AgentKeys policy is 30 days** (set via `AuthOptions.expires_at`); the Heima client SDK default is ~24h. See [#10](https://github.com/litentry/agentKeys/issues/10) for terminology context.
 
 ### Revocation
 

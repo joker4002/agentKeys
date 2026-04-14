@@ -7,6 +7,8 @@ How AgentKeys answers two questions that every credential manager has to answer:
 
 The answers look simple in v0 (mock backend) and get much more interesting in v0.1 (Heima TEE). This page captures the design space, the patterns considered, and why the v0.1 target is **Pattern 4 (TEE-as-paymaster per-read sponsored audit)**.
 
+> **Status:** v0 ships today with a synchronous SQLite audit insert (Pattern 0 equivalent). Pattern 4 is the **v0.1 target** — tracked in [#5](https://github.com/litentry/agentKeys/issues/5). Sections below that describe the ~50ms serve + ~6s audit-lag numbers are v0.1 numbers; the ~6s figure is the *audit-lag* (time from serve → on-chain confirmation), not the serve latency.
+
 Companion doc: `[wiki/key-security.md](./key-security.md)` for the broader security architecture, two-tier storage model, and hardening plan.
 
 ---

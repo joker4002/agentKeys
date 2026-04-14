@@ -1,6 +1,8 @@
-# Session Token: what it is, how it works, how to protect it
+# Bearer Token (session token): what it is, how it works, how to protect it
 
-This page defines what the AgentKeys "session token" actually is, based on verification against the Heima source code (`tee-worker/omni-executor/core/src/auth/auth_token.rs`). The term "session token" is used throughout AgentKeys documentation instead of "JWT" to avoid misleading connotations (see [issue #10](https://github.com/litentry/agentKeys/issues/10)).
+> **Terminology (2026-04-14 decision, tracked in [#10](https://github.com/litentry/agentKeys/issues/10)):** AgentKeys canonical term is **"bearer token"**. "Session token" is accepted as a synonym in older docs. The underlying format is a JWT (verified against the Heima source `tee-worker/omni-executor/core/src/auth/auth_token.rs`), but we deliberately avoid the term "JWT" in user-facing docs because it carries "short-lived, disposable" connotations that misrepresent the 30-day TTL. Heima-side code and terminology are out of scope for this rename — only AgentKeys-side docs/code use "bearer token."
+
+This page defines what the AgentKeys **bearer token** is, based on verification against the Heima source code.
 
 Companion docs:
 
@@ -12,7 +14,7 @@ Companion docs:
 
 ## 1. What it is
 
-A session token is a **long-lived signed bearer credential** issued by the Heima TEE to a client (master CLI or agent daemon) upon successful authentication.
+A bearer token (a.k.a. session token) is a **long-lived signed bearer credential** issued by the Heima TEE to a client (master CLI or agent daemon) upon successful authentication. **AgentKeys policy: 30-day TTL** (set via `AuthOptions.expires_at`; Heima SDK default is ~24h).
 
 ### Underlying format (from Heima source)
 
@@ -32,9 +34,9 @@ The token looks like: `eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIweD...`
 
 ### Why we don't call it "JWT" in AgentKeys
 
-The term "JWT" carries connotations of short-lived, disposable, low-value tokens (like API gateway session cookies). AgentKeys session tokens are **30-day bearer credentials** that grant access to read all scoped credentials via the TEE. Calling them "JWT" leads to underestimating storage security requirements. We call them "session tokens" to make the security posture obvious.
+The term "JWT" carries connotations of short-lived, disposable, low-value tokens (like API gateway session cookies). AgentKeys bearer tokens are **30-day credentials** that grant access to read all scoped credentials via the TEE. Calling them "JWT" leads to underestimating storage security requirements. The canonical AgentKeys term is **"bearer token"** (see [#10](https://github.com/litentry/agentKeys/issues/10)); older docs may still say "session token" or "JWT."
 
-See [issue #10](https://github.com/litentry/agentKeys/issues/10) for the terminology change tracker.
+**Heima side:** Heima-internal code and docs continue to use "JWT" / `AuthTokenClaims`. We do not plan to change Heima terminology. The rename is AgentKeys-local.
 
 ---
 
