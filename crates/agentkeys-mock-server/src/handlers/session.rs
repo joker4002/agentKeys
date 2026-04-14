@@ -321,6 +321,18 @@ pub async fn update_scope(
         .ok_or_else(|| AppError::bad_request("target_wallet required"))?
         .to_string();
 
+    // `agentkeys scope` is for child agents. Allowing a master session to
+    // target its own wallet would let the master accidentally restrict itself
+    // (e.g. `agentkeys scope --agent <MY-WALLET> --set openrouter` would flip
+    // the master's scope_json from NULL to ["openrouter"] and cause every
+    // subsequent `credential/read` outside that list to fail). Reject
+    // self-targeting explicitly before the ownership check.
+    if session.wallet_address == target_wallet {
+        return Err(AppError::bad_request(
+            "agentkeys scope cannot target the master's own wallet — use it on child agent wallets only",
+        ));
+    }
+
     let db = state.db.lock().unwrap();
 
     if !is_owner_of(&db, &session.wallet_address, &target_wallet) {

@@ -645,13 +645,13 @@ async fn resolve_agent_to_wallet(
     } else {
         ("alias", agent)
     };
+    // reqwest's .query() builder percent-encodes per RFC 3986 so identities
+    // containing '+', '&', '=', '%', spaces (e.g. plus-addressed emails like
+    // "bot+prod@example.com") are sent intact to the server.
     let http_client = reqwest::Client::new();
-    let url = format!(
-        "{}/identity/resolve?identity_type={}&identity_value={}",
-        ctx.backend_url, identity_type, identity_value
-    );
     let resp = http_client
-        .get(&url)
+        .get(format!("{}/identity/resolve", ctx.backend_url))
+        .query(&[("identity_type", identity_type), ("identity_value", identity_value)])
         .header("authorization", format!("Bearer {}", session.token))
         .send()
         .await
@@ -681,6 +681,15 @@ pub async fn cmd_scope(
     if set.is_some() && (!add.is_empty() || !remove.is_empty()) {
         return Err(anyhow!(
             "Error: --set is mutually exclusive with --add and --remove. Use one or the other."
+        ));
+    }
+
+    // --list is read-only. Combining it with mutating flags would silently
+    // drop the mutation (the --list early-return happens before the update
+    // path), so reject the combo up front with a clear error.
+    if list && (set.is_some() || !add.is_empty() || !remove.is_empty()) {
+        return Err(anyhow!(
+            "Error: --list is mutually exclusive with --add, --remove, and --set. Use --list alone to read the current scope."
         ));
     }
 
