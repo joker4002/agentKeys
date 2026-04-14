@@ -123,12 +123,23 @@ agentkeys usage 0xAGENT                          # who read what, when
 # 4. Rotate
 agentkeys store 0xAGENT openrouter sk-or-v1-NEW  # overwrite with new key
 
-# 5. Revoke agent access
-agentkeys revoke 0xAGENT                          # invalidate session
+# 5. Revoke access
+agentkeys revoke                                  # self-revoke: invalidate current session + wipe local keychain
+agentkeys revoke 0xAGENT                          # revoke all active sessions for the given wallet
 
 # 6. Tear down completely
-agentkeys teardown 0xAGENT                        # delete all credentials + session
+agentkeys teardown 0xAGENT                        # delete all credentials + revoke all sessions
 ```
+
+### Revoke vs teardown
+
+| Command | Session tokens | Wallet | Credentials | When to use |
+|---|---|---|---|---|
+| `agentkeys revoke` (no args) | Current session invalidated + local keychain wiped | Survives on backend | Survive (inaccessible without a new session) | You're done for the day / device handoff |
+| `agentkeys revoke 0xAGENT` | All active sessions for that wallet invalidated (ownership checked) | Survives | Survive | Kick a compromised child agent off — credentials stay so you can re-pair |
+| `agentkeys teardown 0xAGENT` | All sessions revoked | Survives (account still exists) | **Deleted** | Fully retire an agent — credentials gone |
+
+After `revoke`: re-running `init` (same mock token / OAuth) gives you a fresh session for the same wallet, and the old credentials are accessible again. After `teardown`: `init` gives a fresh session but starts with an empty credential set.
 
 ## Security comparison: `read` vs `run` vs MCP
 

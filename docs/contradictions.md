@@ -225,14 +225,14 @@ Both are true at different horizons. But "instantly" in `key-security.md:221` re
 
 ## 4. CLI UX — manual test doc vs current code vs issues
 
-### 4.1 `agentkeys revoke` broken  (MAJOR — issue #17)
+### 4.1 `agentkeys revoke` broken  (RESOLVED 2026-04-14 — fix/issue-17)
 
 - `crates/agentkeys-cli/src/lib.rs` (`cmd_revoke`): passes wallet address as session token → backend's `WHERE token = ?1` finds nothing → always "target session not found."
 - `docs/manual-test-stage4.md:707-710, 724`: Test 9 marks revoke SKIPPED/BROKEN, but pass criteria line 724 still lists "Revoke succeeds."
 - `wiki/credential-usage.md:127`: shows `agentkeys revoke 0xAGENT` as the canonical syntax, no caveat it's broken.
 - Issue #17 proposes: self-revoke (no args) + revoke by wallet/alias + distinguish revoke (invalidate session, creds survive) vs teardown (delete creds + revoke sessions).
 
-**Resolution.** Land #17. Update `wiki/credential-usage.md:127` to document revoke vs teardown table from issue #17. Update `docs/manual-test-stage4.md` Test 9 pass criteria to not include the SKIPPED step. 3 files.
+**Resolution.** Landed in `fix/issue-17` (PR pending merge). `cmd_revoke` takes `Option<&str>` — no-args self-revokes + wipes local session; wallet form calls new `CredentialBackend::revoke_by_wallet` trait method; backend `/session/revoke` handler now accepts either `target_session` (token) or `target_wallet` (wallet). `wiki/credential-usage.md` now carries the revoke-vs-teardown table. `docs/manual-test-stage4.md` Test 9 passes on the fix branch. See `docs/manual-test-issue-17.md` for the full reproduction + verification walkthrough.
 
 ### 4.2 `agentkeys run` broken for master sessions  (MAJOR — issue #15)
 
