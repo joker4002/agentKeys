@@ -3,7 +3,9 @@ use std::sync::Arc;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::mock_client::MockHttpClient;
 pub use agentkeys_core::session_store;
-use agentkeys_types::{AuditEvent, AuditFilter, AuthToken, ServiceName, Session, WalletAddress};
+use agentkeys_types::{
+    AuditEvent, AuditFilter, AuthToken, Scope, ServiceName, Session, WalletAddress,
+};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 
@@ -68,7 +70,7 @@ impl CommandContext {
         self
     }
 
-    fn load_session(&self) -> Result<Session> {
+    pub fn load_session(&self) -> Result<Session> {
         if let Some(ref s) = self.session_override {
             return Ok(s.clone());
         }
@@ -627,6 +629,122 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
         .map_err(wrap_backend_error)?;
 
     Ok("Approved. Agent paired successfully.".to_string())
+}
+
+async fn resolve_agent_to_wallet(
+    ctx: &CommandContext,
+    session: &Session,
+    agent: &str,
+) -> Result<String> {
+    if agent.starts_with("0x") {
+        return Ok(agent.to_string());
+    }
+    // Resolve alias or email via /identity/resolve
+    let (identity_type, identity_value) = if agent.contains('@') {
+        ("email", agent)
+    } else {
+        ("alias", agent)
+    };
+    let http_client = reqwest::Client::new();
+    let url = format!(
+        "{}/identity/resolve?identity_type={}&identity_value={}",
+        ctx.backend_url, identity_type, identity_value
+    );
+    let resp = http_client
+        .get(&url)
+        .header("authorization", format!("Bearer {}", session.token))
+        .send()
+        .await
+        .context("GET /identity/resolve")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        let msg = body["message"].as_str().unwrap_or("not found");
+        return Err(anyhow!("Error: HTTP {}: {}", status, msg));
+    }
+    let body: serde_json::Value = resp.json().await.context("parse identity/resolve response")?;
+    let wallet = body["wallet_address"]
+        .as_str()
+        .ok_or_else(|| anyhow!("identity/resolve returned no wallet_address"))?
+        .to_string();
+    Ok(wallet)
+}
+
+pub async fn cmd_scope(
+    ctx: &CommandContext,
+    agent: &str,
+    add: &[String],
+    remove: &[String],
+    set: Option<&str>,
+    list: bool,
+) -> Result<String> {
+    if set.is_some() && (!add.is_empty() || !remove.is_empty()) {
+        return Err(anyhow!(
+            "Error: --set is mutually exclusive with --add and --remove. Use one or the other."
+        ));
+    }
+
+    if !list && set.is_none() && add.is_empty() && remove.is_empty() {
+        return Err(anyhow!(
+            "No action specified. Use --add, --remove, --set, or --list.\nRun `agentkeys scope --help` for usage."
+        ));
+    }
+
+    let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
+    let target_wallet = WalletAddress(resolve_agent_to_wallet(ctx, &session, agent).await?);
+    let backend = ctx.backend();
+
+    let current_scope = backend
+        .get_scope(&session, &target_wallet)
+        .await
+        .map_err(wrap_backend_error)?
+        .unwrap_or(Scope { services: vec![], read_only: false });
+
+    if list {
+        let service_names: Vec<&str> =
+            current_scope.services.iter().map(|s| s.0.as_str()).collect();
+        return Ok(format!(
+            "Scope for agent {}:\n  services: [{}]\n  read_only: {}",
+            target_wallet.0,
+            service_names.join(", "),
+            current_scope.read_only
+        ));
+    }
+
+    let mut new_scope = if let Some(set_val) = set {
+        let mut services: Vec<ServiceName> = set_val
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| ServiceName(s.to_string()))
+            .collect();
+        services.sort_by(|a, b| a.0.cmp(&b.0));
+        Scope { services, read_only: current_scope.read_only }
+    } else {
+        let mut services: Vec<ServiceName> = current_scope.services.clone();
+        for svc in add {
+            let name = ServiceName(svc.clone());
+            if !services.contains(&name) {
+                services.push(name);
+            }
+        }
+        services.retain(|s| !remove.contains(&s.0));
+        services.sort_by(|a, b| a.0.cmp(&b.0));
+        Scope { services, read_only: current_scope.read_only }
+    };
+
+    backend
+        .update_scope(&session, &target_wallet, &new_scope)
+        .await
+        .map_err(wrap_backend_error)?;
+
+    new_scope.services.sort_by(|a, b| a.0.cmp(&b.0));
+    let service_names: Vec<&str> = new_scope.services.iter().map(|s| s.0.as_str()).collect();
+    Ok(format!(
+        "Scope updated for agent {}. New services: [{}]",
+        target_wallet.0,
+        service_names.join(", ")
+    ))
 }
 
 pub fn cmd_feedback() -> String {

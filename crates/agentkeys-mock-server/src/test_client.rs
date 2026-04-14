@@ -717,6 +717,53 @@ impl CredentialBackend for InProcessBackend {
         Ok(WalletAddress(wallet_str))
     }
 
+    async fn get_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+    ) -> Result<Option<Scope>, BackendError> {
+        let path = format!("/session/scope?wallet={}", target_wallet.0);
+        let result = self.get_with_session(&path, session).await;
+        match result {
+            Err(BackendError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+            Ok(body) => {
+                if body["services"].is_null() {
+                    return Ok(None);
+                }
+                let services: Vec<ServiceName> = body["services"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| ServiceName(s.to_string()))
+                    .collect();
+                let read_only = body["read_only"].as_bool().unwrap_or(false);
+                Ok(Some(Scope { services, read_only }))
+            }
+        }
+    }
+
+    async fn update_scope(
+        &self,
+        session: &Session,
+        target_wallet: &WalletAddress,
+        new_scope: &Scope,
+    ) -> Result<(), BackendError> {
+        let auth = format!("Bearer {}", session.token);
+        self.do_request(
+            "PUT",
+            "/session/scope",
+            Some(json!({
+                "target_wallet": target_wallet.0,
+                "scope": new_scope,
+            })),
+            vec![("authorization", auth)],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn recover_session(
         &self,
         identity: &agentkeys_types::AgentIdentity,
