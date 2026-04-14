@@ -47,10 +47,42 @@ ak-keychain-show() {
     || echo "(no keychain entry)"
 }
 
-# Show metadata (service, account, timestamps) without the secret
-ak-keychain-meta() {
+# Raw Apple output — escape hatch for troubleshooting the FourCharCode attribute
+# names (e.g. svce/acct/cdat/mdat). Same as `security find-generic-password -s
+# agentkeys -a session`.
+ak-keychain-meta-raw() {
   security find-generic-password -s agentkeys -a session 2>/dev/null \
     || echo "(no keychain entry)"
+}
+
+# Show metadata (service, account, timestamps) without the secret, with the
+# Apple FourCharCode attribute names translated to human-readable English.
+# See docs/field-name-translation.md for the full mapping and the general
+# "translate at the client, not the backend" principle.
+ak-keychain-meta() {
+  local raw
+  raw=$(security find-generic-password -s agentkeys -a session 2>/dev/null) || {
+    echo "(no keychain entry)"
+    return
+  }
+  printf '%s\n' "$raw" | sed -E \
+    -e 's/"svce"<blob>/service<blob>/' \
+    -e 's/"acct"<blob>/account<blob>/' \
+    -e 's/"cdat"<timedate>/created<timedate>/' \
+    -e 's/"mdat"<timedate>/modified<timedate>/' \
+    -e 's/"crtr"<uint32>/creator<uint32>/' \
+    -e 's/"desc"<blob>/description<blob>/' \
+    -e 's/"icmt"<blob>/comment<blob>/' \
+    -e 's/"gena"<blob>/generic_data<blob>/' \
+    -e 's/"invi"<sint32>/invisible<sint32>/' \
+    -e 's/"nega"<sint32>/negative_flag<sint32>/' \
+    -e 's/"prot"<blob>/protocol<blob>/' \
+    -e 's/"scrp"<sint32>/script_code<sint32>/' \
+    -e 's/"cusi"<sint32>/custom_icon<sint32>/' \
+    -e 's/"type"<uint32>/type<uint32>/' \
+    -e 's/0x00000007 <blob>/label           <blob>/' \
+    -e 's/0x00000008 <blob>/alias           <blob>/' \
+    -e 's#0x[0-9a-fA-F]+ *"([0-9]{4})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})Z[^"]*"#\1-\2-\3 \4:\5:\6 UTC#'
 }
 
 # Delete the keychain entry
