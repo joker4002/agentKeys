@@ -54,7 +54,7 @@ The TEE is a **stateless computation oracle**. It reads chain state, performs cr
 | Data                                         | Lifetime                                                                        | How generated                                                                             | Purpose                                                                                   |
 | -------------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Shielding keypair                            | Permanent (sealed storage, pubkey registered on chain via `register_enclave()`) | Generated at enclave startup                                                              | Encrypt/decrypt credential blobs                                                          |
-| RSA JWT signing key                          | Permanent (stored as PKCS#1 DER file)                                           | `RsaPrivateKey::new(&mut rng, 2048)` — randomly generated, NOT derived from a master seed | Sign auth token JWTs issued to clients                                                    |
+| RSA JWT signing key                          | Permanent (stored as PKCS#1 DER file)                                           | `RsaPrivateKey::new(&mut rng, 2048)` — randomly generated, NOT derived from a master seed | Sign session tokens (JWT format) issued to clients                                        |
 | Per-user custodial wallet keys (BTC/ETH/TON) | Permanent (sealed, per `pallet-bitacross` pattern)                              | Generated per account creation, independently per user                                    | Sign on-chain extrinsics on behalf of user wallets. Private key never leaves the enclave. |
 | AES response keys                            | Ephemeral (per-request)                                                         | From `RequestAesKey` parameter                                                            | Encrypt sensitive responses to specific clients                                           |
 | Chain state cache (optional)                 | ≤ 1 block (~6s)                                                                 | Read from chain                                                                           | Performance optimization. Not authoritative — chain is truth.                             |
@@ -65,19 +65,19 @@ The TEE is a **stateless computation oracle**. It reads chain state, performs cr
 **What it does:**
 
 - **Decrypt credential blobs** — reads encrypted ciphertext from chain state, decrypts with shielding key, returns plaintext to authorized callers
-- **Issue auth tokens (JWTs)** — on successful authentication (Passkey/OAuth/Web3 signature), the TEE signs a JWT containing `{sub: omni_account, typ: ACCESS, exp: timestamp, aud: client_id}` with its RSA private key. The client holds this JWT as a bearer token. Verification is stateless (RSA pubkey check + expiration check).
-- **Verify auth tokens** — on every subsequent call, the TEE validates the client's JWT signature and expiration. No session table needed — JWT verification is stateless.
+- **Issue session tokens** — on successful authentication (Passkey/OAuth/Web3 signature), the TEE signs a session token (JWT format) containing `{sub: omni_account, typ: ACCESS, exp: timestamp, aud: client_id}` with its RSA private key. The client holds this session token as a bearer credential. Verification is stateless (RSA pubkey check + expiration check).
+- **Verify session tokens** — on every subsequent call, the TEE validates the client's session token signature and expiration. No session table needed — verification is stateless.
 - **Enforce scope** — reads session/account scope from chain, rejects requests outside the scope
 - **Sign extrinsics** — signs audit events, pair requests, approvals, session management using the user's wallet private key (TEE-held), submits to chain via paymaster
 - **Rate limit** — enforces per-session read rate caps (connection-level state, not persistent)
 
 **What it does NOT do:**
 
-- Store session records (chain does; JWT is stateless)
+- Store session records (chain does; session tokens are stateless)
 - Store credential blobs (chain does)
 - Store pair requests or approvals (chain does)
 - Maintain an audit log (chain does)
-- Return private keys to clients (clients receive JWTs, not keypairs)
+- Return private keys to clients (clients receive session tokens, not keypairs)
 
 **Properties the TEE provides:**
 
@@ -102,7 +102,7 @@ The TEE is a **stateless computation oracle**. It reads chain state, performs cr
 │  - Wallet balances               │     │  Does:                           │
 │                                  │────►│  - Reads chain state             │
 │  Enforces:                       │     │  - Decrypts credential blobs     │
-│  - TTL (valid_until checks)      │     │  - Issues + verifies JWTs        │
+│  - TTL (valid_until checks)      │     │  - Issues + verifies session tokens│
 │  - Replay protection (nonces)    │     │  - Signs extrinsics (as user)    │
 │  - Revocation (flag checks)      │     │  - Rate limits                   │
 │  - Immutability (finalized)      │     │  - Submits extrinsics async      │
@@ -137,9 +137,9 @@ This is the most common operation. An agent daemon needs an API key to call Open
 
 ```
 1. daemon → TEE: read_credential(agent=0x44d3, service=openrouter)
-   authenticated by: JWT (bearer token, issued by TEE on pairing)
+   authenticated by: session token (bearer credential, issued by TEE on pairing)
 
-2. TEE verifies JWT:
+2. TEE verifies session token:
    - RSA signature valid against TEE's public key? ✅
    - exp > current time? ✅ (not expired)
    - sub = 0x44d3 (matches the requesting agent)? ✅
@@ -330,7 +330,7 @@ v0.1 does **not** keep OTP: with on-chain pair transport, there is no `auth_requ
 >
 > **Correction (2026-04-12):** An earlier version of this section described a "session keypair" model where the TEE mints a session keypair and returns the private key to the client. Verification against the actual Heima source (`tee-worker/omni-executor/core/src/auth/auth_token.rs`) shows that Heima uses **JWT-based stateless bearer tokens**, not session keypairs. The client holds a signed JWT string, not a private key. This section has been rewritten to match the actual implementation.
 
-Auth tokens (JWTs) are the connective tissue between client identity and TEE operations. They are **stateless** — the TEE verifies them cryptographically on every call without maintaining a session table.
+Session tokens are the connective tissue between client identity and TEE operations. They are **stateless** — the TEE verifies them cryptographically on every call without maintaining a session table. The underlying wire format is JWT (see `AuthTokenClaims` in Heima source).
 
 ### Token issuance
 
@@ -345,7 +345,7 @@ TEE verifies client's identity signature
 TEE creates/looks up OmniAccount
   (address deterministically derived: OmniAccountConverter::convert(&identity, &client_id))
   ↓
-TEE signs a JWT with its RSA private key:
+TEE signs a session token (JWT format) with its RSA private key:
   AuthTokenClaims {
     sub: "0x9c3e..." (omni account, hex-encoded),
     typ: "ACCESS",
@@ -353,9 +353,9 @@ TEE signs a JWT with its RSA private key:
     aud: "HEIMA" (client ID)
   }
   ↓
-TEE returns JWT string to client
+TEE returns session token string to client
   ↓
-client stores JWT locally
+client stores session token locally
   (a plain string — NOT a private key. Can go in a file, env var, or OS keychain.
    No keyring-rs, no memfd_secret, no special protection beyond file permissions.)
 ```
@@ -363,9 +363,9 @@ client stores JWT locally
 ### Token verification (on every call)
 
 ```
-client sends request + JWT to TEE
+client sends request + session token to TEE
   ↓
-TEE verifies JWT:
+TEE verifies session token:
   1. RSA signature valid? (RSA pubkey derived from TEE's sealed privkey)
   2. exp > current time? (not expired)
   3. aud matches expected client ID? (audience check)
@@ -375,39 +375,39 @@ all pass → extract sub (omni account) → proceed with operation
 any fail → reject (401 unauthorized)
 ```
 
-**No session table, no chain read for auth.** JWT verification is a pure cryptographic check: RSA signature + field validation. The TEE does not maintain a sessions table, does not read chain state to verify the token, and does not need to look up the token in any database. This is the key difference from the session-keypair model described in earlier specs.
+**No session table, no chain read for auth.** Session token verification is a pure cryptographic check: RSA signature + field validation. The TEE does not maintain a sessions table, does not read chain state to verify the token, and does not need to look up the token in any database. This is the key difference from the session-keypair model described in earlier specs.
 
 Chain state IS still read for **scope** and **credential blobs** — but not for auth token validity.
 
 ### Token expiration and refresh
 
 ```
-client's JWT expires (exp < current time)
+client's session token expires (exp < current time)
   ↓
 client must re-authenticate (Passkey / OAuth / Web3 signature)
   ↓
-TEE issues a new JWT
+TEE issues a new session token
   ↓
-client replaces old JWT with new one
+client replaces old session token with new one
 ```
 
 There is no "refresh token" in the current Heima implementation. Expiration means re-auth. The `AuthOptions.expires_at` field controls the TTL — **AgentKeys policy is 30 days** (set via `AuthOptions.expires_at`); the Heima client SDK default is ~24h. See [#10](https://github.com/litentry/agentKeys/issues/10) for terminology context.
 
 ### Revocation
 
-JWT-based auth has an inherent tradeoff with revocation. Since JWTs are stateless and self-contained, the TEE cannot "revoke" a JWT by flipping a flag — the token is valid until it expires.
+Session-token-based auth has an inherent tradeoff with revocation. Since session tokens are stateless and self-contained, the TEE cannot "revoke" a session token by flipping a flag — the token is valid until it expires.
 
 Revocation options for AgentKeys v0.1:
 
-1. **Short-lived JWTs + frequent re-auth.** If the JWT TTL is 15 minutes, a revoked agent's token becomes invalid within 15 minutes. No server-side state needed.
-2. **On-chain revocation list.** TEE reads a revocation list from chain state on every call (adds ~1-5ms). A revoked agent's `sub` (omni account) is on the list → TEE rejects even though the JWT signature is valid. This gives ~6s revocation latency (one block to update the chain list).
+1. **Short-lived session tokens + frequent re-auth.** If the session token TTL is 15 minutes, a revoked agent's token becomes invalid within 15 minutes. No server-side state needed.
+2. **On-chain revocation list.** TEE reads a revocation list from chain state on every call (adds ~1-5ms). A revoked agent's `sub` (omni account) is on the list → TEE rejects even though the session token signature is valid. This gives ~6s revocation latency (one block to update the chain list).
 3. **TEE-side deny list (bounded cache).** TEE holds a small in-memory deny list of revoked accounts, updated from chain events. Not persistent — survives only until TEE restart. Fastest revocation (~0ms) but weakest durability.
 
-Option 2 (on-chain revocation list) is the most consistent with the "chain is single source of truth" architecture and meets the spec requirement from `heima-open-questions.md Q9` (revocation latency ≤ 1 block). The TEE checks `chain_state.revoked_accounts.contains(jwt.sub)` on every call, adding minimal latency.
+Option 2 (on-chain revocation list) is the most consistent with the "chain is single source of truth" architecture and meets the spec requirement from `heima-open-questions.md Q9` (revocation latency ≤ 1 block). The TEE checks `chain_state.revoked_accounts.contains(token.sub)` on every call, adding minimal latency.
 
 ```
 master CLI → TEE: revoke_agent(agent_account=0x44d3)
-  authenticated by: master's JWT
+  authenticated by: master's session token
   ↓
 TEE reads chain state: master owns (is parent of) agent? ✅
   ↓
@@ -417,7 +417,7 @@ TEE submits revocation extrinsic:
 ~6s: chain confirms
   ↓
 next call by the revoked agent:
-  TEE verifies JWT → valid ✅
+  TEE verifies session token → valid ✅
   TEE reads chain state → 0x44d3 in revoked_accounts → REJECT
 ```
 
@@ -434,7 +434,7 @@ Two architectures for the same product. AgentKeys is choosing the left column; H
 
 |                      | **AgentKeys v0.1: Stateless TEE + chain**                                             | **dexs-backend: Pure TEE backend (Heima's existing model)** |
 | -------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| **Session state**    | Stateless JWTs (signed by TEE, verified cryptographically) + on-chain revocation list | Stateless JWTs (same mechanism — both use `auth_token.rs`)  |
+| **Session state**    | Stateless session tokens (JWT format, signed by TEE, verified cryptographically) + on-chain revocation list | Stateless session tokens (same JWT mechanism — both use `auth_token.rs`)  |
 | **Credential blobs** | On-chain encrypted (`pallet-secrets-vault`)                                           | TEE-internal encrypted storage                              |
 | **Audit log**        | On-chain events (signed extrinsics)                                                   | TEE-internal log or centralized DB                          |
 | **Pair state**       | On-chain pallet storage                                                               | TEE-internal or centralized DB                              |

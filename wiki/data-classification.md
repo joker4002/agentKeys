@@ -21,7 +21,7 @@ Companion docs:
 | **User wallet private keys** (current model: per-user)      | Never                                                               | Sealed storage (per `pallet-bitacross`)                                 | Never                                                                   |
 | **MSK** (target model: single master key)                   | Never                                                               | Sealed storage (one blob)                                               | Never                                                                   |
 | **Derived user private key** (target MSK model)             | Never                                                               | Ephemeral memory only (derived from MSK, used, discarded)               | Never                                                                   |
-| **JWT auth token**                                          | Never                                                               | Signed by TEE, not stored after issuance                                | Plaintext file (mode 0600) or OS keychain                               |
+| **Session token** (JWT-format bearer credential)            | Never                                                               | Signed by TEE, not stored after issuance                                | Plaintext file (mode 0600) or OS keychain                               |
 | **OmniAccount address**                                     | Plaintext                                                           | Derived from identity (not stored separately)                           | Known (printed by CLI, used in commands)                                |
 | **Identity hash** `H(identity_info)`                        | Plaintext (hashed — original identity is NOT on chain)              | Original identity available during auth (from OAuth/Passkey/Web3 proof) | Original identity known to user only                                    |
 | **Session scope** (which services an agent can access)      | Plaintext                                                           | Read from chain                                                         | Known (displayed by CLI)                                                |
@@ -65,7 +65,7 @@ Everything on chain is readable by anyone with a node or block explorer. The cha
 **Never on chain:**
 
 - Any private key (shielding, RSA, wallet, MSK, derived user keys)
-- JWT auth tokens
+- Session tokens (bearer credentials)
 - VVC (visual verification codes)
 - Plaintext credentials
 - Original identity info (only the hash is stored)
@@ -104,7 +104,7 @@ The client holds the minimum needed to authenticate and receive results.
 **Stored locally:**
 
 - Bearer token (formerly "JWT auth token"; rename tracked in [#10](https://github.com/litentry/agentKeys/issues/10)) — plaintext string. Storage: OS keychain when available (master CLI + desktop/Mac-mini daemons per [#12](https://github.com/litentry/agentKeys/issues/12)), plain file (`~/.agentkeys/token`, mode 0600) otherwise. NOT a private key. Leakage gives temporary access bounded by the AgentKeys 30-day policy (Heima SDK default is ~24h). Revocable via on-chain revocation list (~6s on Heima; instant on the v0 mock).
-- Child session private key (current v0 model only, stored in `~/.agentkeys/session`, mode 0600). In the target JWT model, this becomes just another JWT string.
+- Child session private key (current v0 model only, stored in `~/.agentkeys/session`, mode 0600). In the target session token model, this becomes just another session token string.
 
 **Ephemeral memory (during operation only):**
 
@@ -115,7 +115,7 @@ The client holds the minimum needed to authenticate and receive results.
 
 - Any TEE private key (shielding, RSA, wallet, MSK)
 - Credential ciphertext (client never sees the encrypted blob — it asks the TEE, which decrypts and returns plaintext)
-- Other users' data (scoped by JWT's `sub` field)
+- Other users' data (scoped by the session token's `sub` field)
 
 ---
 
@@ -127,7 +127,7 @@ The client holds the minimum needed to authenticate and receive results.
 | Credential blobs on chain                                     | Encrypted to shielding key (asymmetric, scheme TBD per Heima implementation) | TEE shielding public key                                 | Only the TEE (holds shielding private key)                                                              |
 | Pair approval payload on chain                                | Encrypted to daemon_pubkey (asymmetric)                                      | Daemon's ephemeral public key (included in pair request) | Only the target daemon (holds its own ephemeral private key)                                            |
 | TEE sealed storage (shielding key, RSA key, wallet keys, MSK) | SGX sealing (AES-GCM with CPU-derived seal key)                              | Derived from CPU's seal key + enclave measurement        | Only the same enclave on the same CPU (or with the same seal policy)                                    |
-| JWT auth token                                                | RSA signature (not encrypted — signed for integrity, readable by anyone)     | TEE's RSA private key (signs); RSA public key (verifies) | Anyone can READ the JWT payload (it's base64, not encrypted). Only the TEE can FORGE a valid signature. |
+| Session token (JWT-format)                                    | RSA signature (not encrypted — signed for integrity, readable by anyone)     | TEE's RSA private key (signs); RSA public key (verifies) | Anyone can READ the session token payload (it's base64, not encrypted). Only the TEE can FORGE a valid signature. |
 | AES response encryption                                       | AES-GCM (symmetric, per-request)                                             | `RequestAesKey` (ephemeral, per-request)                 | Only the requesting client (holds the AES key for that request)                                         |
 | Identity hash on chain                                        | SHA-256 (one-way hash, not encryption)                                       | N/A (hash, not encrypted)                                | Anyone can read the hash. Nobody can reverse it to the original identity (preimage resistance).         |
 
@@ -159,9 +159,9 @@ Plaintext exists NOWHERE after the TEE wipes it.
 ### Credential read flow
 
 ```
-daemon sends: get_credential(openrouter) + JWT                 [CLIENT → TEE: JWT plaintext]
+daemon sends: get_credential(openrouter) + session token       [CLIENT → TEE: token plaintext]
   ↓
-TEE verifies JWT (RSA sig + expiry)                             [TEE: JWT in memory]
+TEE verifies session token (RSA sig + expiry)                  [TEE: token in memory]
 TEE reads chain: credential blob for (owner, agent, service)    [CHAIN → TEE: ciphertext]
 TEE decrypts with shielding key                                 [TEE: plaintext in memory]
 TEE returns plaintext to daemon (over TLS/wss)                  [TEE → CLIENT: TLS encrypted]
@@ -200,7 +200,7 @@ Chain stores: encrypted child session payload                   [CHAIN: encrypte
   ↓
 Daemon reads approval from chain                                [CHAIN → CLIENT: encrypted payload]
 Daemon decrypts with daemon_privkey                             [CLIENT: child session plaintext]
-Daemon stores session locally (JWT or session file, mode 0600)  [CLIENT: stored locally]
+Daemon stores session locally (session token or session file, mode 0600) [CLIENT: stored locally]
 ```
 
 ---
@@ -210,10 +210,10 @@ Daemon stores session locally (JWT or session file, mode 0600)  [CLIENT: stored 
 
 | Compromise point                                           | What they get                                                                                                                             | What they DON'T get                                                                                                 | Blast radius                                                                                                                                                                                                                                                                 |
 | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Chain data exfiltration** (read all on-chain state)      | All plaintext: addresses, identity hashes, scopes, audit events, pair metadata. Credential ciphertext (unreadable without shielding key). | Any private key. Any plaintext credential. JWT tokens (not on chain). Original identity info (only hash).           | Information disclosure only. No ability to decrypt credentials or impersonate users.                                                                                                                                                                                         |
-| **Client device compromise** (laptop/sandbox)              | JWT string (bearer token). Possibly plaintext credential in memory if timed during a read operation.                                      | Any TEE key. Other users' data. Credential ciphertext.                                                              | Impersonate this user until JWT expires (~~24h) or is revoked (~~6s). If credential was in memory, one credential for one service exposed.                                                                                                                                   |
-| **JWT theft**                                              | Impersonate the user for JWT's remaining TTL. Scoped by JWT's `sub` (one user) + on-chain scope (specific services).                      | TEE keys. Other users' sessions. Ability to forge new JWTs. Ability to sign extrinsics (TEE signs, not the client). | Bounded by TTL + scope. Revocable via on-chain revocation list (~6s).                                                                                                                                                                                                        |
-| **TEE compromise** (enclave breach, side-channel, insider) | All sealed keys (shielding, RSA, wallet/MSK). Can decrypt ALL credential blobs. Can forge JWTs. Can sign extrinsics as any user.          | Chain history (already written, immutable). Can't rewrite past audit events.                                        | **Total.** All users, all credentials, all operations. Recovery: rotate shielding key, re-encrypt all credentials, rotate MSK, re-issue all JWTs. The on-chain audit trail survives — forensic investigation of what happened during the breach is possible from chain data. |
+| **Chain data exfiltration** (read all on-chain state)      | All plaintext: addresses, identity hashes, scopes, audit events, pair metadata. Credential ciphertext (unreadable without shielding key). | Any private key. Any plaintext credential. Session tokens (not on chain). Original identity info (only hash).       | Information disclosure only. No ability to decrypt credentials or impersonate users.                                                                                                                                                                                         |
+| **Client device compromise** (laptop/sandbox)              | Session token (bearer credential). Possibly plaintext credential in memory if timed during a read operation.                              | Any TEE key. Other users' data. Credential ciphertext.                                                              | Impersonate this user until session token expires (~30 days) or is revoked (~6s). If credential was in memory, one credential for one service exposed.                                                                                                                       |
+| **Session token theft**                                    | Impersonate the user for the token's remaining TTL. Scoped by the token's `sub` (one user) + on-chain scope (specific services).          | TEE keys. Other users' sessions. Ability to forge new tokens. Ability to sign extrinsics (TEE signs, not the client). | Bounded by TTL + scope. Revocable via on-chain revocation list (~6s).                                                                                                                                                                                                      |
+| **TEE compromise** (enclave breach, side-channel, insider) | All sealed keys (shielding, RSA, wallet/MSK). Can decrypt ALL credential blobs. Can forge session tokens. Can sign extrinsics as any user. | Chain history (already written, immutable). Can't rewrite past audit events.                                        | **Total.** All users, all credentials, all operations. Recovery: rotate shielding key, re-encrypt all credentials, rotate MSK, re-issue all session tokens. The on-chain audit trail survives — forensic investigation of what happened during the breach is possible from chain data. |
 | **Paymaster compromise** (treasury drained)                | Can stop paying for audit extrinsic submission. Existing credentials and sessions unaffected.                                             | Any key. Any credential. Any ability to impersonate.                                                                | Audit events stop appearing on chain. Credential reads still work (TEE serves from chain state). Degraded mode: reads work, audit is paused.                                                                                                                                 |
 
 

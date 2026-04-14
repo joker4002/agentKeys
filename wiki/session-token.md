@@ -241,7 +241,7 @@ After revocation, the agent's session token is cryptographically valid (the RSA 
 | Token format               | Random 32-byte hex string (opaque bearer)    | Signed JWT (RSA, with claims)                                  |
 | Token issuer               | Mock backend (`generate_token()`)            | Heima TEE (`jwt::create(&claims, private_key)`)                |
 | Verification               | Bearer lookup in SQLite `sessions` table     | Stateless RSA signature check (no table)                       |
-| Expiration                 | TTL field in SQLite (86400s default)         | `exp` claim in JWT (configurable, target 30 days)              |
+| Expiration                 | TTL field in SQLite (2_592_000s = 30 days default) | `exp` claim in JWT (configurable, target 30 days)        |
 | Revocation                 | `UPDATE sessions SET revoked=1` in SQLite    | On-chain revocation list, ~6s propagation                      |
 | Storage (master)           | OS keychain via `keyring-rs`                 | OS keychain (same, storing JWT string instead of random token) |
 | Storage (daemon)           | File fallback at `~/.agentkeys/session.json` | File at `~/.agentkeys/token` (mode 0600)                       |
