@@ -8,6 +8,59 @@ Background: these patterns were distilled from 15+ PR review cycles in
 March-April 2026 where codex repeatedly surfaced the same classes of bug. Each
 numbered item below has been a real P1 or P2 finding at least once.
 
+## Writing style for PR comments, commit messages, and docs
+
+Use plain, common English. Short sentences. The reader might be a blockchain
+engineer, a Rust engineer, or a non-native English speaker — make every line
+land on the first read.
+
+**Avoid these words and phrases** (and anything with the same smell):
+
+- "leverage", "leveraging" — use "use"
+- "utilize" — use "use"
+- "robust", "comprehensive", "holistic" — say what it actually does
+- "streamline", "seamless" — describe the mechanism instead
+- "architect a solution", "solutioning" — "design" or "write"
+- "delve", "deep dive" — just say "read", "check", "inspect"
+- "facilitate" — "lets", "helps", "does"
+- "in order to" — "to"
+- "at the end of the day", "fundamentally" — cut entirely
+- "unlock", "empower" (for software) — say the concrete effect
+- "paradigm", "synergy", "holistic approach" — never
+- "cutting-edge", "state-of-the-art" — never; just name the tech
+
+**Prefer:**
+
+- Short sentences. 20 words max where possible.
+- Named concrete things. "The `get_scope` handler" beats "the scope retrieval
+  mechanism".
+- Active voice. "This PR fixes X" not "X is fixed by this PR".
+- Direct verdicts. "Wrong" / "Correct" / "Blocker" / "Ready to merge". Not
+  "may be suboptimal".
+- Code over prose. If three lines of code explain it, use them.
+
+When in doubt: would a tired reviewer at 11pm understand this on the first
+read? If not, rewrite.
+
+## Tagging conventions
+
+When a PR or issue needs input from people outside the Rust team, tag them
+explicitly in the PR description or a comment. The Action will not guess.
+
+| Topic | Tag |
+|-------|-----|
+| Heima blockchain extrinsic semantics, on-chain storage layout, chain-side identity resolution | `@Kailai-Wang @BillyWooo` |
+| TEE / shielding-key lifecycle, Worker runtime integration | `@Kailai-Wang @BillyWooo` |
+| Any change to the mock server's extrinsic-mirror contract that the real chain will need to implement | `@Kailai-Wang @BillyWooo` |
+| Any design decision that asks "does the real chain do it this way?" | `@Kailai-Wang @BillyWooo` |
+
+Tag in the PR body (for reviewers to see the moment they open the PR) AND in
+a comment on the relevant thread (so they get a notification). One-liner is
+fine: `cc @Kailai-Wang @BillyWooo — need your call on <specific question>`.
+
+Don't tag them for Rust-only, mock-only, or CLI-only questions — those stay
+inside the team.
+
 ## Test constraints
 
 - **ALWAYS use `cargo test -p <crate> -- --test-threads=1`.** Tests mutate
