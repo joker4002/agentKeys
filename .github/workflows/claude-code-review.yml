@@ -1,0 +1,89 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    # Only run on code / test / doc paths we actually want reviewed.
+    # Skips cheap churn like Cargo.lock-only updates.
+    paths:
+      - "crates/**"
+      - "docs/**"
+      - "wiki/**"
+      - ".github/workflows/**"
+      - "Cargo.toml"
+      - "CLAUDE.md"
+      - "harness/**"
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so Claude can inspect git log / blame during review
+
+      # Rust toolchain + cache so `cargo check` / `cargo test -p <crate>` runs fast.
+      # Every reviewer-invoked cargo command benefits.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "agentkeys-review"
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          # Custom review prompt tailored to agentkeys' Rust workspace + known
+          # review patterns from past codex iterations. See
+          # .github/REVIEW_GUIDELINES.md for the full pattern catalog.
+          prompt: |
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            REPO CONTEXT:
+            - Rust workspace. Workspace-member crates: agentkeys-types, agentkeys-core,
+              agentkeys-cli, agentkeys-daemon, agentkeys-mock-server, agentkeys-mcp,
+              agentkeys-provisioner.
+            - READ `CLAUDE.md` at repo root for architecture, mock-server design
+              principles, and test commands.
+            - READ `.github/REVIEW_GUIDELINES.md` for agentkeys-specific review
+              patterns (audit-log contract, session-token redaction, URL encoding
+              via reqwest `.query()`, `--test-threads=1` requirement, etc).
+            - Related specs: `docs/spec/architecture.md`,
+              `docs/spec/credential-backend-interface.md`,
+              `wiki/session-token.md` (30-day TTL policy).
+
+            TEST CONSTRAINTS:
+            - Tests mutate shared process state (HOME, keyring accounts) so
+              ALWAYS use `cargo test -p <crate> -- --test-threads=1`.
+            - Target only affected crates, not the whole workspace.
+            - `cargo clippy -p <crate> -- -D warnings` is expected clean.
+
+            KNOWN REVIEW PATTERNS (apply these before accepting a PR):
+            1. Cross-wallet credential safety (namespacing, sanitization).
+            2. Audit log DENIED rows for all cross-agent probing paths.
+            3. URL encoding via reqwest `.query()` — NEVER raw `format!()`
+               interpolation into query strings.
+            4. Token / session-token redaction in prompts and log lines.
+            5. Case-insensitive wallet comparison (EIP-55 vs backend lowercase).
+            6. Session TTL uniformly 30 days per `wiki/session-token.md`.
+            7. Synchronous keychain ops — no fire-and-forget delete.
+            8. Path traversal guards on any user-supplied session_id / filename.
+
+          claude_args: |
+            --allowed-tools Bash(cargo check:*),Bash(cargo test:*),Bash(cargo clippy:*),Bash(cargo fmt:*),Bash(git diff:*),Bash(git log:*),Bash(git blame:*),Bash(gh pr:*),Bash(gh issue view:*)
