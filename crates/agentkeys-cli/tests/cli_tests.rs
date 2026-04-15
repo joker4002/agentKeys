@@ -5,6 +5,7 @@ use agentkeys_cli::session_store;
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
 use agentkeys_types::Session;
+use serial_test::serial;
 
 fn create_test_backend() -> Arc<InProcessBackend> {
     Arc::new(InProcessBackend::new())
@@ -42,6 +43,7 @@ fn ctx_verbose_with_session(backend: Arc<InProcessBackend>, session: Session) ->
 
 // Test 1: init creates a session and returns a wallet address
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_init_creates_session() {
     let backend = create_test_backend();
     let (wallet, _session) = init_session_direct(&backend).await;
@@ -51,6 +53,7 @@ async fn cli_init_creates_session() {
 
 // Test 2: store then read returns the same key
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_store_and_read() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -63,6 +66,7 @@ async fn cli_store_and_read() {
 
 // Test 3: reading an unstored credential returns a NOT_FOUND or DENIED error
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_store_scope_denied() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -79,6 +83,7 @@ async fn cli_store_scope_denied() {
 
 // Test 4: cmd_run executes a child command (env injection works when scope is set)
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_run_injects_env() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -94,6 +99,7 @@ async fn cli_run_injects_env() {
 
 // Test 5: revoke child agent by wallet address
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_revoke_then_read() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -112,6 +118,7 @@ async fn cli_revoke_then_read() {
 
 // Test: cmd_revoke_self_clears_local_session
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_self_clears_local_session() {
     unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
@@ -148,6 +155,7 @@ async fn cmd_revoke_self_clears_local_session() {
 
 // Test: cmd_revoke_with_agent_calls_revoke_by_wallet
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_with_agent_calls_revoke_by_wallet() {
     let backend = create_test_backend();
     let (_, parent_session) = init_session_direct(&backend).await;
@@ -180,6 +188,7 @@ async fn cmd_revoke_with_agent_calls_revoke_by_wallet() {
 // be wiped (same as the no-arg self-revoke form), so subsequent commands
 // don't load a stale revoked token.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_with_own_wallet_clears_local_session() {
     unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
@@ -226,6 +235,7 @@ async fn cmd_revoke_with_own_wallet_clears_local_session() {
 // Counterpart to the above: revoking SOMEONE ELSE's wallet must NOT touch
 // the caller's local session file.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_with_other_wallet_keeps_local_session() {
     unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
@@ -267,6 +277,7 @@ async fn cmd_revoke_with_other_wallet_keeps_local_session() {
 
 // Test: cmd_revoke_no_session_errors_cleanly
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_no_session_errors_cleanly() {
     unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
@@ -291,6 +302,7 @@ async fn cmd_revoke_no_session_errors_cleanly() {
 
 // Test 6: teardown then read returns error
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_teardown_deletes_all() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -309,6 +321,7 @@ async fn cli_teardown_deletes_all() {
 
 // Test 7: usage shows audit events after store+read
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_usage_shows_audit() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -326,6 +339,7 @@ async fn cli_usage_shows_audit() {
 
 // Test 8: link alias succeeds — uses a real TCP server since cmd_link uses reqwest
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_link_alias() {
     use agentkeys_mock_server::{create_router, db, state::AppState};
     use std::sync::Arc as StdArc;
@@ -375,6 +389,7 @@ async fn cli_help_has_examples() {
 
 // Test 10: json output from read is valid JSON with expected fields
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_json_output() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -391,6 +406,7 @@ async fn cli_json_output() {
 
 // Test 11: verbose mode does not cause errors and completes successfully
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_verbose_output() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -402,6 +418,7 @@ async fn cli_verbose_output() {
 
 // Test 12: reading from a different agent produces a permission/not-found error
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_error_format_denied() {
     let backend = create_test_backend();
     let (_wallet, session) = init_session_direct(&backend).await;
@@ -419,6 +436,7 @@ async fn cli_error_format_denied() {
 
 // Test 13: not-found error has expected format
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cli_error_format_not_found() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -454,6 +472,7 @@ async fn cli_error_format_unreachable() {
 
 // Test 15: master session (scope: None) injects all stored credentials
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_run_master_session_injects_all_credentials() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -472,6 +491,7 @@ async fn cmd_run_master_session_injects_all_credentials() {
 // by the master session (which owns the child via parent_token chain).
 // cmd_run with the scoped child session injects only the scoped service.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_run_scoped_session_respects_scope() {
     use agentkeys_core::backend::CredentialBackend;
     use agentkeys_types::{Scope, ServiceName};
@@ -508,6 +528,7 @@ async fn cmd_run_scoped_session_respects_scope() {
 
 // Test 17: --env KEY=service overrides the default auto-convention name
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_run_env_flag_overrides_default_name() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -528,6 +549,7 @@ async fn cmd_run_env_flag_overrides_default_name() {
 
 // Test 18: --env without '=' returns a clean parse error, child not spawned
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_run_env_flag_invalid_format() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -551,6 +573,7 @@ async fn cmd_run_env_flag_invalid_format() {
 // Test 19 (codex P2 v2): --env with empty KEY (e.g. "=github") rejected up
 // front, no backend round-trip and no DENIED audit row.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_run_env_flag_empty_key_rejected() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -573,6 +596,7 @@ async fn cmd_run_env_flag_empty_key_rejected() {
 // Test 20 (codex P2 v2): --env with empty SERVICE (e.g. "MY_KEY=") rejected
 // up front, no backend round-trip for an empty service name.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_run_env_flag_empty_service_rejected() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -598,6 +622,7 @@ async fn cmd_run_env_flag_empty_service_rejected() {
 
 // Test 21 (issue-16): cmd_store with None agent defaults to session wallet
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_store_defaults_to_session_wallet() {
     let backend = create_test_backend();
     let (_wallet, session) = init_session_direct(&backend).await;
@@ -614,6 +639,7 @@ async fn cmd_store_defaults_to_session_wallet() {
 
 // Test 22 (issue-16): cmd_read with None agent defaults to session wallet
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_read_defaults_to_session_wallet() {
     let backend = create_test_backend();
     let (wallet, session) = init_session_direct(&backend).await;
@@ -628,6 +654,7 @@ async fn cmd_read_defaults_to_session_wallet() {
 
 // Test 23 (issue-16): cmd_run with None agent defaults to session wallet
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_run_defaults_to_session_wallet() {
     let backend = create_test_backend();
     let (_wallet, session) = init_session_direct(&backend).await;
@@ -640,6 +667,7 @@ async fn cmd_run_defaults_to_session_wallet() {
 
 // Test 24 (issue-16): cmd_store with alias resolves to the linked wallet
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_store_resolves_alias() {
     use agentkeys_mock_server::{create_router, db, state::AppState};
     use std::sync::Arc as StdArc;
@@ -675,6 +703,7 @@ async fn cmd_store_resolves_alias() {
 
 // Test 25 (issue-16): cmd_read with unknown identity returns the documented error message
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_read_unknown_identity_errors_cleanly() {
     use agentkeys_mock_server::{create_router, db, state::AppState};
     use std::sync::Arc as StdArc;

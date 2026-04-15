@@ -32,3 +32,4 @@ axum = { version = "0.7", features = ["json"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = { workspace = true }
 tempfile = "3"
+serial_test = "3"
