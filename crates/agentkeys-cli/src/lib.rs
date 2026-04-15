@@ -1,5 +1,7 @@
 pub mod session_store;
 
+pub mod biometric;
+
 use std::sync::Arc;
 
 use agentkeys_core::backend::{BackendError, CredentialBackend};
@@ -282,6 +284,16 @@ pub async fn cmd_run(
 pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
 
+    // Biometric gate: the `agent` argument may be a raw session token, so
+    // build the reason with only the non-sensitive framing and let
+    // redact_prompt_reason strip anything long/opaque in case callers ever
+    // pass a token in a future refactor.
+    let reason = match agent {
+        None => "Revoke current session".to_string(),
+        Some(_) => "Revoke target session".to_string(),
+    };
+    biometric::require_biometric(&reason).map_err(|e| anyhow!("biometric gate: {e}"))?;
+
     if ctx.verbose {
         eprintln!("[verbose] POST {}/session/revoke", ctx.backend_url);
     }
@@ -336,6 +348,11 @@ pub async fn cmd_revoke(ctx: &CommandContext, agent: Option<&str>) -> Result<Str
 pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
     let agent_id = WalletAddress(agent.to_string());
+
+    // `agent` for teardown is a wallet address (0x…) — safe to show in the
+    // prompt. redact_prompt_reason preserves short 0x… addresses.
+    let reason = format!("Tear down agent {} (deletes ALL credentials)", agent);
+    biometric::require_biometric(&reason).map_err(|e| anyhow!("biometric gate: {e}"))?;
 
     if ctx.verbose {
         eprintln!("[verbose] DELETE {}/credential/teardown", ctx.backend_url);
@@ -567,6 +584,13 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
     if !confirmed {
         return Err(anyhow!("Approval cancelled by user"));
     }
+
+    // Biometric gate: runs AFTER the user has seen & confirmed the request
+    // details + OTP, so the user decides the semantics first and only then
+    // proves physical presence. `request_type_display` is built from typed
+    // fields (scope, agent_id, service) — no raw user input flows through.
+    let reason = format!("Approve auth-request: {}", request_type_display);
+    biometric::require_biometric(&reason).map_err(|e| anyhow!("biometric gate: {e}"))?;
 
     if ctx.verbose {
         eprintln!("[verbose] POST {}/auth-request/approve", ctx.backend_url);

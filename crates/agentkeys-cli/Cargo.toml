@@ -19,8 +19,17 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 keyring = "2"
 reqwest = { version = "0.12", features = ["json"] }
+
+# macOS-only: real LAContext biometric gate via objc2 FFI.
+# Gated behind target cfg so Linux / Windows builds pay zero cost.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError"] }
+block2 = "0.6"
 
 [dev-dependencies]
 assert_cmd = "2"
