@@ -693,6 +693,25 @@ pub async fn cmd_scope(
         ));
     }
 
+    // `--add foo --remove foo` would silently no-op after mutation
+    // (retain after push cancels) yet still issue a backend write with a
+    // misleading "Scope updated" message. Reject up front (codex PR #29
+    // v2 P2).
+    if !add.is_empty() && !remove.is_empty() {
+        let add_set: std::collections::HashSet<&str> = add.iter().map(|s| s.as_str()).collect();
+        let overlap: Vec<&str> = remove
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| add_set.contains(s))
+            .collect();
+        if !overlap.is_empty() {
+            return Err(anyhow!(
+                "Error: the following services appear in both --add and --remove: {}. Pass each service to only one flag.",
+                overlap.join(", ")
+            ));
+        }
+    }
+
     if !list && set.is_none() && add.is_empty() && remove.is_empty() {
         return Err(anyhow!(
             "No action specified. Use --add, --remove, --set, or --list.\nRun `agentkeys scope --help` for usage."

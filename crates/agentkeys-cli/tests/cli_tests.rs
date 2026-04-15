@@ -709,7 +709,10 @@ async fn cmd_read_unknown_identity_errors_cleanly() {
     assert!(
         err.contains("agentkeys link") || err.contains("0x"),
         "error message should mention agentkeys link: {err}"
+    );
+}
 
+// ---------------------------------------------------------------------------
 // Scope tests (15-19): require a real TCP server (cmd_scope uses reqwest)
 // ---------------------------------------------------------------------------
 

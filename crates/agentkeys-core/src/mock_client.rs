@@ -627,10 +627,13 @@ impl CredentialBackend for MockHttpClient {
         session: &Session,
         agent_id: &WalletAddress,
     ) -> Result<Vec<ServiceName>, BackendError> {
-        let url = format!("/credential/list?agent_id={}", agent_id.0);
+        // Use reqwest's .query() builder for RFC 3986 percent-encoding so
+        // wallet strings with reserved chars (`&`, `#`, `%`, `+`, spaces)
+        // don't smuggle extra params or break the request.
         let resp = self
             .client
-            .get(self.url(&url))
+            .get(self.url("/credential/list"))
+            .query(&[("agent_id", &agent_id.0)])
             .header("authorization", format!("Bearer {}", session.token))
             .send()
             .await
@@ -687,10 +690,12 @@ impl CredentialBackend for MockHttpClient {
         session: &Session,
         target_wallet: &WalletAddress,
     ) -> Result<Option<Scope>, BackendError> {
-        let url = format!("/session/scope?wallet={}", target_wallet.0);
+        // .query() builder percent-encodes per RFC 3986 so wallet strings
+        // with reserved chars don't break the request or smuggle params.
         let resp = self
             .client
-            .get(self.url(&url))
+            .get(self.url("/session/scope"))
+            .query(&[("wallet", &target_wallet.0)])
             .header("authorization", format!("Bearer {}", session.token))
             .send()
             .await

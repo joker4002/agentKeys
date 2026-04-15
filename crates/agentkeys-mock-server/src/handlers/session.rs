@@ -326,8 +326,9 @@ pub async fn update_scope(
     // (e.g. `agentkeys scope --agent <MY-WALLET> --set openrouter` would flip
     // the master's scope_json from NULL to ["openrouter"] and cause every
     // subsequent `credential/read` outside that list to fail). Reject
-    // self-targeting explicitly before the ownership check.
-    if session.wallet_address == target_wallet {
+    // self-targeting explicitly before the ownership check. Case-insensitive
+    // so EIP-55 checksummed input matches the backend's lowercase storage.
+    if session.wallet_address.eq_ignore_ascii_case(&target_wallet) {
         return Err(AppError::bad_request(
             "agentkeys scope cannot target the master's own wallet — use it on child agent wallets only",
         ));
@@ -336,6 +337,15 @@ pub async fn update_scope(
     let db = state.db.lock().unwrap();
 
     if !is_owner_of(&db, &session.wallet_address, &target_wallet) {
+        // Mirror the read_credential / list_credentials audit contract —
+        // cross-agent probing of scope endpoints must leave a DENIED row.
+        let now = now_secs();
+        db.execute(
+            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
+             VALUES (?1, ?2, ?3, 'scope_update', 'DENIED', ?4)",
+            rusqlite::params![session.wallet_address, target_wallet, "*", now],
+        )
+        .ok();
         return Err(AppError::forbidden("session does not own the target wallet"));
     }
 
@@ -347,9 +357,19 @@ pub async fn update_scope(
     let scope_json =
         serde_json::to_string(&new_scope).map_err(|e| AppError::internal(e.to_string()))?;
 
+    // Mutate only the most recent active session for the target wallet.
+    // read-side `get_session_scope` uses `ORDER BY created_at DESC LIMIT 1`,
+    // so blanket updates across all active sessions would drift the
+    // read/write contract on wallets that happen to have multiple active
+    // sessions (e.g. one paired + one recovered).
     let rows_affected = db
         .execute(
-            "UPDATE sessions SET scope_json = ?1 WHERE wallet_address = ?2 AND revoked = 0",
+            "UPDATE sessions SET scope_json = ?1 \
+             WHERE token = ( \
+                 SELECT token FROM sessions \
+                 WHERE wallet_address = ?2 AND revoked = 0 \
+                 ORDER BY created_at DESC LIMIT 1 \
+             )",
             rusqlite::params![scope_json, target_wallet],
         )
         .map_err(|e| AppError::internal(e.to_string()))?;
@@ -382,6 +402,15 @@ pub async fn get_session_scope(
     // Only the master that owns the target wallet may query its scope.
     let db = state.db.lock().unwrap();
     if !is_owner_of(&db, &session.wallet_address, &query.wallet) {
+        // Audit cross-agent scope probing to match the DENIED contract on
+        // other credential-path endpoints (codex PR #29 P1).
+        let now = now_secs();
+        db.execute(
+            "INSERT INTO audit_log (owner_wallet, agent_wallet, service_name, action, result, timestamp)
+             VALUES (?1, ?2, ?3, 'scope_read', 'DENIED', ?4)",
+            rusqlite::params![session.wallet_address, query.wallet, "*", now],
+        )
+        .ok();
         return Err(AppError::forbidden("session does not own the target wallet"));
     }
 
