@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentKeys｜中文项目说明</title>
+    <style>
+      :root {
+        --bg: #f5efe4;
+        --bg-2: #efe6d8;
+        --card: rgba(255, 252, 246, 0.82);
+        --ink: #172436;
+        --muted: #5f6b7c;
+        --line: rgba(23, 36, 54, 0.09);
+        --accent: #d66c2b;
+        --accent-2: #0f6d68;
+        --shadow: 0 18px 50px rgba(27, 34, 46, 0.1);
+        --radius: 22px;
+        --max: 1140px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        font-family:
+          "Avenir Next",
+          "PingFang SC",
+          "Hiragino Sans GB",
+          "Noto Sans CJK SC",
+          "Microsoft YaHei",
+          sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(214, 108, 43, 0.14), transparent 28%),
+          radial-gradient(circle at top right, rgba(15, 109, 104, 0.1), transparent 30%),
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+        line-height: 1.65;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image:
+          linear-gradient(rgba(23, 36, 54, 0.025) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(23, 36, 54, 0.025) 1px, transparent 1px);
+        background-size: 28px 28px;
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 90%);
+      }
+
+      .page {
+        width: min(var(--max), calc(100vw - 24px));
+        margin: 0 auto;
+        padding: 22px 0 52px;
+      }
+
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .mark {
+        width: 42px;
+        height: 42px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, var(--accent), #8f3d31);
+        position: relative;
+      }
+
+      .mark::before,
+      .mark::after {
+        content: "";
+        position: absolute;
+        background: rgba(255, 248, 241, 0.95);
+        border-radius: 999px;
+      }
+
+      .mark::before {
+        width: 22px;
+        height: 6px;
+        left: 10px;
+        top: 12px;
+        transform: rotate(-32deg);
+      }
+
+      .mark::after {
+        width: 18px;
+        height: 6px;
+        left: 12px;
+        top: 22px;
+        transform: rotate(42deg);
+      }
+
+      .brand strong,
+      h1,
+      h2,
+      h3 {
+        font-family:
+          "Iowan Old Style",
+          "Palatino Linotype",
+          "Book Antiqua",
+          "Songti SC",
+          serif;
+      }
+
+      .brand-copy {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .brand-copy span {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .nav a {
+        text-decoration: none;
+        color: var(--muted);
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 251, 246, 0.7);
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid rgba(255, 255, 255, 0.75);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(10px);
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1.25fr 0.9fr;
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+
+      .hero-main,
+      .hero-side,
+      .section-card {
+        padding: 26px;
+      }
+
+      .eyebrow {
+        color: #974632;
+        font-size: 0.86rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 14px;
+      }
+
+      h1 {
+        margin: 0 0 14px;
+        font-size: clamp(2.4rem, 5vw, 4.6rem);
+        line-height: 1.04;
+        letter-spacing: -0.03em;
+      }
+
+      .lede {
+        font-size: clamp(1.06rem, 1.6vw, 1.24rem);
+        max-width: 14em;
+        margin: 0 0 18px;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .chips span {
+        padding: 9px 14px;
+        border-radius: 999px;
+        background: rgba(23, 36, 54, 0.06);
+        font-size: 0.92rem;
+      }
+
+      .snapshot {
+        padding: 16px 18px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.55);
+        margin-bottom: 12px;
+      }
+
+      .snapshot p,
+      .panel p,
+      .section-intro,
+      .list li,
+      .mini p {
+        color: var(--muted);
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .mini {
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.62);
+      }
+
+      .mini b {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 1.05rem;
+      }
+
+      .section {
+        margin-top: 14px;
+      }
+
+      .section-head {
+        margin-bottom: 12px;
+      }
+
+      h2 {
+        margin: 0 0 6px;
+        font-size: 2rem;
+      }
+
+      .grid-3,
+      .grid-2 {
+        display: grid;
+        gap: 14px;
+      }
+
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .grid-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .panel {
+        padding: 22px;
+      }
+
+      .panel .label {
+        color: var(--accent);
+        font-size: 0.84rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 10px;
+      }
+
+      h3 {
+        margin: 0 0 10px;
+        font-size: 1.45rem;
+      }
+
+      .flow {
+        padding: 22px;
+      }
+
+      .flow-line {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        align-items: center;
+      }
+
+      .node {
+        min-height: 112px;
+        padding: 16px;
+        border-radius: 20px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .node strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+
+      .node small {
+        color: var(--muted);
+      }
+
+      .flow-notes {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .flow-note {
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px dashed var(--line);
+        background: rgba(23, 36, 54, 0.04);
+      }
+
+      .list {
+        margin: 0;
+        padding-left: 18px;
+      }
+
+      .list li + li {
+        margin-top: 8px;
+      }
+
+      .code {
+        margin-top: 12px;
+        padding: 16px;
+        border-radius: 18px;
+        background: #162031;
+        color: #eff5fb;
+        overflow-x: auto;
+      }
+
+      .code pre {
+        margin: 0;
+        font-family:
+          "IBM Plex Mono",
+          "SFMono-Regular",
+          "Menlo",
+          monospace;
+        font-size: 0.9rem;
+        line-height: 1.7;
+      }
+
+      .status-now {
+        background: rgba(15, 109, 104, 0.08);
+      }
+
+      .status-next {
+        background: rgba(214, 108, 43, 0.08);
+      }
+
+      .footer-note {
+        margin-top: 14px;
+        padding: 18px 20px;
+        border-radius: 18px;
+        background: rgba(23, 36, 54, 0.05);
+        color: var(--muted);
+      }
+
+      @media (max-width: 980px) {
+        .hero,
+        .grid-3,
+        .grid-2,
+        .flow-line,
+        .flow-notes {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .topbar {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .hero-main,
+        .hero-side,
+        .section-card,
+        .panel,
+        .flow {
+          padding: 20px;
+        }
+
+        .stats {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div class="brand">
+          <div class="mark" aria-hidden="true"></div>
+          <div class="brand-copy">
+            <strong>AgentKeys</strong>
+            <span>中文项目说明页</span>
+          </div>
+        </div>
+        <nav class="nav" aria-label="页面导航">
+          <a href="#what">是什么</a>
+          <a href="#shape">软件形态</a>
+          <a href="#flow">流程</a>
+          <a href="#status">当前进度</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <article class="card hero-main">
+          <div class="eyebrow">Project Readout</div>
+          <h1>AgentKeys 是什么？</h1>
+          <p class="lede">
+            你可以把它理解成一个专门给 AI agent 管 API key 的“钥匙管理员”。
+            人先把 key 存进去，agent 需要时再按权限去取，不用再把一堆 key 塞进
+            <strong>.env</strong>，出了问题也能随时收回。
+          </p>
+          <div class="chips">
+            <span>人负责授权</span>
+            <span>Agent 按需取用</span>
+            <span>支持撤销和恢复</span>
+          </div>
+        </article>
+
+        <aside class="card hero-side">
+          <div class="snapshot">
+            <strong>当前仓库快照</strong>
+            <p>这个页面描述的是当前项目形态，不把未来规划说成已经做完的能力。</p>
+          </div>
+          <div class="stats">
+            <div class="mini">
+              <b>管理端</b>
+              <p>当前是 CLI，长期更合理的形态应该是 GUI。</p>
+            </div>
+            <div class="mini">
+              <b>Daemon</b>
+              <p>Agent 侧 sidecar，负责配对、恢复、MCP 接口。</p>
+            </div>
+            <div class="mini">
+              <b>Backend</b>
+              <p>v0 是 mock server，未来目标是 Heima TEE 后端。</p>
+            </div>
+            <div class="mini">
+              <b>MCP</b>
+              <p>MCP 是 agent 的访问接口，不是整个产品本体。</p>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="section" id="what">
+        <article class="card section-card">
+          <div class="section-head">
+            <h2>一句话说清楚</h2>
+            <p class="section-intro">
+              如果你有技术背景，可以先把它想成：
+              <strong>GUI 管理端 + Agent Sidecar + 后端凭证服务</strong>。
+              Agent 通过 MCP 按需取钥匙，但 MCP 只是访问接口，不是整个产品本体。
+            </p>
+          </div>
+          <div class="grid-3">
+            <section class="card panel">
+              <div class="label">它是什么</div>
+              <h3>给 AI Agent 发钥匙的中间层</h3>
+              <p>
+                重点不是“把密码存起来”，而是让 agent 在需要的时候拿到 API key，而且只能拿到它该拿的那一把。
+              </p>
+            </section>
+            <section class="card panel">
+              <div class="label">给谁用</div>
+              <h3>给跑 Agent 的开发者和基础设施团队</h3>
+              <p>
+                典型用户包括 Claude Code、OpenClaw、Codex 风格环境的使用者，以及自建 agent sandbox / MCP 工具链的工程团队。
+              </p>
+            </section>
+            <section class="card panel">
+              <div class="label">解决什么</div>
+              <h3>怎么发 key，怎么限权，怎么收回</h3>
+              <p>
+                它把三件麻烦事标准化：给 agent 发 key、把不同 agent 的权限拆开、在 sandbox 重建或 agent 出问题时快速撤销和恢复。
+              </p>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <section class="section" id="shape">
+        <article class="card section-card">
+          <div class="section-head">
+            <h2>从软件形态上看，它到底是什么？</h2>
+            <p class="section-intro">
+              它不是单纯的 “MCP server + client”。更准确地说，它是一套分布式凭证系统，MCP 只是 agent 访问这套系统的一层协议接口。
+            </p>
+          </div>
+          <div class="grid-2">
+            <section class="card panel">
+              <div class="label">产品形态</div>
+              <h3>三层结构</h3>
+              <ul class="list">
+                <li><strong>人类管理端</strong>：当前是 CLI，最终更应该演进成 GUI。</li>
+                <li><strong>Agent Sidecar</strong>：`agentkeys-daemon` 跑在 sandbox 里，贴着 agent。</li>
+                <li><strong>后端凭证服务</strong>：负责 session、scope、audit、pair / recover、credential storage。</li>
+              </ul>
+            </section>
+            <section class="card panel">
+              <div class="label">不是它的地方</div>
+              <h3>MCP 不是产品本体</h3>
+              <ul class="list">
+                <li>MCP 只是给 agent 暴露 `get_credential` 这类能力的入口。</li>
+                <li>人类端不应该长期停留在 CLI，而应该走向 GUI 审批、审计、权限查看。</li>
+                <li>所以最准确的表述是：AgentKeys 包含 MCP，但不等于 MCP。</li>
+              </ul>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <section class="section" id="flow">
+        <article class="card section-card">
+          <div class="section-head">
+            <h2>流程图版理解</h2>
+            <p class="section-intro">
+              人类通过管理端管控，agent 通过 daemon + MCP 读取，后端负责限权、审计和恢复。现阶段管理端主要是 CLI，但最终更适合做成 GUI。
+            </p>
+          </div>
+          <div class="flow">
+            <div class="flow-line">
+              <div class="node">
+                <strong>人类操作者</strong>
+                <small>开发者 / 维护者 / 主控端</small>
+              </div>
+              <div class="node">
+                <strong>管理端</strong>
+                <small>当前：CLI<br />未来：GUI</small>
+              </div>
+              <div class="node">
+                <strong>凭证后端</strong>
+                <small>v0: mock server<br />未来：Heima TEE</small>
+              </div>
+              <div class="node">
+                <strong>`agentkeys-daemon`</strong>
+                <small>pair / recover / MCP / sidecar</small>
+              </div>
+              <div class="node">
+                <strong>AI Agent</strong>
+                <small>Claude Code / OpenClaw / 自定义 Agent</small>
+              </div>
+            </div>
+
+            <div class="flow-notes">
+              <div class="flow-note">
+                <strong>人类这边做什么</strong>
+                <p>初始化身份、存储已有 key、批准配对、撤销访问、查看审计。当前这些动作通过 CLI 完成，但长期更适合 GUI。</p>
+              </div>
+              <div class="flow-note">
+                <strong>Agent 这边做什么</strong>
+                <p>不直接碰 `.env`，而是经由 daemon 的 MCP 工具获取受 scope 限制的 credential。</p>
+              </div>
+              <div class="flow-note">
+                <strong>后端这边做什么</strong>
+                <p>负责 session、child session、credential storage、audit、rendezvous、auth request。</p>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="section">
+        <div class="grid-2">
+          <article class="card panel">
+            <div class="label">主流程 A</div>
+            <h3>Store → Use → Revoke</h3>
+            <ul class="list">
+              <li>当前是用 CLI 把 `my-agent + service` 对应的凭证写入后端。</li>
+              <li>Agent 经由 daemon 发 MCP 请求，只能读到属于当前 scope 的 credential。</li>
+              <li>一旦 agent 风险升高，主控端可以 revoke，之后读取就会被拒绝。</li>
+            </ul>
+            <div class="code">
+              <pre>agentkeys store my-agent openrouter sk-...
+Agent --MCP--> agentkeys.get_credential("openrouter")
+agentkeys revoke my-agent</pre>
+            </div>
+          </article>
+          <article class="card panel">
+            <div class="label">主流程 B</div>
+            <h3>Pair / Recover</h3>
+            <ul class="list">
+              <li>daemon 启动时向后端创建 pair 或 recover 请求，拿到 pair code。</li>
+              <li>主控端当前通过 CLI 确认配对码并批准请求；产品体验上后面更适合迁移到 GUI 审批流。</li>
+              <li>这样即使云端 sandbox 是一次性的，agent 也不需要每次重配外部服务凭证。</li>
+            </ul>
+            <div class="code">
+              <pre>agentkeys-daemon --recover my-agent
+...显示 Pair Code...
+agentkeys approve ABCD-EFGH</pre>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="status">
+        <article class="card section-card">
+          <div class="section-head">
+            <h2>当前项目做到哪一步</h2>
+            <p class="section-intro">
+              这里区分“已经在代码里存在的能力”和“目前还停留在设计文档里的能力”，避免把愿景误读成现状。
+            </p>
+          </div>
+          <div class="grid-2">
+            <section class="card panel status-now">
+              <div class="label">已经存在</div>
+              <h3>当前仓库里已经有的东西</h3>
+              <ul class="list">
+                <li>Rust monorepo 与共享类型、`CredentialBackend` 契约。</li>
+                <li>Mock backend：session、credential、audit、rendezvous、auth request。</li>
+                <li>当前的人类管理端是 CLI，支持 `init`、`store`、`read`、`run`、`revoke`、`usage`、`approve` 等命令。</li>
+                <li>`agentkeys-daemon` 已支持启动、配对、恢复和 MCP stdio 服务。</li>
+                <li>MCP 侧已提供 `agentkeys.get_credential` 与 `agentkeys.list_credentials`。</li>
+              </ul>
+            </section>
+            <section class="card panel status-next">
+              <div class="label">尚未完整落地</div>
+              <h3>接下来更像产品化方向的东西</h3>
+              <ul class="list">
+                <li>人类管理端从 CLI 升级成 GUI，尤其是审批、审计、agent 列表和权限查看。</li>
+                <li>`agentkeys.provision` 的完整自动开户 / 自动取 key 流程。</li>
+                <li>面向云 LLM 环境的 npm daemon 分发方案。</li>
+                <li>Heima TEE 作为正式后端替换当前 mock server。</li>
+              </ul>
+            </section>
+          </div>
+          <div class="footer-note">
+            对有技术背景的人来说，最好的理解方式是：
+            <strong>AgentKeys 正在把 “AI agent 用凭证” 这件事，做成一个独立系统层。</strong>
+            现在已经有核心骨架；未来要补的是 GUI 管理端、自动 provision 和更强的可信后端。
+          </div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>
