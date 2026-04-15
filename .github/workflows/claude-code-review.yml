@@ -3,12 +3,12 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Only run on code / test / doc paths we actually want reviewed.
-    # Skips cheap churn like Cargo.lock-only updates.
+    # Run only on paths that contain real code or CI config.
+    # Pure docs pushes (`docs/**`, `wiki/**`) don't need a full code review
+    # — they go through normal PR approval. This also skips Cargo.lock-only
+    # churn and README-only edits.
     paths:
       - "crates/**"
-      - "docs/**"
-      - "wiki/**"
       - ".github/workflows/**"
       - "Cargo.toml"
       - "CLAUDE.md"
@@ -16,6 +16,10 @@ on:
 
 jobs:
   claude-review:
+    # Only review PRs opened by the repo owner. External contributors and
+    # bot PRs don't get auto-review — they go through manual review or can
+    # be invoked explicitly via `@claude` in a comment (see claude.yml).
+    if: github.event.pull_request.user.login == 'hanwencheng'
     runs-on: ubuntu-latest
     permissions:
       contents: read
