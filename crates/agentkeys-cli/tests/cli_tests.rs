@@ -933,3 +933,56 @@ async fn cmd_scope_add_and_set_conflict_errors() {
         "error message should mention the conflict: {err}"
     );
 }
+
+// Test 20: --list + --add rejected up front (claude re-review follow-up).
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_list_and_add_conflict_errors() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(&ctx, &child_wallet, &["x".to_string()], &[], None, true).await;
+    let err = result.expect_err("--list + --add must be rejected").to_string();
+    assert!(
+        err.contains("mutually exclusive"),
+        "error should flag the --list/--add combo: {err}"
+    );
+}
+
+// Test 21: --add X + --remove X overlap rejected with a clear error
+// (claude re-review follow-up on the P2 overlap guard added in v3).
+#[tokio::test(flavor = "multi_thread")]
+async fn cmd_scope_add_remove_overlap_errors() {
+    let (base_url, master_token, child_wallet) = start_scope_test_server().await;
+
+    let master_session = agentkeys_types::Session {
+        token: master_token,
+        wallet: agentkeys_types::WalletAddress("unused".to_string()),
+        scope: None,
+        created_at: 0,
+        ttl_seconds: 86400,
+    };
+
+    let ctx = CommandContext::new(&base_url, false, false).with_session(master_session);
+    let result = cmd_scope(
+        &ctx,
+        &child_wallet,
+        &["foo".to_string()],
+        &["foo".to_string()],
+        None,
+        false,
+    )
+    .await;
+    let err = result.expect_err("--add X + --remove X must be rejected").to_string();
+    assert!(
+        err.contains("both --add and --remove") && err.contains("foo"),
+        "error should name the overlapping service: {err}"
+    );
+}

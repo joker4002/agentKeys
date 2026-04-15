@@ -722,7 +722,12 @@ impl CredentialBackend for InProcessBackend {
         session: &Session,
         target_wallet: &WalletAddress,
     ) -> Result<Option<Scope>, BackendError> {
-        let path = format!("/session/scope?wallet={}", target_wallet.0);
+        // Percent-encode the wallet — matches the `.query()` pattern in
+        // `MockHttpClient::get_scope` and the `pct_encode` usage in
+        // `resolve_identity` above. Wallet strings are hex today so this is
+        // safe in practice, but the consistency matters for the
+        // `.github/REVIEW_GUIDELINES.md` URL-encoding invariant (pattern #3).
+        let path = format!("/session/scope?wallet={}", pct_encode(&target_wallet.0));
         let result = self.get_with_session(&path, session).await;
         match result {
             Err(BackendError::NotFound(_)) => Ok(None),

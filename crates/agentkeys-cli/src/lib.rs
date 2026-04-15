@@ -766,7 +766,9 @@ pub async fn cmd_scope(
         .await
         .map_err(wrap_backend_error)?;
 
-    new_scope.services.sort_by(|a, b| a.0.cmp(&b.0));
+    // `new_scope.services` is already sorted — both the --set branch
+    // (line 749) and the --add/--remove branch (line 760) sort before
+    // the update_scope call.
     let service_names: Vec<&str> = new_scope.services.iter().map(|s| s.0.as_str()).collect();
     Ok(format!(
         "Scope updated for agent {}. New services: [{}]",
