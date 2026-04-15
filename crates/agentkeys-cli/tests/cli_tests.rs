@@ -8,14 +8,25 @@ use agentkeys_cli::session_store;
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_mock_server::test_client::InProcessBackend;
 use agentkeys_types::Session;
+use serial_test::serial;
 
 fn create_test_backend() -> Arc<InProcessBackend> {
     Arc::new(InProcessBackend::new())
 }
 
+/// Set `AGENTKEYS_SESSION_STORE=file` BEFORE the test binary's main runs.
+/// `#[ctor::ctor]` runs this function during dylib/init, well before any
+/// test thread starts, so no race window exists where one test could hit
+/// `cmd_init` → `save_session` → real keychain while another test is
+/// still trying to set the env var. This replaces an earlier `OnceLock`
+/// approach that still had a narrow startup race (issue #34).
+#[ctor::ctor]
+fn init_test_env() {
+    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
+}
+
 /// Initialize a session via the in-process backend and return both wallet and session.
 async fn init_session_direct(backend: &Arc<InProcessBackend>) -> (String, Session) {
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
     let ctx = CommandContext::new("unused", false, false)
         .with_backend(backend.clone() as Arc<dyn CredentialBackend>);
     let (output, session) = cmd_init(&ctx, Some("test-token-unique".to_string()))
@@ -115,8 +126,8 @@ async fn cli_revoke_then_read() {
 
 // Test: cmd_revoke_self_clears_local_session
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_self_clears_local_session() {
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
     let temp_dir = tempfile::tempdir().unwrap();
     let temp_home = temp_dir.path().to_str().unwrap().to_string();
@@ -183,8 +194,8 @@ async fn cmd_revoke_with_agent_calls_revoke_by_wallet() {
 // be wiped (same as the no-arg self-revoke form), so subsequent commands
 // don't load a stale revoked token.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_with_own_wallet_clears_local_session() {
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
     let temp_dir = tempfile::tempdir().unwrap();
     let temp_home = temp_dir.path().to_str().unwrap().to_string();
@@ -229,8 +240,8 @@ async fn cmd_revoke_with_own_wallet_clears_local_session() {
 // Counterpart to the above: revoking SOMEONE ELSE's wallet must NOT touch
 // the caller's local session file.
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_with_other_wallet_keeps_local_session() {
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
     let temp_dir = tempfile::tempdir().unwrap();
     let temp_home = temp_dir.path().to_str().unwrap().to_string();
@@ -270,8 +281,8 @@ async fn cmd_revoke_with_other_wallet_keeps_local_session() {
 
 // Test: cmd_revoke_no_session_errors_cleanly
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cmd_revoke_no_session_errors_cleanly() {
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
 
     let temp_dir = tempfile::tempdir().unwrap();
     let temp_home = temp_dir.path().to_str().unwrap().to_string();
@@ -345,7 +356,6 @@ async fn cli_link_alias() {
     });
     let base_url = format!("http://127.0.0.1:{}", addr.port());
 
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
     let bare_ctx = CommandContext::new(&base_url, false, false);
     let (output, session) = cmd_init(&bare_ctx, Some("test-token-unique".to_string()))
         .await
@@ -658,7 +668,6 @@ async fn cmd_store_resolves_alias() {
     });
     let base_url = format!("http://127.0.0.1:{}", addr.port());
 
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
     let bare_ctx = CommandContext::new(&base_url, false, false);
     let (output, session) = cmd_init(&bare_ctx, Some("test-token-alias".to_string())).await.unwrap();
     let wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
@@ -693,7 +702,6 @@ async fn cmd_read_unknown_identity_errors_cleanly() {
     });
     let base_url = format!("http://127.0.0.1:{}", addr.port());
 
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
     let bare_ctx = CommandContext::new(&base_url, false, false);
     let (_output, session) = cmd_init(&bare_ctx, Some("test-token-unknown".to_string())).await.unwrap();
 
@@ -730,12 +738,11 @@ async fn start_scope_test_server() -> (String, String, String) {
     });
     let base_url = format!("http://127.0.0.1:{}", addr.port());
 
-    unsafe { std::env::set_var("AGENTKEYS_SESSION_STORE", "file"); }
     let bare_ctx = CommandContext::new(&base_url, false, false);
     let (output, _session) = cmd_init(&bare_ctx, Some("scope-test-unique".to_string()))
         .await
         .unwrap();
-    let master_wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
+    let _master_wallet = output.split("Wallet: ").nth(1).unwrap().trim().to_string();
 
     // Create a child session with initial scope [a, b]
     let http_client = reqwest::Client::new();

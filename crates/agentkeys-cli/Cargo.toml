@@ -32,3 +32,10 @@ axum = { version = "0.7", features = ["json"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = { workspace = true }
 tempfile = "3"
+# Serialize tests that mutate process-global env (HOME). See issue #34
+# and the comment on `init_test_env` in `tests/cli_tests.rs`.
+serial_test = "3"
+# Run `AGENTKEYS_SESSION_STORE=file` as a `#[ctor]` pre-main hook so every
+# test binary starts with the env var set — no race window where an early
+# test hits the real keychain before the OnceLock runs (issue #34).
+ctor = "0.2"
