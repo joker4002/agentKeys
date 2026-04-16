@@ -1,0 +1,22 @@
+# Stage 5a — Ralph progress log
+
+Started: 2026-04-16
+
+## Context
+Stage 4 complete (15/11 tests passing per harness/stage-4-done.sh).
+Stage 5a PRD: .omc/prd.json with 15 stories.
+Source of truth: docs/spec/plans/development-stages.md Stage 5a section.
+Reviewer: architect (default).
+
+## Learnings across iterations
+(append as discovered)
+
+## Story log
+
+### US-001 — ProvisionEvent enum in agentkeys-types — PASSED 2026-04-16
+Files: crates/agentkeys-types/src/provision.rs (new), crates/agentkeys-types/src/lib.rs (mod + re-exports).
+Tests: 5 new (provision_event_tagged_serialization, provision_event_roundtrip_every_variant, tripwire_kind_variants_distinct, provision_error_code_variants_distinct, to_json_line_is_single_line). cargo test -p agentkeys-types = 8/8 pass.
+Learnings:
+- Used serde tag=type with rename_all=snake_case at enum level; each variant's discriminator is in the JSON "type" field. Matches the IPC design: one tagged variant per line of subprocess stdout.
+- Added bonus ProvisionErrorCode::Timeout + Internal variants beyond PRD minimum — fewer rewrites later when orchestrator needs timeout and catch-all paths.
+

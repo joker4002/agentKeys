@@ -125,6 +125,18 @@ dependencies = [
 [[package]]
 name = "agentkeys-provisioner"
 version = "0.1.0"
+dependencies = [
+ "agentkeys-core",
+ "agentkeys-types",
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "agentkeys-types"
