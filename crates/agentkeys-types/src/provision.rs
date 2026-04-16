@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn tripwire_kind_variants_distinct() {
-        let kinds = vec![
+        let kinds = [
             TripwireKind::SelectorTimeout,
             TripwireKind::UnexpectedNav,
             TripwireKind::Http5xx,
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn provision_error_code_variants_distinct() {
-        let codes = vec![
+        let codes = [
             ProvisionErrorCode::ProvisionInProgress,
             ProvisionErrorCode::TripwireExhausted,
             ProvisionErrorCode::EmailBackendDown,

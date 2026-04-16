@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn verification_result_label_serialization() {
-        let labels = vec![
+        let labels = [
             VerificationResultLabel::Valid,
             VerificationResultLabel::Phantom,
             VerificationResultLabel::EndpointDown,
