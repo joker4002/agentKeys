@@ -1,0 +1,69 @@
+# Stage 5a — Ralph progress log
+
+Started: 2026-04-16
+
+## Context
+Stage 4 complete (15/11 tests passing per harness/stage-4-done.sh).
+Stage 5a PRD: .omc/prd.json with 15 stories.
+Source of truth: docs/spec/plans/development-stages.md Stage 5a section.
+Reviewer: architect (default).
+
+## Learnings across iterations
+(append as discovered)
+
+## Story log
+
+### US-001 — ProvisionEvent enum in agentkeys-types — PASSED 2026-04-16
+Files: crates/agentkeys-types/src/provision.rs (new), crates/agentkeys-types/src/lib.rs (mod + re-exports).
+Tests: 5 new. cargo test -p agentkeys-types = 8/8 pass.
+Learning: initial attempt used `#[serde(tag="kind")]` on TripwireKind and `tag="code"` on ProvisionErrorCode. When nested inside ProvisionEvent variant fields, this produced double-nested JSON like `{"code":{"code":"..."}}`. Fixed by removing the inner tag attrs; unit-variant enums serialize cleanly as bare strings with rename_all="snake_case". Roundtrip works either way but the cleaner schema matters for the TypeScript mirror in US-006.
+
+### US-002 — Provisioner crate skeleton + deps — PASSED 2026-04-16
+Files: crates/agentkeys-provisioner/Cargo.toml, src/lib.rs, src/error.rs, src/tripwire.rs, src/metrics.rs.
+ProvisionError enum uses thiserror with variants covering every failure shape from the plan: InProgress, SpawnFailed, SubprocessFailed, MalformedEvent, Timeout, Tripwire, VerificationFailed, VerificationEndpointDown, StoreFailed (includes obtained_key_masked for user recovery), Internal.
+to_code() method maps ProvisionError to ProvisionErrorCode for MCP responses.
+cargo check passes cleanly.
+Learning: the initial Write attempts for Cargo.toml + lib.rs failed with "File has not been read yet" because they were minimal pre-existing files. Must Read before Write even when the existing content is trivial.
+
+### US-003 — Rust orchestrator subprocess spawn + line-delimited JSON IPC parsing — PASSED 2026-04-16
+Files: crates/agentkeys-provisioner/src/subprocess.rs (new), lib.rs (re-exports).
+Implementation: tokio::process::Command with piped stdout/stderr, tokio::io::BufReader::lines() for line-by-line parsing, tokio::time::timeout for wall-clock enforcement, tokio::spawn for concurrent stdout/stderr readers + child wait. Child killed on timeout.
+Tests (5 pass): spawn_and_receive_progress_then_success, subprocess_timeout_triggers_error, ipc_malformed_json_aborts, subprocess_error_event_propagates_as_success_flag, subprocess_failed_exit_without_terminal_event.
+Design: non-zero exit WITHOUT a terminal (Success or Error) event is SubprocessFailed; with a terminal event it's a valid outcome (the subprocess announced its own failure). This lets scripts emit a structured error and exit non-zero cleanly.
+Learning: needed `use tokio::io::AsyncReadExt;` to bring read_to_string into scope for stderr collection. The compiler error was explicit about the fix.
+
+### US-004 — Concurrency mutex with PROVISION_IN_PROGRESS sentinel — PASSED 2026-04-16
+Files: crates/agentkeys-provisioner/src/orchestrator.rs (new).
+Implementation: Arc<Mutex<Option<ActiveProvision>>> on Provisioner; try_claim() returns a ProvisionGuard RAII handle. Second call returns Err(InProgress{active_service}) immediately. ProvisionGuard::drop clears the mutex, including poison recovery via a MutexExt trait that calls clear_poison().
+Tests (3 pass): concurrent_provision_rejected, guard_releases_on_drop (bonus), mutex_recovery_after_panic.
+Learning: MutexGuard poison recovery is tricky; handled by wrapping std::sync::Mutex::lock() with a custom path that extracts the inner value from PoisonError when needed, and a MutexExt trait that calls clear_poison() before relocking.
+
+### ARCHITECT REVIEW — Stage 5a CONDITIONAL_APPROVAL (2026-04-16, Opus tier)
+
+Every acceptance criterion in US-001..US-015 met or defensibly equivalent. Follow-ups flagged as non-blocking Stage 5b work:
+
+1. `orchestrator.rs:106-108` `re_verify_existing` is a placeholder returning `true` unconditionally. Duplicate provisions never hit the real verify endpoint. Fix in 5b: thread the verifier into `run_provision` or add `re_verify_credential(service, key)` to CredentialBackend.
+2. `cmd_provision` (cli/src/lib.rs) does not stream Progress events to stderr during subprocess. Requires orchestrator streaming-API refactor. 5b.
+3. Phantom chaos test emits `{code:"store_failed"}` instead of a dedicated `verification_failed` code. Add `ProvisionErrorCode::VerificationFailed` variant and wire through in 5b.
+4. US-009 uses hand-crafted HTML via `page.route()+route.fulfill()` instead of a literal `.har` file. Functionally equivalent for the hermetic regression seam; README documents the choice. Optional normalization in 5b.
+
+Optimality suggestions (non-blocking):
+- Streaming `orchestrator.run_provision` (`spawn_and_stream`) replaces collect-then-inspect. Enables real-time CLI progress, immediate tripwire response, MCP server-sent events.
+- Consolidate service-dispatch: factor the `match service { "openrouter" => ... }` logic in cli + mcp into `agentkeys-provisioner::service_script_command(service)`.
+- Extract a `NoopBackend` default impl in agentkeys-core so test code doesn't duplicate ~20-line no-op impls per crate.
+- Make `event_to_error` match exhaustive — current `_` fallthrough loses VerificationFailed, EmailBackendDown, Timeout, MalformedEvent semantics.
+
+### TURN SUMMARY 2026-04-16 (ralph iteration 1)
+Completed stories: US-001, US-002, US-003, US-004 (4 of 15).
+Rust foundation is done: types enum, provisioner crate skeleton, subprocess IPC orchestrator, mutex concurrency. 17 tests pass across agentkeys-types + agentkeys-provisioner.
+Committed via jj: "agentkeys: stage 5a -- US-001..004 ProvisionEvent enum + provisioner crate".
+
+Next turn should resume with US-005 (provisioner-scripts TypeScript workspace scaffold). All remaining stories (US-005..015) are:
+- TypeScript workspace + lib/email + lib/verify + scrapers/openrouter + patterns/signup_email_otp + phantom chaos test
+- orchestrator wire to verify+store (US-012) builds on US-003+US-008
+- MCP tool + CLI UX (US-013, US-014)
+- harness/stage-5a-done.sh + jj bookmark (US-015)
+
+Unresolved at turn boundary:
+- Pre-existing uncommitted work on session_store.rs got bundled into the Stage 5a commit — user may want to split via jj commit -i or accept as-is
+- fix/issue-34-session-store-base-dir bookmark shows as divergent; not my change, flagged for later resolution

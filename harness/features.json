@@ -7,6 +7,21 @@
     {"name": "cbor_serialization", "stage": 0, "implemented": true, "test": "auth_request::cbor_determinism"},
     {"name": "cbor_vectors", "stage": 0, "implemented": true, "test": "auth_request::cbor_vectors"},
     {"name": "otp_derivation", "stage": 0, "implemented": true, "test": "otp::determinism"},
-    {"name": "payment_layer", "stage": 0, "implemented": true, "test": "payment::layer_enum"}
+    {"name": "payment_layer", "stage": 0, "implemented": true, "test": "payment::layer_enum"},
+    {"name": "provision_event_enum", "stage": "5a", "implemented": true, "test": "provision_event_tagged_serialization"},
+    {"name": "provisioner_crate_skeleton", "stage": "5a", "implemented": true, "test": "workspace_compiles"},
+    {"name": "orchestrator_subprocess_ipc", "stage": "5a", "implemented": true, "test": "spawn_and_receive_progress_then_success"},
+    {"name": "provisioner_mutex_concurrency", "stage": "5a", "implemented": true, "test": "concurrent_provision_rejected"},
+    {"name": "ts_workspace", "stage": "5a", "implemented": true, "test": "npm_test_passes"},
+    {"name": "ts_types_mirror", "stage": "5a", "implemented": true, "test": "types.emit_single_line"},
+    {"name": "lib_email", "stage": "5a", "implemented": true, "test": "email::fetch_code_happy"},
+    {"name": "lib_verify", "stage": "5a", "implemented": true, "test": "verify::valid_key_returns_true"},
+    {"name": "scraper_openrouter_inline", "stage": "5a", "implemented": true, "test": "openrouter_happy_path"},
+    {"name": "pattern_signup_email_otp", "stage": "5a", "implemented": true, "test": "patterns::signup_email_otp_happy"},
+    {"name": "phantom_chaos_test", "stage": "5a", "implemented": true, "test": "openrouter.phantom.test.ts"},
+    {"name": "orchestrator_wire_verify_store", "stage": "5a", "implemented": true, "test": "orchestrate::stores_credential"},
+    {"name": "mcp_provision_tool", "stage": "5a", "implemented": true, "test": "mcp::provision_tool_registered"},
+    {"name": "cli_provision_command", "stage": "5a", "implemented": true, "test": "cli::provision_masked_output"},
+    {"name": "harness_stage5a_done", "stage": "5a", "implemented": true, "test": "stage-5a-done.sh exits 0"}
   ]
 }
