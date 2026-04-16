@@ -239,7 +239,11 @@ impl SessionStore {
                     .context("deserialize legacy session from file");
             }
         }
-        self.load(session_id)
+        anyhow::bail!(
+            "no session found for id={session_id} at {} (keyring mode: {:?}; legacy fallbacks apply only to id=\"master\")",
+            self.session_path(session_id).display(),
+            self.keyring_mode,
+        )
     }
 
     /// Remove the session entry for `session_id` only (does not affect
