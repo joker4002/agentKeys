@@ -58,32 +58,40 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// Construct a store rooted at `base_dir` with the given `keyring_mode`.
-    pub fn new(base_dir: impl Into<PathBuf>, keyring_mode: KeyringMode) -> Self {
-        Self {
-            base_dir: base_dir.into(),
-            keyring_mode,
-        }
-    }
-
     /// Construct a store rooted at `base_dir` that never touches the OS
     /// keyring. Intended for tests and headless environments — lets a
     /// tempdir-scoped test avoid both `$HOME` mutation and the keychain.
+    ///
+    /// This is the only public constructor that accepts a custom `base_dir`.
+    /// `KeyringMode::Auto` is intentionally not offered for custom roots:
+    /// keyring entries are keyed on `session_id` alone and do not incorporate
+    /// `base_dir`, so two stores at different roots sharing a `session_id`
+    /// would silently alias through the OS keychain. Forcing the file path
+    /// for custom roots keeps isolation by construction (codex /codex review
+    /// on PR #43 [P2]).
     pub fn file_only(base_dir: impl Into<PathBuf>) -> Self {
-        Self::new(base_dir, KeyringMode::FileOnly)
+        Self {
+            base_dir: base_dir.into(),
+            keyring_mode: KeyringMode::FileOnly,
+        }
     }
 
     /// Construct a store from the process environment: `$HOME` (or
     /// `$USERPROFILE`, falling back to `"."`) for the base dir, and
     /// `AGENTKEYS_SESSION_STORE=file` for the keyring mode. This is the
     /// production path and is what every legacy free-function wrapper
-    /// below resolves to.
+    /// below resolves to. It is also the only constructor that may return
+    /// `KeyringMode::Auto` — the home-rooted single-root invariant the
+    /// keyring namespace assumes.
     pub fn from_env() -> Self {
         let keyring_mode = match std::env::var("AGENTKEYS_SESSION_STORE").as_deref() {
             Ok("file") => KeyringMode::FileOnly,
             _ => KeyringMode::Auto,
         };
-        Self::new(home_dir_from_env(), keyring_mode)
+        Self {
+            base_dir: home_dir_from_env(),
+            keyring_mode,
+        }
     }
 
     /// The base directory this store is rooted at. Everything lives under
