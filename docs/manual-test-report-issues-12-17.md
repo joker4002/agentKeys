@@ -39,7 +39,7 @@ merged code, not on individual `fix/issue-*` branches.
 
 ## Evidence layout
 
-All per-issue evidence lives under `docs/test-screenshots/`:
+Per-issue evidence is generated into `docs/test-screenshots/` at test time. The folder is **gitignored** — re-run the campaign locally to regenerate. Each run produces three files per issue:
 
 | File | What it is |
 |---|---|
