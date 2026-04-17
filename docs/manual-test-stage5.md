@@ -85,6 +85,7 @@ All 4 crates should exit 0 with no failures.
 ### 3b. TypeScript unit tests (15 tests)
 
 ```bash
+npm install --prefix provisioner-scripts
 npm test --prefix provisioner-scripts
 ```
 
@@ -114,11 +115,17 @@ cd -
 
 **Expected ending:**
 ```
-{"type":"error","code":"store_failed","details":"key verification failed: phantom"}
- ✓ tests/scrapers/openrouter.phantom.test.ts (1 test)
+ ✓ tests/scrapers/openrouter.phantom.test.ts (1) ...
+   ✓ scraper (1) ...
+     ✓ phantom_key_caught ...
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
 ```
 
-If this test ever passes with a Success event, **stop** — the verification gate is broken and a real phantom key could be stored in production. File an issue immediately.
+You will **not** see an `{"type":"error",...}` line in the terminal — the test intercepts stdout via a `process.stdout.write` proxy (`captureEmittedEvents` in the test file) and asserts programmatically that an Error event was emitted and no Success event was. The `✓ phantom_key_caught` is the signal the gate held.
+
+If this test ever fails, or a variant starts passing with a Success event present, **stop** — the verification gate is broken and a real phantom key could be stored in production. File an issue immediately.
 
 ### 3d. Pattern grep guard
 
@@ -206,25 +213,33 @@ MOCK_PID=$!
 # Give it a second to bind
 sleep 1
 
-# Run the daemon with a test session seam (per Stage 3 test-seam pattern)
+# Run the daemon with a test session seam (per Stage 3 test-seam pattern).
+# AGENTKEYS_SESSION injects a pre-built session and bypasses the pair flow —
+# without it the daemon blocks on master-device approval before serving MCP
+# (see crates/agentkeys-daemon/src/main.rs and src/session.rs). Any string
+# works for the token value; `test-token` is a convention.
 AGENTKEYS_BACKEND=http://localhost:8090 \
+  AGENTKEYS_SESSION=test-token \
   cargo run -p agentkeys-daemon -- --stdio
 ```
 
-The daemon is now listening for MCP JSON-RPC on stdin/stdout.
+The daemon is now listening for MCP JSON-RPC on stdin/stdout. You should see `daemon ready, session wallet=local` on stderr and **no** `Pair code:` prompt.
 
 ### 5b. List tools (Terminal 2, via a scratch stdin pipe)
 
-The daemon reads JSON-RPC from stdin. Easiest way to exercise it without an MCP client is a one-shot:
+The daemon reads JSON-RPC from stdin. Easiest way to exercise it without an MCP client is a one-shot. The same `AGENTKEYS_SESSION` test-seam is required here, otherwise the daemon sits in the pair flow and never reads the piped JSON.
 
 ```bash
 cd ~/Projects/agentkeys
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | \
   AGENTKEYS_BACKEND=http://localhost:8090 \
+  AGENTKEYS_SESSION=test-token \
   cargo run -p agentkeys-daemon -- --stdio 2>/dev/null
 ```
 
 **Expected:** the response JSON includes an entry with `"name":"agentkeys.provision"` and the schema `{"service":"string","force":"boolean (optional)"}`.
+
+If you see `Pair code: ... Approve on your Master device. OTP: ...` on the terminal, the `AGENTKEYS_SESSION` env var didn't propagate — double-check it's on the same shell line as the `cargo run` invocation.
 
 ### 5c. Confirm the in-progress sentinel
 
@@ -251,15 +266,22 @@ All CLI provision tests can run without any real signup. They use the mock backe
 ### 6a. Masked key output format
 
 ```bash
-cargo test -p agentkeys-cli -- cli_provision_masked_output --nocapture
+cargo test -p agentkeys-cli --test cli_tests -- cli_provision_masked_output --nocapture
 ```
 
-**Expected:** test passes. Stdout contains exactly one line matching the masked-key format: `sk-or-v1-XXXXXXXX****...XXXX` (first 8 chars + `****...` + last 4). The full raw key is **never** on stdout.
+**Expected:** test passes. The test calls `run_provision()` in-process (it does not spawn the `agentkeys-cli` binary), feeds a scripted success event with raw key `sk-or-v1-realkey12345abcdefgh`, and asserts the returned `obtained_key_masked` field satisfies four properties:
+
+1. Does **not** contain the raw key substring `realkey12345abcdefgh`.
+2. Contains `****` as the mask marker.
+3. Starts with the first 8 raw chars (`sk-or-v1`).
+4. Ends with the last 4 raw chars (`efgh`).
+
+Because the assertions run on the in-memory struct, you will **not** see a masked-key line in stdout — only the `provision_metric` JSON lines tracing emits and the usual `test ... ok` banner. To observe the real stdout masking behavior of the CLI binary, run a full hermetic provision separately (§8 once unblocked, or a scripted provision against the mock backend).
 
 ### 6b. `--force` flag re-provisions
 
 ```bash
-cargo test -p agentkeys-cli -- cli_provision_force_flag --nocapture
+cargo test -p agentkeys-cli --test cli_tests -- cli_provision_force_flag --nocapture
 ```
 
 **Expected:** test passes. With an existing credential present, `--force` triggers a fresh subprocess call (not the verify-and-return shortcut).
@@ -267,7 +289,7 @@ cargo test -p agentkeys-cli -- cli_provision_force_flag --nocapture
 ### 6c. Duplicate provision verify-and-report
 
 ```bash
-cargo test -p agentkeys-cli -- cli_provision_duplicate_verified --nocapture
+cargo test -p agentkeys-cli --test cli_tests -- cli_provision_duplicate_verified --nocapture
 ```
 
 **Expected:** test passes. With an existing credential, no `--force`, the CLI prints to stderr `openrouter already provisioned, key valid`, prints the masked existing key on stdout, and does NOT re-run the subprocess.
@@ -275,7 +297,7 @@ cargo test -p agentkeys-cli -- cli_provision_duplicate_verified --nocapture
 ### 6d. Error message format (problem + cause + fix + docs)
 
 ```bash
-cargo test -p agentkeys-cli -- cli_provision_error_format --nocapture
+cargo test -p agentkeys-cli --test cli_tests -- cli_provision_error_format --nocapture
 ```
 
 **Expected:** test passes. Error output to stderr contains (in order):
@@ -317,14 +339,14 @@ create a real account tied to your email.
 
 ### Prerequisites (when ToS check clears)
 
-1. A Gmail account with plus-addressing enabled (so `you+stage5test@gmail.com` routes to `you@gmail.com`)
-2. Gmail app password (not your regular password) — generate at https://myaccount.google.com/apppasswords
+1. **Your existing personal Gmail account** — do **not** create a new Gmail account for this demo. Plus-addressing is a Gmail-native feature: mail sent to `you+anything@gmail.com` is delivered to `you@gmail.com` without any configuration, so a single personal inbox already supports unlimited test aliases (e.g. `you+stage5test-20260418@gmail.com`). Creating a fresh Gmail account for automation purposes risks Google flagging it as a bot account and could itself violate Google's ToS; the whole point of plus-addressing is to avoid that.
+2. Gmail app password (not your regular password) — generate at https://myaccount.google.com/apppasswords. This is scoped to IMAP access only; revoke it after the demo.
 3. Environment:
    ```bash
    export AGENTKEYS_EMAIL_BACKEND=gmail
-   export AGENTKEYS_EMAIL_USER="you@gmail.com"
-   export AGENTKEYS_EMAIL_PASSWORD="<app password>"
-   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"  # default, set explicitly if overriding
+   export AGENTKEYS_EMAIL_USER="you@gmail.com"             # your real Gmail; Stage 5a appends the +alias at signup time
+   export AGENTKEYS_EMAIL_PASSWORD="<app password>"         # from step 2, NOT your normal Google password
+   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"             # default, set explicitly if overriding
    export AGENTKEYS_EMAIL_PORT="993"
    ```
 4. Daemon running and paired (see Stage 4 manual test guide)
