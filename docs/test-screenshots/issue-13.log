@@ -1,0 +1,97 @@
++(eval):5> REPO=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6 
++(eval):6> cd /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6
++(eval):7> BIN=+(eval):7> pwd
++(eval):7> BIN=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys 
++(eval):8> MOCK=+(eval):8> pwd
++(eval):8> MOCK=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server 
++(eval):9> BACKEND=http://127.0.0.1:8090 
++(eval):11> echo $'=== Issue #13: Part A â\M-\C-@\M-\C-T cargo test -p agentkeys-core -p agentkeys-cli -p agentkeys-mock-server ==='
+=== Issue #13: Part A â€” cargo test -p agentkeys-core -p agentkeys-cli -p agentkeys-mock-server ===
++(eval):12> cargo test --release -p agentkeys-core -p agentkeys-cli -p agentkeys-mock-server
++(eval):12> tail -40
+test resolve_identity_wallet_passthrough ... ok
+test resolve_identity_wallet_unknown_returns_not_found ... ok
+test revoke_by_target_wallet_not_owned ... ok
+test revoke_by_target_session_still_works ... ok
+test revoke_by_target_wallet_none_active_is_404 ... ok
+test revoke_with_both_fields_is_400 ... ok
+test revoke_by_target_wallet_revokes_all ... ok
+test revoke_with_neither_field_is_400 ... ok
+test scope_change ... ok
+test session_child_invalid_parent ... ok
+test session_create_invalid_token ... ok
+test session_create_existing ... ok
+test session_child_valid ... ok
+test session_create_valid ... ok
+test session_revoke_valid ... ok
+test tamper_detection ... ok
+test auth_request_await_decision ... ok
+test rendezvous_ciphertext_passthrough ... ok
+test rendezvous_register_poll_deliver ... ok
+
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+   Doc-tests agentkeys_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agentkeys_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agentkeys_mock_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
++(eval):14> echo ''
+
++(eval):15> echo $'=== Issue #13: Part B â\M-\C-@\M-\C-T Targeted Recover flow ==='
+=== Issue #13: Part B â€” Targeted Recover flow ===
++(eval):16> export AGENTKEYS_SESSION_STORE=file
++(eval):17> mktemp -d
++(eval):17> export HOME_SANDBOX=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A
++(eval):18> export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A
++(eval):21> MOCK_PID=96265 
++(eval):20> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):22> sleep 1
++(eval):24> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token recover-refactor
+Initialized. Wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2
++(eval):25> WALLET=+(eval):25> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys/master/session.json
++(eval):25> WALLET=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 
++(eval):26> echo 'Original wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2'
+Original wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2
++(eval):28> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 link 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 --alias my-bot
+Linked agent=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 alias=my-bot
++(eval):29> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 revoke
+Revoked current session for wallet=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2. Local session wiped. Run `agentkeys init` to re-pair.
++(eval):30> echo '--- Session file should be wiped after revoke ---'
+--- Session file should be wiped after revoke ---
++(eval):31> find /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys -type f
++(eval):33> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 recover my-bot --method passkey
+Recovered. Session restored for wallet 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2
++(eval):34> echo '--- Recover complete. Checking session file ---'
+--- Recover complete. Checking session file ---
++(eval):35> find /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys -type f
+/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys/master/session.json
++(eval):37> RECOVERED=+(eval):37> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys/master/session.json
++(eval):37> RECOVERED=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 
++(eval):38> echo 'Recovered wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2'
+Recovered wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2
++(eval):39> [ 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 '=' 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 ']'
++(eval):39> echo 'PASS: same wallet'
+PASS: same wallet
++(eval):41> kill 96265
++(eval):42> wait
++(eval):43> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A
++(eval):44> echo ''
+
++(eval):45> echo '=== Issue #13 complete ==='
+=== Issue #13 complete ===
++(eval):46> set +x
+DONE

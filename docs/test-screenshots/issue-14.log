@@ -1,0 +1,120 @@
++(eval):5> REPO=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6 
++(eval):6> cd /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6
++(eval):7> CLI=+(eval):7> pwd
++(eval):7> CLI=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys 
++(eval):8> DAEMON=+(eval):8> pwd
++(eval):8> DAEMON=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-daemon 
++(eval):9> MOCK=+(eval):9> pwd
++(eval):9> MOCK=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server 
++(eval):10> BACKEND=http://127.0.0.1:8090 
++(eval):12> export AGENTKEYS_SESSION_STORE=file
++(eval):13> mktemp -d
++(eval):13> export HOME_SANDBOX=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H
++(eval):14> export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H
++(eval):16> echo '=== Issue #14: --parent flag arg presence ==='
+=== Issue #14: --parent flag arg presence ===
++(eval):17> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-daemon --help
++(eval):17> grep -E 'parent|backend'
+Usage: agentkeys-daemon [OPTIONS] --backend <BACKEND>
+      --backend <BACKEND>            [env: AGENTKEYS_BACKEND=]
+      --parent <ALIAS|WALLET>        Bind pair request to a specific master (alias or 0x... wallet)
++(eval):18> echo ''
+
++(eval):20> echo $'=== Issue #14: Case 1 â\M-\C-@\M-\C-T daemon bound via wallet ==='
+=== Issue #14: Case 1 â€” daemon bound via wallet ===
++(eval):22> MOCK_PID=96996 
++(eval):21> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):23> sleep 1
++(eval):25> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token master-a
+Initialized. Wallet: 0x52fc9019995279de0ec9ddede81c1c757aa03251
++(eval):26> A_WALLET=+(eval):26> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/master/session.json
++(eval):26> A_WALLET=0x52fc9019995279de0ec9ddede81c1c757aa03251 
++(eval):27> mv /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/master/session.json /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/session-a.json
++(eval):28> echo 'A_WALLET=0x52fc9019995279de0ec9ddede81c1c757aa03251'
+A_WALLET=0x52fc9019995279de0ec9ddede81c1c757aa03251
++(eval):30> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token master-b
+Initialized. Wallet: 0x8b290eaf10adeb3b3077cdcabf6b32ce0f7098e8
++(eval):31> B_WALLET=+(eval):31> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/master/session.json
++(eval):31> B_WALLET=0x8b290eaf10adeb3b3077cdcabf6b32ce0f7098e8 
++(eval):32> mv /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/master/session.json /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/session-b.json
++(eval):33> echo 'B_WALLET=0x8b290eaf10adeb3b3077cdcabf6b32ce0f7098e8'
+B_WALLET=0x8b290eaf10adeb3b3077cdcabf6b32ce0f7098e8
++(eval):36> mkdir -p /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/master
++(eval):37> cp /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/session-a.json /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/master/session.json
++(eval):41> DAEMON_PID=97007 
++(eval):40> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-daemon --backend http://127.0.0.1:8090 --parent 0x52fc9019995279de0ec9ddede81c1c757aa03251
++(eval):42> sleep 2
++(eval):44> echo '--- daemon log (first 20 lines) ---'
+--- daemon log (first 20 lines) ---
++(eval):45> head -20 /tmp/agentkeys-test-logs/daemon-14a.log
+[2m2026-04-17T01:41:41.467487Z[0m [33m WARN[0m [2magentkeys_daemon::hardening[0m[2m:[0m kernel hardening skipped (macOS)
+Pair code: 705870F0. Approve on your Master device. OTP: 641261
++(eval):46> echo '--- daemon process alive? ---'
+--- daemon process alive? ---
++(eval):47> ps -p 97007
++(eval):47> echo alive
+alive
++(eval):49> kill 97007
++(eval):50> kill 96996
++(eval):51> wait
++(eval):53> echo ''
+
++(eval):54> echo $'=== Issue #14: Case 2 â\M-\C-@\M-\C-T daemon bound via alias ==='
+=== Issue #14: Case 2 â€” daemon bound via alias ===
++(eval):55> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys
++(eval):57> MOCK_PID=97013 
++(eval):56> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):58> sleep 1
++(eval):60> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token master-aliased
+Initialized. Wallet: 0x41ea6a573b0aafdb8692e1f89f3fa0606a9a28e9
++(eval):61> WALLET=+(eval):61> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys/master/session.json
++(eval):61> WALLET=0x41ea6a573b0aafdb8692e1f89f3fa0606a9a28e9 
++(eval):62> echo 'WALLET=0x41ea6a573b0aafdb8692e1f89f3fa0606a9a28e9'
+WALLET=0x41ea6a573b0aafdb8692e1f89f3fa0606a9a28e9
++(eval):63> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 link 0x41ea6a573b0aafdb8692e1f89f3fa0606a9a28e9 --alias office-mac
+Linked agent=0x41ea6a573b0aafdb8692e1f89f3fa0606a9a28e9 alias=office-mac
++(eval):66> DAEMON_PID=97018 
++(eval):65> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-daemon --backend http://127.0.0.1:8090 --parent office-mac
++(eval):67> sleep 2
++(eval):69> echo '--- daemon log (alias resolution) ---'
+--- daemon log (alias resolution) ---
++(eval):70> head -20 /tmp/agentkeys-test-logs/daemon-14b.log
+[2m2026-04-17T01:41:44.529802Z[0m [33m WARN[0m [2magentkeys_daemon::hardening[0m[2m:[0m kernel hardening skipped (macOS)
+Pair code: B59FA7D9. Approve on your Master device. OTP: 661938
++(eval):71> ps -p 97018
++(eval):71> echo alive
+alive
++(eval):73> kill 97018
++(eval):74> kill 97013
++(eval):75> wait
++(eval):77> echo ''
+
++(eval):78> echo $'=== Issue #14: Case 3 â\M-\C-@\M-\C-T no --parent (legacy) ==='
+=== Issue #14: Case 3 â€” no --parent (legacy) ===
++(eval):79> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H/.agentkeys
++(eval):81> MOCK_PID=97023 
++(eval):80> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):82> sleep 1
++(eval):84> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token legacy-flow
+Initialized. Wallet: 0x9d16a68ab365a47ae47e9cc9c263844e4defd117
++(eval):86> DAEMON_PID=97026 
++(eval):85> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-daemon --backend http://127.0.0.1:8090
++(eval):87> sleep 2
++(eval):89> echo '--- daemon log (legacy no parent) ---'
+--- daemon log (legacy no parent) ---
++(eval):90> head -20 /tmp/agentkeys-test-logs/daemon-14c.log
+[2m2026-04-17T01:41:47.575370Z[0m [33m WARN[0m [2magentkeys_daemon::hardening[0m[2m:[0m kernel hardening skipped (macOS)
+Pair code: A2BFBF91. Approve on your Master device. OTP: 274468
++(eval):91> ps -p 97026
++(eval):91> echo alive
+alive
++(eval):93> kill 97026
++(eval):94> kill 97023
++(eval):95> wait
++(eval):96> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.9pqxwXgs9H
++(eval):97> echo ''
+
++(eval):98> echo '=== Issue #14 complete ==='
+=== Issue #14 complete ===
++(eval):99> set +x
+DONE

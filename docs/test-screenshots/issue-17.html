@@ -1,0 +1,109 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Issue #17 test log</title><style>body{background:#111;color:#e0e0e0;font-family:'JetBrains Mono',Menlo,Monaco,monospace;font-size:12px;padding:20px;line-height:1.4;}
+h1{color:#5ec8f7;border-bottom:1px solid #333;padding-bottom:8px;}
+pre{background:#1c1c1c;border:1px solid #333;border-radius:6px;padding:14px;overflow-x:auto;white-space:pre-wrap;}
+.pass{color:#4ade80;font-weight:bold;}
+.fail{color:#f87171;font-weight:bold;}
+.cmd{color:#c084fc;}
+.header{color:#fbbf24;font-weight:bold;}
+</style></head><body><h1>Issue #17 — manual test log</h1><pre><span class="cmd">+(eval):5&gt; REPO=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6 </span>
+<span class="cmd">+(eval):6&gt; cd /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6</span>
+<span class="cmd">+(eval):7&gt; BIN=+(eval):7&gt; pwd</span>
+<span class="cmd">+(eval):7&gt; BIN=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys </span>
+<span class="cmd">+(eval):8&gt; MOCK=+(eval):8&gt; pwd</span>
+<span class="cmd">+(eval):8&gt; MOCK=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server </span>
+<span class="cmd">+(eval):9&gt; BACKEND=http://127.0.0.1:8090 </span>
+<span class="cmd">+(eval):11&gt; export AGENTKEYS_SESSION_STORE=file</span>
+<span class="cmd">+(eval):12&gt; mktemp -d</span>
+<span class="cmd">+(eval):12&gt; export HOME_SANDBOX=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ</span>
+<span class="cmd">+(eval):13&gt; export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ</span>
+<span class="cmd">+(eval):15&gt; echo $&#x27;=== Issue #17: Case 1 �\M-\C-@\M-\C-T self-revoke ===&#x27;</span>
+<span class="header">=== Issue #17: Case 1 — self-revoke ===</span>
+<span class="cmd">+(eval):17&gt; MOCK_PID=99651 </span>
+<span class="cmd">+(eval):16&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server</span>
+<span class="cmd">+(eval):18&gt; sleep 1</span>
+<span class="cmd">+(eval):20&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token self-revoke-test</span>
+<span class="pass">Initialized. Wallet: 0xbbd6791bc2ded05a033bc2d184ce23694f145ceb</span>
+<span class="cmd">+(eval):21&gt; test -f /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys/master/session.json</span>
+<span class="cmd">+(eval):21&gt; echo &#x27;session file exists&#x27;</span>
+session file exists
+<span class="cmd">+(eval):23&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 revoke</span>
+<span class="pass">Revoked current session for wallet=0xbbd6791bc2ded05a033bc2d184ce23694f145ceb. Local session wiped. Run `agentkeys init` to re-pair.</span>
+<span class="cmd">+(eval):24&gt; test -f /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys/master/session.json</span>
+<span class="pass">+(eval):24&gt; echo &#x27;session file wiped&#x27;</span>
+<span class="pass">session file wiped</span>
+<span class="cmd">+(eval):26&gt; echo &#x27;--- follow-up read should fail ---&#x27;</span>
+<span class="cmd">--- follow-up read should fail ---</span>
+<span class="cmd">+(eval):27&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 read --agent 0xdeadbeef openrouter</span>
+<span class="cmd">+(eval):27&gt; head -5</span>
+<span class="fail">load session (run `agentkeys init` first)</span>
+<span class="cmd">+(eval):29&gt; kill 99651</span>
+<span class="cmd">+(eval):29&gt; wait</span>
+<span class="cmd">+(eval):31&gt; echo &#x27;&#x27;</span>
+
+<span class="cmd">+(eval):32&gt; echo $&#x27;=== Issue #17: Case 2 �\M-\C-@\M-\C-T revoke by wallet ===&#x27;</span>
+<span class="header">=== Issue #17: Case 2 — revoke by wallet ===</span>
+<span class="cmd">+(eval):33&gt; rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys</span>
+<span class="cmd">+(eval):35&gt; MOCK_PID=99658 </span>
+<span class="cmd">+(eval):34&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server</span>
+<span class="cmd">+(eval):36&gt; sleep 1</span>
+<span class="cmd">+(eval):38&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token by-wallet-test</span>
+<span class="pass">Initialized. Wallet: 0xb374d75e72bbbfcb312f7f87014eea5a0f75ec92</span>
+<span class="cmd">+(eval):39&gt; WALLET=+(eval):39&gt; jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys/master/session.json</span>
+<span class="cmd">+(eval):39&gt; WALLET=0xb374d75e72bbbfcb312f7f87014eea5a0f75ec92 </span>
+<span class="cmd">+(eval):40&gt; echo &#x27;WALLET=0xb374d75e72bbbfcb312f7f87014eea5a0f75ec92&#x27;</span>
+WALLET=0xb374d75e72bbbfcb312f7f87014eea5a0f75ec92
+<span class="cmd">+(eval):42&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 revoke 0xb374d75e72bbbfcb312f7f87014eea5a0f75ec92</span>
+<span class="cmd">+(eval):42&gt; head -5</span>
+<span class="pass">Revoked agent=0xb374d75e72bbbfcb312f7f87014eea5a0f75ec92 (was your own session — local state wiped, run `agentkeys init` to re-pair).</span>
+<span class="cmd">+(eval):44&gt; echo &#x27;--- post-revoke read should fail ---&#x27;</span>
+<span class="cmd">--- post-revoke read should fail ---</span>
+<span class="cmd">+(eval):45&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 read --agent 0xb374d75e72bbbfcb312f7f87014eea5a0f75ec92 openrouter</span>
+<span class="cmd">+(eval):45&gt; head -5</span>
+<span class="fail">load session (run `agentkeys init` first)</span>
+<span class="cmd">+(eval):47&gt; kill 99658</span>
+<span class="cmd">+(eval):47&gt; wait</span>
+<span class="cmd">+(eval):49&gt; echo &#x27;&#x27;</span>
+
+<span class="cmd">+(eval):50&gt; echo $&#x27;=== Issue #17: Case 3 �\M-\C-@\M-\C-T no session ===&#x27;</span>
+<span class="header">=== Issue #17: Case 3 — no session ===</span>
+<span class="cmd">+(eval):51&gt; rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys</span>
+<span class="cmd">+(eval):52&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 revoke</span>
+<span class="cmd">+(eval):52&gt; head -5</span>
+<span class="fail">load session (run `agentkeys init` first)</span>
+<span class="cmd">+(eval):54&gt; echo &#x27;&#x27;</span>
+
+<span class="cmd">+(eval):55&gt; echo $&#x27;=== Issue #17: Case 4 �\M-\C-@\M-\C-T ownership ===&#x27;</span>
+<span class="header">=== Issue #17: Case 4 — ownership ===</span>
+<span class="cmd">+(eval):56&gt; rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys</span>
+<span class="cmd">+(eval):58&gt; MOCK_PID=99674 </span>
+<span class="cmd">+(eval):57&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server</span>
+<span class="cmd">+(eval):59&gt; sleep 1</span>
+<span class="cmd">+(eval):61&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token user-a</span>
+<span class="pass">Initialized. Wallet: 0x2d13229000a5c01be4513c95d78bbf4e0b151649</span>
+<span class="cmd">+(eval):62&gt; A_WALLET=+(eval):62&gt; jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys/master/session.json</span>
+<span class="cmd">+(eval):62&gt; A_WALLET=0x2d13229000a5c01be4513c95d78bbf4e0b151649 </span>
+<span class="cmd">+(eval):63&gt; echo &#x27;A_WALLET=0x2d13229000a5c01be4513c95d78bbf4e0b151649&#x27;</span>
+A_WALLET=0x2d13229000a5c01be4513c95d78bbf4e0b151649
+<span class="cmd">+(eval):65&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token user-b</span>
+<span class="pass">Initialized. Wallet: 0x351f8e951c49a75f3537c69b413337ab2f67cc8e</span>
+<span class="cmd">+(eval):66&gt; B_WALLET=+(eval):66&gt; jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ/.agentkeys/master/session.json</span>
+<span class="cmd">+(eval):66&gt; B_WALLET=0x351f8e951c49a75f3537c69b413337ab2f67cc8e </span>
+<span class="cmd">+(eval):67&gt; echo &#x27;B_WALLET=0x351f8e951c49a75f3537c69b413337ab2f67cc8e&#x27;</span>
+B_WALLET=0x351f8e951c49a75f3537c69b413337ab2f67cc8e
+<span class="cmd">+(eval):69&gt; echo &#x27;--- User B tries to revoke A&#x27;\&#x27;&#x27;s wallet ---&#x27;</span>
+<span class="cmd">--- User B tries to revoke A&#x27;s wallet ---</span>
+<span class="cmd">+(eval):70&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 revoke 0x2d13229000a5c01be4513c95d78bbf4e0b151649</span>
+<span class="cmd">+(eval):70&gt; head -5</span>
+<span class="fail">Error: DENIED</span>
+  session does not own the target wallet
+
+  Fix: Check the agent&#x27;s scope with `agentkeys usage`
+<span class="cmd">+(eval):72&gt; kill 99674</span>
+<span class="cmd">+(eval):72&gt; wait</span>
+<span class="cmd">+(eval):73&gt; rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.TMMEjBsMXZ</span>
+<span class="cmd">+(eval):74&gt; echo &#x27;&#x27;</span>
+
+<span class="cmd">+(eval):75&gt; echo &#x27;=== Issue #17 complete ===&#x27;</span>
+<span class="header">=== Issue #17 complete ===</span>
+<span class="cmd">+(eval):76&gt; set +x</span>
+DONE</pre></body></html>

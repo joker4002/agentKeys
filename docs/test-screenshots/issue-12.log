@@ -1,0 +1,95 @@
++(eval):6> REPO=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6 
++(eval):7> cd /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6
++(eval):8> CLI=+(eval):8> pwd
++(eval):8> CLI=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys 
++(eval):9> DAEMON=+(eval):9> pwd
++(eval):9> DAEMON=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-daemon 
++(eval):10> MOCK=+(eval):10> pwd
++(eval):10> MOCK=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server 
++(eval):11> BACKEND=http://127.0.0.1:8090 
++(eval):13> echo $'=== Issue #12: Case 2 â\M-\C-@\M-\C-T two daemons file-only ==='
+=== Issue #12: Case 2 â€” two daemons file-only ===
++(eval):14> export AGENTKEYS_SESSION_STORE=file
++(eval):15> mktemp -d
++(eval):15> export HOME_SANDBOX=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs
++(eval):16> export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs
++(eval):20> MOCK_PID=95184 
++(eval):19> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):21> sleep 1
++(eval):24> mkdir -p /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs/.agentkeys/daemon-0xAAAA
++(eval):25> echo '{"token":"tok-a","wallet":"0xAAAA","scope":null,"created_at":0,"ttl_seconds":3600}'
++(eval):26> mkdir -p /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs/.agentkeys/daemon-0xBBBB
++(eval):27> echo '{"token":"tok-b","wallet":"0xBBBB","scope":null,"created_at":0,"ttl_seconds":3600}'
++(eval):29> echo '--- Listing daemon session files ---'
+--- Listing daemon session files ---
++(eval):30> ls -la /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs/.agentkeys/daemon-0xAAAA/session.json /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs/.agentkeys/daemon-0xBBBB/session.json
+-rw-r--r--@ 1 agent-jojo  staff  83 Apr 17 09:36 /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs/.agentkeys/daemon-0xAAAA/session.json
+-rw-r--r--@ 1 agent-jojo  staff  83 Apr 17 09:36 /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs/.agentkeys/daemon-0xBBBB/session.json
++(eval):32> kill 95184
++(eval):33> wait
++(eval):35> echo ''
+
++(eval):36> echo $'=== Issue #12: Case 3 â\M-\C-@\M-\C-T AGENTKEYS_SESSION_STORE=file override ==='
+=== Issue #12: Case 3 â€” AGENTKEYS_SESSION_STORE=file override ===
++(eval):37> mktemp -d
++(eval):37> export HOME_SANDBOX2=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA
++(eval):38> export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA
++(eval):39> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA/.agentkeys
++(eval):42> MOCK_PID=95192 
++(eval):41> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):43> sleep 1
++(eval):45> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token file-override
+Initialized. Wallet: 0x9df8879e4e20ab3710f79b047716c641a2a18ec1
++(eval):46> echo '--- Keychain check (should NOT be found) ---'
+--- Keychain check (should NOT be found) ---
++(eval):47> security find-generic-password -s agentkeys -a master
++(eval):47> head -3
+security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.
++(eval):49> echo '--- File check ---'
+--- File check ---
++(eval):50> ls -la /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA/.agentkeys/master/session.json
+-rw-------@ 1 agent-jojo  staff  178 Apr 17 09:36 /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA/.agentkeys/master/session.json
++(eval):51> test -f /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA/.agentkeys/master/session.json
++(eval):51> echo 'file created'
+file created
++(eval):52> find /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA/.agentkeys -type f
+/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA/.agentkeys/master/session.json
++(eval):54> kill 95192
++(eval):55> wait
++(eval):57> echo ''
+
++(eval):58> echo $'=== Issue #12: Case 1 â\M-\C-@\M-\C-T macOS keychain (may prompt) ==='
+=== Issue #12: Case 1 â€” macOS keychain (may prompt) ===
++(eval):59> mktemp -d
++(eval):59> export HOME_SANDBOX3=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.39lSsziFc5
++(eval):60> export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.39lSsziFc5
++(eval):61> unset AGENTKEYS_SESSION_STORE
++(eval):64> security delete-generic-password -s agentkeys -a master
++(eval):64> true
++(eval):65> security delete-generic-password -s agentkeys -a daemon-pending
++(eval):65> true
++(eval):68> MOCK_PID=95203 
++(eval):67> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):69> sleep 1
++(eval):72> timeout 10 /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token master-keychain-test
++(eval):72> head -10
+(eval):72: command not found: timeout
++(eval):73> echo '--- Keychain master check ---'
+--- Keychain master check ---
++(eval):74> security find-generic-password -s agentkeys -a master
++(eval):74> grep class:
++(eval):74> echo 'keychain entry not found OR prompt not handled'
+keychain entry not found OR prompt not handled
++(eval):77> kill 95203
++(eval):78> wait
++(eval):79> security delete-generic-password -s agentkeys -a master
++(eval):79> true
++(eval):80> security delete-generic-password -s agentkeys -a daemon-pending
++(eval):80> true
++(eval):81> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.Tom1la9Qrs /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.L91R3WsqOA /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.39lSsziFc5
++(eval):82> echo ''
+
++(eval):83> echo '=== Issue #12 tests complete ==='
+=== Issue #12 tests complete ===
++(eval):84> set +x
+DONE

@@ -1,0 +1,104 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Issue #13 test log</title><style>body{background:#111;color:#e0e0e0;font-family:'JetBrains Mono',Menlo,Monaco,monospace;font-size:12px;padding:20px;line-height:1.4;}
+h1{color:#5ec8f7;border-bottom:1px solid #333;padding-bottom:8px;}
+pre{background:#1c1c1c;border:1px solid #333;border-radius:6px;padding:14px;overflow-x:auto;white-space:pre-wrap;}
+.pass{color:#4ade80;font-weight:bold;}
+.fail{color:#f87171;font-weight:bold;}
+.cmd{color:#c084fc;}
+.header{color:#fbbf24;font-weight:bold;}
+</style></head><body><h1>Issue #13 — manual test log</h1><pre><span class="cmd">+(eval):5&gt; REPO=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6 </span>
+<span class="cmd">+(eval):6&gt; cd /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6</span>
+<span class="cmd">+(eval):7&gt; BIN=+(eval):7&gt; pwd</span>
+<span class="cmd">+(eval):7&gt; BIN=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys </span>
+<span class="cmd">+(eval):8&gt; MOCK=+(eval):8&gt; pwd</span>
+<span class="cmd">+(eval):8&gt; MOCK=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server </span>
+<span class="cmd">+(eval):9&gt; BACKEND=http://127.0.0.1:8090 </span>
+<span class="cmd">+(eval):11&gt; echo $&#x27;=== Issue #13: Part A �\M-\C-@\M-\C-T cargo test -p agentkeys-core -p agentkeys-cli -p agentkeys-mock-server ===&#x27;</span>
+<span class="header">=== Issue #13: Part A — cargo test -p agentkeys-core -p agentkeys-cli -p agentkeys-mock-server ===</span>
+<span class="cmd">+(eval):12&gt; cargo test --release -p agentkeys-core -p agentkeys-cli -p agentkeys-mock-server</span>
+<span class="cmd">+(eval):12&gt; tail -40</span>
+test resolve_identity_wallet_passthrough ... ok
+test resolve_identity_wallet_unknown_returns_not_found ... ok
+test revoke_by_target_wallet_not_owned ... ok
+test revoke_by_target_session_still_works ... ok
+test revoke_by_target_wallet_none_active_is_404 ... ok
+test revoke_with_both_fields_is_400 ... ok
+test revoke_by_target_wallet_revokes_all ... ok
+test revoke_with_neither_field_is_400 ... ok
+test scope_change ... ok
+test session_child_invalid_parent ... ok
+test session_create_invalid_token ... ok
+test session_create_existing ... ok
+test session_child_valid ... ok
+test session_create_valid ... ok
+test session_revoke_valid ... ok
+test tamper_detection ... ok
+test auth_request_await_decision ... ok
+test rendezvous_ciphertext_passthrough ... ok
+test rendezvous_register_poll_deliver ... ok
+
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+   Doc-tests agentkeys_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agentkeys_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests agentkeys_mock_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+<span class="cmd">+(eval):14&gt; echo &#x27;&#x27;</span>
+
+<span class="cmd">+(eval):15&gt; echo $&#x27;=== Issue #13: Part B �\M-\C-@\M-\C-T Targeted Recover flow ===&#x27;</span>
+<span class="header">=== Issue #13: Part B — Targeted Recover flow ===</span>
+<span class="cmd">+(eval):16&gt; export AGENTKEYS_SESSION_STORE=file</span>
+<span class="cmd">+(eval):17&gt; mktemp -d</span>
+<span class="cmd">+(eval):17&gt; export HOME_SANDBOX=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A</span>
+<span class="cmd">+(eval):18&gt; export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A</span>
+<span class="cmd">+(eval):21&gt; MOCK_PID=96265 </span>
+<span class="cmd">+(eval):20&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server</span>
+<span class="cmd">+(eval):22&gt; sleep 1</span>
+<span class="cmd">+(eval):24&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token recover-refactor</span>
+<span class="pass">Initialized. Wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2</span>
+<span class="cmd">+(eval):25&gt; WALLET=+(eval):25&gt; jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys/master/session.json</span>
+<span class="cmd">+(eval):25&gt; WALLET=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 </span>
+<span class="cmd">+(eval):26&gt; echo &#x27;Original wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2&#x27;</span>
+Original wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2
+<span class="cmd">+(eval):28&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 link 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 --alias my-bot</span>
+<span class="pass">Linked agent=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 alias=my-bot</span>
+<span class="cmd">+(eval):29&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 revoke</span>
+<span class="pass">Revoked current session for wallet=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2. Local session wiped. Run `agentkeys init` to re-pair.</span>
+<span class="cmd">+(eval):30&gt; echo &#x27;--- Session file should be wiped after revoke ---&#x27;</span>
+<span class="cmd">--- Session file should be wiped after revoke ---</span>
+<span class="cmd">+(eval):31&gt; find /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys -type f</span>
+<span class="cmd">+(eval):33&gt; /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 recover my-bot --method passkey</span>
+<span class="pass">Recovered. Session restored for wallet 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2</span>
+<span class="cmd">+(eval):34&gt; echo &#x27;--- Recover complete. Checking session file ---&#x27;</span>
+<span class="cmd">--- Recover complete. Checking session file ---</span>
+<span class="cmd">+(eval):35&gt; find /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys -type f</span>
+/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys/master/session.json
+<span class="cmd">+(eval):37&gt; RECOVERED=+(eval):37&gt; jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A/.agentkeys/master/session.json</span>
+<span class="cmd">+(eval):37&gt; RECOVERED=0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 </span>
+<span class="pass">+(eval):38&gt; echo &#x27;Recovered wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2&#x27;</span>
+<span class="pass">Recovered wallet: 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2</span>
+<span class="cmd">+(eval):39&gt; [ 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 &#x27;=&#x27; 0x668c6fc8fbc9d21aa3081d7a251750b671fc08b2 &#x27;]&#x27;</span>
+<span class="pass">+(eval):39&gt; echo &#x27;PASS: same wallet&#x27;</span>
+<span class="pass">PASS: same wallet</span>
+<span class="cmd">+(eval):41&gt; kill 96265</span>
+<span class="cmd">+(eval):42&gt; wait</span>
+<span class="cmd">+(eval):43&gt; rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.qVE1Olvj3A</span>
+<span class="cmd">+(eval):44&gt; echo &#x27;&#x27;</span>
+
+<span class="cmd">+(eval):45&gt; echo &#x27;=== Issue #13 complete ===&#x27;</span>
+<span class="header">=== Issue #13 complete ===</span>
+<span class="cmd">+(eval):46&gt; set +x</span>
+DONE</pre></body></html>
