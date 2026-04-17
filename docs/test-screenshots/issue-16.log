@@ -1,0 +1,88 @@
++(eval):5> REPO=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6 
++(eval):6> cd /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6
++(eval):7> BIN=+(eval):7> pwd
++(eval):7> BIN=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys 
++(eval):8> MOCK=+(eval):8> pwd
++(eval):8> MOCK=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server 
++(eval):9> BACKEND=http://127.0.0.1:8090 
++(eval):11> export AGENTKEYS_SESSION_STORE=file
++(eval):12> mktemp -d
++(eval):12> export HOME_SANDBOX=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.E16tuASIvl
++(eval):13> export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.E16tuASIvl
++(eval):15> echo $'=== Issue #16: Case 1 â\M-\C-@\M-\C-T default wallet for store/read/run ==='
+=== Issue #16: Case 1 â€” default wallet for store/read/run ===
++(eval):17> MOCK_PID=99593 
++(eval):16> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):18> sleep 1
++(eval):20> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token default-wallet
+Initialized. Wallet: 0x1aabfcf9700c6cc468f564bf4a37a6b7292971e7
++(eval):21> WALLET=+(eval):21> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.E16tuASIvl/.agentkeys/master/session.json
++(eval):21> WALLET=0x1aabfcf9700c6cc468f564bf4a37a6b7292971e7 
++(eval):22> echo 'WALLET=0x1aabfcf9700c6cc468f564bf4a37a6b7292971e7'
+WALLET=0x1aabfcf9700c6cc468f564bf4a37a6b7292971e7
++(eval):24> echo '--- store without --agent (defaults to session wallet) ---'
+--- store without --agent (defaults to session wallet) ---
++(eval):25> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store openrouter sk-default-test
+Stored credential for agent=0x1aabfcf9700c6cc468f564bf4a37a6b7292971e7 service=openrouter
++(eval):26> echo '--- read without --agent ---'
+--- read without --agent ---
++(eval):27> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 read openrouter
+sk-default-test
++(eval):28> echo '--- run without --agent ---'
+--- run without --agent ---
++(eval):29> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run -- printenv OPENROUTER_API_KEY
+sk-default-test
++(eval):30> echo '--- read with --agent $WALLET (explicit) ---'
+--- read with --agent $WALLET (explicit) ---
++(eval):31> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 read --agent 0x1aabfcf9700c6cc468f564bf4a37a6b7292971e7 openrouter
+sk-default-test
++(eval):33> kill 99593
++(eval):33> wait
++(eval):35> echo ''
+
++(eval):36> echo $'=== Issue #16: Case 2 â\M-\C-@\M-\C-T alias resolution ==='
+=== Issue #16: Case 2 â€” alias resolution ===
++(eval):37> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.E16tuASIvl/.agentkeys
++(eval):39> MOCK_PID=99608 
++(eval):38> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):40> sleep 1
++(eval):42> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token alias-test
+Initialized. Wallet: 0x72be46e8cd2e88bbe4e9d3e524126ba69a8f773c
++(eval):43> WALLET=+(eval):43> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.E16tuASIvl/.agentkeys/master/session.json
++(eval):43> WALLET=0x72be46e8cd2e88bbe4e9d3e524126ba69a8f773c 
++(eval):45> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 link 0x72be46e8cd2e88bbe4e9d3e524126ba69a8f773c --alias my-bot
+Linked agent=0x72be46e8cd2e88bbe4e9d3e524126ba69a8f773c alias=my-bot
++(eval):46> echo '--- store via --agent my-bot ---'
+--- store via --agent my-bot ---
++(eval):47> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store --agent my-bot openrouter sk-alias-resolve
+Stored credential for agent=0x72be46e8cd2e88bbe4e9d3e524126ba69a8f773c service=openrouter
++(eval):48> echo '--- read via --agent my-bot ---'
+--- read via --agent my-bot ---
++(eval):49> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 read --agent my-bot openrouter
+sk-alias-resolve
++(eval):51> kill 99608
++(eval):51> wait
++(eval):53> echo ''
+
++(eval):54> echo $'=== Issue #16: Case 3 â\M-\C-@\M-\C-T unknown identity error ==='
+=== Issue #16: Case 3 â€” unknown identity error ===
++(eval):55> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.E16tuASIvl/.agentkeys
++(eval):57> MOCK_PID=99616 
++(eval):56> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):58> sleep 1
++(eval):60> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token unknown-identity
+Initialized. Wallet: 0x05f3dc922afd6012617595f4baa9faeadc61e5cd
++(eval):61> echo '--- store --agent not-an-alias (should error) ---'
+--- store --agent not-an-alias (should error) ---
++(eval):62> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store --agent not-an-alias openrouter sk-x
++(eval):62> head -5
+unknown identity 'not-an-alias'. Use `agentkeys link` to create an alias or pass the 0x... wallet directly.
++(eval):64> kill 99616
++(eval):64> wait
++(eval):65> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.E16tuASIvl
++(eval):66> echo ''
+
++(eval):67> echo '=== Issue #16 complete ==='
+=== Issue #16 complete ===
++(eval):68> set +x
+DONE

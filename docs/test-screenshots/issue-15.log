@@ -1,0 +1,128 @@
++(eval):5> REPO=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6 
++(eval):6> cd /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6
++(eval):7> BIN=+(eval):7> pwd
++(eval):7> BIN=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys 
++(eval):8> MOCK=+(eval):8> pwd
++(eval):8> MOCK=/Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server 
++(eval):9> BACKEND=http://127.0.0.1:8090 
++(eval):11> export AGENTKEYS_SESSION_STORE=file
++(eval):12> mktemp -d
++(eval):12> export HOME_SANDBOX=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh
++(eval):13> export HOME=/var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh
++(eval):15> echo $'=== Issue #15: Case 1 â\M-\C-@\M-\C-T master session injects all stored credentials ==='
+=== Issue #15: Case 1 â€” master session injects all stored credentials ===
++(eval):17> MOCK_PID=98632 
++(eval):16> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):18> sleep 1
++(eval):20> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token master-inject
+Initialized. Wallet: 0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091
++(eval):21> WALLET=+(eval):21> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys/master/session.json
++(eval):21> WALLET=0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 
++(eval):22> echo 'WALLET=0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091'
+WALLET=0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091
++(eval):24> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store --agent 0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 openrouter sk-openrouter-value
+Stored credential for agent=0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 service=openrouter
++(eval):25> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store --agent 0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 anthropic sk-anthropic-value
+Stored credential for agent=0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 service=anthropic
++(eval):27> echo '--- printenv OPENROUTER_API_KEY ---'
+--- printenv OPENROUTER_API_KEY ---
++(eval):28> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 -- printenv OPENROUTER_API_KEY
+sk-openrouter-value
++(eval):30> echo '--- printenv ANTHROPIC_API_KEY ---'
+--- printenv ANTHROPIC_API_KEY ---
++(eval):31> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 -- printenv ANTHROPIC_API_KEY
+sk-anthropic-value
++(eval):33> echo '--- both in single invocation ---'
+--- both in single invocation ---
++(eval):34> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0x9cf9ee80e3917ba4526c8b966d9cba4dacfeb091 -- sh -c 'echo "OR=$OPENROUTER_API_KEY AN=$ANTHROPIC_API_KEY"'
+OR=sk-openrouter-value AN=sk-anthropic-value
++(eval):36> kill 98632
++(eval):36> wait
++(eval):38> echo ''
+
++(eval):39> echo $'=== Issue #15: Case 2 â\M-\C-@\M-\C-T --env flag overrides default naming ==='
+=== Issue #15: Case 2 â€” --env flag overrides default naming ===
++(eval):40> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys
++(eval):42> MOCK_PID=98661 
++(eval):41> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):43> sleep 1
++(eval):45> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token env-override
+Initialized. Wallet: 0xc6add59ed98c296e644bbc28d10c7ffa36611e05
++(eval):46> WALLET=+(eval):46> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys/master/session.json
++(eval):46> WALLET=0xc6add59ed98c296e644bbc28d10c7ffa36611e05 
++(eval):48> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store --agent 0xc6add59ed98c296e644bbc28d10c7ffa36611e05 github ghp_testtoken
+Stored credential for agent=0xc6add59ed98c296e644bbc28d10c7ffa36611e05 service=github
++(eval):50> echo '--- --env GITHUB_TOKEN=github ---'
+--- --env GITHUB_TOKEN=github ---
++(eval):51> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0xc6add59ed98c296e644bbc28d10c7ffa36611e05 --env 'GITHUB_TOKEN=github' -- printenv GITHUB_TOKEN
+ghp_testtoken
++(eval):53> echo '--- observe GITHUB_TOKEN vs GITHUB_API_KEY semantics ---'
+--- observe GITHUB_TOKEN vs GITHUB_API_KEY semantics ---
++(eval):54> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0xc6add59ed98c296e644bbc28d10c7ffa36611e05 --env 'GITHUB_TOKEN=github' -- sh -c 'echo "GT=$GITHUB_TOKEN GA=${GITHUB_API_KEY:-unset}"'
+GT=ghp_testtoken GA=ghp_testtoken
++(eval):56> echo '--- stacking multiple --env ---'
+--- stacking multiple --env ---
++(eval):57> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store --agent 0xc6add59ed98c296e644bbc28d10c7ffa36611e05 openrouter sk-or-override
+Stored credential for agent=0xc6add59ed98c296e644bbc28d10c7ffa36611e05 service=openrouter
++(eval):58> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0xc6add59ed98c296e644bbc28d10c7ffa36611e05 --env 'GITHUB_TOKEN=github' --env 'OPENROUTER_KEY=openrouter' -- sh -c 'echo "GT=$GITHUB_TOKEN OR=$OPENROUTER_KEY"'
+GT=ghp_testtoken OR=sk-or-override
++(eval):60> kill 98661
++(eval):60> wait
++(eval):62> echo ''
+
++(eval):63> echo $'=== Issue #15: Case 3 â\M-\C-@\M-\C-T --env invalid format ==='
+=== Issue #15: Case 3 â€” --env invalid format ===
++(eval):64> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys
++(eval):66> MOCK_PID=98691 
++(eval):65> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):67> sleep 1
++(eval):69> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token env-invalid
+Initialized. Wallet: 0x698f8140e3847dabdb54a093fa4cb68bf824c586
++(eval):70> WALLET=+(eval):70> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys/master/session.json
++(eval):70> WALLET=0x698f8140e3847dabdb54a093fa4cb68bf824c586 
++(eval):72> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0x698f8140e3847dabdb54a093fa4cb68bf824c586 --env NO_EQUALS -- true
++(eval):72> head -5
+Invalid --env format 'NO_EQUALS': expected KEY=SERVICE (no '=' found)
++(eval):73> echo '(should have errored before running '\''true'\'')'
+(should have errored before running 'true')
++(eval):75> kill 98691
++(eval):75> wait
++(eval):77> echo ''
+
++(eval):78> echo $'=== Issue #15: Case 4 â\M-\C-@\M-\C-T ownership enforced ==='
+=== Issue #15: Case 4 â€” ownership enforced ===
++(eval):79> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys
++(eval):81> MOCK_PID=98698 
++(eval):80> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys-mock-server
++(eval):82> sleep 1
++(eval):84> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token user-a-store
+Initialized. Wallet: 0x96fd72184ebe5933dfbdab0b154a02f91e7193cd
++(eval):85> A_WALLET=+(eval):85> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys/master/session.json
++(eval):85> A_WALLET=0x96fd72184ebe5933dfbdab0b154a02f91e7193cd 
++(eval):86> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 store --agent 0x96fd72184ebe5933dfbdab0b154a02f91e7193cd openrouter sk-secret
+Stored credential for agent=0x96fd72184ebe5933dfbdab0b154a02f91e7193cd service=openrouter
++(eval):87> echo 'A_WALLET=0x96fd72184ebe5933dfbdab0b154a02f91e7193cd'
+A_WALLET=0x96fd72184ebe5933dfbdab0b154a02f91e7193cd
++(eval):89> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 init --mock-token user-b-probe
+Initialized. Wallet: 0xbd39b7b2c3d56c51dae8c2c3eb54d78729b7480a
++(eval):90> B_WALLET=+(eval):90> jq -r .wallet /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh/.agentkeys/master/session.json
++(eval):90> B_WALLET=0xbd39b7b2c3d56c51dae8c2c3eb54d78729b7480a 
++(eval):91> echo 'B_WALLET=0xbd39b7b2c3d56c51dae8c2c3eb54d78729b7480a'
+B_WALLET=0xbd39b7b2c3d56c51dae8c2c3eb54d78729b7480a
++(eval):93> echo '--- User B tries A'\''s credentials (should be denied) ---'
+--- User B tries A's credentials (should be denied) ---
++(eval):94> /Users/agent-jojo/Projects/agentKeys/.claude/worktrees/hopeful-antonelli-6be3b6/target/release/agentkeys --backend http://127.0.0.1:8090 run --agent 0x96fd72184ebe5933dfbdab0b154a02f91e7193cd -- printenv OPENROUTER_API_KEY
++(eval):94> head -5
+Error: DENIED
+  session does not own agent 0x96fd72184ebe5933dfbdab0b154a02f91e7193cd
+
+  Fix: Check the agent's scope with `agentkeys usage`
++(eval):96> kill 98698
++(eval):96> wait
++(eval):97> rm -rf /var/folders/zw/97njcqdn0h7gs8n0kc96wjlh0000gn/T/tmp.f8l1owlCWh
++(eval):98> echo ''
+
++(eval):99> echo '=== Issue #15 complete ==='
+=== Issue #15 complete ===
++(eval):100> set +x
+DONE
