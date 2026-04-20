@@ -30,43 +30,46 @@ For the demo-only purpose of Stage 5, the goal is the **shortest path to a runni
 
 > **This is a temporary demo solution.** For production (v0.1), the agent mailbox moves to SES-hosted `*@agentkeys-email.io` under the three-layer `TokenAuthority` abstraction. See the [email-system wiki page](../wiki/email-system.md) for the full architecture and why we're running demo-and-production on different backends deliberately.
 
-#### 🚀 Demo path: dedicated personal Gmail + TOTP + app password
+#### 🚀 Demo path: your existing Gmail + plus-addressing + app password
 
-Why dedicated (not your personal inbox with plus-addressing): the agent gets a clean inbox it fully controls, no personal mail pollution, cleanup is a single account-delete.
+Why plus-addressing as the primary demo path:
 
-**1. Create a fresh Gmail account for the bot.**
+- **Unique email per run.** OpenRouter's sign-up/sign-in page is a single URL — if you submit an email that already has an account, you land on a returning-user screen the scraper was not designed to traverse, and the provision fails with a `no terminal event`-style error. `you+or-<timestamp>@gmail.com` is a fresh address to OpenRouter on every run, so every run hits the pristine signup path.
+- **Zero account creation.** Uses your existing Gmail — no new Google account, no new phone verification.
+- **Single inbox to clean up.** The OpenRouter confirmation mail lands in your real inbox; delete one thread after the demo and you're done.
+- **Scales to repeat testing.** Rotate the local-part (`+or-1`, `+or-2`, …) or include a timestamp and you have DWD-equivalent disposable emails without building DWD.
 
-Sign up at [accounts.google.com](https://accounts.google.com) with a name like `wildmeta-stage5-demo@gmail.com`. Google will ask for a recovery phone — use your personal phone; you only need it once for step 2.
+**1. Generate a Gmail app password for IMAP.**
 
-**2. Enable 2-Step Verification and enroll TOTP as the second factor.**
+- Requires 2FA enabled on your Google account. If not already enabled: [myaccount.google.com](https://myaccount.google.com) → Security → turn on 2-Step Verification (TOTP or SMS is fine; enrollment is a one-time cost).
+- Visit [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Create one named `agentkeys-stage5`. Google gives you a 16-character password.
+- Copy immediately — it's shown once. Revoke anytime from the same page.
 
-Gmail IMAP access chain: `app password` requires `2FA enabled` requires `second factor enrolled`. Using an authenticator app as that second factor makes the account non-interactive after this one-time enrollment.
+**2. Export the env vars.**
 
-- Open [myaccount.google.com](https://myaccount.google.com) → **Security**
-- **Turn on 2-Step Verification.** Google sends an SMS to your recovery phone to start enrollment.
-- Under 2-Step Verification settings, add **Authenticator app** as a second step. Google shows a QR code and a secret.
-- Scan into Google Authenticator / Authy / 1Password / Bitwarden / whatever TOTP client you already use. You now own the second factor.
-- (Optional) once TOTP is active, you can drop SMS as a 2FA method — Google keeps the phone for account recovery but stops using it as a live second factor.
-
-**3. Generate an app password for IMAP.**
-
-- Visit [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
-- Create one named "agentkeys-stage5". Google gives you a 16-character password.
-- Copy it immediately — it's shown once. Revoke anytime from the same page.
-
-**4. Export the four env vars.**
+The scraper splits **IMAP login** from **signup email**. Set both:
 
 ```bash
 export AGENTKEYS_EMAIL_BACKEND=gmail
-export AGENTKEYS_EMAIL_USER="wildmeta-stage5-demo@gmail.com"   # the bot account from step 1
-export AGENTKEYS_EMAIL_PASSWORD="xxxx xxxx xxxx xxxx"          # 16-char app password from step 3
+
+# IMAP login — must be the canonical Gmail address.
+export AGENTKEYS_EMAIL_USER="you@gmail.com"
+export AGENTKEYS_EMAIL_PASSWORD="xxxx xxxx xxxx xxxx"   # 16-char app password
+
+# What we type into OpenRouter's signup form.
+# Plus-addressed alias so OpenRouter sees a brand-new email per run;
+# mail is still delivered to you@gmail.com.
+export AGENTKEYS_SIGNUP_EMAIL="you+or-$(date +%s)@gmail.com"
+
 export AGENTKEYS_EMAIL_HOST="imap.gmail.com"
 export AGENTKEYS_EMAIL_PORT="993"
 ```
 
+> **Why two email vars.** `AGENTKEYS_EMAIL_USER` is the IMAP login — Gmail IMAP only accepts your canonical address (plus-addressing aliases are rejected at login). `AGENTKEYS_SIGNUP_EMAIL` is what we fill into the service's sign-up form — plus-addressing works there because SMTP delivery honors the `+alias` suffix. If `AGENTKEYS_SIGNUP_EMAIL` is unset, the scraper falls back to `AGENTKEYS_EMAIL_USER` — which is fine for a dedicated bot account (see alternative below) but guarantees a "account already exists" collision if you reuse a canonical address across runs.
+
 Once the app password is set, the demo sees **zero 2FA prompts**. App passwords bypass 2FA by design — they're Google's non-interactive credential, scoped to IMAP only, revocable anytime.
 
-**5. Build binaries + install provisioner-script deps (one-time).**
+**3. Build binaries + install provisioner-script deps (one-time).**
 
 ```bash
 cd ~/Projects/agentkeys
@@ -76,29 +79,16 @@ npx playwright install chromium --with-deps
 ```
 
 <details>
-<summary>Alternative: Google Workspace DWD (for operators with an existing Workspace subscription)</summary>
+<summary>Alternative: dedicated throwaway Gmail (cleanest but more setup)</summary>
 
-See [`docs/stage5-workspace-email-setup.md`](stage5-workspace-email-setup.md). That path mints a throwaway `stage5test-<timestamp>@wildmeta.ai` per run, reads its inbox via the Gmail API (no app password, no interactive OAuth), and deletes the user at the end. One-time ~20-minute admin setup + currently 3-5 days of code work to replace the `imapflow` fetcher with a Gmail-API fetcher that uses DWD impersonation. Longer upfront cost than the dedicated-Gmail demo path, but the right choice for enterprise deployments that already run Workspace.
+Create a fresh bot Gmail (`wildmeta-stage5-demo@gmail.com`), enable 2FA + TOTP, generate an app password. Set `AGENTKEYS_EMAIL_USER` to the bot address; leave `AGENTKEYS_SIGNUP_EMAIL` unset. One-time ~10 minutes setup; gives you a fully controlled inbox with no personal-mail pollution. Re-runs need `--force` or account-delete between attempts because the bot address itself will collide.
 
 </details>
 
 <details>
-<summary>Alternative: plus-addressed personal Gmail (shared-inbox quick demo)</summary>
+<summary>Alternative: Google Workspace DWD (for operators with an existing Workspace subscription)</summary>
 
-If you don't want to create a dedicated account and are OK with one-off OpenRouter mail landing in your real inbox, plus-addressing on your existing Gmail works for a single demo run.
-
-1. **Your existing personal Gmail account** — plus-addressing is a Gmail-native feature: mail sent to `you+anything@gmail.com` is delivered to `you@gmail.com` without any configuration. A single inbox supports unlimited test aliases (`you+stage5test-20260418@gmail.com`).
-2. **Gmail app password** (not your regular password) — generate at https://myaccount.google.com/apppasswords. Scoped to IMAP access only; revoke after the demo.
-3. **Environment:**
-   ```bash
-   export AGENTKEYS_EMAIL_BACKEND=gmail
-   export AGENTKEYS_EMAIL_USER="you@gmail.com"      # your real Gmail; Stage 5a appends +alias at signup
-   export AGENTKEYS_EMAIL_PASSWORD="<app password>" # NOT your normal Google password
-   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"
-   export AGENTKEYS_EMAIL_PORT="993"
-   ```
-
-Downside: the agent doesn't fully control the inbox (shared with the human), and the OpenRouter confirmation email lingers in your personal mail until you delete it.
+See [`docs/stage5-workspace-email-setup.md`](stage5-workspace-email-setup.md). That path mints a throwaway `stage5test-<timestamp>@wildmeta.ai` per run, reads its inbox via the Gmail API (no app password, no interactive OAuth), and deletes the user at the end. One-time ~20-minute admin setup + currently 3-5 days of code work to replace the `imapflow` fetcher with a Gmail-API fetcher that uses DWD impersonation. Right choice for enterprise deployments that already run Workspace; overkill for the demo.
 
 </details>
 
@@ -114,7 +104,7 @@ cargo run --release -p agentkeys-mock-server -- --port 8090
 # Expected: "Mock server running on port 8090"
 ```
 
-**Terminal 2 — provision.** Carry the four Gmail env vars from step 4 into this shell (or re-`export` them here). Then:
+**Terminal 2 — provision.** Carry the Gmail env vars from step 2 into this shell (or re-`export` them here). Note: if you are using plus-addressing, **re-evaluate `AGENTKEYS_SIGNUP_EMAIL` for every run** so the timestamp is fresh and OpenRouter sees a new email — otherwise your second run will collide with the first run's account.
 
 ```bash
 cd ~/Projects/agentkeys
@@ -125,11 +115,16 @@ BACKEND=http://127.0.0.1:8090
 $BIN --backend $BACKEND init --mock-token stage5-demo
 # Expected: wallet printed; ~/.agentkeys/master/session.json created.
 
-# 2. Sanity-check the Gmail env vars landed in this shell.
-env | grep AGENTKEYS_EMAIL_
-# Expected: four AGENTKEYS_EMAIL_* lines matching step 4.
+# 2. Sanity-check the email env vars landed in this shell.
+env | grep -E 'AGENTKEYS_(EMAIL|SIGNUP)_'
+# Expected: AGENTKEYS_EMAIL_{BACKEND,USER,PASSWORD,HOST,PORT} and AGENTKEYS_SIGNUP_EMAIL.
+# If AGENTKEYS_SIGNUP_EMAIL is missing, the scraper falls back to AGENTKEYS_EMAIL_USER,
+# which will hit "account already exists" on the second run against OpenRouter.
 
-# 3. Run the live OpenRouter provision.
+# 3. Re-seed a fresh signup alias for this run (plus-addressing path only).
+export AGENTKEYS_SIGNUP_EMAIL="you+or-$(date +%s)@gmail.com"
+
+# 4. Run the live OpenRouter provision.
 $BIN --backend $BACKEND provision openrouter
 # Expect ~30-90 s: browser opens headless, account created,
 # email verified, API key extracted + verified, stored in the mock backend.
@@ -157,8 +152,21 @@ curl -s -H "Authorization: Bearer $($BIN --backend $BACKEND read openrouter)" \
 **Artifacts you can inspect:**
 
 - `~/.agentkeys/master/session.json` — the master session (wallet + bearer token).
-- `~/.agentkeys/logs/provision-<timestamp>.jsonl` — per-step audit trail (when present; full audit logging lands with 5b).
+- `~/.agentkeys/logs/provision-openrouter-<unix_ts>.log` — **written automatically when a provision fails with "no terminal event."** Contains the exit code, every event the subprocess emitted, and the full captured stderr. `ls -lt ~/.agentkeys/logs/ | head` to find the most recent.
 - Stderr of `provision openrouter` — the single-shot step lines shown under "Expected behavior" below.
+
+**Debugging a failure:**
+
+1. Check the error message on stderr — if it ends with `full log: /path/to/provision-openrouter-<ts>.log`, that file has the full signal.
+2. `cat` the log file. The `=== subprocess stderr ===` section usually shows the real cause (Playwright browser-launch error, IMAP connection refused, an unhandled rejection from the pattern, etc.).
+3. For interactive debugging, run the TS scraper directly against a visible browser:
+   ```bash
+   # Temporarily flip headless:false at provisioner-scripts/src/scrapers/openrouter.ts:~116,
+   # then:
+   cd ~/Projects/agentkeys
+   npx tsx provisioner-scripts/src/scrapers/openrouter.ts
+   ```
+   You'll see the page in real time — instant diagnosis for selector drift, returning-user UI paths, or CAPTCHA challenges.
 
 ### Expected behavior
 
@@ -181,6 +189,8 @@ curl -s -H "Authorization: Bearer $($BIN --backend $BACKEND read openrouter)" \
 
 ### Failure modes to watch for
 
+- **"subprocess ended without terminal event"** — the scraper crashed before emitting any event (Playwright browser-launch failed, IMAP connection refused, unhandled rejection, etc.). The error message now ends with `full log: ~/.agentkeys/logs/provision-openrouter-<ts>.log` — open that file; the `=== subprocess stderr ===` section has the real cause. If stderr is empty, re-run the TS scraper directly with `npx tsx provisioner-scripts/src/scrapers/openrouter.ts` and watch the node-side output.
+- **"account already exists" (returning-user path)** — OpenRouter's `/auth` is signup+signin on one URL. If `AGENTKEYS_SIGNUP_EMAIL` is an address that already has an OpenRouter account, the site lands on a returning-user UI the scraper can't traverse, and you'll get a `selector_timeout` tripwire or (if the path is weirder) a "no terminal event." Re-evaluate `AGENTKEYS_SIGNUP_EMAIL` with a fresh timestamp (`you+or-$(date +%s)@gmail.com`) and retry.
 - **CAPTCHA / Cloudflare challenge** — the Tier 2 script does not solve CAPTCHAs. Expect a Tripwire event with `kind: selector_timeout`. This is the signal that Stage 5b's agentic fallback is needed. Until 5b ships, abort and retry from a different IP.
 - **Email didn't arrive within 60 s** — check spam, check plus-addressing forwarding. Tripwire `email_timeout` means the IMAP fetch exhausted its polling window.
 - **Key verification fails with `phantom`** — the scraper extracted something key-shaped that isn't a real API key. OpenRouter may have changed its DOM; inspect the page at the success-step selector and file an issue with the HAR dump.
