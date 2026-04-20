@@ -1,3 +1,4 @@
+import { fileURLToPath } from "url";
 import type { Browser } from "playwright";
 import { emit, type ProvisionEvent } from "../types.js";
 import type { VerifyResult } from "../lib/verify.js";
@@ -157,4 +158,16 @@ export default async function main(): Promise<void> {
     const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
     emitAndExit({ type: "error", code: "internal", details: `unhandled: ${msg}` }, 2);
   }
+}
+
+// Entry-point guard. Invoke main() only when this file is the direct script
+// target (e.g. `npx tsx src/scrapers/openrouter.ts`). When the module is
+// imported by test files that only use named exports like
+// `runOpenRouterScraper`, main() must NOT run — otherwise tests would launch
+// a real browser and hit real OpenRouter. Without this block, the provisioner
+// subprocess just loads the module, reaches EOF, and exits 0 with no events —
+// exactly the "exit_code: Some(0) / events_emitted: 0" failure mode.
+const isEntry = fileURLToPath(import.meta.url) === process.argv[1];
+if (isEntry) {
+  void main();
 }
