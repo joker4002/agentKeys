@@ -281,16 +281,77 @@ These are slop markers. Apply the suggested `cargo clippy --fix` or hand-replace
 
 ---
 
-## 4. What to do when Stage 5b lands
+## 4. Stage 5b — CDP-connected real-Chrome scraper (partial: proven working, blocked on email duplicate)
 
-When Stage 5b ships (agentic fallback, `/agentkeys-record-scraper` skill, script-generation loop), this document will grow:
+### What's landed
 
+- **[provisioner-scripts/src/scrapers/openrouter-cdp.ts](../provisioner-scripts/src/scrapers/openrouter-cdp.ts)** — connects to a user-launched real Chrome via `chromium.connectOverCDP()`, drives the OpenRouter Clerk-hosted signup form, polls Gmail IMAP for the OTP code, mints a new key on `/keys`, prints the `sk-or-v1-*` value on stdout.
+- **Why CDP, not Playwright-launched Chromium:** Playwright's bundled Chromium ships with `--enable-automation` baked in. Cloudflare Turnstile detects this at runtime (error **600010** — "browser execution environment suspicious") and refuses to issue a token even when a human clicks the checkbox. Connecting to a user-launched *real* Chrome bypasses this because the browser process has no automation flags. Verified 2026-04-20: Turnstile passes invisibly in real Chrome, Clerk backend returns normal responses.
+
+### How to run (when you have a fresh-to-OpenRouter email)
+
+1. **Launch real Chrome with CDP enabled** (fresh profile, separate from your daily browsing):
+   ```bash
+   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+     --remote-debugging-port=9222 \
+     --user-data-dir=/tmp/agentkeys-chrome-profile &
+   ```
+   A blank Chrome window opens. Don't navigate it manually — the scraper drives it.
+
+2. **Export env** (Gmail IMAP creds + a signup email OpenRouter hasn't seen):
+   ```bash
+   export AGENTKEYS_EMAIL_BACKEND=gmail
+   export AGENTKEYS_EMAIL_USER="you@gmail.com"                   # canonical IMAP login
+   export AGENTKEYS_EMAIL_PASSWORD="<gmail app password>"
+   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"
+   export AGENTKEYS_EMAIL_PORT="993"
+   export AGENTKEYS_SIGNUP_EMAIL="<NEW-address-OpenRouter-hasnt-seen>"
+   export AGENTKEYS_SIGNUP_PASSWORD="<strong-random>"
+   ```
+
+3. **Run the scraper:**
+   ```bash
+   cd ~/Projects/agentkeys
+   node --import tsx/esm provisioner-scripts/src/scrapers/openrouter-cdp.ts
+   ```
+   Last stdout line is the `sk-or-v1-*` key. Stderr shows `[cdp] <time> <step>` progress lines.
+
+4. **Store via the CLI:**
+   ```bash
+   $BIN --backend $BACKEND store openrouter <KEY>
+   $BIN --backend $BACKEND read openrouter
+   curl -H "Authorization: Bearer $(... read openrouter)" https://openrouter.ai/api/v1/models
+   ```
+
+### Known blocker — WHY "a fresh-to-OpenRouter email" is non-trivial today
+
+OpenRouter's Clerk integration **normalizes Gmail / Workspace plus-aliases** to the canonical address when checking for duplicates. If `agent@wildmeta.ai` already has an OpenRouter account, every plus-aliased variant (`agent+or-<ts>@wildmeta.ai`, `agent+stage5b@wildmeta.ai`, etc.) gets rejected with:
+
+> This email address is already in use. Creating multiple accounts with the same email address is not allowed.
+
+Only a **different canonical local-part** passes (e.g. `bot-42@wildmeta.ai` is fine if no one has used it; `agent+42@wildmeta.ai` is not because it normalizes to `agent@wildmeta.ai`).
+
+### Pickup plan — blocked on Stage 6
+
+This unblocks when Stage 6 ships its **throwaway inbox provisioning API** (see [`docs/spec/plans/development-stages.md`](./spec/plans/development-stages.md) §Stage 6 deliverables). Stage 6 mints distinct local-parts like `bot-<random>@agentkeys-email.io` per call, Clerk-normalization-proof because each has a unique local-part. The pickup checklist:
+
+- [ ] Stage 6 SES stack deployed (`agentkeys-email.io` verified, MX/DKIM/SPF live, S3 bucket + IAM OIDC provider + bucket policy per §Stage 6)
+- [ ] `agentkeys inbox provision` CLI mints a `<id>@agentkeys-email.io` and returns the address
+- [ ] `provisioner-scripts/src/lib/email.ts` has an SES-S3 reader variant that reads messages for the provisioned address
+- [ ] Set `AGENTKEYS_SIGNUP_EMAIL` to the provisioned address + point the IMAP fetcher at the SES-S3 reader
+- [ ] Re-run the CDP scraper per §4 step 3 above
+- [ ] Verify all four Stage 5a acceptance criteria pass with the resulting key
+- [ ] Promote the scraper from `provisioner-scripts/src/scrapers/openrouter-cdp.ts` to the default OpenRouter provisioner (delete or archive the Turnstile-blocked `openrouter.ts`)
+
+See [`docs/manual-test-stage6.md`](./manual-test-stage6.md) for the Stage 6 manual demo once that stage lands.
+
+### What's also deferred past the CDP scraper (original Stage 5b scope)
+
+Still-future pieces of the original Stage 5b agentic-fallback design:
 - A new demo path that triggers the agentic fallback via a failing Tier 2 script (expected Tripwire → Tier 3 engagement).
 - A step for inspecting the audit JSONL at `~/.agentkeys/logs/provision-<timestamp>.jsonl`.
 - A `/agentkeys-record-scraper` walkthrough for adding a new service (Brave, Jina, etc.).
 - An assertion that the fallback→PR loop does **not** auto-submit for agent-driven callers (non-TTY).
-
-For now, Stage 5a with OpenRouter as the only deterministic scraper is the full surface.
 
 ---
 
