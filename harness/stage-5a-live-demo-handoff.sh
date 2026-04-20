@@ -27,13 +27,17 @@ say "Preflight — required env"
 : "${AGENTKEYS_EMAIL_HOST:?AGENTKEYS_EMAIL_HOST must be set (imap.gmail.com)}"
 : "${AGENTKEYS_EMAIL_PORT:?AGENTKEYS_EMAIL_PORT must be set (993)}"
 
-# Auto-mint a fresh plus-alias for THIS run so OpenRouter never sees a repeat
-# email. User can override by exporting AGENTKEYS_SIGNUP_EMAIL themselves.
+# Auto-mint a fresh single-plus alias for THIS run so OpenRouter never sees
+# a repeat email. Strip any existing +suffix on AGENTKEYS_EMAIL_USER first:
+# some email validators (including OpenRouter's) reject double-plus addresses
+# like agent+2026042001+or-...@wildmeta.ai and silently drop the signup. The
+# inbox delivery path doesn't care, but the signup form does.
 if [ -z "${AGENTKEYS_SIGNUP_EMAIL:-}" ]; then
-  LOCAL="${AGENTKEYS_EMAIL_USER%@*}"
+  RAW_LOCAL="${AGENTKEYS_EMAIL_USER%@*}"
+  CANONICAL_LOCAL="${RAW_LOCAL%%+*}"   # strip first + and everything after
   DOMAIN="${AGENTKEYS_EMAIL_USER#*@}"
-  export AGENTKEYS_SIGNUP_EMAIL="${LOCAL}+or-$(date +%s)@${DOMAIN}"
-  say "Auto-minted AGENTKEYS_SIGNUP_EMAIL=$AGENTKEYS_SIGNUP_EMAIL"
+  export AGENTKEYS_SIGNUP_EMAIL="${CANONICAL_LOCAL}+or-$(date +%s)@${DOMAIN}"
+  say "Auto-minted AGENTKEYS_SIGNUP_EMAIL=$AGENTKEYS_SIGNUP_EMAIL (stripped existing plus-alias before appending)"
 fi
 
 say "Preflight — binary exists"
