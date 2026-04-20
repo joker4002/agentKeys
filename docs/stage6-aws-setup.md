@@ -1,58 +1,64 @@
 # Stage 6 AWS Setup Runbook
 
-**Audience:** the operator setting up `@agentkeys-email.io` on real AWS for the first time.
+**Audience:** the operator setting up Stage 6's hosted-email infra on real AWS for the first time. Default path is a subdomain on an existing parent (`bots.litentry.org` on AWS account `429071895007`); the wiki-canonical standalone `@agentkeys-email.io` path is the post-interim option.
 **Outcome:** an AWS account with SES domain verified, S3 bucket + bucket policy for per-user isolation, IAM role for the daemon to assume, and (optional) IAM OIDC provider registered. Once done, the Stage 6 code (mock-server + CLI + provisioner-scripts adapters) can talk to real AWS, and the Stage 5b live demo unblocks.
 **Status:** interim build. TEE-held BYODKIM and TEE-signed OIDC JWTs are deferred until [`heima-gaps-vs-desired-architecture.md`](./spec/heima-gaps-vs-desired-architecture.md) §3 + §4 close. AWS-managed DKIM is used as the Stage 6 interim; replace it with TEE-BYODKIM later.
 
 ## 0. Preconditions
 
-- AWS account with **IAM admin** or equivalent (you'll create roles, OIDC providers, IAM policies, S3 buckets, SES identities, Route 53 hosted zones).
+- AWS account with **IAM admin** or equivalent (roles, OIDC providers, IAM policies, S3 buckets, SES identities, Route 53 hosted zones).
 - `aws` CLI v2 installed and authenticated. `aws sts get-caller-identity` must return your identity.
-- Decision on the domain:
-  - **Preferred:** register `agentkeys-email.io` in Route 53 (this runbook assumes it). ~$15/year.
-  - **Alternative:** use a domain you already own. Swap `agentkeys-email.io` for your domain name throughout. The Stage 6 code also reads the domain from `AGENTKEYS_EMAIL_DOMAIN` env var, so non-canonical domains work end-to-end.
+- A **parent domain** already hosted in Route 53. This runbook uses a subdomain carved out of the parent. We default to `bots.litentry.org` on account `429071895007` (hosted zone `Z09723983CFJOHAE3VC65`).
+
+### Domain decision — subdomain on litentry.org vs standalone agentkeys-email.io
+
+Two viable shapes:
+
+| Path | Domain | Hosted zone | Cost | Use when |
+|---|---|---|---|---|
+| **A. Subdomain on existing parent** (this runbook's default) | `bots.litentry.org` — email addresses look like `bot-ab12cd@bots.litentry.org` | Reuses `litentry.org` zone (`Z09723983CFJOHAE3VC65`) — just add records, no delegation | $0 — parent already registered | Stage 6 interim / internal testing; parent domain's reputation bootstraps deliverability |
+| **B. Standalone canonical domain** | `agentkeys-email.io` — matches the wiki's published hosted-default | New Route 53 hosted zone on fresh registration | ~$15/yr + fresh-domain reputation build | Production-facing v0.1+; external users will see and trust the name |
+
+Stage 6 goes with Path A because (1) it's what the user already has set up, (2) it's free, (3) inheriting `litentry.org`'s reputation is better for initial deliverability than a brand-new `.io`. The Stage 6 code is domain-agnostic — reads `AGENTKEYS_EMAIL_DOMAIN` — so swapping to `agentkeys-email.io` later is a one-env-var change.
 
 Set these once at the top of your shell for the rest of the runbook:
 
 ```bash
-export REGION=us-east-1            # SES inbound requires one of: us-east-1, us-west-2, eu-west-1
-export DOMAIN=agentkeys-email.io   # or your chosen domain
+export REGION=us-east-1                         # SES inbound regions: us-east-1, us-west-2, eu-west-1
+export DOMAIN=bots.litentry.org                 # the subdomain we'll run SES under
+export PARENT_ZONE_ID=Z09723983CFJOHAE3VC65     # existing litentry.org Route 53 hosted zone
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export BUCKET=agentkeys-mail       # must be globally unique; append a suffix if taken
+export BUCKET=agentkeys-mail-${ACCOUNT_ID}      # bucket names are globally unique; account-id suffix avoids collisions
 ```
 
-## 1. Register the domain in Route 53
-
-If `agentkeys-email.io` is available:
+Verify all four resolved correctly before proceeding:
 
 ```bash
-aws route53domains check-domain-availability --domain-name "$DOMAIN"
-# → "Availability": "AVAILABLE"
-
-aws route53domains register-domain \
-  --region us-east-1 \
-  --domain-name "$DOMAIN" \
-  --duration-in-years 1 \
-  --admin-contact file://contact.json \
-  --registrant-contact file://contact.json \
-  --tech-contact file://contact.json \
-  --privacy-protect-admin-contact \
-  --privacy-protect-registrant-contact \
-  --privacy-protect-tech-contact
+echo "REGION=$REGION DOMAIN=$DOMAIN PARENT_ZONE_ID=$PARENT_ZONE_ID ACCOUNT_ID=$ACCOUNT_ID BUCKET=$BUCKET"
+# Expected: REGION=us-east-1 DOMAIN=bots.litentry.org PARENT_ZONE_ID=Z09723983CFJOHAE3VC65 ACCOUNT_ID=429071895007 BUCKET=agentkeys-mail-429071895007
 ```
 
-(Create `contact.json` with your registrant details first — see AWS Route 53 domains docs for the schema. This takes 10-15 minutes; domain is LIVE when `aws route53domains get-domain-detail --domain-name "$DOMAIN"` shows `StatusList: [SUCCESSFUL]`.)
+## 1. DNS prep on the existing litentry.org hosted zone
 
-If the domain is unavailable, pick an alternative and substitute it for `$DOMAIN` below.
+No domain registration needed — we just publish records for the `bots` subdomain inside the existing litentry.org zone. Later sections generate DKIM tokens and an MX record; you'll UPSERT them against `$PARENT_ZONE_ID`.
 
-After registration, Route 53 auto-creates a hosted zone. Capture its ID:
+Confirm the parent zone is reachable before we start:
 
 ```bash
-export HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name \
-  --dns-name "$DOMAIN" --max-items 1 \
-  --query 'HostedZones[0].Id' --output text | sed 's|/hostedzone/||')
-echo "HOSTED_ZONE_ID=$HOSTED_ZONE_ID"
+aws route53 get-hosted-zone --id "$PARENT_ZONE_ID" \
+  --query 'HostedZone.{name: Name, private: Config.PrivateZone}'
+# Expected: {"name": "litentry.org.", "private": false}
 ```
+
+If that fails, your aws creds don't have Route 53 permissions on this zone — fix before continuing.
+
+### Note: no subdomain NS delegation required
+
+Because `bots.litentry.org` lives *inside* the same hosted zone as `litentry.org`, every DNS change below is an UPSERT on the parent zone. You do NOT need to create a separate child hosted zone for `bots.litentry.org`. (That's only needed if someone *else* is going to manage `bots.litentry.org` records.)
+
+### Nothing-else-breaks check
+
+This runbook adds records scoped to `bots.litentry.org` and `*.bots.litentry.org`. It does NOT touch the apex `litentry.org` MX, SPF, DMARC, or any records for other subdomains. If you have existing inbound mail on `litentry.org`, it is unaffected.
 
 ## 2. SES domain identity + DKIM (AWS-managed interim)
 
@@ -75,29 +81,37 @@ aws sesv2 get-email-identity \
 # → three strings like: <token1> <token2> <token3>
 ```
 
-Publish the DKIM CNAMEs + SPF + DMARC + MX records in Route 53. Save this as `dns-change.json`:
+Publish the DKIM CNAMEs + SPF + DMARC + MX records in Route 53. Capture the DKIM tokens into env vars first so the JSON-templating heredoc below expands them (no hand-editing `<tokenN>` placeholders):
 
-```json
+```bash
+read -r T1 T2 T3 <<<"$(aws sesv2 get-email-identity --region "$REGION" \
+  --email-identity "$DOMAIN" --query 'DkimAttributes.Tokens' --output text)"
+echo "DKIM tokens: $T1 $T2 $T3"
+
+cat > dns-change.json <<EOF
 {
-  "Comment": "Stage 6 email infra",
+  "Comment": "Stage 6 email infra for $DOMAIN",
   "Changes": [
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "<token1>._domainkey.agentkeys-email.io", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "<token1>.dkim.amazonses.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "<token2>._domainkey.agentkeys-email.io", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "<token2>.dkim.amazonses.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "<token3>._domainkey.agentkeys-email.io", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "<token3>.dkim.amazonses.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "agentkeys-email.io", "Type": "MX", "TTL": 300, "ResourceRecords": [{"Value": "10 inbound-smtp.us-east-1.amazonaws.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "agentkeys-email.io", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=spf1 include:amazonses.com -all\""}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "_dmarc.agentkeys-email.io", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=DMARC1; p=quarantine; rua=mailto:dmarc@agentkeys-email.io\""}]}}
+    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$T1._domainkey.$DOMAIN", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "$T1.dkim.amazonses.com"}]}},
+    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$T2._domainkey.$DOMAIN", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "$T2.dkim.amazonses.com"}]}},
+    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$T3._domainkey.$DOMAIN", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "$T3.dkim.amazonses.com"}]}},
+    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$DOMAIN", "Type": "MX", "TTL": 300, "ResourceRecords": [{"Value": "10 inbound-smtp.$REGION.amazonaws.com"}]}},
+    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$DOMAIN", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=spf1 include:amazonses.com -all\""}]}},
+    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "_dmarc.$DOMAIN", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=DMARC1; p=quarantine; rua=mailto:dmarc@$DOMAIN\""}]}}
   ]
 }
+EOF
 ```
 
 Apply:
 
 ```bash
 aws route53 change-resource-record-sets \
-  --hosted-zone-id "$HOSTED_ZONE_ID" \
+  --hosted-zone-id "$PARENT_ZONE_ID" \
   --change-batch file://dns-change.json
 ```
+
+> **Note on the DMARC `rua` address:** the DMARC aggregate-report mailbox `dmarc@$DOMAIN` must exist once the receipt rule in §6 is live. Until then, DMARC reports that come in get swallowed by SES. That's fine for Stage 6 interim. For a production posture, add a dedicated `dmarc@` inbox or point the `rua` at a mailbox you already monitor.
 
 Wait ~5 minutes for propagation, then confirm verification:
 
@@ -107,7 +121,7 @@ aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
 # → {"verified": true, "dkim": "SUCCESS"}
 ```
 
-> **Interim note (flag this for Stage 6 follow-up):** SES is now signing outbound mail with an AWS-managed RSA-2048 DKIM key. The target architecture uses a TEE-held Ed25519 key derived at `dkim/agentkeys-email.io/v1`, published via BYODKIM. Swap happens when [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) closes.
+> **Interim note (flag this for Stage 6 follow-up):** SES is now signing outbound mail with an AWS-managed RSA-2048 DKIM key. The target architecture uses a TEE-held Ed25519 key derived at `dkim/<domain>/v1` (e.g. `dkim/bots.litentry.org/v1` for this Stage 6 interim, `dkim/agentkeys-email.io/v1` for the standalone canonical domain later), published via BYODKIM. Swap happens when [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) closes.
 
 ## 3. S3 bucket for inbound mail + per-user isolation
 
@@ -333,13 +347,16 @@ If this works, the inbound pipeline is live.
 When the above completes, share these values back so I can wire them into the Stage 6 code (via env vars, NOT committed to git):
 
 ```
-HOSTED_ZONE_ID=$HOSTED_ZONE_ID
+ACCOUNT_ID=429071895007
+REGION=us-east-1
+DOMAIN=bots.litentry.org
+PARENT_ZONE_ID=Z09723983CFJOHAE3VC65
 SES_VERIFIED=<yes|no>
 DKIM_STATUS=<SUCCESS|PENDING|FAILED>
-BUCKET_ARN=arn:aws:s3:::$BUCKET
-ROLE_ARN=$ROLE_ARN
+BUCKET_ARN=arn:aws:s3:::agentkeys-mail-429071895007
+ROLE_ARN=arn:aws:iam::429071895007:role/agentkeys-agent
 TRUST_MODE=<oidc | static-iam-user>
-OIDC_PROVIDER_ARN=<$OIDC_PROVIDER_ARN, or "deferred">
+OIDC_PROVIDER_ARN=<arn:aws:iam::429071895007:oidc-provider/oidc.agentkeys.dev, or "deferred">
 # If TRUST_MODE=static-iam-user:
 DAEMON_ACCESS_KEY_ID=<redacted>
 DAEMON_SECRET_ACCESS_KEY=<redacted>  # share via 1Password, NOT in chat
