@@ -91,10 +91,8 @@ try {
     await page.fill(selector, EMAIL);
     await snap(page, "03-filled");
 
-    // Find a submit-ish button
-    const submitBtn = buttons[0] || candidates.find(c =>
-      c.tag === "button" && (c.type === "submit" || /continue|sign up|next/i.test(c.text || ""))
-    );
+    // `buttons` is already the sign/continue/next/submit/start-filtered set.
+    const submitBtn = buttons[0];
     if (submitBtn) {
       console.log(`5) clicking button: text="${submitBtn.text}"`);
       await page.getByRole("button", { name: new RegExp(submitBtn.text?.split("\n")[0] ?? "", "i") }).first().click();

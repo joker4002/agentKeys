@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # Stage 5a live-demo one-shot handoff.
-# Preconditions checked up front; failures are loud. If all four
-# acceptance criteria pass, prints SUCCESS and a JSON summary.
+# Preconditions checked up front; failures are loud; prints SUCCESS when
+# all four acceptance criteria pass.
 #
-# Usage:
+# Usage (with AGENTKEYS_EMAIL_{BACKEND,USER,PASSWORD,HOST,PORT} exported;
+# AGENTKEYS_SIGNUP_EMAIL is auto-minted below if unset):
 #   cd ~/Projects/agentkeys
-#   # Export your Gmail Workspace creds first:
-#   #   AGENTKEYS_EMAIL_{BACKEND,USER,PASSWORD,HOST,PORT}
-#   #   (AGENTKEYS_SIGNUP_EMAIL auto-computed below if unset)
 #   bash harness/stage-5a-live-demo-handoff.sh
 set -uo pipefail
 
@@ -51,7 +49,7 @@ curl -sf "$BACKEND/health" >/dev/null 2>&1 \
 say "Preflight — node + playwright deps + chromium browser"
 command -v node >/dev/null || fail "node not on PATH"
 command -v npx  >/dev/null || fail "npx not on PATH"
-[ -d node_modules ] || [ -d provisioner-scripts/node_modules ] \
+[ -d provisioner-scripts/node_modules ] \
   || fail "provisioner-scripts deps missing. Run: npm install --prefix provisioner-scripts"
 # Playwright caches browsers under \$HOME/Library/Caches/ms-playwright on macOS;
 # a run-in-unusual-HOME provision will hit "browserType.launch: Executable
@@ -81,17 +79,14 @@ if ! $BIN --backend $BACKEND provision openrouter; then
   fail "provision failed; inspect log above"
 fi
 
-say "4. AC#1-#2 — exit 0 and masked-key form"
-# (provision emits masked key to stdout as final line; exit checked above)
-
-say "5. AC#3 — read full key back"
+say "4. AC#1-#3 — read full key back (exit 0 + masked-key form already checked above)"
 KEY=$($BIN --backend $BACKEND read openrouter) || fail "read openrouter"
 case "$KEY" in
   sk-or-v1-*) pass "read returned key of correct prefix" ;;
   *) fail "read returned unexpected prefix: $(echo "$KEY" | head -c 12)..." ;;
 esac
 
-say "6. AC#4 — curl OpenRouter /api/v1/models"
+say "5. AC#4 — curl OpenRouter /api/v1/models"
 HTTP_CODE=$(curl -sS -o /tmp/or-models.json -w '%{http_code}' \
   -H "Authorization: Bearer $KEY" \
   https://openrouter.ai/api/v1/models)

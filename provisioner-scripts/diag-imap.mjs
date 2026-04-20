@@ -1,5 +1,5 @@
 // Diagnostic: IMAP auth + folder scan for OpenRouter verification emails.
-// Usage: node harness/diag-imap.mjs
+// Usage (from provisioner-scripts/): node diag-imap.mjs
 // Requires AGENTKEYS_EMAIL_{USER,PASSWORD,HOST,PORT} exported.
 import { ImapFlow } from "imapflow";
 
