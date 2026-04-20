@@ -44,6 +44,10 @@ pub fn create_router(state: SharedState) -> Router {
         // Identity
         .route("/identity/link", post(handlers::identity::link_identity))
         .route("/identity/resolve", get(handlers::identity::resolve_identity))
+        // Inbox
+        .route("/mock/inbox/provision", post(handlers::inbox::provision_inbox))
+        .route("/mock/inbox/deliver", post(handlers::inbox::deliver_inbox))
+        .route("/mock/inbox/messages", get(handlers::inbox::list_messages))
         // Health
         .route("/health", get(|| async { "ok" }))
         .with_state(state)
