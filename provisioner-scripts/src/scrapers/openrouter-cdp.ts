@@ -15,21 +15,20 @@
 //   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
 //     --remote-debugging-port=9222 \
 //     --user-data-dir=/tmp/agentkeys-chrome-profile &
-//   # 2. Export env:
-//   export AGENTKEYS_SIGNUP_EMAIL="you+or-<ts>@gmail.com"  # canonical-split plus alias
-//   export AGENTKEYS_SIGNUP_PASSWORD="strong-random"
+//   # 2. Export env — SIGNUP_EMAIL must be a local-part OpenRouter hasn't seen;
+//   #    Clerk normalizes Gmail/Workspace plus-aliases so +suffix reuse is rejected.
+//   export AGENTKEYS_SIGNUP_EMAIL="<fresh-local-part>@<your-domain>"
+//   export AGENTKEYS_SIGNUP_PASSWORD="<strong-random>"
 //   export AGENTKEYS_EMAIL_USER="you@gmail.com"            # canonical IMAP login
 //   export AGENTKEYS_EMAIL_PASSWORD="<gmail app password>"
 //   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"
 //   export AGENTKEYS_EMAIL_PORT="993"
 //   # 3. Run:
-//   node provisioner-scripts/src/scrapers/openrouter-cdp.ts
+//   node --import tsx/esm provisioner-scripts/src/scrapers/openrouter-cdp.ts
 //
-// If Turnstile surfaces a visible challenge, the script logs a prompt and
-// waits up to 120s for the user to click it, then continues.
-//
-// Final line on stdout is the sk-or-v1-* key. All progress/diagnostic lines
-// go to stderr so they don't pollute the key capture.
+// Waits up to 180s for Turnstile to resolve + form to advance. If Turnstile
+// surfaces a visible challenge, the user must click it on screen within that
+// window. Final line on stdout is the sk-or-v1-* key; progress logs go to stderr.
 
 import { chromium, type Browser, type Page } from "playwright";
 import { fetchVerificationCode } from "../lib/email.js";
@@ -67,7 +66,7 @@ async function main() {
     log("filling password");
     await page.fill("#password-field", SIGNUP_PASSWORD);
 
-    log("checking terms-of-service checkbox (direct input only — the label wrapper contains a ToS link that navigates away)");
+    log("checking TOS checkbox");
     // DO NOT click the <label> — it wraps both the checkbox AND a "Terms of
     // Service" link; clicking the label text often lands on the link and
     // navigates to /terms. Click the checkbox input directly instead.
