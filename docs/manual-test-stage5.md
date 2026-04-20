@@ -66,7 +66,14 @@ export AGENTKEYS_EMAIL_PORT="993"
 
 Once the app password is set, the demo sees **zero 2FA prompts**. App passwords bypass 2FA by design — they're Google's non-interactive credential, scoped to IMAP only, revocable anytime.
 
-**5. Daemon running and paired** — see the Stage 4 manual test guide.
+**5. Build binaries + install provisioner-script deps (one-time).**
+
+```bash
+cd ~/Projects/agentkeys
+cargo build --workspace --release
+npm install --prefix provisioner-scripts
+npx playwright install chromium --with-deps
+```
 
 <details>
 <summary>Alternative: Google Workspace DWD (for operators with an existing Workspace subscription)</summary>
@@ -94,6 +101,64 @@ If you don't want to create a dedicated account and are OK with one-off OpenRout
 Downside: the agent doesn't fully control the inbox (shared with the human), and the OpenRouter confirmation email lingers in your personal mail until you delete it.
 
 </details>
+
+### Run it
+
+Two terminals. Everything runs from the repo root (`~/Projects/agentkeys`).
+
+**Terminal 1 — mock backend.** Stage 5a stores the provisioned key via the mock server (real Heima + TEE ships in v0.1). Leave this running.
+
+```bash
+cd ~/Projects/agentkeys
+cargo run --release -p agentkeys-mock-server -- --port 8090
+# Expected: "Mock server running on port 8090"
+```
+
+**Terminal 2 — provision.** Carry the four Gmail env vars from step 4 into this shell (or re-`export` them here). Then:
+
+```bash
+cd ~/Projects/agentkeys
+BIN=$(pwd)/target/release/agentkeys
+BACKEND=http://127.0.0.1:8090
+
+# 1. Initialize the master session (one-time per shell / mock restart).
+$BIN --backend $BACKEND init --mock-token stage5-demo
+# Expected: wallet printed; ~/.agentkeys/master/session.json created.
+
+# 2. Sanity-check the Gmail env vars landed in this shell.
+env | grep AGENTKEYS_EMAIL_
+# Expected: four AGENTKEYS_EMAIL_* lines matching step 4.
+
+# 3. Run the live OpenRouter provision.
+$BIN --backend $BACKEND provision openrouter
+# Expect ~30-90 s: browser opens headless, account created,
+# email verified, API key extracted + verified, stored in the mock backend.
+```
+
+**What this does under the hood:**
+
+- `init` authenticates the master CLI to the mock backend and caches the session token (OS keychain on macOS/Linux with keychain, file fallback otherwise).
+- `provision openrouter` runs `npx tsx provisioner-scripts/src/scrapers/openrouter.ts` against a real Chromium session, uses the Gmail IMAP creds from your exported env to read the confirmation email, extracts + verifies the key against `https://openrouter.ai/api/v1/models`, and stores it into the mock backend under the master session's wallet.
+- No daemon, no pairing — Stage 5a provision runs entirely as the master CLI. Daemon + pairing are Stage 4's flow for agent-side credential access, not needed for the live provision demo.
+
+**After it succeeds:**
+
+```bash
+# Read the full stored key back.
+$BIN --backend $BACKEND read openrouter
+# Expected: sk-or-v1-...
+
+# Verify it works against OpenRouter.
+curl -s -H "Authorization: Bearer $($BIN --backend $BACKEND read openrouter)" \
+  https://openrouter.ai/api/v1/models | head -c 200
+# Expected: HTTP 200 + a JSON body starting with {"data":[...
+```
+
+**Artifacts you can inspect:**
+
+- `~/.agentkeys/master/session.json` — the master session (wallet + bearer token).
+- `~/.agentkeys/logs/provision-<timestamp>.jsonl` — per-step audit trail (when present; full audit logging lands with 5b).
+- Stderr of `provision openrouter` — the single-shot step lines shown under "Expected behavior" below.
 
 ### Expected behavior
 
