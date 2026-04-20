@@ -51,16 +51,19 @@ The TEE is a **stateless computation oracle**. It reads chain state, performs cr
 **What it holds (TEE-internal, sealed/persistent):**
 
 
-| Data                                         | Lifetime                                                                        | How generated                                                                             | Purpose                                                                                   |
-| -------------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Shielding keypair                            | Permanent (sealed storage, pubkey registered on chain via `register_enclave()`) | Generated at enclave startup                                                              | Encrypt/decrypt credential blobs                                                          |
-| RSA JWT signing key                          | Permanent (stored as PKCS#1 DER file)                                           | `RsaPrivateKey::new(&mut rng, 2048)` — randomly generated, NOT derived from a master seed | Sign session tokens (JWT format) issued to clients                                        |
-| Per-user custodial wallet keys (BTC/ETH/TON) | Permanent (sealed, per `pallet-bitacross` pattern)                              | Generated per account creation, independently per user                                    | Sign on-chain extrinsics on behalf of user wallets. Private key never leaves the enclave. |
-| AES response keys                            | Ephemeral (per-request)                                                         | From `RequestAesKey` parameter                                                            | Encrypt sensitive responses to specific clients                                           |
-| Chain state cache (optional)                 | ≤ 1 block (~6s)                                                                 | Read from chain                                                                           | Performance optimization. Not authoritative — chain is truth.                             |
+| Data                                              | Lifetime                                                                                      | How generated                                                                                                                | Purpose                                                                                         |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| **TEE master seed**                               | Permanent (sealed storage, never leaves enclave, never exposed)                               | Generated once at first enclave provisioning from a hardware RNG (256-bit)                                                   | Root of all HD derivation. Every other key below derives from this seed.                        |
+| Shielding keypair                                 | Permanent (sealed storage, pubkey registered on chain via `register_enclave()`)               | Derived from master seed at path `shielding/v1` (SLIP-0010 / BIP-32-style HDKD)                                              | Encrypt/decrypt credential blobs                                                                |
+| Session-JWT signing key (ES256)                   | Permanent (sealed storage, pubkey registered on chain via `register_enclave()`)               | Derived from master seed at path `issuer/jwt/v1` (SLIP-0010, secp256r1 / NIST P-256)                                         | Sign 30-day session tokens (JWT format) issued to clients. Verified by TEE only — not exposed via public JWKS. |
+| OIDC-issuer signing key (ES256)                   | Permanent (sealed storage, pubkey published at `https://oidc.agentkeys.dev/.well-known/jwks.json`) | Derived from master seed at path `oidc/issuer/v1` (SLIP-0010, secp256r1 / NIST P-256)                                        | Sign short-lived (≤5 min) OIDC JWTs exchanged by daemons for AWS/GCP/Azure/Ali temp creds (Stage 7). Separate key so the publicly-rotatable OIDC trust anchor is isolated from the session-JWT trust anchor. |
+| Per-user custodial wallet keys (BTC/ETH/TON)      | Permanent (derived on demand, cacheable; deterministic re-derivation after restart)           | Derived from master seed at path `wallet/<chain>/<omni_account>/v1` (SLIP-0010)                                              | Sign on-chain extrinsics on behalf of user wallets. Private key never leaves the enclave.       |
+| Per-domain DKIM signing key (Stage 6)             | Permanent (derived on demand, public key published as DNS TXT record)                         | Derived from master seed at path `dkim/<domain>/v1` (Ed25519, RFC 8463)                                                      | Sign outbound mail for `@agentkeys-email.io` and user-owned domains                             |
+| AES response keys                                 | Ephemeral (per-request)                                                                       | From `RequestAesKey` parameter                                                                                               | Encrypt sensitive responses to specific clients                                                 |
+| Chain state cache (optional)                      | ≤ 1 block (~6s)                                                                               | Read from chain                                                                                                              | Performance optimization. Not authoritative — chain is truth.                                   |
 
 
-> **Correction (verified against Heima source 2026-04-12):** The TEE holds **multiple independent keys**, not a single master seed with HD derivation. The RSA JWT key, shielding key, and per-user wallet keys are each generated independently and stored separately. OmniAccount *addresses* are deterministically derived (`OmniAccountConverter::convert(&identity, &client_id)`), but the underlying *private keys* are not HD-derived.
+> **Desired architecture (this spec):** All long-lived TEE keys are deterministically derived from a single sealed master seed via SLIP-0010 HDKD. This makes the TEE's key surface infinitely extensible (new services add new derivation paths, no new randomness or new storage slots), supports clean disaster recovery (a reprovisioned enclave with the same sealed seed reconstructs every subkey), and matches how we already treat OmniAccount addresses. Current Heima source generates keys independently instead — the gap, its impact, and the migration path are tracked in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md).
 
 **What it does:**
 
@@ -515,17 +518,19 @@ This gets the per-read latency down to pure-TEE-backend levels for hot-path read
 
 ---
 
-## 6. Summary: the three rules
+## 6. Summary: the four rules
 
+> **Updated 2026-04-19** to (a) add rule #4 (credential broker, not operation proxy) after the email, knowledge-base, and OIDC-federation design rounds, and (b) re-anchor rule #2 on the DESIRED architecture: a single TEE master seed with SLIP-0010 HDKD for every long-lived subkey (shielding, issuer JWT, per-user wallet, per-domain DKIM). Current Heima source generates these independently — the gap list lives in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md).
 > **Corrected 2026-04-12** after verifying against the actual Heima source code (`litentry/heima` on GitHub). The previous version of rule #3 stated "clients hold only their own private keys" — this was wrong. Clients hold JWTs (bearer tokens), not private keys. All private keys live inside the TEE.
 
-The entire AgentKeys v0.1 architecture follows three rules:
+The entire AgentKeys v0.1 architecture follows four rules:
 
 1. **Chain stores everything persistent.** Account records, credential blobs (encrypted), pair requests, approvals, audit events, wallet balances, revocation lists. The chain is the single source of truth. If the TEE restarts, if the daemon crashes, if the user switches devices — chain state is always there.
-2. **TEE holds all private keys and does all computation.** The TEE holds the shielding key, the RSA JWT signing key, and per-user custodial wallet keys (per `pallet-bitacross` pattern). These are generated independently (not derived from a single master seed) and sealed inside the enclave. The TEE decrypts credential blobs, issues and verifies JWTs, signs on-chain extrinsics using the user's wallet key, and enforces scope + rate limits. No private key ever leaves the TEE.
-3. **Clients hold only a JWT (bearer token), not private keys.** The master CLI and agent daemon each hold a JWT string issued by the TEE upon authentication. The JWT is a signed bearer token (`AuthTokenClaims { sub, typ, exp, aud }`), not a private key. However, it IS still a bearer credential — anyone with the string can impersonate the user until it expires. **OS keychain is the recommended default** for the master CLI (provides app-level ACL against malware-as-same-user). Plain file (mode 0600) is an acceptable fallback for daemon/sandbox/CI where keychain isn't available. If the JWT leaks, the blast radius is bounded by its expiration time (~~24h) and the on-chain revocation list (~~6s). If the JWT expires, the client re-authenticates and gets a new one.
+2. **TEE holds all private keys and does all computation.** The TEE holds a single sealed master seed and deterministically derives every other long-lived key from it via SLIP-0010 HDKD: the shielding key (`shielding/v1`, Curve25519), the session-JWT signing key (`issuer/jwt/v1`, ES256), the OIDC-issuer key (`oidc/issuer/v1`, ES256, separate from the session-JWT key so the publicly-rotatable OIDC trust anchor is isolated from the internal session-JWT trust anchor), per-user custodial wallet keys (`wallet/<chain>/<omni_account>/v1`, per `pallet-bitacross` pattern), and per-domain DKIM signing keys (`dkim/<domain>/v1`, Ed25519, Stage 6). The TEE decrypts credential blobs, issues and verifies JWTs, signs on-chain extrinsics using the user's wallet key, signs outbound mail (BYODKIM — the DKIM key lives in the enclave, not at AWS SES), and enforces scope + rate limits. No private key ever leaves the TEE. (Current Heima source generates these keys independently rather than HD-derived — see [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) for the migration gap.)
+3. **Clients hold only a JWT (bearer token), not private keys.** The master CLI and agent daemon each hold a JWT string issued by the TEE upon authentication. The JWT is a signed bearer token (`AuthTokenClaims { sub, typ, exp, aud }`), not a private key. However, it IS still a bearer credential — anyone with the string can impersonate the user until it expires. **OS keychain is the recommended default** for the master CLI (provides app-level ACL against malware-as-same-user). Plain file (mode 0600) is an acceptable fallback for daemon/sandbox/CI where keychain isn't available. If the JWT leaks, the blast radius is bounded by its expiration time (**30 days**, per [Session Token](session-token)) and the on-chain revocation list (~6s). If the JWT expires, the client re-authenticates and gets a new one. There are three TTLs to keep straight: **30-day session bearer** (this rule), **≤5-min OIDC-federation JWT** (what the daemon exchanges at AWS STS / GCP WIF / Ali RAM for cloud temp creds, per [OIDC Federation](oidc-federation)), and **≤1-hour cloud temp creds** (AWS default). Nested: shortest TTL always wins; revocation still propagates in ≤6s via the chain.
+4. **AgentKeys brokers credentials, not operations.** Our infrastructure mints ephemeral credentials (JWTs, temp cloud creds, decrypted API keys) and emits audit extrinsics at mint time. The daemon then calls remote services (SES, S3, GitHub, Notion, LLM APIs, …) **directly** using those credentials — we never proxy per-operation reads/writes. Compute cost on our side scales with user count, not with operation frequency. Per-user isolation on shared cloud resources is enforced by the cloud itself via PrincipalTag / session-tag conditions derived from JWT claims (see [Tag-Based Access](tag-based-access)). This rule is why the email, knowledge-base, and OIDC-federation designs never build proxies, SaaS feature surfaces, or per-operation compute on our side.
 
-Every flow in the system (credential store, credential read, pairing, revocation, audit query) is an instance of:
+Every flow in the system (credential store, credential read, pairing, revocation, audit query, email read/send, knowledge-base ops) is an instance of:
 
 ```
 client sends request + JWT to TEE
@@ -540,7 +545,86 @@ No exceptions.
 
 ---
 
-## 7. References
+## 7. Security model: assumptions and attacker surface
+
+This section consolidates the trust assumptions the four rules rely on and the attacker surfaces those assumptions expose. It is the authoritative security summary for the architecture; individual wiki pages (e.g. [Key Security](key-security), [OIDC Federation](oidc-federation), [Tag-Based Access](tag-based-access)) cover narrower surfaces in more detail.
+
+### 7.1 Assumptions we take as given
+
+These are the foundational trust assumptions. If any breaks, the architecture's guarantees do not hold.
+
+| # | Assumption | What breaks if it fails |
+|---|---|---|
+| A1 | The TEE's attestation primitive (Intel SGX DCAP today) is sound — `mrenclave` + `mrsigner` + the attestation report cryptographically bind to the running code. | Rule #2 collapses — an attacker could run arbitrary code while claiming to be our enclave. |
+| A2 | The SGX master-seed sealing primitive (`SEAL_POLICY_MRSIGNER`) is sound. A sealed blob is readable only by enclaves sharing the same MRSIGNER. | HDKD collapses — the master seed leaks, all derived keys leak. |
+| A3 | SLIP-0010 HDKD is cryptographically sound for the algorithm families we use (Ed25519, secp256k1, NIST P-256/ES256). | Derived-key isolation breaks between purposes (`dkim/*`, `wallet/*`, `oidc/*`). |
+| A4 | The Heima parachain's finality and validator set are honest (BABE/GRANDPA assumptions). | Rule #1 collapses — chain state can be rewritten; grants and audit events lose meaning. |
+| A5 | At least one TEE worker is running unmodified, attested code (liveness). | We can still verify old chain state, but we can't mint new credentials or sign new extrinsics until a worker recovers. |
+| A6 | Standard internet PKI works for the Stage 7 OIDC URL: DNS resolves honestly, CAs don't misissue, the hosting tier isn't compromised. | URL-hijack window opens — see 7.3 below. Stage 7b (`pallet-oidc-pubkeys` + watchdog) collapses the blast window but does not eliminate the assumption. |
+| A7 | The operator's deploy pipeline for static OIDC artifacts (discovery doc, JWKS) has integrity. | Same class as A6 — attacker replaces what the URL serves. Stage 7b mitigation applies. |
+
+Assumptions A1–A5 are the "Heima + TEE" trust core and are shared with every other service built on Heima. A6–A7 are specific to our OIDC federation path and are the ones Stage 7b is designed to harden.
+
+### 7.2 What the four rules actually defend
+
+Rule-by-rule, what compromise **looks like under each rule** and what the blast radius is when the rule holds:
+
+| Rule | Holds means… | If compromised… |
+|---|---|---|
+| #1 Chain stores everything persistent | No off-chain state is load-bearing. Every grant, credential, audit event is reconstructible from chain + TEE. | An attacker who compromises our infrastructure (hosting, deploy pipeline, databases) cannot forge grants or hide audit events — the chain is still there. |
+| #2 TEE holds all private keys | No operational key (shielding, session-JWT, OIDC-issuer, per-user wallet, per-domain DKIM) exists outside the enclave. All derived from one sealed master seed via HDKD. | If the TEE is compromised, *all* operational keys are compromised. This is the "total compromise" case — see 7.4. If the TEE is not compromised, nothing short of extracting the master seed from SGX silicon gets you a key. |
+| #3 Clients hold only a JWT | The master CLI and agent daemon never hold a private key. If a client is compromised, the attacker gets a 30-day bearer at worst, not signing authority. | Leaked bearer → attacker impersonates until expiration (≤30 d) or on-chain revocation (≤6 s). They cannot forge new bearers, cannot sign extrinsics, cannot forge OIDC JWTs. |
+| #4 Credential broker, not operation proxy | Per-operation compute lives on the daemon. Our backend never holds operation-level data (email bodies, knowledge-base documents, trade payloads). | Breach of our operation path is bounded to metadata we already store — grants, audit events, addresses. Operation content stays on the user's daemon and the vendor's service. |
+
+### 7.3 Attacker surface by attack class
+
+Every attack vector we design against, what it enables, and which rule / Stage-7b layer blunts it.
+
+| Attack class | Requires attacker to… | Net capability without mitigation | Mitigation |
+|---|---|---|---|
+| **Bearer token theft** (malware on user's machine) | Read keychain / file storage of the master CLI or daemon | Impersonate user until token expires or is revoked | Short TTL (30 d), on-chain revocation (≤6 s), keychain ACL (Stage 3), memory hygiene (Stage 8) |
+| **TEE compromise** (hardware or microcode attack) | Extract master seed from SGX | Full, permanent compromise of all users | Out of scope for v0.1 — assumption A1/A2. DCAP + enclave upgrade path + MRSIGNER rotation (§7.5) are the operational responses |
+| **Chain attack** (51% validator collusion) | Finalize malicious blocks on Heima | Forge grants, hide audit events | Assumption A4 — shared with all Heima applications |
+| **OIDC URL hijack** (DNS / CA / hosting / deploy compromise) | Replace `oidc.agentkeys.dev` with attacker-controlled JWKS | Mint arbitrary JWTs accepted by AWS / GCP / Ali; federate to any user's cloud prefix | Stage 7 baseline: AWS thumbprint pinning, CAA, DNSSEC, 5-min JWT TTL. Stage 7b: `pallet-oidc-pubkeys` on-chain authoritative registry + watchdog (30–60 s detection) + daemon-side dual verify for our own infra. |
+| **Malicious enclave build signed by our MRSIGNER** | Compromise our enclave-signing key *and* push a build through our release pipeline | Mint JWTs with any `sub`/claims; all consumers pinning on MRSIGNER accept | Governance-gated `pallet-enclave-successors` (only authorized MRSIGNERs are accepted during seed handoff); release pipeline review; relying parties can opt into MRENCLAVE pinning (strict mode) for highest-security buckets |
+| **Bearer replay across audiences** | Steal a JWT minted for one `aud` | Use it against a different cloud | `aud` binding at JWT level; consumer-side `aud` condition in trust policies; 5-min TTL |
+| **Prefix-crossing on shared buckets** (user A tries to read user B's data) | Mint or obtain a JWT with wrong `agentkeys_user_wallet` value | Access another user's prefix on shared S3/OSS/GCS | PrincipalTag condition on bucket policy — enforced by the cloud, not us (see [Tag-Based Access](tag-based-access)) |
+| **Insider attack** (AgentKeys operator) | Access our deploy / AWS / hosting creds | Depends — see below | Chain-audit means every minted JWT is permanently logged; insider actions are forensically attributable. AWS-account SCPs, least-privilege IAM, CloudTrail → chain audit for tamper-evidence. |
+| **Registrar / DNS provider compromise** | Compromise our domain registrar | Silent URL takeover (subset of URL hijack class) | DNSSEC where supported; registrar-lock; monitoring via CT logs; Stage 7b watchdog detects drift |
+
+### 7.4 The "total compromise" case: TEE extraction
+
+The one failure mode this architecture cannot recover from *in place* is extraction of the master seed from a live enclave. That requires defeating SGX's sealing + attestation guarantees, which is an assumption-A1/A2 break. The operational response is:
+
+1. Detect: attestation-verification failures, out-of-band intelligence, unexplained signing-key usage patterns.
+2. Contain: revoke all active OIDC keys via `pallet-oidc-pubkeys::revoke_oidc_key`; freeze the affected enclave's submitter origin; pause grant issuance.
+3. Rotate: stand up a new enclave with a new master seed (fresh MRSIGNER if the signing key is also suspected); users must re-authenticate; on-chain custodial wallet addresses change (new derivations from new seed).
+4. Recover: chain state (grants, audit, non-custodial chain state) survives intact. User-scoped credentials (API keys stored in the old TEE) are lost and must be re-provisioned.
+
+This is a known disaster-recovery mode, not a routine operation. It is documented here so the scope is explicit.
+
+### 7.5 Routine key-rotation procedures
+
+Three rotation paths, each routine under HDKD + the new pallets (7b):
+
+- **OIDC-issuer key rotation** (`oidc/issuer/v1` → `v2`): new derivation path; both keys in JWKS during the grace window; `pallet-oidc-pubkeys` records both `kid`s as active; consumer JWKS cache refreshes naturally. No external party action required.
+- **Session-JWT key rotation** (`issuer/jwt/v1` → `v2`): same pattern, but the session-JWT key is internal (not on public JWKS). Clients re-authenticate gradually as old tokens expire; no coordinated flip.
+- **MRSIGNER rotation** (new enclave-signing key): one attested seed handoff from the old enclave to the new one; `pallet-enclave-successors::authorize_mrsigner(new_mrsigner, ...)` extrinsic lands before the handoff; JWKS / custodial wallets / DKIM DNS are **unchanged** because the master seed survived. Relying parties who pinned on MRSIGNER do a one-time trust-policy update (automatable via the `agentkeys oidc-rotate-trust` CLI — see [`docs/spec/post-v0.1-future-work.md`](../docs/spec/post-v0.1-future-work.md) §3.1).
+
+See [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) §8 and §9 for the pallet specifications and the MRSIGNER-rotation runbook.
+
+### 7.6 What this section does *not* cover
+
+Narrower surfaces with their own dedicated pages:
+
+- Daemon-side credential lifecycle (memory hygiene, zeroization, keyring ACL) → [Key Security](key-security).
+- Per-domain DKIM + outbound-mail provenance → [Email System](email-system) §Security.
+- Per-user isolation on shared cloud buckets → [Tag-Based Access](tag-based-access) §Security properties.
+- JWT format, claim semantics, and consumer-trust-policy patterns → [OIDC Federation](oidc-federation) + [Tag-Based Access](tag-based-access).
+
+---
+
+## 8. References
 
 ### Spec documents
 

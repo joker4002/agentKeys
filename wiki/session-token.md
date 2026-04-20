@@ -64,12 +64,12 @@ TEE signs a session token with its RSA private key:
 TEE returns the token string to the client
 ```
 
-The RSA signing key:
+The issuer signing key:
 
-- Lives inside the TEE (sealed storage)
-- Is a 2048-bit RSA key generated randomly (`RsaPrivateKey::new(&mut rng, 2048)`)
-- Is NOT derived from a master seed — it's an independent key per TEE worker instance
-- Public key is derivable from the private key for verification
+- Lives inside the TEE (sealed storage), derived from the sealed TEE master seed at path `issuer/jwt/v1` via SLIP-0010 HDKD — the same seed that roots the shielding key, per-user wallet keys, OIDC-issuer key, and per-domain DKIM keys (see [Blockchain TEE Architecture §1](blockchain-tee-architecture#tee-trusted-execution-environment-worker) and [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) for the current-vs-desired gap)
+- Alg is **ES256** (ECDSA P-256, SHA-256 digest). This is the TEE's internal trust anchor for the 30-day session bearer and is verified only by TEE workers — not exposed on any public JWKS endpoint.
+- The session-JWT key is **separate** from the public OIDC-issuer key (`oidc/issuer/v1`, also ES256). Separation keeps the public-facing, rotatable OIDC trust anchor isolated from the internal session-JWT anchor, so an OIDC-issuer rotation (driven by AWS cache windows) does not invalidate every live session token.
+- Public key published on chain via `register_enclave()` for on-chain verification by other Heima components.
 
 ---
 

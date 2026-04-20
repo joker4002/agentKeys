@@ -454,7 +454,40 @@ See `docs/spec/plans/development-stages.md` Stage 8 section for the full deliver
 
 ---
 
-## 10. What was broken in the manual-test doc
+## 10. Server-side trust anchors and URL-hijack defense
+
+This doc focuses on **client-side** credential storage: keychain vs file, memory hygiene, the daemon's credential lifecycle. It does not cover the **server-side** trust anchors our architecture introduced for Stage 6/7 (OIDC federation, DKIM, per-user PrincipalTag). Those are documented authoritatively in [Blockchain TEE Architecture §7 — Security model: assumptions and attacker surface](blockchain-tee-architecture#7-security-model-assumptions-and-attacker-surface).
+
+### What's covered there that matters to a client-security reader
+
+- **Four architectural rules** and what each rule actually defends against (bearer theft, TEE compromise, chain attack, OIDC URL hijack, etc.).
+- **Attacker-surface matrix by attack class** — columns for what the attacker needs to achieve, net capability without mitigation, and the mitigation we ship.
+- **The "total compromise" disaster-recovery case** for TEE-extraction scenarios.
+- **Routine key-rotation procedures** for the three rotation paths (OIDC-issuer, session-JWT, MRSIGNER) — all kept cheap under HDKD (gap §2) + the two new pallets (gap §8, §9).
+
+### New threat class introduced by Stage 7 OIDC federation
+
+**OIDC URL hijack.** `https://oidc.agentkeys.dev` is a public HTTPS endpoint serving our JWKS. Stage 7's cryptographic trust anchor is URL + TLS + JWKS signature. Attackers who compromise DNS / CA / hosting / deploy pipeline can replace the JWKS and mint JWTs that downstream clouds (AWS / GCP / Ali) accept.
+
+- **Baseline hardening in Stage 7 (no blockchain):** AWS thumbprint pinning, CAA DNS records, DNSSEC where supported, 5-min JWT TTL, short `Cache-Control` on JWKS. These reduce the attack surface but don't close it.
+- **Chain-anchored defense in Stage 7b:** `pallet-oidc-pubkeys` + off-chain watchdog + daemon-side dual-verify for AgentKeys-owned accounts. Detection + auto-revocation in 30–60 s. Full spec in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) §8.
+- **TEE-hosted OIDC endpoint (future work):** defers past v0.1; closes the hole on foreign clouds too. Tracked in [`docs/spec/post-v0.1-future-work.md`](../docs/spec/post-v0.1-future-work.md) §2.1.
+
+### How this doc's client-side model interacts with the server-side model
+
+Client-side (what this doc covers) and server-side (blockchain-tee-architecture §7) defenses are additive; neither replaces the other:
+
+- Client-side keychain / memory hygiene defends bearer-token leakage on a user's machine.
+- Server-side OIDC / PrincipalTag defends against a compromised client failing into another user's data or privilege.
+- **If both hold**, user-A compromise bounds to user-A's 30-day blast radius, and even then only against operations user-A was grant-authorized for.
+- **If client-side breaks** (bearer stolen), server-side still enforces per-user isolation at the cloud layer.
+- **If server-side breaks** (TEE compromise), client-side keychain is irrelevant — the attacker has signing authority.
+
+The two models are designed against **different adversaries** — client-side against local malware and opportunistic attackers on the user's device; server-side against infrastructure attackers with PKI / cloud / deploy-pipeline reach. Shipping both is the whole story.
+
+---
+
+## 11. What was broken in the manual-test doc
 
 Two bugs in `docs/manual-test-stage4.md` found during this investigation:
 
@@ -468,7 +501,7 @@ Both should be fixed together. The right fix is to add `agentkeys whoami` (see h
 
 ---
 
-## 11. References
+## 12. References
 
 ### Spec documents
 

@@ -7,359 +7,97 @@
 > `/agentkeys-record-scraper` skill usage) is not yet shipped and is tested
 > separately once 5b lands. Stage 6 (npm packaging) is deferred to v0.1.
 
-> **Hermetic vs live.** Stage 5a tests fall into two groups:
-> - **Hermetic** — Playwright runs against local HTML fixtures via `page.route()`.
->   No real network, no real Gmail, no real OpenRouter. These are the *unit
->   and chaos tests* and can run on any machine with Node + Playwright.
-> - **Live provision** — creates a real OpenRouter account via a real Chromium
->   session, real Gmail IMAP, real HTTP call to openrouter.ai. Requires
->   Gmail plus-addressing creds **and** a ToS compliance check (tracked in
->   `TODOS.md`) before running. The live test is documented here but *do not*
->   run it until the ToS check completes.
+Stage 5a has two tests that matter:
 
-All manual tests target the workspace layout:
-```
-crates/agentkeys-{types,provisioner,mcp,cli}
-provisioner-scripts/{src,tests}
-harness/
-```
+1. **The live demo** — a real OpenRouter signup, real Gmail, real API key stored and verified. This is what you run to show Stage 5a actually works end-to-end. Written up top; this is the centerpiece.
+2. **Everything else** — Rust + TS unit tests, phantom-key chaos, grep guard, typecheck, clippy, MCP registration, observability metrics. All of it runs in one command: `bash harness/stage-5a-done.sh`. No per-section prose required.
 
 ---
 
-## 1. Fast gate (30 seconds, no external deps)
+## 1. The demo — live OpenRouter provision
 
-The quickest way to verify Stage 5a is intact. Run this first after any change
-that touches Stage 5a files.
+> ⛔ **DO NOT RUN YET — blocked on ToS check.** The OpenRouter ToS compliance item in `TODOS.md` must clear first. Running this before the check may violate OpenRouter's terms and create a real account tied to your email.
 
-```bash
-cd ~/Projects/agentkeys
-bash harness/stage-5a-done.sh
-```
-
-**Expected output ends with:**
-```
-STAGE 5a PASSED
-```
-
-This script runs:
-1. `cargo test -p agentkeys-types -p agentkeys-provisioner -p agentkeys-mcp -p agentkeys-cli`
-2. `npm test --prefix provisioner-scripts`
-3. `grep -iE "openrouter|brave|jina|groq|anthropic|gemini|twitter|instagram" provisioner-scripts/src/patterns/` (must be empty)
-4. Isolated phantom-key chaos test (hermetic)
-
-Exit 0 = everything green. Exit non-zero = stage broken, do not merge.
-
----
-
-## 2. Setup (one-time, for the deeper manual tests below)
-
-```bash
-cd ~/Projects/agentkeys
-
-# Build all binaries + install TS deps
-cargo build --workspace --release
-npm install --prefix provisioner-scripts
-npx playwright install chromium --with-deps  # downloads the headless browser
-
-# Convenience aliases
-alias agentkeys="./target/release/agentkeys-cli"
-alias agentkeys-daemon="./target/release/agentkeys-daemon"
-alias agentkeys-mock-server="./target/release/agentkeys-mock-server"
-```
-
----
-
-## 3. Hermetic tests — run these any time
-
-### 3a. Rust unit tests (67 tests)
-
-```bash
-cargo test -p agentkeys-types       # 8 tests — includes ProvisionEvent serde roundtrips
-cargo test -p agentkeys-provisioner # 15 tests — subprocess IPC + mutex + orchestrator
-cargo test -p agentkeys-mcp         # 3 tests — agentkeys.provision tool registration
-cargo test -p agentkeys-cli         # 41 tests — includes 4 new provision tests
-```
-
-All 4 crates should exit 0 with no failures.
-
-### 3b. TypeScript unit tests (15 tests)
-
-```bash
-npm install --prefix provisioner-scripts
-npm test --prefix provisioner-scripts
-```
-
-**Expected:**
-```
-Test Files  6 passed (6)
-     Tests  15 passed (15)
-```
-
-Breakdown:
-- `src/types.test.ts` (3) — ProvisionEvent emit + roundtrip
-- `src/lib/email.test.ts` (3) — IMAP happy/timeout/wrong-pattern
-- `src/lib/verify.test.ts` (3) — 200/401/503 status mapping
-- `tests/scrapers/openrouter.test.ts` (3) — scraper happy/selector-timeout/verification-failure
-- `tests/patterns/signup_email_otp.test.ts` (2) — pattern happy/selector-timeout
-- `tests/scrapers/openrouter.phantom.test.ts` (1) — phantom-key chaos
-
-### 3c. Phantom-key chaos test in isolation
-
-The key defense against silent-corrupt credentials. Fake-shaped key → verify() returns 401 → Error event, no Success.
-
-```bash
-cd provisioner-scripts
-npx vitest run tests/scrapers/openrouter.phantom.test.ts
-cd -
-```
-
-**Expected ending:**
-```
- ✓ tests/scrapers/openrouter.phantom.test.ts (1) ...
-   ✓ scraper (1) ...
-     ✓ phantom_key_caught ...
-
- Test Files  1 passed (1)
-      Tests  1 passed (1)
-```
-
-You will **not** see an `{"type":"error",...}` line in the terminal — the test intercepts stdout via a `process.stdout.write` proxy (`captureEmittedEvents` in the test file) and asserts programmatically that an Error event was emitted and no Success event was. The `✓ phantom_key_caught` is the signal the gate held.
-
-If this test ever fails, or a variant starts passing with a Success event present, **stop** — the verification gate is broken and a real phantom key could be stored in production. File an issue immediately.
-
-### 3d. Pattern grep guard
-
-Patterns must never reference service-specific strings. Enforce:
-
-```bash
-grep -riE "openrouter|brave|jina|groq|anthropic|gemini|twitter|instagram" \
-  provisioner-scripts/src/patterns/
-```
-
-**Expected:** empty (no output). Any match means a pattern has leaked service-specific selectors or copy — extract them back into `scrapers/<service>.ts` parameters.
-
-### 3e. Typecheck
-
-```bash
-npm run typecheck --prefix provisioner-scripts
-```
-
-**Expected:** exit 0, no TypeScript errors.
-
-### 3f. Clippy (Rust lints)
-
-```bash
-cargo clippy -p agentkeys-types -p agentkeys-provisioner -p agentkeys-mcp -p agentkeys-cli --all-targets
-```
-
-**Expected:** zero warnings in the Stage 5a crates. (Warnings in other crates like `agentkeys-mock-server` or `agentkeys-core` are pre-existing and out of scope.)
-
----
-
-## 4. Scraper walkthrough — inspect what it does without running live
-
-This is a read-only tour of how a provision actually works, useful when debugging
-a failing scraper or onboarding a new service.
-
-### 4a. Inspect the Rust ↔ TS wire format
-
-Every line the TS subprocess emits is a tagged JSON event. Open two terminals.
-
-Terminal 1 — show the schema:
-```bash
-cat crates/agentkeys-types/src/provision.rs | grep -A 20 "enum ProvisionEvent"
-```
-
-Terminal 2 — show the TS mirror:
-```bash
-cat provisioner-scripts/src/types.ts | grep -A 15 "ProvisionEvent"
-```
-
-Fields match. JSON snake_case. `type` is the discriminator. This is the IPC contract.
-
-### 4b. Run the scraper against the hermetic fixture only
-
-The OpenRouter scraper can run with the local HTML fixture served via Playwright `page.route()`. No real network, no real OpenRouter.
-
-```bash
-cd provisioner-scripts
-npx vitest run tests/scrapers/openrouter.test.ts --reporter=verbose
-cd -
-```
-
-Three scenarios run:
-- `scraper::happy_path` — scraper walks the fixture, emits Progress events, extracts the fixture key, verify() returns valid, Success event fires
-- `scraper::selector_timeout` — fixture served without the email input; scraper emits a Tripwire event within 15s
-- `scraper::verification_failure` — mock verifier returns `{valid:false, reason:"phantom"}`; scraper emits an Error event
-
-Watch the `console.log` output for the emitted events in each test.
-
----
-
-## 5. MCP tool registration check
-
-Verify `agentkeys.provision` is discoverable through the daemon's MCP interface.
-
-### 5a. Start the daemon in a scratch environment
-
-Terminal 1:
-```bash
-cd ~/Projects/agentkeys
-
-# Start the mock backend (needed by daemon for credential backend wiring)
-cargo run -p agentkeys-mock-server -- --port 8090 &
-MOCK_PID=$!
-
-# Give it a second to bind
-sleep 1
-
-# Run the daemon with a test session seam (per Stage 3 test-seam pattern).
-# AGENTKEYS_SESSION injects a pre-built session and bypasses the pair flow —
-# without it the daemon blocks on master-device approval before serving MCP
-# (see crates/agentkeys-daemon/src/main.rs and src/session.rs). Any string
-# works for the token value; `test-token` is a convention.
-AGENTKEYS_BACKEND=http://localhost:8090 \
-  AGENTKEYS_SESSION=test-token \
-  cargo run -p agentkeys-daemon -- --stdio
-```
-
-The daemon is now listening for MCP JSON-RPC on stdin/stdout. You should see `daemon ready, session wallet=local` on stderr and **no** `Pair code:` prompt.
-
-### 5b. List tools (Terminal 2, via a scratch stdin pipe)
-
-The daemon reads JSON-RPC from stdin. Easiest way to exercise it without an MCP client is a one-shot. The same `AGENTKEYS_SESSION` test-seam is required here, otherwise the daemon sits in the pair flow and never reads the piped JSON.
-
-```bash
-cd ~/Projects/agentkeys
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | \
-  AGENTKEYS_BACKEND=http://localhost:8090 \
-  AGENTKEYS_SESSION=test-token \
-  cargo run -p agentkeys-daemon -- --stdio 2>/dev/null
-```
-
-**Expected:** the response JSON includes an entry with `"name":"agentkeys.provision"` and the schema `{"service":"string","force":"boolean (optional)"}`.
-
-If you see `Pair code: ... Approve on your Master device. OTP: ...` on the terminal, the `AGENTKEYS_SESSION` env var didn't propagate — double-check it's on the same shell line as the `cargo run` invocation.
-
-### 5c. Confirm the in-progress sentinel
-
-(Advanced — requires sending a provision call then immediately a second one. Easier via unit tests: `mcp::provision_in_progress_error` in `crates/agentkeys-mcp/src/lib.rs`.)
-
-```bash
-cargo test -p agentkeys-mcp -- provision_in_progress_error --nocapture
-```
-
-**Expected:** test passes; the output confirms a second concurrent call returns an MCP error with `code: "PROVISION_IN_PROGRESS"`.
-
-### 5d. Cleanup
-
-```bash
-kill $MOCK_PID
-```
-
----
-
-## 6. CLI UX walkthrough
-
-All CLI provision tests can run without any real signup. They use the mock backend and a test-seam provisioner.
-
-### 6a. Masked key output format
-
-```bash
-cargo test -p agentkeys-cli --test cli_tests -- cli_provision_masked_output --nocapture
-```
-
-**Expected:** test passes. The test calls `run_provision()` in-process (it does not spawn the `agentkeys-cli` binary), feeds a scripted success event with raw key `sk-or-v1-realkey12345abcdefgh`, and asserts the returned `obtained_key_masked` field satisfies four properties:
-
-1. Does **not** contain the raw key substring `realkey12345abcdefgh`.
-2. Contains `****` as the mask marker.
-3. Starts with the first 8 raw chars (`sk-or-v1`).
-4. Ends with the last 4 raw chars (`efgh`).
-
-Because the assertions run on the in-memory struct, you will **not** see a masked-key line in stdout — only the `provision_metric` JSON lines tracing emits and the usual `test ... ok` banner. To observe the real stdout masking behavior of the CLI binary, run a full hermetic provision separately (§8 once unblocked, or a scripted provision against the mock backend).
-
-### 6b. `--force` flag re-provisions
-
-```bash
-cargo test -p agentkeys-cli --test cli_tests -- cli_provision_force_flag --nocapture
-```
-
-**Expected:** test passes. With an existing credential present, `--force` triggers a fresh subprocess call (not the verify-and-return shortcut).
-
-### 6c. Duplicate provision verify-and-report
-
-```bash
-cargo test -p agentkeys-cli --test cli_tests -- cli_provision_duplicate_verified --nocapture
-```
-
-**Expected:** test passes. With an existing credential, no `--force`, the CLI prints to stderr `openrouter already provisioned, key valid`, prints the masked existing key on stdout, and does NOT re-run the subprocess.
-
-### 6d. Error message format (problem + cause + fix + docs)
-
-```bash
-cargo test -p agentkeys-cli --test cli_tests -- cli_provision_error_format --nocapture
-```
-
-**Expected:** test passes. Error output to stderr contains (in order):
-- `Problem: ...`
-- `Cause: ...`
-- `Fix: ...`
-- `Docs: https://...`
-
-This is the CLAUDE.md-specified error format. Verify manually by triggering any known-bad state (e.g. missing AGENTKEYS_BACKEND) and checking the stderr shape.
-
----
-
-## 7. Observability check — structured metrics
-
-The orchestrator emits JSON log lines to stderr for each metric. Easiest to see via a subprocess run in a test:
-
-```bash
-cargo test -p agentkeys-provisioner -- stores_credential --nocapture 2>&1 | \
-  grep "provision_metric"
-```
-
-**Expected:** at least three log lines of the form:
-```
-{"level":"info","event":"provision_metric","name":"tier_used","service":"openrouter","tier":2}
-{"level":"info","event":"provision_metric","name":"duration_seconds","service":"openrouter","seconds":0.123}
-{"level":"info","event":"provision_metric","name":"verification_result","service":"openrouter","result":"valid"}
-```
-
-The metric names are stable (`tier_used`, `duration_seconds`, `trip_wire_fired`, `verification_result`). Prometheus/OTel exporters come in v0.1.
-
----
-
-## 8. Live provision (DO NOT RUN YET — blocked on ToS check)
-
-This is the end-to-end test that actually creates a real OpenRouter account.
-**Do not run until** the TODOS.md OpenRouter ToS compliance check completes.
-Running this test before the ToS check may violate OpenRouter's terms and
-create a real account tied to your email.
-
-### Prerequisites (when ToS check clears)
-
-1. **Your existing personal Gmail account** — do **not** create a new Gmail account for this demo. Plus-addressing is a Gmail-native feature: mail sent to `you+anything@gmail.com` is delivered to `you@gmail.com` without any configuration, so a single personal inbox already supports unlimited test aliases (e.g. `you+stage5test-20260418@gmail.com`). Creating a fresh Gmail account for automation purposes risks Google flagging it as a bot account and could itself violate Google's ToS; the whole point of plus-addressing is to avoid that.
-2. Gmail app password (not your regular password) — generate at https://myaccount.google.com/apppasswords. This is scoped to IMAP access only; revoke it after the demo.
-3. Environment:
-   ```bash
-   export AGENTKEYS_EMAIL_BACKEND=gmail
-   export AGENTKEYS_EMAIL_USER="you@gmail.com"             # your real Gmail; Stage 5a appends the +alias at signup time
-   export AGENTKEYS_EMAIL_PASSWORD="<app password>"         # from step 2, NOT your normal Google password
-   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"             # default, set explicitly if overriding
-   export AGENTKEYS_EMAIL_PORT="993"
-   ```
-4. Daemon running and paired (see Stage 4 manual test guide)
-
-### Run the provision
+This is the end-to-end test that actually creates a real OpenRouter account. One command, and by the end you have a verified API key stored in `agentkeys`:
 
 ```bash
 agentkeys provision openrouter
 ```
 
+### Prerequisites (once the ToS check clears)
+
+For the demo-only purpose of Stage 5, the goal is the **shortest path to a running provisioner** with an inbox the agent fully controls. Use a dedicated personal Gmail below — reuses our existing IMAP code path, ~10 minutes total setup, no Workspace subscription required.
+
+> **This is a temporary demo solution.** For production (v0.1), the agent mailbox moves to SES-hosted `*@agentkeys-email.io` under the three-layer `TokenAuthority` abstraction. See the [email-system wiki page](../wiki/email-system.md) for the full architecture and why we're running demo-and-production on different backends deliberately.
+
+#### 🚀 Demo path: dedicated personal Gmail + TOTP + app password
+
+Why dedicated (not your personal inbox with plus-addressing): the agent gets a clean inbox it fully controls, no personal mail pollution, cleanup is a single account-delete.
+
+**1. Create a fresh Gmail account for the bot.**
+
+Sign up at [accounts.google.com](https://accounts.google.com) with a name like `wildmeta-stage5-demo@gmail.com`. Google will ask for a recovery phone — use your personal phone; you only need it once for step 2.
+
+**2. Enable 2-Step Verification and enroll TOTP as the second factor.**
+
+Gmail IMAP access chain: `app password` requires `2FA enabled` requires `second factor enrolled`. Using an authenticator app as that second factor makes the account non-interactive after this one-time enrollment.
+
+- Open [myaccount.google.com](https://myaccount.google.com) → **Security**
+- **Turn on 2-Step Verification.** Google sends an SMS to your recovery phone to start enrollment.
+- Under 2-Step Verification settings, add **Authenticator app** as a second step. Google shows a QR code and a secret.
+- Scan into Google Authenticator / Authy / 1Password / Bitwarden / whatever TOTP client you already use. You now own the second factor.
+- (Optional) once TOTP is active, you can drop SMS as a 2FA method — Google keeps the phone for account recovery but stops using it as a live second factor.
+
+**3. Generate an app password for IMAP.**
+
+- Visit [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+- Create one named "agentkeys-stage5". Google gives you a 16-character password.
+- Copy it immediately — it's shown once. Revoke anytime from the same page.
+
+**4. Export the four env vars.**
+
+```bash
+export AGENTKEYS_EMAIL_BACKEND=gmail
+export AGENTKEYS_EMAIL_USER="wildmeta-stage5-demo@gmail.com"   # the bot account from step 1
+export AGENTKEYS_EMAIL_PASSWORD="xxxx xxxx xxxx xxxx"          # 16-char app password from step 3
+export AGENTKEYS_EMAIL_HOST="imap.gmail.com"
+export AGENTKEYS_EMAIL_PORT="993"
+```
+
+Once the app password is set, the demo sees **zero 2FA prompts**. App passwords bypass 2FA by design — they're Google's non-interactive credential, scoped to IMAP only, revocable anytime.
+
+**5. Daemon running and paired** — see the Stage 4 manual test guide.
+
+<details>
+<summary>Alternative: Google Workspace DWD (for operators with an existing Workspace subscription)</summary>
+
+See [`docs/stage5-workspace-email-setup.md`](stage5-workspace-email-setup.md). That path mints a throwaway `stage5test-<timestamp>@wildmeta.ai` per run, reads its inbox via the Gmail API (no app password, no interactive OAuth), and deletes the user at the end. One-time ~20-minute admin setup + currently 3-5 days of code work to replace the `imapflow` fetcher with a Gmail-API fetcher that uses DWD impersonation. Longer upfront cost than the dedicated-Gmail demo path, but the right choice for enterprise deployments that already run Workspace.
+
+</details>
+
+<details>
+<summary>Alternative: plus-addressed personal Gmail (shared-inbox quick demo)</summary>
+
+If you don't want to create a dedicated account and are OK with one-off OpenRouter mail landing in your real inbox, plus-addressing on your existing Gmail works for a single demo run.
+
+1. **Your existing personal Gmail account** — plus-addressing is a Gmail-native feature: mail sent to `you+anything@gmail.com` is delivered to `you@gmail.com` without any configuration. A single inbox supports unlimited test aliases (`you+stage5test-20260418@gmail.com`).
+2. **Gmail app password** (not your regular password) — generate at https://myaccount.google.com/apppasswords. Scoped to IMAP access only; revoke after the demo.
+3. **Environment:**
+   ```bash
+   export AGENTKEYS_EMAIL_BACKEND=gmail
+   export AGENTKEYS_EMAIL_USER="you@gmail.com"      # your real Gmail; Stage 5a appends +alias at signup
+   export AGENTKEYS_EMAIL_PASSWORD="<app password>" # NOT your normal Google password
+   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"
+   export AGENTKEYS_EMAIL_PORT="993"
+   ```
+
+Downside: the agent doesn't fully control the inbox (shared with the human), and the OpenRouter confirmation email lingers in your personal mail until you delete it.
+
+</details>
+
 ### Expected behavior
 
-1. Stderr shows step lines (currently single-shot; real-time streaming ships in 5b):
+1. Stderr shows single-shot step lines (real-time streaming ships in 5b):
    ```
    Creating account...
    Waiting for email verification...
@@ -367,68 +105,115 @@ agentkeys provision openrouter
    Verifying key against openrouter.ai...
    Stored.
    ```
-2. Stdout shows the masked key, e.g.:
+2. Stdout shows the masked key:
    ```
    sk-or-v1-abcd1234****...WXYZ
    ```
 3. Exit code 0.
-4. A new OpenRouter account exists at `you+stage5test-<timestamp>@gmail.com`.
+4. A new OpenRouter account exists at the email address you configured in `$AGENTKEYS_EMAIL_USER` (e.g. `wildmeta-stage5-demo@gmail.com` for the dedicated-Gmail path, or `you+stage5test-<timestamp>@gmail.com` for the plus-addressing fallback).
 5. `agentkeys read openrouter` returns the full key.
-6. Manually calling `curl -H "Authorization: Bearer $(agentkeys read openrouter)" https://openrouter.ai/api/v1/models` returns HTTP 200.
+6. `curl -H "Authorization: Bearer $(agentkeys read openrouter)" https://openrouter.ai/api/v1/models` returns HTTP 200.
 
 ### Failure modes to watch for
 
-- **CAPTCHA / Cloudflare challenge** — the Tier 2 script does not solve CAPTCHAs. Expect a Tripwire event with `kind: selector_timeout`. This is the signal that Stage 5b's agentic fallback is needed (human or LLM drives the browser through the challenge). Until 5b ships, just abort and retry from a different IP.
-- **Email didn't arrive within 60s** — check spam folder, check plus-addressing is actually forwarding. Tripwire `email_timeout` indicates the IMAP fetch exhausted its polling window.
-- **Key verification fails with `phantom`** — the scraper extracted something key-shaped that isn't a real API key. Inspect the page at the success-step selector; OpenRouter may have changed its DOM. File an issue with the HAR dump.
-- **Store fails after verify** — the error message will include the obtained (masked) key. Run `agentkeys store openrouter <full-key-you-still-have>` manually to recover, then investigate why the backend rejected.
+- **CAPTCHA / Cloudflare challenge** — the Tier 2 script does not solve CAPTCHAs. Expect a Tripwire event with `kind: selector_timeout`. This is the signal that Stage 5b's agentic fallback is needed. Until 5b ships, abort and retry from a different IP.
+- **Email didn't arrive within 60 s** — check spam, check plus-addressing forwarding. Tripwire `email_timeout` means the IMAP fetch exhausted its polling window.
+- **Key verification fails with `phantom`** — the scraper extracted something key-shaped that isn't a real API key. OpenRouter may have changed its DOM; inspect the page at the success-step selector and file an issue with the HAR dump.
+- **Store fails after verify** — the error message includes the obtained (masked) key. Run `agentkeys store openrouter <full-key-you-still-have>` manually to recover, then investigate why the backend rejected.
 
 ---
 
-## 9. Troubleshooting
+## 2. Everything else — one command
+
+Runs every non-live check in a single script. Use this before merging anything that touches Stage 5a crates or `provisioner-scripts/`.
+
+```bash
+cd ~/Projects/agentkeys
+bash harness/stage-5a-done.sh
+```
+
+**Expected last line:**
+```
+STAGE 5a PASSED
+```
+
+Exit 0 = everything green. Non-zero = the failing step number and a red `✗` line. Do not merge on red.
+
+### What the script runs
+
+| # | Step | Asserts |
+|---|---|---|
+| 1 | Rust unit tests (`agentkeys-types`, `-provisioner`, `-mcp`, `-cli`) | 67 tests pass |
+| 2 | TS install + `npm test` | 15 tests pass across 6 files |
+| 3 | Phantom-key chaos test in isolation | silent-corrupt defense holds — Error event fires, no Success |
+| 4 | Grep guard over `provisioner-scripts/src/patterns/` | zero service-specific strings leaked into patterns |
+| 5 | TS typecheck | no TypeScript errors |
+| 6 | `cargo clippy` on Stage 5a crates with `-D warnings` | zero clippy warnings |
+| 7 | MCP `tools/list` on the daemon (with the `AGENTKEYS_SESSION` test seam) | `agentkeys.provision` advertised |
+| 8 | Observability | orchestrator emits `tier_used`, `duration_seconds`, `verification_result` as JSON metric lines |
+
+### Setup (one-time)
+
+If any step fails with a "command not found" or "workspace member not found" error, you probably haven't installed dependencies yet:
+
+```bash
+cd ~/Projects/agentkeys
+cargo build --workspace --release
+npm install --prefix provisioner-scripts
+npx playwright install chromium --with-deps
+```
+
+---
+
+## 3. Troubleshooting
 
 ### `npm test` hangs
 
-Playwright might be waiting for a browser that isn't installed.
+Playwright is waiting for a browser that isn't installed:
+
 ```bash
 npx playwright install chromium --with-deps
 ```
 
-### `cargo test` complains about missing `agentkeys-provisioner`
-
-The workspace member might not be listed in the top-level `Cargo.toml`. Check `[workspace]/members` contains `crates/agentkeys-provisioner`.
-
 ### Grep guard fails
 
-A pattern in `provisioner-scripts/src/patterns/` has a service-specific string. Find it:
+A pattern under `provisioner-scripts/src/patterns/` has a service-specific string. Find it:
+
 ```bash
 grep -rniE "openrouter|brave|jina|groq|anthropic|gemini|twitter|instagram" \
   provisioner-scripts/src/patterns/
 ```
+
 Extract the offender into a parameter in the calling scraper under `scrapers/`.
 
 ### Phantom chaos test passes with a Success event
 
-**Critical.** The verification gate is broken. Check:
-1. `provisioner-scripts/src/lib/verify.ts` — the fetch function actually returns 401 from the mock?
-2. `provisioner-scripts/src/scrapers/openrouter.ts` — the Success event is only emitted AFTER verify returns `{valid:true}`?
-3. The phantom test's `route.fulfill()` — the mock verify endpoint is actually being intercepted?
+**Critical.** The verification gate is broken. Check, in order:
+
+1. `provisioner-scripts/src/lib/verify.ts` — does the fetch actually return 401 from the mock?
+2. `provisioner-scripts/src/scrapers/openrouter.ts` — is Success only emitted AFTER verify returns `{valid:true}`?
+3. The phantom test's `route.fulfill()` — is the mock verify endpoint actually being intercepted?
 
 Fix before merging anything. Silent-corrupt-credential is the primary threat this defends against.
 
-### Clippy says "useless_vec" or "useless_format"
+### MCP step reports `Pair code: …`
 
-These are slop markers. Apply the suggested `cargo clippy --fix` or replace `vec![...]` with `[...]` arrays / `format!("literal")` with `.to_string()`. Deslop passes catch these.
+The `AGENTKEYS_SESSION=test-token` test seam didn't reach the daemon — the env var needs to be on the same shell line as the binary invocation. The script already does this; if you're re-running step 7 by hand, make sure you keep the env vars on the same line.
+
+### Clippy says `useless_vec` / `useless_format`
+
+These are slop markers. Apply the suggested `cargo clippy --fix` or hand-replace `vec![...]` with `[...]` arrays and `format!("literal")` with `.to_string()`. Deslop passes catch these.
 
 ---
 
-## What to do when Stage 5b lands
+## 4. What to do when Stage 5b lands
 
-When Stage 5b ships (agentic fallback, `/agentkeys-record-scraper` skill, script generation loop), this document will grow new sections for:
-- Triggering the agentic fallback via a failing Tier 2 script (expected Tripwire → Tier 3 engagement)
-- Inspecting the audit JSONL at `~/.agentkeys/logs/provision-<timestamp>.jsonl`
-- Running the `/agentkeys-record-scraper` skill to add a new service (Brave, Jina, etc.)
-- Verifying the fallback→PR loop does NOT auto-submit for agent-driven callers (non-TTY)
+When Stage 5b ships (agentic fallback, `/agentkeys-record-scraper` skill, script-generation loop), this document will grow:
+
+- A new demo path that triggers the agentic fallback via a failing Tier 2 script (expected Tripwire → Tier 3 engagement).
+- A step for inspecting the audit JSONL at `~/.agentkeys/logs/provision-<timestamp>.jsonl`.
+- A `/agentkeys-record-scraper` walkthrough for adding a new service (Brave, Jina, etc.).
+- An assertion that the fallback→PR loop does **not** auto-submit for agent-driven callers (non-TTY).
 
 For now, Stage 5a with OpenRouter as the only deterministic scraper is the full surface.
 
@@ -436,15 +221,5 @@ For now, Stage 5a with OpenRouter as the only deterministic scraper is the full 
 
 ## Summary checklist
 
-- [ ] `bash harness/stage-5a-done.sh` exits 0
-- [ ] All 67 Rust tests pass across 4 crates
-- [ ] All 15 TypeScript tests pass
-- [ ] Phantom-key chaos test aborts with Error event (no Success)
-- [ ] Pattern grep guard returns empty
-- [ ] `npm run typecheck` exits 0
-- [ ] `cargo clippy` has zero warnings in Stage 5a crates
-- [ ] `agentkeys.provision` appears in MCP `tools/list` response
-- [ ] CLI masked-key output never contains the full raw key
-- [ ] CLI error output follows problem + cause + fix + docs format
-- [ ] Orchestrator emits all four metric names to stderr
-- [ ] (Live, after ToS check) `agentkeys provision openrouter` creates a real account and stores a verified key
+- [ ] `bash harness/stage-5a-done.sh` exits 0 (covers tests 1–8 above)
+- [ ] (Once ToS cleared) `agentkeys provision openrouter` creates a real account, stores a verified key, `curl` against `/api/v1/models` returns 200
