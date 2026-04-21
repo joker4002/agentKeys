@@ -302,22 +302,38 @@ Note: this writes raw MIME to `s3://agentkeys-mail/inbound/<msg_id>`. The Stage 
 
 ## 6. Test: send yourself a test message
 
+> **Heads-up: you'll likely see one S3 object already** named `inbound/AMAZON_SES_SETUP_NOTIFICATION`. AWS writes that *once* when the receipt rule first activates — it's their "I successfully tested write access to your bucket" marker, NOT your test mail. Confirms SES → S3 plumbing works; ignore it from here on.
+
 Send a message to `test@$DOMAIN` from ANY outside mailbox (your Gmail on your phone works; the macOS `/usr/bin/mail` command usually does NOT — no MTA configured by default, so the message sits queued locally and never reaches SES).
 
-Then verify it landed in S3 within ~30 s (no placeholder substitution needed — the `LATEST` query grabs the most-recent key automatically):
+Then verify it landed in S3 within ~30 s. The `LATEST` query below auto-filters out the AWS setup-notification marker so it only picks up real inbound mail:
 
 ```bash
-# Any object at all?
+# Any object at all? (You'll likely see AMAZON_SES_SETUP_NOTIFICATION
+# plus your test mail, if it arrived.)
 aws s3 ls "s3://$BUCKET/inbound/" --recursive
 
-# Grab the most-recent one and dump the first 400 bytes of raw MIME:
+# Grab the most-recent REAL inbound object (excluding the SES setup
+# marker) and dump the first 400 bytes of raw MIME:
 LATEST=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "inbound/" \
-  --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
-[ "$LATEST" = "None" ] && { echo "no objects under inbound/ — see troubleshooting below"; } \
+  --query 'sort_by(Contents,&LastModified)[?Key!=`inbound/AMAZON_SES_SETUP_NOTIFICATION`] | [-1].Key' \
+  --output text)
+[ "$LATEST" = "None" ] && { echo "no inbound mail yet — see troubleshooting below"; } \
   || { echo "latest key: $LATEST"; aws s3 cp "s3://$BUCKET/$LATEST" - | head -c 400; }
 ```
 
 If you see your `Subject:` + body in the output, the inbound pipeline is live. Skip to §7.
+
+> **Alternative sender — SES self-loop** (avoids needing to switch to your Gmail). Sends from one address on your verified domain to another — same domain, but goes out through the public internet and back via SES inbound, which exercises the full path. Only works if you're out of SES sandbox mode OR the recipient address is verified:
+>
+> ```bash
+> aws ses send-email --region "$REGION" \
+>   --from "noreply@$DOMAIN" \
+>   --destination "ToAddresses=test@$DOMAIN" \
+>   --message "Subject={Data=stage6-setup-test},Body={Text={Data=hello stage 6}}"
+> # If sandbox-mode error: aws sesv2 create-email-identity --region "$REGION" --email-identity "test@$DOMAIN"
+> # then click the verification link AWS emails to test@$DOMAIN (which you can read via S3 once the receipt rule fires).
+> ```
 
 ### Troubleshooting — nothing landed in S3
 
