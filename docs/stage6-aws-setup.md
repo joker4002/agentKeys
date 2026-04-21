@@ -356,7 +356,64 @@ aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
 
 Most common cause when all four checks pass: you sent from a sender that failed silently. Retry from a distinct outside mailbox you can monitor.
 
-## 7. Hand-back to Claude / the Stage 6 code
+## 7. Operational notes — inbound spam & lifecycle
+
+The wildcard receipt rule from §5 accepts mail to **any** address under `$DOMAIN`, including addresses we never minted. SES's built-in scanners stamp `X-SES-Spam-Verdict` and `X-SES-Virus-Verdict` headers but do not drop mail; storage grows unboundedly without intervention. Three hardening items in priority order for the throwaway-inbox use case.
+
+### 7.1 S3 lifecycle policy — auto-expire `inbound/*` after 30 days (do this now)
+
+Single CLI call. Prevents the bucket from growing forever as bot inboxes accumulate verification emails + any spam that slips through. Throwaway addresses are intended to receive one or two messages then be discarded, so 30 days is generous.
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
+  --lifecycle-configuration "$(jq -n '{
+    Rules: [{
+      ID: "inbound-30d-ttl",
+      Status: "Enabled",
+      Filter: {Prefix: "inbound/"},
+      Expiration: {Days: 30}
+    }]
+  }')"
+
+# Verify
+aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" \
+  --query 'Rules[0].{id: ID, prefix: Filter.Prefix, days: Expiration.Days}'
+# → {"id": "inbound-30d-ttl", "prefix": "inbound/", "days": 30}
+```
+
+Tune `Days` if you want shorter / longer retention. AWS deletes objects in batches once daily, so the actual delete latency is up to 48 h.
+
+### 7.2 Spam handling — read-time, not write-time (Stage 6 interim)
+
+The architecturally clean spot to drop spam is at READ time in our daemon: when it downloads an `.eml` from S3, parse the `X-SES-Spam-Verdict` header; if `FAIL`, skip and don't pass the body to the scraper. This keeps the SES receipt rule trivial (one S3Action), avoids a per-message Lambda invocation cost, and pushes the policy decision to the place that knows what's "real" mail (the bot expects an OpenRouter verification — anything else is spam regardless of SES's verdict).
+
+Pseudo-code for the daemon's filter:
+
+```rust
+// in provisioner-scripts/src/lib/email-backends/ses-s3.ts equivalent
+fn is_spam(eml: &str) -> bool {
+    eml.lines().any(|l| l.starts_with("X-SES-Spam-Verdict: FAIL")
+                     || l.starts_with("X-SES-Virus-Verdict: FAIL"))
+}
+```
+
+Add a write-time Lambda ONLY if S3 cost or daemon poll-bandwidth becomes a problem at scale. For Stage 6 demo, read-time filter is sufficient.
+
+### 7.3 SES sandbox vs production — only matters for OUTBOUND
+
+Fresh AWS accounts ship with SES in **sandbox mode**, which restricts outbound to verified recipient addresses (cap of 200/day). **Inbound is unaffected** — the wildcard receipt rule + S3 write works regardless of sandbox status, which is why your test from Gmail landed despite (likely) being in sandbox.
+
+You only need to request production access when the agent itself starts SENDING mail to arbitrary user addresses (replies, notifications). Request via AWS Console → Support → Create case → "Service limit increase" → "SES Sending Limits" → "Request Production Access". Review usually ≤24 h; provide a one-line use case ("transactional verification mail for AI agent inboxes").
+
+For Stage 6 demo (Gmail-style verification email INBOUND), no action needed.
+
+### What we're NOT mitigating in Stage 6 (deferred)
+
+- **Address enumeration** — an attacker scanning `bot-aaaaaa@`, `bot-aaaaab@`... gets the same "accepted" response from SES. Mitigation requires a per-address allowlist (Lambda lookup against our chain) before S3Action. Tracked as a Stage 6 post-MVP item.
+- **Per-recipient inbound rate limit** — none enforced. A bot inbox can be flooded with tens of thousands of messages. Mitigation: same Lambda pattern.
+- **Sender allow/deny lists** — SES does not have native domain allowlists; would need a Lambda. For verification emails, the sender domain is whoever the agent signs up at (OpenRouter, etc.) — too dynamic for a static allowlist anyway.
+
+## 8. Hand-back to Claude / the Stage 6 code
 
 When the above completes, share these values back so I can wire them into the Stage 6 code (via env vars, NOT committed to git):
 
