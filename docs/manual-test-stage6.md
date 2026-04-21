@@ -13,92 +13,59 @@ npm install --prefix provisioner-scripts
 npx playwright install chromium --with-deps
 ```
 
-## 2. Shell env setup — all four terminals need this
+## 2. Shell env setup
 
-You manage two distinct AWS identities:
+Two sets of IAM creds stashed under project-specific env vars so neither pollutes `AWS_*` persistently. Only the 1h assumed-role temp creds ever live in `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`.
 
-| Identity | Purpose | Env vars holding the keys |
+| Identity | Purpose | Env var names |
 |---|---|---|
-| `agentKeys-admin` | The IAM user that built the AWS infra in `stage6-aws-setup.md`. Stays your default for any `aws ...` command outside the demo. | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
-| `agentkeys-daemon` | The IAM user the daemon impersonates. Has only `sts:AssumeRole` on `agentkeys-agent`. | `DAEMON_ACCESS_KEY_ID` + `DAEMON_ACCESS_KEY_SECRET` |
+| `agentKeys-admin` | Built the infra; used for any non-demo `aws` call via env-prefix | `ADMIN_AWS_ACCESS_KEY_ID` + `ADMIN_AWS_ACCESS_KEY_SECRET` |
+| `agentkeys-daemon` | `sts:AssumeRole` only; impersonated by the daemon | `DAEMON_ACCESS_KEY_ID` + `DAEMON_SECRET_ACCESS_KEY` |
 
-> The AWS-standard env-var name for the secret half is `AWS_SECRET_ACCESS_KEY` — **not** `AWS_ACCESS_KEY_SECRET`. If your shell currently exports it as `AWS_ACCESS_KEY_SECRET`, the AWS CLI silently ignores it and falls back to `~/.aws/credentials` if any. Confirm with `env | grep AWS_` and rename if needed.
+> **Naming drift worth noting:** admin uses `..._ACCESS_KEY_SECRET`, daemon uses AWS-standard `..._SECRET_ACCESS_KEY`. Both work — they're names you chose, not names the AWS SDK reads directly. Pick one pattern eventually to avoid confusion.
 
-### 2a. Stage 6 setup vars (always-on)
+Copy-paste this whole block once per demo run:
 
 ```bash
+# Stage 6 vars
 export REGION=us-east-1
 export DOMAIN=bots.litentry.org
 export ACCOUNT_ID=429071895007
 export BUCKET=agentkeys-mail-${ACCOUNT_ID}
-
 export AGENTKEYS_EMAIL_BACKEND=ses-s3
 export AGENTKEYS_SES_BUCKET="$BUCKET"
-
-# Scraper signup identity — rotate per run so OpenRouter sees a fresh email.
 export AGENTKEYS_SIGNUP_EMAIL="bot-$(date +%s)@${DOMAIN}"
 export AGENTKEYS_SIGNUP_PASSWORD="Stg6-$(date +%s)-xZq9okFg"
-
-# CDP endpoint (default for the command in step 6)
 export CDP_URL="http://localhost:9222"
-```
 
-### 2b. Pre-flight: confirm admin creds work
+# Call sts:AssumeRole as the daemon via env-prefix. Creds are scoped to
+# this one subprocess only — your shell's AWS_* env stays unset until the
+# next line, where the temp creds populate it.
+CREDS=$(AWS_ACCESS_KEY_ID="$DAEMON_ACCESS_KEY_ID" \
+        AWS_SECRET_ACCESS_KEY="$DAEMON_SECRET_ACCESS_KEY" \
+  aws sts assume-role \
+    --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent" \
+    --role-session-name "stage6-demo-$(date +%s)")
 
-Quick sanity check that `aws` is authenticated as `agentKeys-admin`:
-
-```bash
-aws sts get-caller-identity
-# Expected:
-# {
-#   "UserId":  "AIDA...",
-#   "Account": "429071895007",
-#   "Arn":     "arn:aws:iam::429071895007:user/agentKeys-admin"
-# }
-```
-
-If this fails or shows a different identity, fix your env (`echo $AWS_ACCESS_KEY_ID` should be the admin's, `echo $AWS_SECRET_ACCESS_KEY` non-empty).
-
-### 2c. Switch to daemon creds + AssumeRole → 1h temp creds
-
-The daemon user's policy is `sts:AssumeRole` ONLY. Without the AssumeRole step the `ses-s3` backend hits AccessDenied on every `ListObjects`. We swap admin creds for daemon creds just long enough to call `sts:AssumeRole`, then overwrite with the assumed-role temp creds the daemon will actually use.
-
-```bash
-# Save admin creds to a backup so we can restore later (§Cleanup).
-ADMIN_AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
-ADMIN_AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
-
-# Swap in daemon creds for the AssumeRole call
-export AWS_ACCESS_KEY_ID="$DAEMON_ACCESS_KEY_ID"
-export AWS_SECRET_ACCESS_KEY="$DAEMON_ACCESS_KEY_SECRET"
-unset AWS_SESSION_TOKEN  # clear any stale session token
-
-# Confirm we're now the daemon user
-aws sts get-caller-identity
-# Expected ARN: arn:aws:iam::429071895007:user/agentkeys-daemon
-
-# Assume the agentkeys-agent role
-CREDS=$(aws sts assume-role \
-  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent" \
-  --role-session-name "stage6-demo-$(date +%s)")
+# Export the 1h temp creds — this is what the ses-s3 backend uses.
 export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r '.Credentials.AccessKeyId')
 export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.Credentials.SecretAccessKey')
 export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.Credentials.SessionToken')
 
-# Confirm we're now operating as the assumed role
+# Sanity check — assumed-role identity + S3 access both work
 aws sts get-caller-identity
 # Expected ARN: arn:aws:sts::429071895007:assumed-role/agentkeys-agent/stage6-demo-<ts>
 
-# Confirm the assumed role can actually read S3 (this is what the
-# ses-s3 backend will do — if it works here, the demo will work):
 aws s3 ls "s3://$BUCKET/inbound/" | head -3
-# Expected: lists the bucket (may show AMAZON_SES_SETUP_NOTIFICATION
-# + any past test mails). NO AccessDenied.
+# Expected: lists bucket contents (may show AMAZON_SES_SETUP_NOTIFICATION).
+# NO AccessDenied.
 ```
 
-The temp creds in `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` are valid for 1 hour. If your demo run takes longer (it shouldn't — typical run is 1–3 minutes), re-run §2c to refresh.
+If either sanity check fails, stop and fix — the demo can't succeed if the assumed role can't read S3. Temp creds expire in 1 h; typical demo run is 1–3 min. If you hit the hour, re-run this whole block for fresh creds.
 
-> **Why split between daemon user and agent role.** The USER holds long-lived access keys; its only permission is `sts:AssumeRole`. The ROLE holds real S3+SES permissions and only hands them out as 1h temp creds. Compromise of the daemon's access keys bounds to "attacker can assume the role" — key rotation is one `aws iam create-access-key` + delete the old. See [`wiki/email-system.md` §"Architecture topology"](../wiki/email-system.md) for the full trust chain.
+> **Why env-prefix for AssumeRole.** Writing `AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… aws sts ...` on the same line (no `export`) scopes those values to that one subprocess. No save/restore gymnastics, no state to clean up.
+>
+> **Why split between daemon user and agent role.** Daemon user holds long-lived keys but its only permission is `sts:AssumeRole`. Role holds real S3+SES permissions and only hands them out as 1 h temp creds. Compromise of daemon keys bounds to "attacker can assume the role" — key rotation is one CLI call. Full trust chain: [`wiki/email-system.md` §"Architecture topology"](../wiki/email-system.md).
 
 ## 3. Start mock server (Terminal A — leave running)
 
@@ -200,24 +167,29 @@ $BIN --backend $BACKEND store openrouter "$KEY" --force
 
 ## Teardown / cleanup
 
-**Restore admin creds** so future `aws ...` commands work as `agentKeys-admin` again (otherwise your shell still has the assumed-role temp creds, which expire in 1h and have only S3+SES permissions):
+The 1 h temp creds in `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` auto-expire — no restore gymnastics needed. If you want to clear them now:
 
 ```bash
-export AWS_ACCESS_KEY_ID="$ADMIN_AWS_ACCESS_KEY_ID"
-export AWS_SECRET_ACCESS_KEY="$ADMIN_AWS_SECRET_ACCESS_KEY"
-unset AWS_SESSION_TOKEN
-
-aws sts get-caller-identity
-# Expected ARN back to: arn:aws:iam::429071895007:user/agentKeys-admin
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 ```
 
-**Stop the long-running processes:**
+To run admin commands (e.g. inspecting IAM policies), env-prefix with your stashed admin creds — same scoped pattern as §2:
 
+```bash
+AWS_ACCESS_KEY_ID="$ADMIN_AWS_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$ADMIN_AWS_ACCESS_KEY_SECRET" \
+aws sts get-caller-identity
+# Expected ARN: arn:aws:iam::429071895007:user/agentKeys-admin
+```
+
+Admin creds touch only the one subprocess; your shell never picks them up.
+
+**Stop the long-running processes:**
 - Terminal A: Ctrl+C the mock server.
 - Terminal B: close Chrome.
 - `rm -rf /tmp/agentkeys-chrome-profile /tmp/cdp.log`
 
-**AWS infra teardown** (only if you're done with Stage 6 entirely): see `docs/stage6-aws-setup.md` §Cleanup. Don't run this between demo iterations — re-running §2c above gives you fresh temp creds without rebuilding the infra.
+**AWS infra teardown** (only if you're done with Stage 6 entirely): see `docs/stage6-aws-setup.md` §Cleanup. Don't run between demo iterations — re-run §2 for fresh temp creds instead.
 
 ## Cross-references
 
