@@ -7,3 +7,13 @@
 /docs/test-screenshots/
 .gstack/
 AWSCLIV2.pkg
+bucket-policy.json
+bucket-policy-ses-only.json
+dns-change.json
+role-trust.json
+role-trust-oidc.json
+role-inline.json
+daemon-user-inline.json
+receipt-rule.json
+contact.json
+bucket-policy-oidc.json
