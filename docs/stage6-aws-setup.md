@@ -142,6 +142,19 @@ For the full OIDC-federated variant (where a TEE-minted JWT is exchanged at STS 
 
 ### 3a. Create the daemon IAM user
 
+> **Before you run any `cat > *.json <<EOF` command in §3 and §4**, confirm the env vars from §0 are still set in this shell. These heredocs interpolate `$ACCOUNT_ID`, `$BUCKET`, `$REGION`, `$DOMAIN` at write time — a new shell tab wipes them, and an empty expansion produces a malformed ARN that AWS rejects with the unhelpful message `MalformedPolicyDocument: The policy failed legacy parsing`.
+>
+> ```bash
+> # Re-run §0 if any of these echo empty:
+> : "${ACCOUNT_ID:?ACCOUNT_ID empty — re-run §0 env setup}"
+> : "${REGION:?REGION empty — re-run §0 env setup}"
+> : "${DOMAIN:?DOMAIN empty — re-run §0 env setup}"
+> : "${BUCKET:?BUCKET empty — re-run §0 env setup}"
+> echo "OK: ACCOUNT_ID=$ACCOUNT_ID REGION=$REGION DOMAIN=$DOMAIN BUCKET=$BUCKET"
+> ```
+>
+> You can also `grep Resource *.json` after any heredoc write to confirm the ARN landed correctly.
+
 ```bash
 aws iam create-user --user-name agentkeys-daemon
 
