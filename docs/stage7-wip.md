@@ -35,24 +35,25 @@ export OIDC_PROVIDER_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/$(echo $OIDC_
 Replaces [`stage6-aws-setup.md` §3b](./stage6-aws-setup.md) (static IAM user). Principal becomes the OIDC provider; the `sts:TagSession` + `aws:RequestTag/agentkeys_user_wallet` condition is what wires cloud-enforced per-user isolation in §3 below.
 
 ```bash
-cat > role-trust-oidc.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Federated": "$OIDC_PROVIDER_ARN"},
-    "Action": ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
-    "Condition": {
-      "StringEquals": {"$(echo $OIDC_ISSUER | sed 's|https://||'):aud": "sts.amazonaws.com"},
-      "StringNotEquals": {"aws:RequestTag/agentkeys_user_wallet": ""}
-    }
-  }]
-}
-EOF
+OIDC_ISSUER_HOST="$(echo "$OIDC_ISSUER" | sed 's|https://||')"
 
 aws iam update-assume-role-policy \
   --role-name agentkeys-agent \
-  --policy-document file://role-trust-oidc.json
+  --policy-document "$(jq -n \
+    --arg provider "$OIDC_PROVIDER_ARN" \
+    --arg aud_key "${OIDC_ISSUER_HOST}:aud" \
+    '{
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Principal: {Federated: $provider},
+        Action: ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
+        Condition: {
+          StringEquals: {($aud_key): "sts.amazonaws.com"},
+          StringNotEquals: {"aws:RequestTag/agentkeys_user_wallet": ""}
+        }
+      }]
+    }')"
 ```
 
 ### 3. Upgrade bucket policy to PrincipalTag-scoped

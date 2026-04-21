@@ -81,34 +81,30 @@ aws sesv2 get-email-identity \
 # → three strings like: <token1> <token2> <token3>
 ```
 
-Publish the DKIM CNAMEs + SPF + DMARC + MX records in Route 53. Capture the DKIM tokens into env vars first so the JSON-templating heredoc below expands them (no hand-editing `<tokenN>` placeholders):
+Publish the DKIM CNAMEs + SPF + DMARC + MX records in Route 53. `jq --arg` interpolates the env vars outside shell parsing, so zsh modifiers never bite; the JSON is validated by jq on construction; no file lands on disk.
 
 ```bash
 read -r T1 T2 T3 <<<"$(aws sesv2 get-email-identity --region "$REGION" \
   --email-identity "$DOMAIN" --query 'DkimAttributes.Tokens' --output text)"
 echo "DKIM tokens: $T1 $T2 $T3"
 
-cat > dns-change.json <<EOF
-{
-  "Comment": "Stage 6 email infra for $DOMAIN",
-  "Changes": [
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$T1._domainkey.$DOMAIN", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "$T1.dkim.amazonses.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$T2._domainkey.$DOMAIN", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "$T2.dkim.amazonses.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$T3._domainkey.$DOMAIN", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "$T3.dkim.amazonses.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$DOMAIN", "Type": "MX", "TTL": 300, "ResourceRecords": [{"Value": "10 inbound-smtp.$REGION.amazonaws.com"}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "$DOMAIN", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=spf1 include:amazonses.com -all\""}]}},
-    {"Action": "UPSERT", "ResourceRecordSet": {"Name": "_dmarc.$DOMAIN", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=DMARC1; p=quarantine; rua=mailto:dmarc@$DOMAIN\""}]}}
-  ]
-}
-EOF
-```
-
-Apply:
-
-```bash
 aws route53 change-resource-record-sets \
   --hosted-zone-id "$PARENT_ZONE_ID" \
-  --change-batch file://dns-change.json
+  --change-batch "$(jq -n \
+    --arg domain "$DOMAIN" \
+    --arg region "$REGION" \
+    --arg t1 "$T1" --arg t2 "$T2" --arg t3 "$T3" \
+    '{
+      Comment: "Stage 6 email infra for \($domain)",
+      Changes: [
+        {Action:"UPSERT", ResourceRecordSet:{Name:"\($t1)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t1).dkim.amazonses.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:"\($t2)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t2).dkim.amazonses.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:"\($t3)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t3).dkim.amazonses.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$domain, Type:"MX", TTL:300, ResourceRecords:[{Value:"10 inbound-smtp.\($region).amazonaws.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$domain, Type:"TXT", TTL:300, ResourceRecords:[{Value:"\"v=spf1 include:amazonses.com -all\""}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:"_dmarc.\($domain)", Type:"TXT", TTL:300, ResourceRecords:[{Value:"\"v=DMARC1; p=quarantine; rua=mailto:dmarc@\($domain)\""}]}}
+      ]
+    }')"
 ```
 
 > **Note on the DMARC `rua` address:** the DMARC aggregate-report mailbox `dmarc@$DOMAIN` must exist once the receipt rule in §6 is live. Until then, DMARC reports that come in get swallowed by SES. That's fine for Stage 6 interim. For a production posture, add a dedicated `dmarc@` inbox or point the `rua` at a mailbox you already monitor.
@@ -142,18 +138,15 @@ For the full OIDC-federated variant (where a TEE-minted JWT is exchanged at STS 
 
 ### 3a. Create the daemon IAM user
 
-> **Before you run any `cat > *.json <<EOF` command in §3 and §4**, confirm the env vars from §0 are still set in this shell. These heredocs interpolate `$ACCOUNT_ID`, `$BUCKET`, `$REGION`, `$DOMAIN` at write time — a new shell tab wipes them, and an empty expansion produces a malformed ARN that AWS rejects with the unhelpful message `MalformedPolicyDocument: The policy failed legacy parsing`.
+> **Env-var sanity check (run this once before §3 and §4).** Every `jq -n --arg` call below reads `$ACCOUNT_ID`, `$BUCKET`, `$REGION`, `$DOMAIN` from the current shell. A fresh shell tab will have none of them set.
 >
 > ```bash
-> # Re-run §0 if any of these echo empty:
-> : "${ACCOUNT_ID:?ACCOUNT_ID empty — re-run §0 env setup}"
-> : "${REGION:?REGION empty — re-run §0 env setup}"
-> : "${DOMAIN:?DOMAIN empty — re-run §0 env setup}"
-> : "${BUCKET:?BUCKET empty — re-run §0 env setup}"
+> : "${ACCOUNT_ID:?re-run §0 env setup}"
+> : "${REGION:?re-run §0 env setup}"
+> : "${DOMAIN:?re-run §0 env setup}"
+> : "${BUCKET:?re-run §0 env setup}"
 > echo "OK: ACCOUNT_ID=$ACCOUNT_ID REGION=$REGION DOMAIN=$DOMAIN BUCKET=$BUCKET"
 > ```
->
-> You can also `grep Resource *.json` after any heredoc write to confirm the ARN landed correctly.
 
 ```bash
 aws iam create-user --user-name agentkeys-daemon
@@ -164,39 +157,36 @@ aws iam create-user --user-name agentkeys-daemon
 aws iam create-access-key --user-name agentkeys-daemon
 # → save both values to 1Password / your secret manager. NOT to git.
 
-# Minimum permissions for the USER: just sts:AssumeRole on the role we're
-# about to create. All real S3/SES access comes from the role, not the user.
-#
-# Guard: confirm ACCOUNT_ID is set before proceeding — an empty value
-# produces `arn:aws:iam:::role/...` which IAM rejects with the cryptic
-# `MalformedPolicyDocument: The policy failed legacy parsing` error.
-[ -n "$ACCOUNT_ID" ] || { echo "ACCOUNT_ID is empty — re-run §0"; exit 1; }
-
+# User's only permission: sts:AssumeRole on the role we're about to create.
+# All real S3/SES access comes from the role.
 aws iam put-user-policy \
   --user-name agentkeys-daemon \
   --policy-name agentkeys-daemon-assume-role \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\",\"Resource\":\"arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent\"}]}"
+  --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Action: "sts:AssumeRole",
+      Resource: "arn:aws:iam::\($acct):role/agentkeys-agent"
+    }]
+  }')"
 ```
 
-> **Why inline instead of `file://`.** The inline form lets you verify the ARN expanded correctly (`echo` the command before running if unsure) without a separate file that could pick up a BOM / invisible chars / stale content from a previous run. `MalformedPolicyDocument: The policy failed legacy parsing` is the specific error you get when either (a) the Resource ARN has an empty `$ACCOUNT_ID` (double colon), or (b) the JSON has invisible Unicode the IAM parser rejects. The guard above catches case (a); the inline form eliminates case (b).
+> **Why `jq --arg` instead of `cat > file.json <<EOF`.** `jq --arg` passes env values outside shell-parameter-expansion, so zsh modifier shortcuts (`$VAR:r`, `$VAR:h`, etc.) never corrupt ARNs. JSON is validated on construction. Command substitution (`$(...)`) feeds it straight into the AWS CLI arg — no file lands on disk, nothing persists to confuse a later re-run.
 
 ### 3b. Create the `agentkeys-agent` role
 
 ```bash
-cat > role-trust.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:user/agentkeys-daemon"},
-    "Action": "sts:AssumeRole"
-  }]
-}
-EOF
-
 aws iam create-role \
   --role-name agentkeys-agent \
-  --assume-role-policy-document file://role-trust.json
+  --assume-role-policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Principal: {AWS: "arn:aws:iam::\($acct):user/agentkeys-daemon"},
+      Action: "sts:AssumeRole"
+    }]
+  }')"
 
 export ROLE_ARN=$(aws iam get-role --role-name agentkeys-agent --query 'Role.Arn' --output text)
 echo "ROLE_ARN=$ROLE_ARN"
@@ -204,33 +194,22 @@ echo "ROLE_ARN=$ROLE_ARN"
 # Role's permissions: read from S3 bucket, send from SES. (The bucket is
 # created in §4; the role policy can reference it by ARN before the bucket
 # exists — AWS doesn't validate resource-existence on put-role-policy.)
-cat > role-inline.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::$BUCKET"
-    },
-    {
-      "Effect": "Allow",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::$BUCKET/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["ses:SendRawEmail"],
-      "Resource": "arn:aws:ses:${REGION}:${ACCOUNT_ID}:identity/$DOMAIN"
-    }
-  ]
-}
-EOF
-
 aws iam put-role-policy \
   --role-name agentkeys-agent \
   --policy-name agentkeys-agent-inline \
-  --policy-document file://role-inline.json
+  --policy-document "$(jq -n \
+    --arg bucket "$BUCKET" \
+    --arg region "$REGION" \
+    --arg acct "$ACCOUNT_ID" \
+    --arg domain "$DOMAIN" \
+    '{
+      Version: "2012-10-17",
+      Statement: [
+        {Effect: "Allow", Action: "s3:ListBucket", Resource: "arn:aws:s3:::\($bucket)"},
+        {Effect: "Allow", Action: "s3:GetObject",  Resource: "arn:aws:s3:::\($bucket)/*"},
+        {Effect: "Allow", Action: ["ses:SendRawEmail"], Resource: "arn:aws:ses:\($region):\($acct):identity/\($domain)"}
+      ]
+    }')"
 ```
 
 > **Per-user isolation note.** With the static-IAM-user path, per-user isolation lives *app-side* in the daemon — the daemon knows which wallet it's acting as and scopes its own S3 keys accordingly. The cloud does NOT enforce isolation; an app bug could let one wallet read another's prefix. The OIDC-federated path in [`stage7-wip.md`](./stage7-wip.md) enforces isolation at the bucket-policy layer via `${aws:PrincipalTag/agentkeys_user_wallet}` — recommended for production. See also [`wiki/tag-based-access.md`](../wiki/tag-based-access.md).
@@ -253,35 +232,30 @@ aws s3api put-public-access-block \
 Bucket policy — SES writes inbound, `agentkeys-agent` role reads:
 
 ```bash
-cat > bucket-policy.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowSESWriteInbound",
-      "Effect": "Allow",
-      "Principal": {"Service": "ses.amazonaws.com"},
-      "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::$BUCKET/*",
-      "Condition": {
-        "StringEquals": {"aws:Referer": "$ACCOUNT_ID"}
-      }
-    },
-    {
-      "Sid": "AllowDaemonRead",
-      "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"},
-      "Action": ["s3:GetObject", "s3:ListBucket"],
-      "Resource": [
-        "arn:aws:s3:::$BUCKET",
-        "arn:aws:s3:::$BUCKET/*"
+aws s3api put-bucket-policy --bucket "$BUCKET" \
+  --policy "$(jq -n \
+    --arg bucket "$BUCKET" \
+    --arg acct "$ACCOUNT_ID" \
+    '{
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "AllowSESWriteInbound",
+          Effect: "Allow",
+          Principal: {Service: "ses.amazonaws.com"},
+          Action: "s3:PutObject",
+          Resource: "arn:aws:s3:::\($bucket)/*",
+          Condition: {StringEquals: {"aws:Referer": $acct}}
+        },
+        {
+          Sid: "AllowDaemonRead",
+          Effect: "Allow",
+          Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-agent"},
+          Action: ["s3:GetObject", "s3:ListBucket"],
+          Resource: ["arn:aws:s3:::\($bucket)", "arn:aws:s3:::\($bucket)/*"]
+        }
       ]
-    }
-  ]
-}
-EOF
-
-aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://bucket-policy.json
+    }')"
 ```
 
 Verify both statements present:
@@ -302,26 +276,22 @@ Create a rule set and rule that writes all inbound to our S3 bucket:
 aws ses create-receipt-rule-set --rule-set-name agentkeys --region "$REGION"
 
 # Rule: match *@$DOMAIN, write to S3
-cat > receipt-rule.json <<EOF
-{
-  "Name": "agentkeys-inbound",
-  "Enabled": true,
-  "ScanEnabled": true,
-  "TlsPolicy": "Optional",
-  "Recipients": ["$DOMAIN"],
-  "Actions": [{
-    "S3Action": {
-      "BucketName": "$BUCKET",
-      "ObjectKeyPrefix": "inbound/"
-    }
-  }]
-}
-EOF
-
 aws ses create-receipt-rule \
   --region "$REGION" \
   --rule-set-name agentkeys \
-  --rule file://receipt-rule.json
+  --rule "$(jq -n --arg domain "$DOMAIN" --arg bucket "$BUCKET" '{
+    Name: "agentkeys-inbound",
+    Enabled: true,
+    ScanEnabled: true,
+    TlsPolicy: "Optional",
+    Recipients: [$domain],
+    Actions: [{
+      S3Action: {
+        BucketName: $bucket,
+        ObjectKeyPrefix: "inbound/"
+      }
+    }]
+  }')"
 
 aws ses set-active-receipt-rule-set --rule-set-name agentkeys --region "$REGION"
 ```
