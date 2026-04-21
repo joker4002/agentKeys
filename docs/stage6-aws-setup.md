@@ -1,7 +1,7 @@
 # Stage 6 AWS Setup Runbook
 
 **Audience:** the operator setting up Stage 6's hosted-email infra on real AWS for the first time. Default path is a subdomain on an existing parent (`bots.litentry.org` on AWS account `429071895007`); the wiki-canonical standalone `@agentkeys-email.io` path is the post-interim option.
-**Outcome:** an AWS account with SES domain verified, S3 bucket + bucket policy for per-user isolation, IAM role for the daemon to assume, and (optional) IAM OIDC provider registered. Once done, the Stage 6 code (mock-server + CLI + provisioner-scripts adapters) can talk to real AWS, and the Stage 5b live demo unblocks.
+**Outcome:** an AWS account with SES domain verified, `agentkeys-daemon` IAM user + `agentkeys-agent` role (static-IAM-user trust), S3 bucket + bucket policy, SES receipt rule writing inbound to S3. Once done, the Stage 6 code (mock-server + CLI + provisioner-scripts adapters) can talk to real AWS, and the Stage 5b live demo unblocks. The OIDC-federated variant (TEE-signed JWT → PrincipalTag isolation) is preserved for future work in [`stage6-oidc-federation-demo.md`](./stage6-oidc-federation-demo.md).
 **Status:** interim build. TEE-held BYODKIM and TEE-signed OIDC JWTs are deferred until [`heima-gaps-vs-desired-architecture.md`](./spec/heima-gaps-vs-desired-architecture.md) §3 + §4 close. AWS-managed DKIM is used as the Stage 6 interim; replace it with TEE-BYODKIM later.
 
 ## 0. Preconditions
@@ -134,84 +134,45 @@ aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
 >
 > **Swap to TEE-BYODKIM happens when [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) closes.** Until then, the Stage 6 interim accepts the AWS-custody tradeoff. Do NOT upgrade to "BYODKIM with file-stored key" — that path is strictly worse than AWS-managed (lower availability, similar trust surface).
 
-## 3. S3 bucket for inbound mail + per-user isolation
+## 3. IAM: daemon user + `agentkeys-agent` role
 
-Create the bucket:
+This Stage 6 runbook uses **static IAM-user trust** as the interim: create a dedicated IAM user `agentkeys-daemon`, create the `agentkeys-agent` role that trusts only that user, and attach the S3/SES inline permissions. The user's access keys get injected into the daemon's env at runtime; the daemon calls `sts:AssumeRole` to get temp creds before touching S3 or SES.
 
-```bash
-aws s3api create-bucket \
-  --region "$REGION" \
-  --bucket "$BUCKET" \
-  $([ "$REGION" != "us-east-1" ] && echo "--create-bucket-configuration LocationConstraint=$REGION")
+For the full OIDC-federated variant (where a TEE-minted JWT is exchanged at STS for temp creds tagged with `agentkeys_user_wallet`), see [`stage6-oidc-federation-demo.md`](./stage6-oidc-federation-demo.md). That path delivers cryptographic per-user isolation via PrincipalTag but requires `oidc.agentkeys.dev` hosted publicly with a Let's Encrypt cert — deferred because (a) the hosting adds a Stage 7 dependency and (b) the "right" signer for that path is a TEE-derived ES256 key, blocked on [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md).
 
-aws s3api put-public-access-block \
-  --bucket "$BUCKET" \
-  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-```
-
-Bucket policy — SES write only for now. The daemon-read statement references `role/agentkeys-agent` which is created in §4; AWS validates principals at policy-apply time, so we split the policy: **apply the SES-write statement here in §3, then finalize with the full two-statement policy in §4c after the role exists.**
+### 3a. Create the daemon IAM user
 
 ```bash
-cat > bucket-policy-ses-only.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowSESWriteInbound",
-      "Effect": "Allow",
-      "Principal": {"Service": "ses.amazonaws.com"},
-      "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::$BUCKET/*",
-      "Condition": {
-        "StringEquals": {
-          "aws:Referer": "$ACCOUNT_ID"
-        }
-      }
-    }
-  ]
-}
-EOF
+aws iam create-user --user-name agentkeys-daemon
 
-aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://bucket-policy-ses-only.json
-```
+# Generate an access key. Save AccessKeyId + SecretAccessKey IMMEDIATELY —
+# the secret is only shown on creation. Inject into daemon env as
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY later.
+aws iam create-access-key --user-name agentkeys-daemon
+# → save both values to 1Password / your secret manager. NOT to git.
 
-> **Why split.** Attempting to apply the full two-statement policy here fails with `MalformedPolicy: Invalid principal in policy` because `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent` doesn't exist yet. We come back in §4c to overlay the full policy with both statements. (Alternative: do §4 first then come back here with the full policy — functionally identical; this ordering keeps §3 focused on bucket provisioning.)
-
-The `${aws:PrincipalTag/agentkeys_user_wallet}` expansion is the whole per-user-isolation mechanism — every daemon session's assumed role will carry `agentkeys_user_wallet` as a PrincipalTag, and the bucket policy keys off it. See [`wiki/tag-based-access.md`](../wiki/tag-based-access.md).
-
-## 4. IAM role `agentkeys-agent`
-
-Two interim options for the trust policy — pick one based on whether §5 (OIDC) is in-scope for this pass:
-
-### 4a. Trust policy — OIDC-federated (preferred, needs §5 completed)
-
-```bash
-cat > role-trust.json <<EOF
+# Minimum permissions for the USER: just sts:AssumeRole on the role we're
+# about to create. All real S3/SES access comes from the role, not the user.
+cat > daemon-user-inline.json <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::$ACCOUNT_ID:oidc-provider/oidc.agentkeys.dev"
-    },
-    "Action": ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
-    "Condition": {
-      "StringEquals": {"oidc.agentkeys.dev:aud": "sts.amazonaws.com"},
-      "StringNotEquals": {"aws:RequestTag/agentkeys_user_wallet": ""}
-    }
+    "Action": "sts:AssumeRole",
+    "Resource": "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"
   }]
 }
 EOF
+
+aws iam put-user-policy \
+  --user-name agentkeys-daemon \
+  --policy-name agentkeys-daemon-assume-role \
+  --policy-document file://daemon-user-inline.json
 ```
 
-### 4b. Trust policy — static IAM user (interim, OIDC deferred)
+### 3b. Create the `agentkeys-agent` role
 
 ```bash
-# Create a dedicated IAM user for the daemon
-aws iam create-user --user-name agentkeys-daemon
-aws iam create-access-key --user-name agentkeys-daemon
-# → save the AccessKeyId + SecretAccessKey; inject into AGENTKEYS_AWS_ACCESS_KEY / ..._SECRET_KEY env
-
 cat > role-trust.json <<EOF
 {
   "Version": "2012-10-17",
@@ -222,11 +183,7 @@ cat > role-trust.json <<EOF
   }]
 }
 EOF
-```
 
-Then create the role + attach a session policy that sets `agentkeys_user_wallet` on assume:
-
-```bash
 aws iam create-role \
   --role-name agentkeys-agent \
   --assume-role-policy-document file://role-trust.json
@@ -234,7 +191,9 @@ aws iam create-role \
 export ROLE_ARN=$(aws iam get-role --role-name agentkeys-agent --query 'Role.Arn' --output text)
 echo "ROLE_ARN=$ROLE_ARN"
 
-# Minimum permissions: read from S3 bucket (scoped by PrincipalTag in bucket policy), send from SES
+# Role's permissions: read from S3 bucket, send from SES. (The bucket is
+# created in §4; the role policy can reference it by ARN before the bucket
+# exists — AWS doesn't validate resource-existence on put-role-policy.)
 cat > role-inline.json <<EOF
 {
   "Version": "2012-10-17",
@@ -264,9 +223,24 @@ aws iam put-role-policy \
   --policy-document file://role-inline.json
 ```
 
-### 4c. Finalize the bucket policy (now that `agentkeys-agent` exists)
+> **Per-user isolation note.** With the static-IAM-user path, per-user isolation lives *app-side* in the daemon — the daemon knows which wallet it's acting as and scopes its own S3 keys accordingly. The cloud does NOT enforce isolation; an app bug could let one wallet read another's prefix. The OIDC-federated path in [`stage6-oidc-federation-demo.md`](./stage6-oidc-federation-demo.md) enforces isolation at the bucket-policy layer via `${aws:PrincipalTag/agentkeys_user_wallet}` — recommended for production. See also [`wiki/tag-based-access.md`](../wiki/tag-based-access.md).
 
-Back in §3 we applied a SES-write-only bucket policy because the daemon role didn't exist yet. Now overlay the full two-statement policy:
+## 4. S3 bucket for inbound mail
+
+Now that `agentkeys-agent` exists, we can apply the full bucket policy in one shot — no split.
+
+```bash
+aws s3api create-bucket \
+  --region "$REGION" \
+  --bucket "$BUCKET" \
+  $([ "$REGION" != "us-east-1" ] && echo "--create-bucket-configuration LocationConstraint=$REGION")
+
+aws s3api put-public-access-block \
+  --bucket "$BUCKET" \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+```
+
+Bucket policy — SES writes inbound, `agentkeys-agent` role reads:
 
 ```bash
 cat > bucket-policy.json <<EOF
@@ -280,25 +254,18 @@ cat > bucket-policy.json <<EOF
       "Action": "s3:PutObject",
       "Resource": "arn:aws:s3:::$BUCKET/*",
       "Condition": {
-        "StringEquals": {
-          "aws:Referer": "$ACCOUNT_ID"
-        }
+        "StringEquals": {"aws:Referer": "$ACCOUNT_ID"}
       }
     },
     {
-      "Sid": "AllowDaemonReadOwnPrefix",
+      "Sid": "AllowDaemonRead",
       "Effect": "Allow",
       "Principal": {"AWS": "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"},
       "Action": ["s3:GetObject", "s3:ListBucket"],
       "Resource": [
         "arn:aws:s3:::$BUCKET",
-        "arn:aws:s3:::$BUCKET/\${aws:PrincipalTag/agentkeys_user_wallet}/*"
-      ],
-      "Condition": {
-        "StringEquals": {
-          "s3:prefix": "\${aws:PrincipalTag/agentkeys_user_wallet}/"
-        }
-      }
+        "arn:aws:s3:::$BUCKET/*"
+      ]
     }
   ]
 }
@@ -307,33 +274,16 @@ EOF
 aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://bucket-policy.json
 ```
 
-This overlays the earlier SES-only policy. Verify:
+Verify both statements present:
 
 ```bash
 aws s3api get-bucket-policy --bucket "$BUCKET" --query 'Policy' --output text | jq '.Statement | length'
 # → 2
 ```
 
-## 5. IAM OIDC provider for `oidc.agentkeys.dev` (optional for Stage 6 interim)
+> **What's different from the OIDC path.** Here `AllowDaemonRead` gives the role read-access to the whole bucket — the daemon is trusted to self-scope via the `s3:prefix` / object-key conventions its own code applies. The OIDC path instead puts a `${aws:PrincipalTag/agentkeys_user_wallet}/*` condition here and mints one PrincipalTag per session. If you later migrate to OIDC, this statement's `Resource` + `Condition` are the two things that change.
 
-**Skip this section if you chose 4b and don't yet have `oidc.agentkeys.dev` hosted.** Stage 6 interim works fine with static IAM keys; OIDC federation is the target architecture but requires the `agentkeys-oidc-stub` service (code landing in US-6-5) or a TEE-derived ES256 issuer key (blocked by heima-gaps §3).
-
-When you're ready:
-
-```bash
-# Register the OIDC provider
-aws iam create-open-id-connect-provider \
-  --url https://oidc.agentkeys.dev \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list ''   # AWS will use its trusted-CA library for Let's Encrypt-issued certs
-
-export OIDC_PROVIDER_ARN="arn:aws:iam::$ACCOUNT_ID:oidc-provider/oidc.agentkeys.dev"
-echo "OIDC_PROVIDER_ARN=$OIDC_PROVIDER_ARN"
-```
-
-You'll also need `oidc.agentkeys.dev` to actually serve `/.well-known/openid-configuration` + `/.well-known/jwks.json` with a currently-valid Let's Encrypt cert. The AWS side validates reachability on registration. See `services/oidc-stub/README.md` once US-6-5 lands for the reference implementation.
-
-## 6. SES receipt rule for inbound
+## 5. SES receipt rule for inbound
 
 Create a rule set and rule that writes all inbound to our S3 bucket:
 
@@ -370,7 +320,7 @@ Note: this writes raw MIME to `s3://agentkeys-mail/inbound/<msg_id>`. The Stage 
 
 > **Follow-up:** the object-key prefix should eventually become `s3://agentkeys-mail/<user_wallet>/<address>/` so per-user bucket-policy conditions bite. That requires a Lambda between SES and S3 to route by address (Stage 6 post-MVP) or SES's new subdomain routing. For now, all inbound lands in `inbound/` and the daemon filters by `To:` header.
 
-## 7. Test: send yourself a test message
+## 6. Test: send yourself a test message
 
 From any source that can send mail:
 
@@ -390,7 +340,7 @@ aws s3 cp "s3://$BUCKET/inbound/<most-recent-msg-id>" - | head -c 400
 
 If this works, the inbound pipeline is live.
 
-## 8. Hand-back to Claude / the Stage 6 code
+## 7. Hand-back to Claude / the Stage 6 code
 
 When the above completes, share these values back so I can wire them into the Stage 6 code (via env vars, NOT committed to git):
 
@@ -403,14 +353,12 @@ SES_VERIFIED=<yes|no>
 DKIM_STATUS=<SUCCESS|PENDING|FAILED>
 BUCKET_ARN=arn:aws:s3:::agentkeys-mail-429071895007
 ROLE_ARN=arn:aws:iam::429071895007:role/agentkeys-agent
-TRUST_MODE=<oidc | static-iam-user>
-OIDC_PROVIDER_ARN=<arn:aws:iam::429071895007:oidc-provider/oidc.agentkeys.dev, or "deferred">
-# If TRUST_MODE=static-iam-user:
+DAEMON_USER_ARN=arn:aws:iam::429071895007:user/agentkeys-daemon
 DAEMON_ACCESS_KEY_ID=<redacted>
 DAEMON_SECRET_ACCESS_KEY=<redacted>  # share via 1Password, NOT in chat
 ```
 
-I'll then wire `AGENTKEYS_EMAIL_BACKEND=ses-s3` in provisioner-scripts to read from `$BUCKET_ARN` with creds from either OIDC-mint (if TRUST_MODE=oidc) or the static IAM user (if TRUST_MODE=static-iam-user).
+I'll then wire `AGENTKEYS_EMAIL_BACKEND=ses-s3` in provisioner-scripts to read from `$BUCKET_ARN` using the `agentkeys-daemon` user's access key to assume `$ROLE_ARN` at runtime.
 
 ## Follow-ups tracked elsewhere
 
@@ -425,17 +373,25 @@ I'll then wire `AGENTKEYS_EMAIL_BACKEND=ses-s3` in provisioner-scripts to read f
 # Disable the active rule set (keeps SES inbound from hitting this bucket)
 aws ses set-active-receipt-rule-set --rule-set-name "" --region "$REGION"
 
-# Drop the role + bucket
+# Drop the role
 aws iam delete-role-policy --role-name agentkeys-agent --policy-name agentkeys-agent-inline
 aws iam delete-role --role-name agentkeys-agent
+
+# Drop the daemon user (list + delete access keys first — can't delete a user with keys)
+for KEY in $(aws iam list-access-keys --user-name agentkeys-daemon --query 'AccessKeyMetadata[*].AccessKeyId' --output text); do
+  aws iam delete-access-key --user-name agentkeys-daemon --access-key-id "$KEY"
+done
+aws iam delete-user-policy --user-name agentkeys-daemon --policy-name agentkeys-daemon-assume-role
+aws iam delete-user --user-name agentkeys-daemon
+
+# Drop the bucket (contents first)
 aws s3 rm "s3://$BUCKET" --recursive
 aws s3api delete-bucket --bucket "$BUCKET"
 
 # Delete SES domain identity
 aws sesv2 delete-email-identity --region "$REGION" --email-identity "$DOMAIN"
 
-# OIDC provider (if created)
-aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_PROVIDER_ARN"
-
-# Domain registration stays (you paid for it); release via registrar if unwanted
+# Domain / hosted zone stays — you're using the existing litentry.org zone.
+# Only the Stage 6 records we UPSERTed need cleanup; leave DNS alone unless
+# you want to revert SPF/DMARC/MX/DKIM records on bots.litentry.org.
 ```
