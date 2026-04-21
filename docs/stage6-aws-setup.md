@@ -166,22 +166,19 @@ aws iam create-access-key --user-name agentkeys-daemon
 
 # Minimum permissions for the USER: just sts:AssumeRole on the role we're
 # about to create. All real S3/SES access comes from the role, not the user.
-cat > daemon-user-inline.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": "sts:AssumeRole",
-    "Resource": "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"
-  }]
-}
-EOF
+#
+# Guard: confirm ACCOUNT_ID is set before proceeding — an empty value
+# produces `arn:aws:iam:::role/...` which IAM rejects with the cryptic
+# `MalformedPolicyDocument: The policy failed legacy parsing` error.
+[ -n "$ACCOUNT_ID" ] || { echo "ACCOUNT_ID is empty — re-run §0"; exit 1; }
 
 aws iam put-user-policy \
   --user-name agentkeys-daemon \
   --policy-name agentkeys-daemon-assume-role \
-  --policy-document file://daemon-user-inline.json
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\",\"Resource\":\"arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent\"}]}"
 ```
+
+> **Why inline instead of `file://`.** The inline form lets you verify the ARN expanded correctly (`echo` the command before running if unsure) without a separate file that could pick up a BOM / invisible chars / stale content from a previous run. `MalformedPolicyDocument: The policy failed legacy parsing` is the specific error you get when either (a) the Resource ARN has an empty `$ACCOUNT_ID` (double colon), or (b) the JSON has invisible Unicode the IAM parser rejects. The guard above catches case (a); the inline form eliminates case (b).
 
 ### 3b. Create the `agentkeys-agent` role
 
@@ -191,7 +188,7 @@ cat > role-trust.json <<EOF
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": {"AWS": "arn:aws:iam::$ACCOUNT_ID:user/agentkeys-daemon"},
+    "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:user/agentkeys-daemon"},
     "Action": "sts:AssumeRole"
   }]
 }
@@ -224,7 +221,7 @@ cat > role-inline.json <<EOF
     {
       "Effect": "Allow",
       "Action": ["ses:SendRawEmail"],
-      "Resource": "arn:aws:ses:$REGION:$ACCOUNT_ID:identity/$DOMAIN"
+      "Resource": "arn:aws:ses:${REGION}:${ACCOUNT_ID}:identity/$DOMAIN"
     }
   ]
 }
@@ -273,7 +270,7 @@ cat > bucket-policy.json <<EOF
     {
       "Sid": "AllowDaemonRead",
       "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"},
+      "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"},
       "Action": ["s3:GetObject", "s3:ListBucket"],
       "Resource": [
         "arn:aws:s3:::$BUCKET",

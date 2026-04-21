@@ -27,7 +27,7 @@ aws iam create-open-id-connect-provider \
   --url "$OIDC_ISSUER" \
   --client-id-list sts.amazonaws.com \
   --thumbprint-list ''
-export OIDC_PROVIDER_ARN="arn:aws:iam::$ACCOUNT_ID:oidc-provider/$(echo $OIDC_ISSUER | sed 's|https://||')"
+export OIDC_PROVIDER_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/$(echo $OIDC_ISSUER | sed 's|https://||')"
 ```
 
 ### 2. Replace the role's trust policy with the federated variant
@@ -63,7 +63,7 @@ Replaces the `AllowDaemonRead` statement in [`stage6-aws-setup.md` §4](./stage6
 {
   "Sid": "AllowDaemonReadOwnPrefix",
   "Effect": "Allow",
-  "Principal": {"AWS": "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"},
+  "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"},
   "Action": ["s3:GetObject", "s3:ListBucket"],
   "Resource": [
     "arn:aws:s3:::$BUCKET",
@@ -95,7 +95,7 @@ JWT=$(curl -sf -X POST http://localhost:34568/internal/sign \
 
 # Exchange for temp creds
 CREDS=$(aws sts assume-role-with-web-identity \
-  --role-arn "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent" \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent" \
   --role-session-name "stage7-wip-$(date +%s)" \
   --web-identity-token "$JWT")
 export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
