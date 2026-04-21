@@ -121,7 +121,18 @@ aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
 # → {"verified": true, "dkim": "SUCCESS"}
 ```
 
-> **Interim note (flag this for Stage 6 follow-up):** SES is now signing outbound mail with an AWS-managed RSA-2048 DKIM key. The target architecture uses a TEE-held Ed25519 key derived at `dkim/<domain>/v1` (e.g. `dkim/bots.litentry.org/v1` for this Stage 6 interim, `dkim/agentkeys-email.io/v1` for the standalone canonical domain later), published via BYODKIM. Swap happens when [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) closes.
+> **Interim DKIM key custody — explicit.** In this Stage 6 setup, **AWS SES itself holds the private DKIM key.** We never generate, see, or store it. The three CNAME records you published point `<token>._domainkey.$DOMAIN` at `<token>.dkim.amazonses.com`, where AWS publishes the matching public key. SES signs every outbound message with the private key sitting inside its DKIM signing service; we just call `ses:SendRawEmail` and trust AWS to sign correctly.
+>
+> **What we're trusting AWS with:** DKIM signing authority for `$DOMAIN`. An AWS-internal compromise or an account takeover could forge mail that passes DKIM as us. Bounded blast radius: the signed mail cannot touch anything in the TEE, forge session tokens, or access user data — it's a reputation risk (spam or phishing claiming to be us), not a key-custody-of-user-data risk.
+>
+> **Migration spectrum (target = TEE-BYODKIM):**
+> | Option | Who holds the private key | Rule #2 | Complexity |
+> |---|---|---|---|
+> | AWS-managed DKIM (this interim) | AWS SES — opaque service | ❌ | trivial |
+> | BYODKIM, key in AWS KMS + Lambda signer | AWS KMS HSM | ⚠ partial | medium (adds outbound Lambda) |
+> | BYODKIM, key in enclave (`dkim/<domain>/v1`) | TEE-sealed, derived from master seed | ✅ | high — blocked on [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) |
+>
+> **Swap to TEE-BYODKIM happens when [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) closes.** Until then, the Stage 6 interim accepts the AWS-custody tradeoff. Do NOT upgrade to "BYODKIM with file-stored key" — that path is strictly worse than AWS-managed (lower availability, similar trust surface).
 
 ## 3. S3 bucket for inbound mail + per-user isolation
 
@@ -138,10 +149,10 @@ aws s3api put-public-access-block \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
-Bucket policy allowing SES to write AND the daemon role (created in §4) to read ONLY its own prefix:
+Bucket policy — SES write only for now. The daemon-read statement references `role/agentkeys-agent` which is created in §4; AWS validates principals at policy-apply time, so we split the policy: **apply the SES-write statement here in §3, then finalize with the full two-statement policy in §4c after the role exists.**
 
 ```bash
-cat > bucket-policy.json <<EOF
+cat > bucket-policy-ses-only.json <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -156,28 +167,15 @@ cat > bucket-policy.json <<EOF
           "aws:Referer": "$ACCOUNT_ID"
         }
       }
-    },
-    {
-      "Sid": "AllowDaemonReadOwnPrefix",
-      "Effect": "Allow",
-      "Principal": {"AWS": "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"},
-      "Action": ["s3:GetObject", "s3:ListBucket"],
-      "Resource": [
-        "arn:aws:s3:::$BUCKET",
-        "arn:aws:s3:::$BUCKET/\${aws:PrincipalTag/agentkeys_user_wallet}/*"
-      ],
-      "Condition": {
-        "StringEquals": {
-          "s3:prefix": "\${aws:PrincipalTag/agentkeys_user_wallet}/"
-        }
-      }
     }
   ]
 }
 EOF
 
-aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://bucket-policy.json
+aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://bucket-policy-ses-only.json
 ```
+
+> **Why split.** Attempting to apply the full two-statement policy here fails with `MalformedPolicy: Invalid principal in policy` because `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent` doesn't exist yet. We come back in §4c to overlay the full policy with both statements. (Alternative: do §4 first then come back here with the full policy — functionally identical; this ordering keeps §3 focused on bucket provisioning.)
 
 The `${aws:PrincipalTag/agentkeys_user_wallet}` expansion is the whole per-user-isolation mechanism — every daemon session's assumed role will carry `agentkeys_user_wallet` as a PrincipalTag, and the bucket policy keys off it. See [`wiki/tag-based-access.md`](../wiki/tag-based-access.md).
 
@@ -264,6 +262,56 @@ aws iam put-role-policy \
   --role-name agentkeys-agent \
   --policy-name agentkeys-agent-inline \
   --policy-document file://role-inline.json
+```
+
+### 4c. Finalize the bucket policy (now that `agentkeys-agent` exists)
+
+Back in §3 we applied a SES-write-only bucket policy because the daemon role didn't exist yet. Now overlay the full two-statement policy:
+
+```bash
+cat > bucket-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowSESWriteInbound",
+      "Effect": "Allow",
+      "Principal": {"Service": "ses.amazonaws.com"},
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::$BUCKET/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:Referer": "$ACCOUNT_ID"
+        }
+      }
+    },
+    {
+      "Sid": "AllowDaemonReadOwnPrefix",
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"},
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::$BUCKET",
+        "arn:aws:s3:::$BUCKET/\${aws:PrincipalTag/agentkeys_user_wallet}/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "s3:prefix": "\${aws:PrincipalTag/agentkeys_user_wallet}/"
+        }
+      }
+    }
+  ]
+}
+EOF
+
+aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://bucket-policy.json
+```
+
+This overlays the earlier SES-only policy. Verify:
+
+```bash
+aws s3api get-bucket-policy --bucket "$BUCKET" --query 'Policy' --output text | jq '.Statement | length'
+# → 2
 ```
 
 ## 5. IAM OIDC provider for `oidc.agentkeys.dev` (optional for Stage 6 interim)

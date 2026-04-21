@@ -121,6 +121,50 @@ pub async fn deliver_inbox(
 }
 
 #[derive(Deserialize)]
+pub struct ListInboxesQuery {
+    pub agent_id: String,
+}
+
+pub async fn list_inboxes(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<ListInboxesQuery>,
+) -> AppResult<Json<Value>> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer_token)
+        .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
+
+    let session = validate_session(&state, token)?;
+
+    let agent_id = &query.agent_id;
+    let db = state.db.lock().unwrap();
+
+    if !is_owner_of(&db, &session.wallet_address, agent_id) {
+        return Err(AppError::forbidden(format!(
+            "session does not own agent {}",
+            agent_id
+        )));
+    }
+
+    let mut stmt = db
+        .prepare("SELECT address FROM inboxes WHERE agent_wallet = ?1 ORDER BY created_at ASC")
+        .map_err(|e| AppError::internal(e.to_string()))?;
+
+    let addresses: Vec<Value> = stmt
+        .query_map(params![agent_id], |row| {
+            let addr: String = row.get(0)?;
+            Ok(Value::String(addr))
+        })
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(Value::Array(addresses)))
+}
+
+#[derive(Deserialize)]
 pub struct ListMessagesQuery {
     pub address: String,
 }
