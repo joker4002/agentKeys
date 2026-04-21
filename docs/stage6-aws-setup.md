@@ -302,23 +302,43 @@ Note: this writes raw MIME to `s3://agentkeys-mail/inbound/<msg_id>`. The Stage 
 
 ## 6. Test: send yourself a test message
 
-From any source that can send mail:
+Send a message to `test@$DOMAIN` from ANY outside mailbox (your Gmail on your phone works; the macOS `/usr/bin/mail` command usually does NOT — no MTA configured by default, so the message sits queued locally and never reaches SES).
+
+Then verify it landed in S3 within ~30 s (no placeholder substitution needed — the `LATEST` query grabs the most-recent key automatically):
 
 ```bash
-echo "stage-6 AWS setup test body" | mail -s "stage-6-setup-test" "test@$DOMAIN"
-```
-
-Verify it lands in S3 within ~30s:
-
-```bash
+# Any object at all?
 aws s3 ls "s3://$BUCKET/inbound/" --recursive
-# → you should see one .eml object
 
-aws s3 cp "s3://$BUCKET/inbound/<most-recent-msg-id>" - | head -c 400
-# → raw MIME with your subject + body
+# Grab the most-recent one and dump the first 400 bytes of raw MIME:
+LATEST=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "inbound/" \
+  --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
+[ "$LATEST" = "None" ] && { echo "no objects under inbound/ — see troubleshooting below"; } \
+  || { echo "latest key: $LATEST"; aws s3 cp "s3://$BUCKET/$LATEST" - | head -c 400; }
 ```
 
-If this works, the inbound pipeline is live.
+If you see your `Subject:` + body in the output, the inbound pipeline is live. Skip to §7.
+
+### Troubleshooting — nothing landed in S3
+
+```bash
+# (a) Is the receipt rule set active? Should show "agentkeys".
+aws ses describe-active-receipt-rule-set --region "$REGION" \
+  --query 'Metadata.Name'
+
+# (b) Does $DOMAIN's MX record resolve to SES inbound? Should show
+#     "10 inbound-smtp.us-east-1.amazonaws.com." (or your region's).
+dig MX "$DOMAIN" +short
+
+# (c) Is SES in the right identity state?
+aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
+  --query '{verified: VerifiedForSendingStatus, dkim: DkimAttributes.Status}'
+
+# (d) Did the sender get a bounce? If you sent from Gmail, check Gmail's
+#     outbox / the inbox for a delivery failure notification.
+```
+
+Most common cause when all four checks pass: you sent from a sender that failed silently. Retry from a distinct outside mailbox you can monitor.
 
 ## 7. Hand-back to Claude / the Stage 6 code
 
