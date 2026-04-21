@@ -160,6 +160,96 @@ Minimal broker-not-proxy shape. Our infrastructure handles only credential minti
 
 ---
 
+## Architecture topology — singleton scaling model
+
+The SES email stack uses **singleton AWS resources** with logical or cryptographic per-user isolation, not per-user AWS resources. This is what makes it scale to millions of AgentKeys users without hitting IAM quotas.
+
+### Resource graph
+
+```mermaid
+graph TB
+    subgraph EXT[" External "]
+        Sender[Sender MTA, e.g. Gmail]
+        Recip[Recipient MTA]
+    end
+    subgraph DNS[" Route 53 "]
+        Records["MX → SES inbound<br/>3× DKIM CNAMEs<br/>SPF + DMARC TXT"]
+    end
+    subgraph SES[" AWS SES "]
+        Inbound["Inbound endpoint<br/>+ wildcard receipt rule on *@&lt;domain&gt;"]
+        Outbound["ses:SendRawEmail<br/>+ AWS-managed DKIM signing"]
+    end
+    subgraph S3[" S3 "]
+        Bucket["Singleton bucket<br/>+ bucket policy<br/>+ 30d inbound/* lifecycle"]
+    end
+    subgraph IAM[" IAM "]
+        User["Singleton user 'agentkeys-daemon'<br/>+ inline policy: only sts:AssumeRole"]
+        Role["Singleton role 'agentkeys-agent'<br/>+ inline policy: s3:Get/List + ses:SendRawEmail"]
+    end
+    subgraph APP[" Our code "]
+        Daemon[Daemon process]
+    end
+    Sender -->|1 MX lookup| Records
+    Records -.->|returns SES MX| Sender
+    Sender -->|2 SMTP| Inbound
+    Inbound -->|3 PutObject| Bucket
+    Daemon -->|4 long-lived access keys| User
+    User -->|5 sts:AssumeRole| Role
+    Role -.->|6 1h temp creds| Daemon
+    Daemon -->|7 GetObject| Bucket
+    Daemon -->|8 SendRawEmail| Outbound
+    Outbound -->|9 DKIM-signed| Recip
+```
+
+### Singleton vs per-user — what scales how
+
+| Singleton — one per AWS account regardless of user count | Per-user — logical, no AWS resource per user |
+|---|---|
+| 1 IAM user `agentkeys-daemon` | N throwaway addresses `bot-<random>@<domain>` (DB / on-chain) |
+| 1 IAM role `agentkeys-agent` | N S3 objects under `inbound/<msg-id>.eml` (lifecycle-capped) |
+| 1 S3 bucket | (no other AWS resources scale per user) |
+| 1 SES domain identity | |
+| 1 SES wildcard receipt rule on `*@<domain>` | |
+
+### Why singleton — AWS quotas would cap per-user IAM
+
+| Resource | AWS default quota | Implication if used per AgentKeys user |
+|---|---|---|
+| IAM users | 5,000 / account | Total user count capped at 5k |
+| IAM roles | 1,000 / account | Total user count capped at 1k |
+| S3 buckets | 100 (raisable to 1,000) | Capped at ~1k |
+| SES verified identities | 10,000 / account | Plenty, but ops debt to manage |
+
+Our design moves the bottleneck from IAM (hard cap) to SES inbound rate (60 msg/sec/region default, raisable on request). Storage math at 10k users × 5 throwaway inboxes × 2 verification mails: ~100k S3 objects steady-state with 30d TTL = ~500MB = ~$0.01/month.
+
+### Trust chain
+
+```
+operator's long-lived AWS access keys (stored in 1Password)
+  ↓ injected to daemon as AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env
+IAM user (agentkeys-daemon)
+  ↓ sts:AssumeRole — only action this user can perform
+IAM role (agentkeys-agent)
+  ↓ returns 1h temp creds (auto-refreshed)
+S3 GetObject + ses:SendRawEmail API calls
+```
+
+Compromise of the long-lived access keys is bounded to "attacker can assume the role." Rotating the keys is one CLI call (`aws iam create-access-key` + delete the old one); the role and its permissions are untouched.
+
+### Per-user isolation — Stage 6 vs Stage 7
+
+| | Stage 6 interim (shipped today) | Stage 7 target |
+|---|---|---|
+| Bucket policy | `agentkeys-agent` reads whole bucket | `agentkeys-agent` only reads prefix matching `${aws:PrincipalTag/agentkeys_user_wallet}` |
+| Per-user separation | App-side — daemon filters by `To:` header | Cloud-side — bucket policy denies cross-prefix reads |
+| Failure mode if our app has a bug | User A could read user B's mail | `AccessDenied` from S3 |
+| Auth flow | Long-lived IAM user → `sts:AssumeRole` | OIDC JWT (with `agentkeys_user_wallet` claim) → `sts:AssumeRoleWithWebIdentity` |
+| AWS resources | Same singletons | Same singletons (no new IAM per user) |
+
+Stage 7 is documented in [oidc-federation](oidc-federation) and [tag-based-access](tag-based-access). The migration from Stage 6 → 7 swaps the auth flow but keeps the singleton design — same one bucket, same one role, both paths.
+
+---
+
 ## How we differ from AgentMail
 
 AgentMail is a SaaS running on AWS SES. They proxy per-operation: agents call their API, their servers parse MIME, compute threads, manage drafts/labels/webhooks on the client's behalf. Their compute cost scales with user operation frequency.
