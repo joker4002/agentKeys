@@ -359,3 +359,29 @@ Still-future pieces of the original Stage 5b agentic-fallback design:
 
 - [ ] `bash harness/stage-5a-done.sh` exits 0 (covers tests 1–8 above)
 - [ ] (Once ToS cleared) `agentkeys provision openrouter` creates a real account, stores a verified key, `curl` against `/api/v1/models` returns 200
+
+---
+
+## 5. Backend selector — `AGENTKEYS_EMAIL_BACKEND`
+
+`provisioner-scripts/src/lib/email.ts` dispatches `fetchVerificationCode` to one of three backends based on this env var.
+
+| `AGENTKEYS_EMAIL_BACKEND` | Required env vars | Description |
+|---|---|---|
+| `gmail` (default) | `AGENTKEYS_EMAIL_USER`, `AGENTKEYS_EMAIL_PASSWORD` | Polls Gmail via IMAP. Optional: `AGENTKEYS_EMAIL_HOST` (default `imap.gmail.com`), `AGENTKEYS_EMAIL_PORT` (default `993`). |
+| `mock-inbox` | `AGENTKEYS_SESSION_TOKEN`, `AGENTKEYS_SIGNUP_EMAIL` | Polls `GET /mock/inbox/messages?address=<AGENTKEYS_SIGNUP_EMAIL>` on the running mock server. Optional: `AGENTKEYS_BACKEND_URL` (default `http://127.0.0.1:8090`). |
+| `ses-s3` | `AGENTKEYS_SES_BUCKET` | Lists objects under `s3://$AGENTKEYS_SES_BUCKET/inbound/`, downloads new `.eml` files, parses MIME headers. AWS credentials via standard SDK chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / instance profile). |
+
+**Quick smoke test for `mock-inbox` dispatch** (server must be running on port 8090; expects a timeout since no message is delivered):
+
+```bash
+AGENTKEYS_EMAIL_BACKEND=mock-inbox \
+AGENTKEYS_SIGNUP_EMAIL=bot-test@agentkeys-email.io \
+AGENTKEYS_SESSION_TOKEN=demo-token \
+node --input-type=module <<'EOF'
+import { fetchVerificationCode } from './provisioner-scripts/src/lib/email.js';
+fetchVerificationCode({ from: /./, subject: /./, codeRegex: /(\d{6})/, timeoutMs: 3000 })
+  .catch(e => { console.log('dispatch ok, error:', e.code ?? e.message); });
+EOF
+# Expected output: "dispatch ok, error: EMAIL_TIMEOUT" (or a fetch error if server is not running)
+```
