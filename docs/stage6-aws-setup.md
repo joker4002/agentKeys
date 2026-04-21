@@ -1,7 +1,7 @@
 # Stage 6 AWS Setup Runbook
 
 **Audience:** the operator setting up Stage 6's hosted-email infra on real AWS for the first time. Default path is a subdomain on an existing parent (`bots.litentry.org` on AWS account `429071895007`); the wiki-canonical standalone `@agentkeys-email.io` path is the post-interim option.
-**Outcome:** an AWS account with SES domain verified, `agentkeys-daemon` IAM user + `agentkeys-agent` role (static-IAM-user trust), S3 bucket + bucket policy, SES receipt rule writing inbound to S3. Once done, the Stage 6 code (mock-server + CLI + provisioner-scripts adapters) can talk to real AWS, and the Stage 5b live demo unblocks. The OIDC-federated variant (TEE-signed JWT → PrincipalTag isolation) is preserved for future work in [`stage6-wip.md §3`](./stage6-wip.md#3-oidc-federation-demo-future-preserved-here).
+**Outcome:** an AWS account with SES domain verified, `agentkeys-daemon` IAM user + `agentkeys-agent` role (static-IAM-user trust), S3 bucket + bucket policy, SES receipt rule writing inbound to S3. Once done, the Stage 6 code (mock-server + CLI + provisioner-scripts adapters) can talk to real AWS, and the Stage 5b live demo unblocks. The OIDC-federated variant (TEE-signed JWT → PrincipalTag isolation) is Stage 7 work; test preserved in [`stage7-wip.md`](./stage7-wip.md).
 **Status:** interim build. TEE-held BYODKIM and TEE-signed OIDC JWTs are deferred until [`heima-gaps-vs-desired-architecture.md`](./spec/heima-gaps-vs-desired-architecture.md) §3 + §4 close. AWS-managed DKIM is used as the Stage 6 interim; replace it with TEE-BYODKIM later.
 
 ## 0. Preconditions
@@ -138,7 +138,7 @@ aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
 
 This Stage 6 runbook uses **static IAM-user trust** as the interim: create a dedicated IAM user `agentkeys-daemon`, create the `agentkeys-agent` role that trusts only that user, and attach the S3/SES inline permissions. The user's access keys get injected into the daemon's env at runtime; the daemon calls `sts:AssumeRole` to get temp creds before touching S3 or SES.
 
-For the full OIDC-federated variant (where a TEE-minted JWT is exchanged at STS for temp creds tagged with `agentkeys_user_wallet`), see [`stage6-wip.md §3`](./stage6-wip.md#3-oidc-federation-demo-future-preserved-here). That path delivers cryptographic per-user isolation via PrincipalTag but requires `oidc.agentkeys.dev` hosted publicly with a Let's Encrypt cert — deferred because (a) the hosting adds a Stage 7 dependency and (b) the "right" signer for that path is a TEE-derived ES256 key, blocked on [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md).
+For the full OIDC-federated variant (where a TEE-minted JWT is exchanged at STS for temp creds tagged with `agentkeys_user_wallet`), see [`stage7-wip.md`](./stage7-wip.md). That path delivers cryptographic per-user isolation via PrincipalTag but requires `oidc.agentkeys.dev` hosted publicly with a Let's Encrypt cert — deferred because (a) the hosting adds a Stage 7 dependency and (b) the "right" signer for that path is a TEE-derived ES256 key, blocked on [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md).
 
 ### 3a. Create the daemon IAM user
 
@@ -223,7 +223,7 @@ aws iam put-role-policy \
   --policy-document file://role-inline.json
 ```
 
-> **Per-user isolation note.** With the static-IAM-user path, per-user isolation lives *app-side* in the daemon — the daemon knows which wallet it's acting as and scopes its own S3 keys accordingly. The cloud does NOT enforce isolation; an app bug could let one wallet read another's prefix. The OIDC-federated path in [`stage6-wip.md §3`](./stage6-wip.md#3-oidc-federation-demo-future-preserved-here) enforces isolation at the bucket-policy layer via `${aws:PrincipalTag/agentkeys_user_wallet}` — recommended for production. See also [`wiki/tag-based-access.md`](../wiki/tag-based-access.md).
+> **Per-user isolation note.** With the static-IAM-user path, per-user isolation lives *app-side* in the daemon — the daemon knows which wallet it's acting as and scopes its own S3 keys accordingly. The cloud does NOT enforce isolation; an app bug could let one wallet read another's prefix. The OIDC-federated path in [`stage7-wip.md`](./stage7-wip.md) enforces isolation at the bucket-policy layer via `${aws:PrincipalTag/agentkeys_user_wallet}` — recommended for production. See also [`wiki/tag-based-access.md`](../wiki/tag-based-access.md).
 
 ## 4. S3 bucket for inbound mail
 
