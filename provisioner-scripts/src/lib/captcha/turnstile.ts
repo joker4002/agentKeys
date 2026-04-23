@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import { escalateAndThrow } from "../lib/human-assist.js";
+import { escalateAndThrow } from "../human-assist.js";
 
 export type TurnstileMode = "not-present" | "auto-passive" | "auto-click" | "human" | "timeout";
 

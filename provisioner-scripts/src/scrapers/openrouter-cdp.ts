@@ -1,309 +1,315 @@
-// Stage 5b CDP scraper — connects to a user-launched Chrome via CDP, drives
-// OpenRouter signup through Clerk + Turnstile, retrieves verification (either
-// a 6-digit OTP or a magic-link URL, whichever Clerk is currently serving)
-// from the configured email backend, mints a new API key, outputs the
-// sk-or-v1-* value on stdout.
+// Production scraper — OpenRouter signup → API-key mint.
 //
-// Why this exists:
-// Playwright's bundled Chromium launches with --enable-automation baked in
-// by the Playwright library. Cloudflare Turnstile detects this at runtime
-// (error 600010: "browser execution environment suspicious") and refuses
-// to issue a token even when a human clicks the checkbox. Connecting via
-// CDP to a user-launched real Chrome bypasses this because the browser
-// process has no automation flags.
+// Contract:
+//   stdin:  —
+//   stdout: newline-delimited JSON events, terminal {"type":"success","api_key":"sk-or-v1-..."}
+//           or {"type":"error","code":"...","details":"..."} on failure
+//   stderr: timestamped progress logs (for humans reading live)
+//   exit:   0 on success, 1 on failure
 //
-// How to use:
-//   # 1. User launches a fresh real Chrome with remote-debugging enabled:
+// Shell / direct use:
+//   node --import tsx/esm src/scrapers/openrouter-cdp.ts | jq -r 'select(.type=="success") | .api_key'
+//
+// Rust provisioner use: the daemon's `spawn_and_collect` already consumes
+// this JSON-event contract — drops in with no wrapper.
+//
+// Why CDP-to-real-Chrome and not Playwright-launched Chromium:
+//   Cloudflare Turnstile detects --enable-automation (baked into Playwright's
+//   bundled Chromium) and refuses to issue tokens. Connecting via CDP to a
+//   user-launched real Chrome avoids the flag entirely.
+//
+// Prereq: Chrome listening on CDP_URL (default http://localhost:9222). The
+// `scripts/reset-chrome-for-recording.sh` script in the repo root launches
+// the expected throwaway profile. Alternatively:
 //   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
 //     --remote-debugging-port=9222 \
 //     --user-data-dir=/tmp/agentkeys-chrome-profile &
-//   # 2. Export env — SIGNUP_EMAIL must be a local-part OpenRouter hasn't seen;
-//   #    Clerk normalizes Gmail/Workspace plus-aliases so +suffix reuse is rejected.
-//   export AGENTKEYS_SIGNUP_EMAIL="<fresh-local-part>@<your-domain>"
-//   export AGENTKEYS_SIGNUP_PASSWORD="<strong-random>"
-//   export AGENTKEYS_EMAIL_USER="you@gmail.com"            # canonical IMAP login
-//   export AGENTKEYS_EMAIL_PASSWORD="<gmail app password>"
-//   export AGENTKEYS_EMAIL_HOST="imap.gmail.com"
-//   export AGENTKEYS_EMAIL_PORT="993"
-//   # 3. Run:
-//   node --import tsx/esm provisioner-scripts/src/scrapers/openrouter-cdp.ts
 //
-// Waits up to 180s for Turnstile to resolve + form to advance. If Turnstile
-// surfaces a visible challenge, the user must click it on screen within that
-// window. Final line on stdout is the sk-or-v1-* key; progress logs go to stderr.
+// Required env:
+//   AGENTKEYS_SIGNUP_EMAIL         fresh local-part (Clerk rejects plus-alias reuse)
+//   AGENTKEYS_SIGNUP_PASSWORD      strong password
+//   AGENTKEYS_EMAIL_BACKEND        "gmail" | "ses-s3" | "mock-inbox" (default gmail)
+//   (+ backend-specific vars: see src/lib/email.ts)
+//
+// Optional env:
+//   CDP_URL                        default http://localhost:9222
 
 import { chromium, type Browser, type Page } from "playwright";
 import { fetchVerificationCode } from "../lib/email.js";
+import {
+  clickFirstVisible,
+  clickOuterCreate,
+  dismissCookieBanner,
+  humanType,
+  jitterDelay,
+  probeAndDismissDialog,
+} from "../lib/playwright-patterns.js";
+import { handleTurnstile } from "../lib/captcha/turnstile.js";
 
 const CDP_URL = process.env.CDP_URL ?? "http://localhost:9222";
 const SIGNUP_EMAIL = process.env.AGENTKEYS_SIGNUP_EMAIL ?? "";
 const SIGNUP_PASSWORD = process.env.AGENTKEYS_SIGNUP_PASSWORD ?? "";
 
-// Real sender observed in Stage 6: "OpenRouter <notifications@openrouter.ai>".
-// Matches any @openrouter.ai mailbox plus generic clerk-hosted senders.
-const OPENROUTER_VERIFICATION_FROM = /@openrouter\.ai|clerk/i;
+const SIGNUP_URL = "https://openrouter.ai/auth";
+const KEYS_URL = "https://openrouter.ai/workspaces/default/keys";
 
-// Subjects observed in Stage 6 across runs: "Your sign up link", "Verify your
-// email for OpenRouter". Matches authentication-flow phrases so non-auth
-// traffic from the same sender (credit summaries, marketing) is skipped.
-const OPENROUTER_VERIFICATION_SUBJECT = /sign[\s-]?up.*link|sign[\s-]?in.*link|magic.*link|verify|verification|confirm/i;
+// Real sender observed: "OpenRouter <notifications@openrouter.ai>".
+const FROM_REGEX = /@openrouter\.ai|clerk/i;
+// Subjects observed: "Your sign up link", "Verify your email for OpenRouter".
+const SUBJECT_REGEX = /sign[\s-]?up.*link|sign[\s-]?in.*link|magic.*link|verify|verification|confirm/i;
+// Clerk magic-link URL shape.
+const URL_REGEX = /(https:\/\/[^\s<>"'\)]*(?:clerk|\/verify|ticket=|verification)[^\s<>"'\)]*)/i;
 
-// Clerk magic-link URLs typically include "clerk", "/verify", or "ticket=".
-// The codeRegex runs against a QP-decoded body so reserved chars are already
-// normalized back to =/? by the ses-s3 backend.
-const OPENROUTER_VERIFICATION_URL = /(https:\/\/[^\s<>"'\)]*(?:clerk|\/verify|ticket=|verification)[^\s<>"'\)]*)/i;
+// JSON-line event emitter — contract shared with the Rust provisioner's
+// `spawn_and_collect` parser. Progress events are informational; exactly
+// one terminal event (success | error) MUST be emitted per run.
+type Event =
+  | { type: "progress"; step: string }
+  | { type: "success"; api_key: string }
+  | { type: "error"; code: string; details: string };
 
-const log = (msg: string) => console.error(`[cdp] ${new Date().toISOString().slice(11, 19)} ${msg}`);
+function emit(e: Event): void {
+  process.stdout.write(JSON.stringify(e) + "\n");
+}
+const progress = (step: string): void => emit({ type: "progress", step });
+const log = (msg: string): void => {
+  process.stderr.write(`[openrouter] ${new Date().toISOString().slice(11, 19)} ${msg}\n`);
+};
 
-// Shared so the FATAL handler can snapshot the live page on crash.
-let livePage: Page | null = null;
-
-// HTML entities that may appear in URLs extracted from plain-text email parts.
-// &amp; is the breaking one — query-param separators silently mis-parse.
-function decodeHtmlEntitiesInUrl(url: string): string {
-  return url
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'");
+// Service-specific: OpenRouter chains TWO modals after signup that each
+// block the keys page:
+//   1. Survey: "Where did you first hear about OpenRouter?" — select an
+//      option button (we use "Other / Not sure") then click Continue.
+//   2. Welcome: "You're all set!" — click Close (X).
+// Either or both may render; both may render sequentially.
+async function dismissOpenRouterOnboardingModals(
+  page: Page,
+  detectTimeoutMs = 500,
+): Promise<boolean> {
+  return probeAndDismissDialog({
+    page,
+    textRegex:
+      /where did you first hear|you'?re all set|welcome to|get started by buying/i,
+    detectTimeoutMs,
+    maxRounds: 4,
+    dismissFn: async (p) => {
+      // Decide branch by peeking at dialog textContent.
+      const text = await p
+        .evaluate(() => {
+          const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(
+            (el) => !!((el as HTMLElement).offsetWidth || (el as HTMLElement).offsetHeight),
+          );
+          return (d?.textContent ?? "").toLowerCase();
+        })
+        .catch(() => "");
+      if (text.includes("where did you first hear")) {
+        // Survey branch: click "Other / Not sure" then Continue.
+        const optionLabels = [
+          /^other\s*\/\s*not sure$/i,
+          /^other.*not sure$/i,
+          /^skip$/i,
+          /^not now$/i,
+          /^other$/i,
+        ];
+        for (const lbl of optionLabels) {
+          const btn = p.getByRole("button", { name: lbl }).first();
+          if (!(await btn.isVisible({ timeout: 300 }).catch(() => false))) continue;
+          await btn.click({ timeout: 3_000, force: true }).catch(() => {});
+          break;
+        }
+        await p.waitForTimeout(250);
+        await p
+          .getByRole("button", { name: /^continue$/i })
+          .first()
+          .click({ timeout: 5_000, force: true })
+          .catch(() => {});
+      } else {
+        // Welcome banner: click Close (X).
+        const closeBtn = p.getByRole("button", { name: /^close$/i }).first();
+        if (await closeBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+          await closeBtn.click({ timeout: 3_000, force: true }).catch(() => {});
+        } else {
+          await p.keyboard.press("Escape").catch(() => {});
+        }
+      }
+    },
+  });
 }
 
-async function main() {
+async function main(): Promise<void> {
   if (!SIGNUP_EMAIL || !SIGNUP_PASSWORD) {
-    throw new Error("AGENTKEYS_SIGNUP_EMAIL and AGENTKEYS_SIGNUP_PASSWORD env vars are required");
-  }
-  if (!process.env.AGENTKEYS_EMAIL_USER || !process.env.AGENTKEYS_EMAIL_PASSWORD) {
-    throw new Error("AGENTKEYS_EMAIL_USER + AGENTKEYS_EMAIL_PASSWORD required for OTP retrieval");
+    emit({
+      type: "error",
+      code: "missing-env",
+      details: "AGENTKEYS_SIGNUP_EMAIL and AGENTKEYS_SIGNUP_PASSWORD required",
+    });
+    process.exit(1);
   }
 
+  progress("cdp-connect");
   log(`connecting to CDP at ${CDP_URL}`);
   const browser: Browser = await chromium.connectOverCDP(CDP_URL);
-  const contexts = browser.contexts();
-  const ctx = contexts[0] ?? await browser.newContext();
-  const page: Page = ctx.pages()[0] ?? await ctx.newPage();
-  livePage = page;
+  const ctx = browser.contexts()[0] ?? (await browser.newContext());
+  // Wipe cookies so Clerk doesn't short-circuit us into a stale session.
+  await ctx.clearCookies().catch(() => {});
+  const page: Page = ctx.pages()[0] ?? (await ctx.newPage());
 
   try {
-    log("navigating to openrouter.ai/auth");
-    await page.goto("https://openrouter.ai/auth", { waitUntil: "networkidle", timeout: 30_000 });
+    progress("goto-signup");
+    log("navigating to signup");
+    await page.goto(SIGNUP_URL, { waitUntil: "load", timeout: 30_000 });
+    await dismissCookieBanner(page);
 
-    log("waiting for email input");
-    await page.waitForSelector("#emailAddress-field", { timeout: 15_000 });
+    progress("signup-form");
+    log(`filling credentials (email=${SIGNUP_EMAIL})`);
+    const EMAIL_SEL = 'input[type="email"], input[name*="email" i]';
+    const PW_SEL = 'input[type="password"], input[name*="password" i]';
+    await page.locator(EMAIL_SEL).first().waitFor({ timeout: 15_000 });
+    await humanType(page, EMAIL_SEL, SIGNUP_EMAIL);
+    await jitterDelay(250, 550);
+    await humanType(page, PW_SEL, SIGNUP_PASSWORD);
+    await jitterDelay(300, 700);
 
-    log(`filling email = ${SIGNUP_EMAIL}`);
-    await page.fill("#emailAddress-field", SIGNUP_EMAIL);
-
-    log("filling password");
-    await page.fill("#password-field", SIGNUP_PASSWORD);
-
-    log("checking TOS checkbox");
-    // DO NOT click the <label> — it wraps both the checkbox AND a "Terms of
-    // Service" link; clicking the label text often lands on the link and
-    // navigates to /terms. Click the checkbox input directly instead.
-    await page.locator('#legalAccepted-field').check({ force: true, timeout: 3000 });
-
-    log("clicking Continue");
-    await page.locator('button[data-localization-key="formButtonPrimary"]').first().click({ timeout: 5_000 });
-
-    // Watch for one of:
-    //   (a) URL leaves /sign-up (Turnstile advanced the form, or magic-link already clicked)
-    //   (b) OTP input appears (legacy 6-digit flow)
-    //   (c) "Verify your email" link screen appears (current Clerk magic-link flow)
-    //   (d) Turnstile surfaces a visible challenge — user clicks it in Chrome
-    const OTP_SEL = 'input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"]';
-    const MAGIC_LINK_SEL = 'text=/verification link|use the link/i';
-    type VerifyMode = "url-advanced" | "otp" | "magic-link";
-
-    log("waiting for Turnstile + form to advance (up to 180s; user may need to click a visible challenge)");
-    const started = Date.now();
-    let mode: VerifyMode | null = null;
-    while (Date.now() - started < 180_000) {
-      const url = page.url();
-      if (!url.includes("/sign-up")) {
-        log(`URL advanced to ${url.slice(0, 60)}`);
-        mode = "url-advanced";
-        break;
+    // Check TOS checkbox with label-click fallback (Clerk hides the real
+    // input and styles the label as the visible toggle).
+    const TOS_SEL =
+      'input[type="checkbox"][id*="legal" i], input[type="checkbox"][name*="terms" i], input[type="checkbox"][id*="tos" i]';
+    const tos = page.locator(TOS_SEL).first();
+    if (await tos.count()) {
+      await tos.check({ force: true, timeout: 3_000 }).catch(() => {});
+      if (!(await tos.isChecked().catch(() => false))) {
+        const id = await tos.evaluate((el: HTMLInputElement) => el.id || "");
+        if (id) {
+          await page.locator(`label[for="${id}"]`).first().click({ timeout: 2_000 }).catch(() => {});
+        }
       }
-      const otpPresent = await page.locator(OTP_SEL).count();
-      if (otpPresent > 0) {
-        log("OTP input appeared (legacy 6-digit flow)");
-        mode = "otp";
-        break;
-      }
-      const magicLinkPresent = await page.locator(MAGIC_LINK_SEL).count();
-      if (magicLinkPresent > 0) {
-        log("magic-link verification screen detected");
-        mode = "magic-link";
-        break;
-      }
-      const err = await page.locator('[role="alert"], .cl-formFieldError, .cl-alertText').allInnerTexts();
-      const realErr = err.find(t => t && !/password meets/i.test(t));
-      if (realErr) {
-        throw new Error(`form error: ${realErr}`);
-      }
-      await page.waitForTimeout(2500);
+      await jitterDelay(200, 500);
     }
 
-    if (mode === null) {
-      throw new Error(
-        "form still on /sign-up after 180s AND no OTP/magic-link screen — Turnstile likely never resolved. " +
-        "Check the Chrome window: is the Turnstile checkbox visible and waiting? " +
-        "Or did the page navigate elsewhere (e.g. /terms if the ToS link was accidentally clicked)?"
-      );
+    progress("click-continue");
+    const clickedContinue = await clickFirstVisible(page, [
+      'button[data-localization-key="formButtonPrimary"]',
+      'button:text-is("Sign up")',
+      'button:text-is("Continue")',
+      'button:text-is("Register")',
+      'form button[type="submit"]:not(:has-text("Google")):not(:has-text("GitHub")):not(:has-text("Apple"))',
+    ]);
+    if (!clickedContinue) {
+      emit({ type: "error", code: "selector-missing", details: "no visible Continue button after fill" });
+      process.exit(1);
     }
 
-    if (mode === "otp") {
-      log("fetching 6-digit OTP from email");
-      const code = await fetchVerificationCode({
-        from: OPENROUTER_VERIFICATION_FROM,
-        subject: OPENROUTER_VERIFICATION_SUBJECT,
-        codeRegex: /(\d{6})/,
-        timeoutMs: 90_000,
-      });
-      log(`got OTP: ${code}`);
+    progress("turnstile");
+    const turnstile = await handleTurnstile(page);
+    log(`turnstile: ${turnstile}`);
 
-      // Clerk OTP is usually split into 6 single-char inputs, but some versions are one input.
-      const otpInputs = await page.locator(OTP_SEL).all();
-      if (otpInputs.length === 1) {
-        await otpInputs[0].fill(code);
-      } else if (otpInputs.length === 6) {
-        for (let i = 0; i < 6; i++) await otpInputs[i].fill(code[i]);
-      } else {
-        throw new Error(`unexpected OTP input count: ${otpInputs.length}`);
-      }
+    progress("fetch-verification-email");
+    log("polling email backend for verification email");
+    const verifyUrl = (
+      await fetchVerificationCode({
+        from: FROM_REGEX,
+        subject: SUBJECT_REGEX,
+        codeRegex: URL_REGEX,
+        timeoutMs: 120_000,
+      })
+    )
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">");
 
-      const verifyBtn = page.locator('button[data-localization-key="formButtonPrimary"]');
-      if (await verifyBtn.isEnabled({ timeout: 3000 })) {
-        await verifyBtn.click();
-      }
+    progress("goto-verify-url");
+    log("following magic link");
+    await page.goto(verifyUrl, { waitUntil: "load", timeout: 30_000 });
+    // Clerk magic links land on /sign-up/verify-email-address?__clerk_status=verified.
+    // URL still contains "/sign-up" but session IS established. Accept as done.
+    await page
+      .waitForURL(
+        (u) => {
+          const s = u.toString();
+          return (
+            /[?&]__clerk_status=verified|__clerk_created_session=/.test(s) ||
+            (!s.includes("/sign-up") && !s.includes("/sign-in"))
+          );
+        },
+        { timeout: 30_000 },
+      )
+      .catch(() => {});
 
-      log("waiting for redirect away from /sign-up");
-      await page.waitForURL(u => !u.toString().includes("/sign-up"), { timeout: 30_000 });
+    progress("goto-keys");
+    log("navigating to keys page");
+    await page.goto(KEYS_URL, { waitUntil: "load", timeout: 20_000 });
+
+    // OpenRouter's onboarding + welcome modal chain renders 15-40s after
+    // keys-page hydration. Short initial probe so fast-loading sessions
+    // don't stall; the per-iteration dismiss inside clickOuterCreate catches
+    // late-rendering modals.
+    await dismissOpenRouterOnboardingModals(page, 1_500);
+
+    progress("click-create");
+    log("clicking Create (up to 40s, dismissing onboarding each iter)");
+    const clickedCreate = await clickOuterCreate(page, {
+      onBeforeIteration: (p) => dismissOpenRouterOnboardingModals(p, 200).then(() => {}),
+    });
+    if (!clickedCreate) {
+      emit({ type: "error", code: "selector-missing", details: "no visible Create Key button on keys page" });
+      process.exit(1);
     }
 
-    if (mode === "magic-link") {
-      log("fetching verification link from email");
-      const verifyUrlRaw = await fetchVerificationCode({
-        from: OPENROUTER_VERIFICATION_FROM,
-        subject: OPENROUTER_VERIFICATION_SUBJECT,
-        codeRegex: OPENROUTER_VERIFICATION_URL,
-        timeoutMs: 90_000,
-      });
-      // OpenRouter's plain-text part HTML-encodes ampersands (`&amp;`) inside
-      // the verification URL. Passing that to page.goto() makes Clerk's query
-      // parser treat `&amp;token=X` as a single param literally named
-      // `amp;token`; Clerk's token lookup fails, verification silently hangs.
-      // Decode common HTML entities before navigation.
-      const verifyUrl = decodeHtmlEntitiesInUrl(verifyUrlRaw);
-      if (verifyUrl !== verifyUrlRaw) {
-        log("decoded HTML entities in URL (e.g. &amp; -> &)");
-      }
-      log(`got verify URL: ${verifyUrl.slice(0, 80)}${verifyUrl.length > 80 ? "..." : ""}`);
+    // Defensive re-dismiss in case the onboarding modal popped up over the
+    // freshly-opened Create Key form dialog.
+    await dismissOpenRouterOnboardingModals(page, 500);
 
-      log("navigating current tab to verify URL");
-      await page.goto(verifyUrl, { waitUntil: "networkidle", timeout: 30_000 });
-
-      log("waiting for redirect away from /sign-up");
-      await page.waitForURL(u => !u.toString().includes("/sign-up"), { timeout: 30_000 });
-    }
-
-    log("navigating to /keys");
-    await page.goto("https://openrouter.ai/keys", { waitUntil: "networkidle", timeout: 20_000 });
-
-    // First-run onboarding: OpenRouter shows a "Where did you first hear about
-    // OpenRouter?" modal before exposing the API Keys UI. The Create Key
-    // button sits behind the modal and fails to become visible. Dismiss the
-    // modal by selecting a neutral option and clicking Continue. No-op on
-    // subsequent visits (modal already answered).
-    log("checking for first-run onboarding modal");
-    const onboardingHeader = page.locator('text=/where did you first hear/i').first();
-    const modalPresent = await onboardingHeader.isVisible({ timeout: 3_000 }).catch(() => false);
-    if (modalPresent) {
-      log("onboarding modal detected — selecting 'Other / Not sure'");
-      const otherOption = page
-        .getByRole("radio", { name: /other.*not sure/i })
-        .or(page.getByLabel(/other.*not sure/i))
-        .or(page.getByText(/^other.*not sure$/i))
-        .first();
-      await otherOption.click({ timeout: 5_000 });
-
-      log("clicking Continue");
-      const continueBtn = page.getByRole("button", { name: /^continue$/i }).first();
-      await continueBtn.click({ timeout: 5_000 });
-
-      log("waiting for onboarding modal to dismiss");
-      await onboardingHeader.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {
-        log("onboarding modal did not dismiss cleanly — continuing anyway");
-      });
-    } else {
-      log("no onboarding modal (existing account or already dismissed)");
-    }
-
-    log("looking for Create Key button");
-    // Current OpenRouter empty state: plain "Create" button. Older UI used
-    // "Create Key" / "Create API Key". Accept all; `/^create$/i` matches the
-    // exact-text button. `[data-testid]` kept as belt-and-suspenders.
-    const createBtn = page
-      .getByRole("button", { name: /^create$/i })
-      .or(page.getByRole("button", { name: /create.*api.*key/i }))
-      .or(page.getByRole("button", { name: /create.*key/i }))
-      .or(page.locator('[data-testid="create-key-btn"]'))
-      .first();
-    await createBtn.waitFor({ state: "visible", timeout: 15_000 });
-    await createBtn.click();
-
-    log("filling key name (if name dialog opened)");
-    const nameInput = page.locator('input[placeholder*="name" i], input[name="name"]').first();
+    progress("fill-key-name");
+    const NAME_SEL =
+      'input#name, input[id*="name" i]:not([type="email"]):not([type="password"])';
+    await page.locator(NAME_SEL).first().waitFor({ state: "visible", timeout: 10_000 }).catch(() => {});
+    const nameInput = page.locator(NAME_SEL).first();
     if (await nameInput.count()) {
-      await nameInput.fill(`agentkeys-stage5b-${Date.now()}`);
+      await nameInput.fill("").catch(() => {});
+      await humanType(page, NAME_SEL, `agentkeys-${Date.now()}`);
+      await jitterDelay(300, 600);
     }
 
-    log("confirming create");
-    // Find the submit/create button inside the dialog. Prefer the visible one
-    // with "Create" text, fall back to any submit button.
-    const confirm = page
-      .getByRole("button", { name: /^create$/i })
-      .or(page.locator('button[type="submit"]'))
-      .last();
-    await confirm.click({ timeout: 5_000 });
+    await dismissOpenRouterOnboardingModals(page, 300);
+    progress("click-confirm");
+    const clickedConfirm = await clickFirstVisible(page, [
+      '[role="dialog"]:has(input#name) button:text-is("Create API Key")',
+      '[role="dialog"]:has(input#name) button:text-is("Create")',
+      '[role="dialog"]:has(input#name) button:has-text("Create")',
+    ]);
+    if (!clickedConfirm) {
+      emit({ type: "error", code: "selector-missing", details: "no visible Create/Submit in dialog" });
+      process.exit(1);
+    }
 
-    log("waiting for key to appear");
-    const keyEl = page.locator('code:has-text("sk-or-v1-"), pre:has-text("sk-or-v1-"), input[value^="sk-or-v1-"]').first();
-    await keyEl.waitFor({ timeout: 15_000 });
-
-    const tag = await keyEl.evaluate(n => n.tagName.toLowerCase());
+    progress("extract-key");
+    const keyEl = page
+      .locator('code:has-text("sk-"), pre:has-text("sk-"), input[value^="sk-"]')
+      .first();
+    await keyEl.waitFor({ state: "visible", timeout: 15_000 });
+    const tag = await keyEl.evaluate((n) => n.tagName.toLowerCase());
     const raw =
       tag === "input"
         ? await keyEl.inputValue()
-        : (await keyEl.textContent()) ?? "";
-
+        : ((await keyEl.textContent()) ?? "");
     const key = raw.trim();
-    log(`extracted key: ${key.slice(0, 12)}****...${key.slice(-4)}`);
-    if (!/^sk-or-v1-[a-zA-Z0-9]{20,}$/.test(key)) {
-      throw new Error(`extracted value doesn't match sk-or-v1-* format: ${key.slice(0, 40)}...`);
+    if (!/^sk-[a-zA-Z0-9_-]{20,}$/.test(key)) {
+      emit({ type: "error", code: "key-format", details: `extracted value didn't match sk-*: ${key.slice(0, 40)}` });
+      process.exit(1);
     }
-    process.stdout.write(key + "\n");
+
+    log(`minted key: ${key.slice(0, 8)}****${key.slice(-4)}`);
+    emit({ type: "success", api_key: key });
   } finally {
-    // Don't close the browser — user may want to keep their session.
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
+  process.exit(0);
 }
 
-main().catch(async err => {
-  const msg = err?.message ?? err?.toString?.() ?? JSON.stringify(err);
+main().catch((err: unknown) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  emit({ type: "error", code: "fatal", details: msg });
   log(`FATAL: ${msg}`);
-  if (err?.stack) console.error(err.stack);
-  else console.error(JSON.stringify(err, Object.getOwnPropertyNames(err ?? {}), 2));
-  if (livePage) {
-    try {
-      const url = livePage.url();
-      const shotPath = `/tmp/cdp-fatal-${Date.now()}.png`;
-      await livePage.screenshot({ path: shotPath, fullPage: true });
-      log(`page snapshot on fatal — url=${url} screenshot=${shotPath}`);
-    } catch (screenshotErr) {
-      log(`could not capture fatal screenshot: ${(screenshotErr as Error).message}`);
-    }
-  }
   process.exit(1);
 });

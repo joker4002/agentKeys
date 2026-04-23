@@ -7,10 +7,17 @@ import {
   type Manifest,
   type SessionCtx,
 } from "./artifacts.js";
-import { dumpEmailToRecording, pollFreshRawEmail } from "./email-analyzer.js";
-import { handleTurnstile } from "./turnstile-handler.js";
-import { handleHCaptcha } from "./hcaptcha-handler.js";
+import { dumpEmailToRecording, pollFreshRawEmail } from "../lib/email-analyzer.js";
+import { handleTurnstile } from "../lib/captcha/turnstile.js";
+import { handleHCaptcha } from "../lib/captcha/hcaptcha.js";
 import { escalateAndThrow } from "../lib/human-assist.js";
+import {
+  clickFirstVisible,
+  clickOuterCreate,
+  dismissCookieBanner,
+  humanType,
+  jitterDelay,
+} from "../lib/playwright-patterns.js";
 
 export interface FlowCtx {
   session: SessionCtx;
@@ -27,178 +34,11 @@ export interface FlowCtx {
 const MAGIC_LINK_TEXT_SELECTOR = 'text=/verification link|use the link|sign up link|magic link/i';
 const OTP_SELECTOR = 'input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"]';
 
-// Iterate candidate selectors in priority order. For each, enumerate all
-// matches and click the FIRST visible one. Returns the winning selector
-// string, or null if nothing visible matched. Essential for Clerk pages that
-// render aria-hidden duplicates of their primary button (which `.first()`
-// would otherwise grab and time out clicking).
-async function clickFirstVisible(page: Page, selectors: string[]): Promise<string | null> {
-  for (const sel of selectors) {
-    const candidates = await page.locator(sel).all();
-    for (const c of candidates) {
-      const visible = await c.isVisible().catch(() => false);
-      if (!visible) continue;
-      // Skip disabled buttons — Playwright's .click() on a disabled element
-      // succeeds silently (no throw) but doesn't fire the action. We'd then
-      // falsely think we submitted. Check enabled state before attempting.
-      const enabled = await c.isEnabled().catch(() => true);
-      if (!enabled) continue;
-      // Layer 1 humanization: move mouse to element BEFORE clicking. A
-      // direct click teleports the cursor which is a fingerprinting signal
-      // Turnstile watches for.
-      try {
-        const box = await c.boundingBox();
-        if (box) {
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
-          await jitterDelay(120, 280);
-        }
-        await c.click({ timeout: 5_000 });
-        return sel;
-      } catch {
-        // visible but not clickable (covered by overlay, etc.); try next
-      }
-    }
-  }
-  return null;
-}
+// clickFirstVisible, jitterDelay, humanType, dismissCookieBanner,
+// clickOuterCreate moved to ../lib/playwright-patterns.ts (shared with
+// production scrapers). Recorder-specific wrappers below still reference
+// them via the named imports at the top of this file.
 
-// Random wait between min and max ms. Kept short so the recorder doesn't
-// feel sluggish but long enough to avoid "every action in 0ms" bot-signature.
-function jitterDelay(minMs: number, maxMs: number): Promise<void> {
-  const ms = Math.floor(minMs + Math.random() * (maxMs - minMs));
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-// Click the "Create (API) Key" button that opens the form dialog. OpenRouter
-// after-signup shows a welcome banner with role="dialog" containing the real
-// Create API Key button — previously we excluded dialog-scoped buttons and
-// missed it. Strategy: prefer "Create API Key" exact text > "Create Key" >
-// "Create" (narrowed to enabled+visible). The form dialog's submit is
-// DISABLED until Name is typed, so it gets filtered naturally.
-async function clickOuterCreate(page: Page): Promise<string | null> {
-  // OpenAI's /api-keys SPA takes 10-15s to hydrate on first visit. OpenRouter's
-  // onboarding+welcome modal chain can take 25-40s to render after keys-page
-  // hydrates. 40s deadline lets the per-iter dismissOnboardingModal catch
-  // the modals as they appear and still leaves time to click Create.
-  const deadline = Date.now() + 40_000;
-  // Prefer the empty-state "Create" button (opens the form dialog) over
-  // "Create API Key" (which may be a welcome-banner tutorial link that
-  // navigates to itself — no form dialog). After each click, verify the
-  // form dialog opened by waiting for input#name; if not, try the next
-  // candidate.
-  const preferences = [
-    { label: '"Create"', filter: /^Create$/i },
-    { label: '"Create Key"', filter: /^Create Key$/i },
-    { label: '"Create API Key"', filter: /^Create API Key$/i },
-    { label: '"Create new secret key"', filter: /^Create new secret key$/i },
-    { label: '"New secret key"', filter: /^New secret key$/i },
-    { label: '"Generate API Key"', filter: /^Generate API Key$/i },
-    { label: '"New API Key"', filter: /^New API Key$/i },
-    // Looser fallbacks — match variations with leading/trailing whitespace
-    // or icon text nodes that break anchored filters.
-    { label: 'substring "Create new secret key"', filter: /Create new secret key/i },
-    { label: 'substring "Create secret key"', filter: /Create secret key/i },
-  ];
-  // Post-click success = EITHER a form-dialog with a Name input appears
-  // (OpenRouter/Brave/Clerk style) OR a fully-revealed `sk-*` value of
-  // long-key shape ([A-Za-z0-9_-]{20+}) appears on the page (OpenAI-style
-  // instant-mint UI with no Name prompt).
-  // The sk-* baseline COUNT is captured BEFORE clicking so tutorial text
-  // (e.g. OpenRouter's docs section quoting `sk-or-v1-...`) doesn't false-
-  // positive a click that didn't open anything.
-  const NAME_INPUT_SEL =
-    'input#name, input[id*="name" i]:not([type="email"]):not([type="password"])';
-  const longKeyCount = async () =>
-    page.evaluate(() => {
-      let n = 0;
-      const re = /sk-[A-Za-z0-9_-]{20,}/;
-      document.querySelectorAll('code, pre, input').forEach((el) => {
-        const v = (el as HTMLInputElement).value ?? el.textContent ?? "";
-        if (re.test(v)) n++;
-      });
-      return n;
-    }).catch(() => 0);
-  const baselineKeyCount = await longKeyCount();
-  const clickWorked = async (timeoutMs: number): Promise<boolean> => {
-    const dialogPromise = page
-      .locator(NAME_INPUT_SEL)
-      .first()
-      .waitFor({ state: "visible", timeout: timeoutMs })
-      .then(() => true)
-      .catch(() => false);
-    const keyDeadline = Date.now() + timeoutMs;
-    while (Date.now() < keyDeadline) {
-      if (await Promise.race([dialogPromise, Promise.resolve(false)])) return true;
-      const c = await longKeyCount();
-      if (c > baselineKeyCount) return true;
-      await page.waitForTimeout(250);
-    }
-    return await dialogPromise;
-  };
-
-  while (Date.now() < deadline) {
-    // Onboarding modal can pop up DURING clickOuterCreate's iteration
-    // (OpenRouter renders it 5-20s after keys-page hydrates). Dismiss
-    // defensively at the top of every loop iteration so it doesn't block
-    // the Create button. Cheap: 200ms detect + dismiss if present.
-    await dismissOnboardingModalDom(page, 200);
-
-    const testid = page.locator('[data-testid="create-key-btn"]').first();
-    if ((await testid.isVisible().catch(() => false)) && (await testid.isEnabled().catch(() => true))) {
-      await testid.click({ timeout: 5_000 });
-      if (await clickWorked(5_000)) {
-        return '[data-testid="create-key-btn"]';
-      }
-    }
-    for (const pref of preferences) {
-      const candidates = await page.locator('button').filter({ hasText: pref.filter }).all();
-      for (const c of candidates) {
-        const visible = await c.isVisible().catch(() => false);
-        const enabled = await c.isEnabled().catch(() => true);
-        if (!visible || !enabled) continue;
-        try {
-          const box = await c.boundingBox();
-          if (box) {
-            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
-            await jitterDelay(100, 220);
-          }
-          // force:true bypasses overlay-intercept errors when an
-          // onboarding modal is mid-fade-in over our target button.
-          await c.click({ timeout: 5_000, force: true });
-          // Form-dialog OR key-reveal within 10s → click was meaningful.
-          // 5s was too short for OpenRouter's form dialog hydration when
-          // the SPA is also racing to render the onboarding modal.
-          if (await clickWorked(10_000)) {
-            return `button:has-text(${pref.label})`;
-          }
-        } catch {
-          // next candidate / preference
-        }
-      }
-    }
-    await page.waitForTimeout(500);
-  }
-  return null;
-}
-
-// Human-ish typing: sequential keystrokes with a randomized inter-key delay.
-// Replaces `.fill()` which writes instantly (another Turnstile red flag).
-// Also focuses the element first with a mouse-move-then-click so the cursor
-// trail looks natural.
-async function humanType(page: Page, selector: string, value: string): Promise<void> {
-  const locator = page.locator(selector).first();
-  const box = await locator.boundingBox();
-  if (box) {
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
-    await jitterDelay(60, 180);
-  }
-  await locator.click({ timeout: 5_000 }).catch(() => {});
-  await locator.pressSequentially(value, { delay: 60 + Math.floor(Math.random() * 60) });
-}
-
-// Dismiss cookie consent banner if present. Common text variants across
-// EU-compliant sites. Uses a short timeout per selector — if none match,
-// no banner shown, return fast.
 // OpenRouter's onboarding modal ("Where did you first hear...") may pop up
 // after the keys page hydrates AND can re-open mid-form-fill if dismissed
 // late. This helper is idempotent — call it whenever a layered Radix modal
@@ -265,130 +105,9 @@ async function dismissOnboardingModalDom(page: Page, detectTimeoutMs = 500): Pro
   return dismissed;
 }
 
-async function dismissOnboardingModal(page: Page, detectTimeoutMs = 500): Promise<boolean> {
-  // OpenRouter has TWO chained modals after signup that block keys page:
-  //   1. "Where did you first hear about OpenRouter?" — survey, requires
-  //      selecting an option then Continue
-  //   2. "You're all set!" — welcome banner, dismissed via Close (X)
-  // This helper drains both in a loop until no recognizable modal remains.
-  // Using .filter({hasText: regex}) — more reliable than `:has-text(...)`
-  // in compound selectors per Playwright docs.
-  const HEADER_RX =
-    /where did you first hear|you'?re all set|welcome to|get started|quick setup/i;
-  let dismissedAny = false;
-
-  for (let i = 0; i < 4; i++) {
-    const header = page
-      .locator('[role="dialog"]')
-      .filter({ hasText: HEADER_RX })
-      .first();
-    // First iteration uses caller's timeout; subsequent ones short-poll.
-    // CRITICAL: `isVisible({timeout})` does NOT wait — it checks instantly.
-    // Use waitFor() to actually poll, then double-check visibility.
-    const wait = i === 0 ? detectTimeoutMs : 500;
-    const appeared = await header
-      .waitFor({ state: "visible", timeout: wait })
-      .then(() => true)
-      .catch(() => false);
-    if (!appeared) break;
-    dismissedAny = true;
-
-    const text = ((await header.textContent().catch(() => "")) ?? "").toLowerCase();
-    if (text.includes("where did you first hear")) {
-      // Survey-style: click an option button then Continue.
-      const optionLabels = [
-        /^other\s*\/\s*not sure$/i,
-        /^other.*not sure$/i,
-        /^skip$/i,
-        /^not now$/i,
-        /^other$/i,
-      ];
-      for (const lbl of optionLabels) {
-        const btn = page.getByRole("button", { name: lbl }).first();
-        if (!(await btn.isVisible({ timeout: 300 }).catch(() => false))) continue;
-        await btn.click({ timeout: 3_000, force: true }).catch(() => {});
-        break;
-      }
-      await page.waitForTimeout(250);
-      await page
-        .getByRole("button", { name: /^continue$/i })
-        .first()
-        .click({ timeout: 5_000, force: true })
-        .catch(() => {});
-    } else {
-      // Welcome banner / generic — click the Close button. OpenRouter's
-      // "You're all set!" modal has a Close X button as the dismiss action.
-      const closeBtn = page.getByRole("button", { name: /^close$/i }).first();
-      if (await closeBtn.isVisible({ timeout: 500 }).catch(() => false)) {
-        await closeBtn.click({ timeout: 3_000, force: true }).catch(() => {});
-      } else {
-        // Last resort: press Escape to close the topmost modal.
-        await page.keyboard.press("Escape").catch(() => {});
-      }
-    }
-
-    // Give the modal a beat to animate out before checking the next one.
-    const closed = await header
-      .waitFor({ state: "hidden", timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!closed) {
-      // Click-based dismiss failed (overlay race, focus jail, etc.). Force-
-      // remove the dialog node from the DOM. This bypasses Radix's animation
-      // state machine but leaves React's data unchanged — the modal won't
-      // re-render until the page navigates again. For the recorder's
-      // single-shot "click Create then exit" path, that's enough.
-      await page.evaluate(() => {
-        document.querySelectorAll('[role="dialog"]').forEach((d) => {
-          const t = (d.textContent || "").toLowerCase();
-          if (
-            t.includes("where did you first hear") ||
-            t.includes("you're all set") ||
-            t.includes("youre all set") ||
-            t.includes("welcome to") ||
-            t.includes("get started") ||
-            t.includes("quick setup")
-          ) {
-            d.remove();
-          }
-        });
-        // Also kill any Radix portal overlay that intercepts pointer events.
-        document
-          .querySelectorAll('[data-radix-popper-content-wrapper], [data-state="open"][role="presentation"], .fixed.inset-0')
-          .forEach((el) => {
-            const cs = getComputedStyle(el);
-            if (cs.pointerEvents === "auto" && cs.zIndex && parseInt(cs.zIndex) > 10) {
-              (el as HTMLElement).style.pointerEvents = "none";
-            }
-          });
-      });
-    }
-    await page.waitForTimeout(300);
-  }
-
-  return dismissedAny;
-}
-
-async function dismissCookieBanner(page: Page): Promise<void> {
-  const texts = [
-    "Accept All Cookies",
-    "Accept all cookies",
-    "Accept cookies",
-    "Accept All",
-    "Accept",
-    "Agree",
-    "OK",
-    "Got it",
-  ];
-  for (const t of texts) {
-    const candidate = page.locator("button").filter({ hasText: new RegExp(`^${t}$`, "i") }).first();
-    if (await candidate.isVisible({ timeout: 800 }).catch(() => false)) {
-      await candidate.click({ timeout: 3_000 }).catch(() => {});
-      await page.waitForTimeout(400);
-      return;
-    }
-  }
-}
+// `dismissCookieBanner` now imported from ../lib/playwright-patterns.js
+// The legacy `dismissOnboardingModal` (locator-based variant) was removed —
+// `dismissOnboardingModalDom` above is the active, DOM-probe-based dismisser.
 
 async function detectAlreadyLoggedIn(page: Page): Promise<boolean> {
   const url = page.url();
@@ -1080,7 +799,9 @@ export async function mintApiKey(ctx: FlowCtx): Promise<void> {
   const dlgAlreadyOpen = await page.locator('[role="dialog"]').first().isVisible({ timeout: 500 }).catch(() => false);
   let clickedCreateKey: string | null = "dialog-already-open";
   if (!dlgAlreadyOpen) {
-    clickedCreateKey = await clickOuterCreate(page);
+    clickedCreateKey = await clickOuterCreate(page, {
+      onBeforeIteration: (p) => dismissOnboardingModalDom(p, 200).then(() => {}),
+    });
   }
   if (!clickedCreateKey) {
     escalateAndThrow({

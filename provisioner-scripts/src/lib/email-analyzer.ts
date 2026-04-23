@@ -135,6 +135,33 @@ export function analyzeEmail(rawMime: string): EmailAnalysis {
   };
 }
 
+// High-level helper for scrapers: poll S3 for a fresh email matching
+// from/subject patterns, then parse it via analyzeEmail (HTML-strip + label-
+// aware OTP extract). Returns the structured EmailAnalysis — caller picks
+// between verifyType === "magic-link" | "otp" | "unknown".
+//
+// Only works with the ses-s3 email backend. Gmail-IMAP / mock-inbox callers
+// continue using `fetchVerificationCode` from lib/email.ts with a regex.
+export async function fetchAndAnalyzeSesEmail(opts: {
+  bucket: string;
+  region?: string;
+  fromPattern: RegExp;
+  subjectPattern: RegExp;
+  startedAtMs?: number;
+  timeoutMs?: number;
+}): Promise<EmailAnalysis> {
+  const startedAtMs = opts.startedAtMs ?? Date.now();
+  const { rawMime } = await pollFreshRawEmail({
+    bucket: opts.bucket,
+    region: opts.region,
+    startedAtMs,
+    timeoutMs: opts.timeoutMs ?? 120_000,
+    fromPattern: opts.fromPattern,
+    subjectPattern: opts.subjectPattern,
+  });
+  return analyzeEmail(rawMime);
+}
+
 async function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) {
