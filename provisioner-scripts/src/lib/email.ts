@@ -6,6 +6,10 @@ export interface FetchOpts {
   codeRegex: RegExp;
   timeoutMs: number;
   pollIntervalMs?: number;
+  // ses-s3 only: how many ms before poll start a message may be and still
+  // count as fresh. Default 60_000. Smaller = stricter rejection of prior-run
+  // leftovers; larger = more tolerant to clock skew / S3 delivery latency.
+  freshnessGraceMs?: number;
   imapClientFactory?: () => import("./email-backends/gmail-imap.js").ImapClientLike;
 }
 

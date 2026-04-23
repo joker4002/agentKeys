@@ -24,44 +24,45 @@ Two sets of IAM creds stashed under project-specific env vars so neither pollute
 
 > **Naming drift worth noting:** admin uses `..._ACCESS_KEY_SECRET`, daemon uses AWS-standard `..._SECRET_ACCESS_KEY`. Both work — they're names you chose, not names the AWS SDK reads directly. Pick one pattern eventually to avoid confusion.
 
-Copy-paste this whole block once per demo run:
+**Quick path — just source the helper:**
 
 ```bash
-# Stage 6 vars
+cd ~/Projects/agentkeys
+source scripts/stage6-demo-env.sh
+```
+
+The script populates all Stage 6 env vars, calls `sts:AssumeRole` as the daemon, exports the 1h temp creds into this shell, and prints a sanity-check line. If `DAEMON_ACCESS_KEY_ID` / `DAEMON_SECRET_ACCESS_KEY` aren't in your shell, it fails fast with a clear message.
+
+Re-source it whenever you want fresh creds (temp creds expire in 1h; typical run is 1–3 min).
+
+<details>
+<summary>What the script does (for reference / debugging)</summary>
+
+```bash
 export REGION=us-east-1
+export AWS_REGION="$REGION"   # AWS SDK reads AWS_REGION, not REGION
 export DOMAIN=bots.litentry.org
 export ACCOUNT_ID=429071895007
-export BUCKET=agentkeys-mail-${ACCOUNT_ID}
+export BUCKET="agentkeys-mail-${ACCOUNT_ID}"
 export AGENTKEYS_EMAIL_BACKEND=ses-s3
 export AGENTKEYS_SES_BUCKET="$BUCKET"
 export AGENTKEYS_SIGNUP_EMAIL="bot-$(date +%s)@${DOMAIN}"
 export AGENTKEYS_SIGNUP_PASSWORD="Stg6-$(date +%s)-xZq9okFg"
 export CDP_URL="http://localhost:9222"
 
-# Call sts:AssumeRole as the daemon via env-prefix. Creds are scoped to
-# this one subprocess only — your shell's AWS_* env stays unset until the
-# next line, where the temp creds populate it.
 CREDS=$(AWS_ACCESS_KEY_ID="$DAEMON_ACCESS_KEY_ID" \
         AWS_SECRET_ACCESS_KEY="$DAEMON_SECRET_ACCESS_KEY" \
   aws sts assume-role \
     --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent" \
     --role-session-name "stage6-demo-$(date +%s)")
 
-# Export the 1h temp creds — this is what the ses-s3 backend uses.
 export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r '.Credentials.AccessKeyId')
 export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.Credentials.SecretAccessKey')
 export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.Credentials.SessionToken')
-
-# Sanity check — assumed-role identity + S3 access both work
-aws sts get-caller-identity
-# Expected ARN: arn:aws:sts::429071895007:assumed-role/agentkeys-agent/stage6-demo-<ts>
-
-aws s3 ls "s3://$BUCKET/inbound/" | head -3
-# Expected: lists bucket contents (may show AMAZON_SES_SETUP_NOTIFICATION).
-# NO AccessDenied.
 ```
 
-If either sanity check fails, stop and fix — the demo can't succeed if the assumed role can't read S3. Temp creds expire in 1 h; typical demo run is 1–3 min. If you hit the hour, re-run this whole block for fresh creds.
+Env-prefix on the AssumeRole call scopes the long-lived daemon keys to that one subprocess — they never touch `AWS_*` in your shell.
+</details>
 
 > **Why env-prefix for AssumeRole.** Writing `AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… aws sts ...` on the same line (no `export`) scopes those values to that one subprocess. No save/restore gymnastics, no state to clean up.
 >
@@ -100,15 +101,31 @@ $BIN --backend $BACKEND init --mock-token stage6-demo
 
 ## 6. Run the CDP scraper + capture the key (Terminal C)
 
-The scraper drives the Chrome from step 4, fills the signup form, waits for Turnstile to resolve (you may need to click the checkbox if a visible challenge appears), polls S3 for the verification email, enters the OTP, mints a key, prints it on stdout.
+The scraper drives the Chrome from step 4, fills the signup form, waits for Turnstile to resolve (you may need to click the checkbox if a visible challenge appears), polls S3 for the verification email, **handles whichever verification path Clerk is currently serving** (magic-link URL *or* legacy 6-digit OTP), mints a key, prints it on stdout. Magic-link path: the scraper extracts the verify URL from the email body, navigates the Chrome tab to it, and Clerk completes verification automatically — no manual click needed.
+
+**Quick path — run the helper:**
 
 ```bash
-KEY=$(node --import tsx/esm provisioner-scripts/src/scrapers/openrouter-cdp.ts 2>/tmp/cdp.log | tail -1)
-echo "extracted key: ${KEY:0:12}****...${KEY: -4}"
-cat /tmp/cdp.log | tail -20   # progress log
+cd ~/Projects/agentkeys
+./scripts/stage6-demo-run.sh
 ```
 
-Expected `/tmp/cdp.log` tail:
+The script refreshes `AGENTKEYS_SIGNUP_EMAIL` with a new timestamp, `cd`s into `provisioner-scripts/` (required — `tsx` lives there, not at repo root), runs the CDP scraper, and prints the extracted key. Log streams to `/tmp/cdp.log`; on failure it tails 25 lines automatically.
+
+Capture the key for step 7:
+
+```bash
+KEY=$(./scripts/stage6-demo-run.sh | tail -1)
+echo "extracted: ${KEY:0:12}****...${KEY: -4}"
+```
+
+Common failures (script + log will make them obvious):
+- `env not loaded` → run `source scripts/stage6-demo-env.sh` first
+- `ExpiredToken` in /tmp/cdp.log → your STS creds are >1h old; re-source the env script
+- Scraper hangs on `waiting for Turnstile` >2 min → click the checkbox in the Chrome window from step 4
+- `Cannot find package 'tsx'` → shouldn't happen with the helper, but means you bypassed it and ran from repo root
+
+Expected `/tmp/cdp.log` tail — **magic-link flow** (current Clerk default):
 
 ```
 [cdp] HH:MM:SS connecting to CDP at http://localhost:9222
@@ -116,12 +133,16 @@ Expected `/tmp/cdp.log` tail:
 [cdp] HH:MM:SS filling email = bot-<ts>@bots.litentry.org
 [cdp] HH:MM:SS clicking Continue
 [cdp] HH:MM:SS waiting for Turnstile + form to advance ...
-[cdp] HH:MM:SS OTP input appeared
-[cdp] HH:MM:SS fetching code from Gmail IMAP          ← misnomer; with ses-s3 backend it polls S3
-[cdp] HH:MM:SS got OTP: 123456
+[cdp] HH:MM:SS magic-link verification screen detected
+[cdp] HH:MM:SS fetching verification link from email
+[cdp] HH:MM:SS got verify URL: https://clerk...
+[cdp] HH:MM:SS navigating current tab to verify URL
+[cdp] HH:MM:SS waiting for redirect away from /sign-up
 [cdp] HH:MM:SS navigating to /keys
 [cdp] HH:MM:SS extracted key: sk-or-v1-xxxx****...WXYZ
 ```
+
+If Clerk falls back to the legacy **6-digit OTP flow**, you'll see `OTP input appeared (legacy 6-digit flow)` → `fetching 6-digit OTP from email` → `got OTP: 123456` instead. The scraper auto-detects which mode Clerk is serving.
 
 > **If it fails at "waiting for Turnstile..." for >2 min:** check the Chrome window — Turnstile may be showing a visible checkbox. Click it. If no checkbox and URL still `/sign-up`, Turnstile rejected the browser fingerprint. Try a fresh `/tmp/agentkeys-chrome-profile` dir in step 4.
 >
@@ -152,11 +173,11 @@ All four acceptance criteria pass when this works:
 Because plus-aliases are unreliable on Clerk normalization, always re-evaluate `AGENTKEYS_SIGNUP_EMAIL` before each run:
 
 ```bash
-export AGENTKEYS_SIGNUP_EMAIL="bot-$(date +%s)@${DOMAIN}"
-export AGENTKEYS_SIGNUP_PASSWORD="Stg6-$(date +%s)-xZq9okFg"
-KEY=$(node --import tsx/esm provisioner-scripts/src/scrapers/openrouter-cdp.ts 2>/tmp/cdp.log | tail -1)
+KEY=$(./scripts/stage6-demo-run.sh | tail -1)
 $BIN --backend $BACKEND store openrouter "$KEY" --force
 ```
+
+The run script refreshes `AGENTKEYS_SIGNUP_EMAIL` every invocation. If STS creds expired (>1h since last `source`), re-source `scripts/stage6-demo-env.sh` first.
 
 ## Known limitations in this interim Stage 6 demo
 
