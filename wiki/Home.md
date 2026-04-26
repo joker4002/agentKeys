@@ -10,8 +10,8 @@ AgentKeys is a credential custody service: a TEE-backed vault that issues long-l
 
 Every spec and every service on top of AgentKeys preserves these four invariants (details in [Blockchain TEE Architecture §6](blockchain-tee-architecture#6-summary-the-four-rules)):
 
-1. **Chain stores everything persistent** — single source of truth.
-2. **TEE holds all private keys and does all computation** — no key leaves the enclave.
+1. **Chain stores everything persistent** — single source of truth for ownership, grants, audit, revocation, and ciphertext hashes. **Not bulk encrypted bytes** ([threat-model-key-custody](https://github.com/litentry/agentKeys/blob/main/docs/spec/threat-model-key-custody.md)).
+2. **TEE holds key-derivation roots and per-request decryption capability** — never bulk plaintext, never persistent per-user material beyond what the master seed reproduces.
 3. **Clients hold only a JWT, not private keys** — bearer tokens, short blast radius.
 4. **AgentKeys brokers credentials, not operations** — daemons call remote services directly; our compute scales with user count, not operation frequency.
 
@@ -25,6 +25,7 @@ Every spec and every service on top of AgentKeys preserves these four invariants
 - **[Session Token](session-token)** — 30-day JWT bearer; issuance, storage, revocation
 - **[Key Security](key-security)** — TEE keys, master session key, storage tiers, threat model
 - **[Data Classification](data-classification)** — data classes, where each lives, retention policy
+- **[Threat Model: Key Custody](https://github.com/litentry/agentKeys/blob/main/docs/spec/threat-model-key-custody.md)** *(spec)* — why nothing sensitive lives on chain or persistently in TEE; off-chain ciphertext + forward-secret epoch rotation (Stage 8)
 
 ### Credential lifecycle (canonical, published wiki)
 

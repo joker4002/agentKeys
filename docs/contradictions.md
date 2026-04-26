@@ -387,6 +387,45 @@ Grouped by status and what the user probably wants to hit before Stage 8.
 
 ---
 
+## 7.1 Where sensitive ciphertext lives — on chain vs off chain  (RESOLVED 2026-04-26)
+
+This was Part 4 / Part 7 of the 2026-04-19 inventory's "key contradictions" list — the docs were silent or inconsistent on whether credential ciphertext lives in `pallet-secrets-vault` on chain (per `wiki/blockchain-tee-architecture.md` §1, `wiki/key-security.md` §1, `docs/spec/credential-backend-interface.md` "Mapping to Heima Primitives") or off-chain in S3. The closest-analogous existing pattern is the Stage 6 email pipeline, which puts raw MIME in S3 and only metadata on chain.
+
+| Source | Pre-2026-04-26 claim |
+|---|---|
+| `wiki/blockchain-tee-architecture.md` §1 row "Credential blobs" | "encrypted ciphertext, on chain in `pallet-secrets-vault`" |
+| `wiki/data-classification.md` §1 row "Credential blobs" | "On chain: encrypted ciphertext" |
+| `wiki/key-security.md` §1 v0.1 column | "Encrypted blob in Heima TEE (`pallet-secrets-vault`)" |
+| `docs/spec/credential-backend-interface.md` Mapping table | `store_credential` → `pallet-secrets-vault::write_secret` |
+| `docs/spec/ses-email-architecture.md` §4 + §6 | Email blobs already in S3 (precedent for off-chain) — not extended to credentials |
+
+**Threat-model finding (2026-04-26):** on-chain encrypted-blob storage creates an unbounded harvest-now-decrypt-later window — public + immutable + permanent ciphertext means any future TEE-key compromise leaks all historical data. Splitting the TEE into two enclaves does not fix the consequence axis. The fix has to be (a) move ciphertext off-chain so it isn't publicly observable forever, and (b) rotate per-epoch DEKs with deletion of old ciphertext. Both moves are required; they multiply rather than add. Full argument: [`docs/spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md).
+
+**Decision (2026-04-26):** Sensitive ciphertext lives **off-chain** in S3 under per-epoch DEKs. Chain holds `(blob_pointer, ciphertext_hash, epoch)` via new `pallet-vault-pointers`. The deprecated `pallet-secrets-vault` design is no longer a target. Forward-secret epoch rotation is the property the previous design did not have.
+
+**Applied to:**
+- `docs/spec/threat-model-key-custody.md` — new doc; canonical position.
+- `docs/stage8-wip.md` — new Stage 8 operational design (off-chain vault + rotation runbook).
+- `docs/spec/plans/development-stages.md` — inserted new Stage 8; renumbered old Stage 8 (memory hygiene) → Stage 9 and old Stage 9 (Heima holding pen) → Stage 10. Parallelization table + change log updated.
+- `docs/stage7-wip.md` — added scope-boundary note: Stage 7 ships the isolation primitive only; vault question deferred to Stage 8.
+- `docs/spec/credential-backend-interface.md` — superseded banner on the Mapping table; rows for `store_credential` / `read_credential` / `teardown_agent` updated to point at `pallet-vault-pointers` + S3.
+- `wiki/blockchain-tee-architecture.md` §1 — superseded banner; on-chain row rewritten to "vault pointers, not blobs"; new `EpochDek` row; new Stage 8 audit extrinsics added.
+- `wiki/data-classification.md` §1 — credential-blob row updated to off-chain + per-epoch DEK; doc-level banner.
+- `wiki/key-security.md` §1 — v0.1 storage column updated; doc-level banner.
+- `wiki/Home.md` — reading-order link to the new threat-model doc; "four rules" wording softened on rules 1 + 2 to align with the new position.
+- `docs/spec/ses-email-architecture.md` §16 — cross-reference added; framing the email pipeline as the precedent that Stage 8 generalizes.
+
+**Tracking:** [issue #57](https://github.com/litentry/agentKeys/issues/57) — security finding + remediation roadmap.
+
+**Why this resolution closes Part 7's gap (architectural commitments NOT yet made).**
+1. ✅ "Is `pallet-secrets-vault` the final design, or is S3 off-chain fallback planned?" — **No**, the final design is off-chain S3 with chain pointers. Decided.
+2. ✅ "Per-request ephemeral key material rotation (forward secrecy at read level)" — addressed via per-epoch DEK rotation; lazy-rotation variant chosen as default.
+3. ❓ "TEE-side credential TTL / eviction policy" — partially addressed (DEK destroyed on epoch boundary; blobs lifecycle-deleted). Remaining tunables (epoch cadence, lifecycle TTL) tracked in [`docs/stage8-wip.md`](./stage8-wip.md) §5 open questions.
+4. ❓ "MRSIGNER succession pallet spec" — orthogonal; out of scope here.
+5. ❓ "TEE-hosted OIDC endpoint (fully sealed)" — orthogonal Stage 7b/future item.
+
+---
+
 ## 8. What this doc does NOT cover
 
 - Code-level bugs not cited in an issue or a wiki/plan doc. (Let code review handle those.)

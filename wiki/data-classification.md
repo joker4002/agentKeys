@@ -1,12 +1,15 @@
 # Data Classification: what is encrypted, what is plaintext, where
 
-Every piece of data in AgentKeys exists in one or more of three locations: the blockchain, the TEE, and the client (CLI or daemon). This document maps each data item to its encryption status at each location.
+> **Updated 2026-04-26 — credential storage row.** The "Credential blobs" row in §1 used to read "On chain: encrypted ciphertext." That position is superseded — sensitive ciphertext now lives **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only `(blob_pointer, ciphertext_hash, epoch)`. Architectural rationale: [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md). Operational design: [`docs/stage8-wip.md`](../docs/stage8-wip.md). The change is structural, not cosmetic — it closes the harvest-now-decrypt-later gap that on-chain ciphertext could not.
+
+Every piece of data in AgentKeys exists in one or more of four locations: the blockchain, the TEE, **off-chain content-addressed storage (S3 today)**, and the client (CLI or daemon). This document maps each data item to its encryption status at each location.
 
 Companion docs:
 
 - `[wiki/blockchain-tee-architecture.md](./blockchain-tee-architecture.md)` — how the chain and TEE split responsibilities
 - `[wiki/key-security.md](./key-security.md)` — session vs credential security, hardening layers
 - `[wiki/serve-and-audit.md](./serve-and-audit.md)` — audit submission, Pattern 4, fee funding
+- [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md) — why nothing sensitive lives on chain or persistently in TEE; forward-secret epoch rotation
 
 ---
 
@@ -15,7 +18,7 @@ Companion docs:
 
 | Data                                                        | On chain                                                            | In TEE                                                                  | On client                                                               |
 | ----------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| **Credential blobs** (API keys — the actual secrets)        | Encrypted (ciphertext, encrypted to TEE shielding key)              | Plaintext in memory during decrypt, then wiped                          | Plaintext in memory during MCP delivery, then wiped (Stage 8 hardening) |
+| **Credential blobs** (API keys — the actual secrets)        | **Pointer + ciphertext hash only** (`pallet-vault-pointers`); ciphertext lives off-chain in S3 under per-epoch DEK | Plaintext in memory during decrypt, then wiped; DEK unwrapped per-request, never persistent in TEE memory across calls | Plaintext in memory during MCP delivery, then wiped (Stage 9 hardening, formerly Stage 8) |
 | **Shielding private key**                                   | Public key only (registered via `register_enclave()`)               | Sealed storage (SGX encrypted at rest)                                  | Never                                                                   |
 | **RSA JWT signing key**                                     | Never                                                               | Sealed storage (PKCS#1 DER file)                                        | Never                                                                   |
 | **User wallet private keys** (current model: per-user)      | Never                                                               | Sealed storage (per `pallet-bitacross`)                                 | Never                                                                   |

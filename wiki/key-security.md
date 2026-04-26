@@ -1,5 +1,7 @@
 # Key Security in AgentKeys
 
+> **Updated 2026-04-26 — v0.1 storage column.** §1 used to say "v0.1 Heima: encrypted blob in `pallet-secrets-vault` (on chain)." That target is superseded. The canonical v0.1 design moves ciphertext **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only pointer + hash. See [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md) and [`docs/stage8-wip.md`](../docs/stage8-wip.md). Stage 9 (memory hygiene; renumbered from Stage 8 in the same change) is unaffected.
+
 Reference notes on how AgentKeys stores session tokens and user credentials, what the macOS Keychain prompt behavior actually means, and why our architecture looks different from 1Password-style local vaults.
 
 These notes were compiled from a Stage 4 manual-test debugging session and are meant to answer the questions real testers and reviewers ask when they first see prompts pop up.
@@ -14,7 +16,7 @@ AgentKeys splits secrets across two tiers with different security properties. Ev
 | Tier                        | What it is                                                                                                                | Where it lives (v0 mock)                                                                     | Where it lives (v0.1 Heima)                                                                                    |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **Master session key**      | The CLI's own bearer token, used in `Authorization: Bearer ...` to authenticate to the backend. One per user-device pair. | OS keychain via `keyring-rs` (macOS Keychain / Windows Credential Manager / Linux libsecret) | Same                                                                                                           |
-| **User-stored credentials** | The API keys the user's agents actually consume — `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, etc.                         | Encrypted blob in backend SQLite (axum + rusqlite)                                           | Encrypted blob in Heima TEE (`pallet-secrets-vault`), client-encrypted to the TEE shielding key before transit |
+| **User-stored credentials** | The API keys the user's agents actually consume — `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, etc.                         | Encrypted blob in backend SQLite (axum + rusqlite)                                           | **Off-chain ciphertext in S3** under per-epoch DEK; chain holds `(blob_pointer, ciphertext_hash, epoch)` via `pallet-vault-pointers` (Stage 8). DEK wrapped under TEE shielding key, unwrapped per-request, destroyed on epoch rotation. |
 
 
 Reference spec lines:

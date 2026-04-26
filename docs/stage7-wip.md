@@ -6,6 +6,8 @@
 
 Expose our TEE (or interim ES256 signer) as a conforming OIDC Identity Provider at a stable public URL. Any cloud that trusts the issuer can exchange our JWTs for scoped temp creds via standard federation. Per [`docs/spec/plans/development-stages.md`](./spec/plans/development-stages.md), this is the "Generalized OIDC Provider" stage after Stage 6 (Federated Own Email).
 
+> **Scope boundary (added 2026-04-26).** Stage 7 ships the per-user isolation primitive — JWT claim → PrincipalTag → resource-policy gate. **It does not commit a position on where credential ciphertext lives.** The previously-assumed `pallet-secrets-vault` (on-chain encrypted blob store) is superseded by [`stage8-wip.md`](./stage8-wip.md), which moves ciphertext off-chain into the same PrincipalTag-gated S3 prefixes. See [`docs/spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) for the architectural rationale.
+
 ## Why it's not running yet
 
 - Needs `oidc.agentkeys.dev` (or equivalent) hosted publicly with a public-CA TLS cert so AWS IAM accepts `create-open-id-connect-provider`.
@@ -121,3 +123,4 @@ When [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md) closes, re
 - Host `services/oidc-stub/` publicly (CloudFront+S3 for static discovery + Lambda for sign)
 - Promote to `docs/manual-test-stage7.md` once the test passes live
 - Add the equivalent GCP Workload Identity Federation + Ali Cloud RAM recipes (Stage 7 target is generalized, not AWS-only)
+- Hand off the credential-vault question to Stage 8 — the bucket prefix `s3://agentkeys-vault/<wallet>/` is the reuse point; ciphertext + per-epoch DEK rotation live in [`stage8-wip.md`](./stage8-wip.md), not here.
