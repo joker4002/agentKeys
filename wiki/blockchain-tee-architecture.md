@@ -13,6 +13,8 @@ Companion docs:
 
 ### Blockchain (Heima parachain)
 
+> **Superseded 2026-04-26.** The "Credential blobs … `pallet-secrets-vault`" row below was the v0.1 design until the threat-model review found that on-chain encrypted ciphertext creates an unbounded harvest-now-decrypt-later window. The canonical position is now **off-chain ciphertext + on-chain hash**, delivered in Stage 8. See [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md) and [`docs/stage8-wip.md`](../docs/stage8-wip.md). The row is preserved for historical context; the new design uses `pallet-vault-pointers` instead.
+
 The blockchain is the **single source of truth** for all persistent state. It is an append-only, publicly verifiable, tamper-evident ledger that every participant can read and no single party can rewrite.
 
 **What it stores (on-chain state):**
@@ -22,10 +24,11 @@ The blockchain is the **single source of truth** for all persistent state. It is
 | --------------------------------------------------------------------- | ---------------------------- | ------------------------------ | --------------------------------------------------- |
 | OmniAccount records (wallet address, linked identities)               | `pallet-omni-account`        | TEE (on account creation)      | TEE, CLI, block explorer                            |
 | Session records (pubkey, scope, TTL, parent, revocation status)       | New AgentKeys pallet         | TEE (on session mint / revoke) | TEE (on every credential read)                      |
-| Credential blobs (encrypted ciphertext, keyed by owner/agent/service) | `pallet-secrets-vault` (new) | TEE (on `store_credential`)    | TEE (on `read_credential`)                          |
+| ~~Credential blobs (encrypted ciphertext, keyed by owner/agent/service)~~ Vault pointers `(user_wallet, service, epoch, blob_id, ciphertext_hash)` | ~~`pallet-secrets-vault` (deprecated)~~ → `pallet-vault-pointers` (Stage 8) | TEE (on `store_credential`)    | TEE (on `read_credential`); chain holds **no ciphertext**; bytes live in S3 |
+| Per-epoch wrapped DEK metadata (Stage 8) | `pallet-vault-pointers::EpochDek` | TEE-B rotation enclave | TEE-A on decrypt |
 | Pair requests (daemon_pubkey, scope, alias, valid_until)              | New AgentKeys pallet         | TEE (on pair request open)     | TEE (on master fetch / approve)                     |
 | Pair approvals (encrypted child session, master signature)            | New AgentKeys pallet         | TEE (on approval)              | TEE (daemon reads approval)                         |
-| Audit events (credential reads, stores, revocations, pair events)     | New AgentKeys pallet         | TEE (async, paymaster-funded)  | Block explorer, Subsquid indexer, `agentkeys usage` |
+| Audit events (credential reads, stores, revocations, pair events, **Stage 8: `BlobWritten`, `EpochRotated`, `EpochDestroyed`**) | New AgentKeys pallet         | TEE (async, paymaster-funded)  | Block explorer, Subsquid indexer, `agentkeys usage` |
 | Wallet USDC balances (x402 payment rail)                              | EVM / `pallet-evm`           | x402 protocol                  | Agents, billing system                              |
 
 
