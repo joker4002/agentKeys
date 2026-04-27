@@ -61,9 +61,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config.backend_request_timeout_seconds))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    let grace_seconds = config.shutdown_grace_seconds;
+
     let state = Arc::new(AppState {
         config,
-        http: reqwest::Client::new(),
+        http,
         audit,
         sts: Arc::new(sts),
     });
@@ -72,10 +79,27 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("broker listening on {}", addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    tracing::info!("broker shut down cleanly");
+
+    // Wrap the graceful-shutdown future in a hard timeout so a single hung
+    // request can't block process exit forever.
+    let serve_result = tokio::time::timeout(
+        std::time::Duration::from_secs(60 * 60 * 24),
+        axum::serve(listener, app).with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            tokio::time::sleep(std::time::Duration::from_secs(grace_seconds)).await;
+            tracing::warn!(
+                grace_seconds = grace_seconds,
+                "shutdown grace expired; forcing exit even if requests are still in flight"
+            );
+        }),
+    )
+    .await;
+
+    match serve_result {
+        Ok(Ok(())) => tracing::info!("broker shut down cleanly"),
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => tracing::error!("broker hit max-uptime timeout (24h serve loop)"),
+    }
     Ok(())
 }
 
@@ -85,10 +109,13 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            sig.recv().await;
-        }
+        // expect(): if we cannot register a SIGTERM handler the process is
+        // running in a hardened environment that intentionally blocks signal
+        // handling. Failing loud is better than silently exiting on startup
+        // (which is what `if let Ok(...)` did).
+        let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler — running in a sandbox that blocks signals?");
+        sig.recv().await;
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();

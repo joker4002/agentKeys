@@ -31,9 +31,13 @@ pub async fn mint_aws_creds(
     let session = match validate_bearer_token(&state.http, &state.config.backend_url, token).await {
         Ok(s) => s,
         Err(e) => {
-            let outcome = match e {
-                BrokerError::Unauthorized(_) => MintOutcome::AuthFailed,
-                _ => MintOutcome::AuthFailed, // backend-unreachable still records as auth-failed; the user couldn't authenticate
+            // Distinguish bearer-rejected (auth_failed) from backend-down
+            // (backend_error). An operator chasing a backend outage should
+            // not see it as a flood of auth failures.
+            let (outcome, span_label) = match &e {
+                BrokerError::Unauthorized(_) => (MintOutcome::AuthFailed, "auth_failed"),
+                BrokerError::BackendUnreachable(_) => (MintOutcome::BackendError, "backend_error"),
+                _ => (MintOutcome::BackendError, "backend_error"),
             };
             record_outcome(
                 &state,
@@ -43,7 +47,7 @@ pub async fn mint_aws_creds(
                 outcome,
                 Some(&e.to_string()),
             );
-            tracing::Span::current().record("outcome", "auth_failed");
+            tracing::Span::current().record("outcome", span_label);
             return Err(e);
         }
     };

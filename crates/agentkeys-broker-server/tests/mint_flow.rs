@@ -51,11 +51,18 @@ async fn spawn_broker_with_sts(
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),
         session_duration_seconds: 3600,
+        backend_request_timeout_seconds: 5,
+        shutdown_grace_seconds: 5,
     };
 
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .build()
+        .unwrap();
     let state = Arc::new(AppState {
         config,
-        http: reqwest::Client::new(),
+        http,
         audit: AuditLog::open_in_memory().unwrap(),
         sts,
     });
@@ -197,7 +204,9 @@ async fn mint_aws_creds_handles_backend_unreachable() {
     assert_eq!(body["error"], "backend_unreachable");
 
     let row = broker_state.audit.last_row().unwrap().expect("audit row missing");
-    assert_eq!(row.outcome, "auth_failed");
+    // Backend down should show as backend_error in the audit log, NOT
+    // auth_failed — operators chasing an outage need the distinction.
+    assert_eq!(row.outcome, "backend_error");
     assert!(row.outcome_detail.is_some());
 }
 

@@ -9,6 +9,12 @@ pub struct BrokerConfig {
     pub audit_db_path: PathBuf,
     pub aws_region: String,
     pub session_duration_seconds: i32,
+    /// Timeout for HTTP calls to the backend's /session/validate. A hung
+    /// backend would otherwise pin a tokio task indefinitely.
+    pub backend_request_timeout_seconds: u64,
+    /// Hard cap on graceful-shutdown drain time. After SIGTERM, in-flight
+    /// requests get this many seconds before the process exits anyway.
+    pub shutdown_grace_seconds: u64,
 }
 
 impl BrokerConfig {
@@ -23,10 +29,16 @@ impl BrokerConfig {
             .unwrap_or_else(default_audit_db_path);
         let aws_region = std::env::var("BROKER_AWS_REGION")
             .unwrap_or_else(|_| "us-east-1".to_string());
-        let session_duration_seconds = std::env::var("BROKER_SESSION_DURATION_SECONDS")
-            .ok()
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(3600);
+        let session_duration_seconds = match std::env::var("BROKER_SESSION_DURATION_SECONDS") {
+            Ok(s) => s.parse::<i32>().map_err(|e| {
+                anyhow::anyhow!(
+                    "BROKER_SESSION_DURATION_SECONDS={:?} could not be parsed as integer: {}",
+                    s,
+                    e
+                )
+            })?,
+            Err(_) => 3600,
+        };
 
         if !(900..=43_200).contains(&session_duration_seconds) {
             anyhow::bail!(
@@ -34,6 +46,28 @@ impl BrokerConfig {
                 session_duration_seconds
             );
         }
+
+        let backend_request_timeout_seconds = match std::env::var("BROKER_BACKEND_TIMEOUT_SECONDS") {
+            Ok(s) => s.parse::<u64>().map_err(|e| {
+                anyhow::anyhow!(
+                    "BROKER_BACKEND_TIMEOUT_SECONDS={:?} could not be parsed: {}",
+                    s,
+                    e
+                )
+            })?,
+            Err(_) => 10,
+        };
+
+        let shutdown_grace_seconds = match std::env::var("BROKER_SHUTDOWN_GRACE_SECONDS") {
+            Ok(s) => s.parse::<u64>().map_err(|e| {
+                anyhow::anyhow!(
+                    "BROKER_SHUTDOWN_GRACE_SECONDS={:?} could not be parsed: {}",
+                    s,
+                    e
+                )
+            })?,
+            Err(_) => 30,
+        };
 
         Ok(Self {
             daemon_access_key_id,
@@ -43,6 +77,8 @@ impl BrokerConfig {
             audit_db_path,
             aws_region,
             session_duration_seconds,
+            backend_request_timeout_seconds,
+            shutdown_grace_seconds,
         })
     }
 }

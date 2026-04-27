@@ -25,6 +25,7 @@ pub struct MintRecord<'a> {
 pub enum MintOutcome {
     Ok,
     AuthFailed,
+    BackendError,
     StsError,
 }
 
@@ -33,6 +34,7 @@ impl MintOutcome {
         match self {
             MintOutcome::Ok => "ok",
             MintOutcome::AuthFailed => "auth_failed",
+            MintOutcome::BackendError => "backend_error",
             MintOutcome::StsError => "sts_error",
         }
     }
@@ -79,11 +81,16 @@ impl AuditLog {
 
     fn init_schema(&self) -> BrokerResult<()> {
         let conn = self.lock_conn()?;
+        // WAL + FULL sync: audit log durability matters more than write throughput.
+        // FULL fsyncs the WAL on every commit so a power loss loses at most the
+        // currently in-flight mint, not the last N rows.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS mint_log (
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=FULL;
+             CREATE TABLE IF NOT EXISTS mint_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 minted_at INTEGER NOT NULL,
-                requester_token TEXT NOT NULL,
+                requester_token_hash TEXT NOT NULL,
                 requester_wallet TEXT NOT NULL,
                 requested_role TEXT NOT NULL,
                 session_duration_seconds INTEGER NOT NULL,
@@ -99,12 +106,14 @@ impl AuditLog {
     }
 
     pub fn record_mint(&self, record: MintRecord<'_>, detail: Option<&str>) -> BrokerResult<()> {
-        let conn = self.lock_conn()?;
+        // Compute timestamp + hash before grabbing the lock so the critical
+        // section is purely the SQLite write.
         let token_hash = hash_token(record.requester_token);
         let now = now_secs();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO mint_log
-             (minted_at, requester_token, requester_wallet, requested_role,
+             (minted_at, requester_token_hash, requester_wallet, requested_role,
               session_duration_seconds, sts_session_name, outcome, outcome_detail)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -134,7 +143,7 @@ impl AuditLog {
         let conn = self.lock_conn()?;
         let row = conn
             .query_row(
-                "SELECT minted_at, requester_token, requester_wallet, requested_role,
+                "SELECT minted_at, requester_token_hash, requester_wallet, requested_role,
                         session_duration_seconds, sts_session_name, outcome, outcome_detail
                  FROM mint_log ORDER BY id DESC LIMIT 1",
                 [],
@@ -163,7 +172,13 @@ pub fn hash_token(token: &str) -> String {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            tracing::warn!(error = %e, "system clock is before unix epoch; audit row will record minted_at=0");
+            0
+        }
+    }
 }
 
 #[cfg(test)]
