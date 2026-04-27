@@ -117,6 +117,341 @@ Operators no longer have to source `scripts/stage6-demo-env.sh`. With `--broker-
 
 The legacy `stage6-demo-env.sh` flow still works when `--broker-url` is unset; the wiring is purely additive.
 
+## Operator end-to-end test (Phase 2)
+
+A four-terminal walk-through that exercises everything Phase 2 ships, with no AWS round-trip required (the broker's `--skip-startup-check` lets you stand it up offline). Run it once after a fresh build to confirm your operator setup is wired correctly. Times below are wall-clock expectations on a recent laptop.
+
+### Prereqs
+
+- A release build: `cargo build --release -p agentkeys-mock-server -p agentkeys-broker-server -p agentkeys-cli` (≈ 90 s cold).
+- `jq` and `curl` on `$PATH`.
+- For the AWS-side check (step 6), `DAEMON_ACCESS_KEY_ID` + `DAEMON_SECRET_ACCESS_KEY` + `ACCOUNT_ID` from your operator setup; for offline-only, skip step 6 and use `--skip-startup-check`.
+
+### Walk-through
+
+```bash
+# Terminal A — backend (mock-server, in-memory SQLite)
+./target/release/agentkeys-mock-server --port 8090
+# expect: "Mock server running on port 8090"
+# CAVEAT: this server keeps state in-memory — it works for the E2E test
+# but is NOT a long-running production backend. See the "Remote
+# deployment" section below for the production backend story.
+
+# Terminal B — broker. For the offline path (no live AWS round-trip),
+# pass --skip-startup-check; for the live path source your daemon creds
+# first per docs/operator-runbook.md §3.1.
+export BROKER_BACKEND_URL=http://127.0.0.1:8090
+export BROKER_OIDC_ISSUER=http://localhost:8091   # http for dev only; production must be https
+export DAEMON_ACCESS_KEY_ID=AKIA-offline-stub
+export DAEMON_SECRET_ACCESS_KEY=offline-stub-secret
+export ACCOUNT_ID=000000000000
+./target/release/agentkeys-broker-server --port 8091 --skip-startup-check
+# expect: "OIDC signer ready" with kid=v1-<unix-secs>, then "broker listening on 0.0.0.0:8091"
+
+# Terminal C — checks
+# 1. Healthz
+curl -sf http://127.0.0.1:8091/healthz   # → "ok"
+# 2. Discovery doc (the surface AWS would consume after registration)
+curl -sf http://127.0.0.1:8091/.well-known/openid-configuration | jq .
+# 3. JWKS (the public-key Set the issuer publishes)
+curl -sf http://127.0.0.1:8091/.well-known/jwks.json | jq '.keys[0] | {kty, crv, alg, kid}'
+
+# 4. Mint a session against the backend, then mint an OIDC JWT and an
+#    AWS-creds response from the broker.
+SESSION=$(curl -sf -X POST http://127.0.0.1:8090/session/create \
+  -H 'content-type: application/json' \
+  -d '{"auth_token":"phase2-e2e"}' | jq -r .session)
+
+# 4a. JWT mint
+JWT=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
+  -H "Authorization: Bearer $SESSION" | jq -r .jwt)
+echo "$JWT" | awk -F. '{print $2}' | base64 --decode 2>/dev/null | jq .
+# expect: claims with iss, sub=agentkeys:agent:<wallet>, aud=sts.amazonaws.com,
+# agentkeys_user_wallet, iat, exp.
+
+# 4b. AWS-creds mint (requires real AWS daemon creds; skip on the
+# offline path).
+CREDS=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-aws-creds \
+  -H "Authorization: Bearer $SESSION")
+echo "$CREDS" | jq '{access_key_id, expiration, wallet}'
+
+# 5. Provisioner-scripts wiring (CLI side). With AGENTKEYS_BROKER_URL
+# set, `agentkeys provision` fetches AWS creds via the broker before
+# spawning the scraper subprocess — no stage6-demo-env.sh sourcing.
+export AGENTKEYS_BROKER_URL=http://127.0.0.1:8091
+./target/release/agentkeys init --mock-token phase2-e2e        # session in OS keyring
+./target/release/agentkeys provision openrouter --force        # full live signup; takes minutes
+# alternatively: confirm just the broker hop without doing the live signup
+./target/release/agentkeys --broker-url http://127.0.0.1:8091 \
+  provision openrouter --help                                  # should not error on the env-fetch path
+
+# 6. Audit log inspection
+sqlite3 ~/.agentkeys/broker/audit.sqlite \
+  "SELECT outcome, requested_role, requester_wallet, occurred_at FROM mint_audit ORDER BY id DESC LIMIT 10;"
+# expect: a row per mint, with requested_role IN ('arn:aws:iam::*:role/agentkeys-agent', 'oidc_jwt')
+```
+
+### Acceptance
+
+- `/healthz` and `/readyz` both return `200`.
+- `/.well-known/openid-configuration` returns a body where `issuer` matches `BROKER_OIDC_ISSUER`.
+- `/.well-known/jwks.json` returns a JWK Set with `alg=ES256`, `crv=P-256`, a stable `kid`.
+- `mint-oidc-jwt` returns a JWT whose claims (decoded) include `agentkeys_user_wallet` matching the session's wallet, `aud=sts.amazonaws.com`, and a future `exp`.
+- The audit DB has a fresh row per mint with `outcome=ok` (or `auth_failed` for the negative checks below).
+
+### Negative checks (verify the failure modes)
+
+```bash
+# Missing bearer → 401
+curl -sf -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt
+# expect: 401, with one auth_failed row in the audit DB.
+
+# Bogus bearer → 401
+curl -sf -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
+  -H 'Authorization: Bearer never-minted'
+# expect: 401 + auth_failed audit row.
+
+# Backend down (kill terminal A first) → 502
+curl -sf -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
+  -H "Authorization: Bearer $SESSION"
+# expect: 502, with a backend_error audit row (NOT auth_failed — the
+# distinction is what an oncall operator chases when triaging).
+```
+
+If any of these don't match, capture the broker's stderr (Terminal B) and the audit row, then file an issue — the broker exposes one ledger so triage shouldn't require log digging.
+
+## Remote deployment
+
+This section is for operators who want their broker reachable by daemons running on developer laptops, CI, or cloud sandboxes — and who eventually want AWS / GCP / etc. to OIDC-federate against it. Phase 2 architecture is complete on a single host (see the operator E2E above); these instructions take that single-host setup and put it on real infrastructure.
+
+### Topology
+
+```
+┌── developer laptop / CI / cloud sandbox ──┐
+│  agentkeys-daemon  (or `agentkeys` CLI)   │
+│  --broker-url https://broker.example.dev  │
+└───────────────────┬───────────────────────┘
+                    │ HTTPS (bearer)
+                    ▼
+┌── operator-managed host(s) ─────────────────────────────┐
+│                                                          │
+│  reverse proxy (TLS terminator)                          │
+│       nginx + Let's Encrypt / AWS ALB + ACM /            │
+│       Caddy / CloudFront in front of broker              │
+│                    │                                     │
+│                    ▼                                     │
+│  agentkeys-broker-server  :8091     ──────────┐          │
+│  (BROKER_BACKEND_URL=http://backend:8090)     │          │
+│                                                │          │
+│  agentkeys-mock-server (or Heima-backed       │ HTTP     │
+│  successor) :8090                  ◄──────────┘          │
+│                                                          │
+│  ~/.agentkeys/broker/audit.sqlite                        │
+│  ~/.agentkeys/broker/oidc-keypair.json (mode 0600)       │
+└──────────────────────────────────────────────────────────┘
+```
+
+The two server processes are deployed together. The mock backend (or its production successor) is **not** exposed publicly — only the broker is. The broker reaches the backend over the operator's private network.
+
+### Backend server: production caveats
+
+`agentkeys-mock-server` exists for v0 operators who don't yet have Heima integration. It's deliberately simple — Axum + **in-memory** SQLite — which means:
+
+- **State is lost on restart.** Every running session, identity link, and audit row vanishes when the process exits. For development this is fine; for a backend that other developers' daemons depend on, it's not.
+- **No HA.** Single-process, single-node.
+- **No TLS at the listener.** Always front it with a reverse proxy (or co-locate with the broker on the same private network and don't expose it externally).
+
+For v0.1 operators, two pragmatic options:
+
+1. **Single-host deployment with persistent state (recommended for self-hosted teams).** Keep the mock-server but add a small wrapper: front it with `systemd` (or Docker `restart: unless-stopped`), and mount the SQLite file on persistent storage — `docs/operator-runbook.md` will track the exact patches needed in the next iteration. Until that lands, treat session loss on restart as part of the operator runbook (have developers re-`init` after a backend restart).
+2. **Skip the mock and wait for Heima.** If your timeline allows, hold this deployment until the chain-backed backend lands and use the real Heima session-management path. Stage 7 phase 2 isn't gated on this — the broker's interface is the same regardless of which backend implements `/session/create` + `/session/validate`.
+
+### Step 1 — Provision the host
+
+Pick whatever fits your stack. Two examples that satisfy the requirements (TLS-terminating reverse proxy + ≥ 1 vCPU / 1 GiB RAM + persistent disk):
+
+- **AWS:** `t4g.small` EC2 + Elastic IP + Route 53 A record + ALB with ACM cert. Or skip the ALB and run nginx directly on the instance.
+- **DigitalOcean / Hetzner / Linode:** any 1 GiB droplet + a managed DNS A record + nginx + Let's Encrypt via certbot.
+
+Either way you need:
+
+- A DNS name resolving to the host (e.g. `broker.example.dev`).
+- A public-CA TLS certificate covering that name (Let's Encrypt is free; ACM is free for ALB use).
+- Firewall: inbound `:443` from anywhere, inbound `:22` from your admin IP, **everything else closed**. The broker's `:8091` and the backend's `:8090` are reached only via localhost or the private network.
+
+### Step 2 — Install the binaries
+
+The repo doesn't yet ship a `cargo dist` release; build from source on the target arch and copy the resulting binaries:
+
+```bash
+git clone https://github.com/litentry/agentKeys.git
+cd agentKeys
+cargo build --release \
+  -p agentkeys-mock-server \
+  -p agentkeys-broker-server
+
+sudo install -m 0755 \
+  target/release/agentkeys-mock-server \
+  target/release/agentkeys-broker-server \
+  /usr/local/bin/
+```
+
+### Step 3 — Persisted operator config
+
+Persist the broker's required env vars in a 0600-mode file (`~/.zshenv` for zsh ops, `/etc/agentkeys/broker.env` for systemd):
+
+```bash
+sudo install -d -m 0700 /etc/agentkeys
+sudo tee /etc/agentkeys/broker.env >/dev/null <<'EOF'
+DAEMON_ACCESS_KEY_ID=AKIA...
+DAEMON_SECRET_ACCESS_KEY=...
+ACCOUNT_ID=429071895007
+REGION=us-east-1
+BROKER_BACKEND_URL=http://127.0.0.1:8090
+BROKER_OIDC_ISSUER=https://broker.example.dev
+EOF
+sudo chmod 600 /etc/agentkeys/broker.env
+```
+
+`BROKER_OIDC_ISSUER` **must** match the public URL the reverse proxy serves — AWS rejects `create-open-id-connect-provider` if the registered URL doesn't equal the `iss` claim emitted by the broker.
+
+### Step 4 — systemd units
+
+```ini
+# /etc/systemd/system/agentkeys-backend.service
+[Unit]
+Description=AgentKeys mock backend (session management)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/agentkeys-mock-server --port 8090
+Restart=on-failure
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+# Listens on all interfaces; only the local broker should reach it.
+# Use a host firewall (ufw / nftables) to drop :8090 from anywhere
+# but 127.0.0.1 + the broker's IP.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/agentkeys-broker.service
+[Unit]
+Description=AgentKeys broker (Stage 7)
+After=network-online.target agentkeys-backend.service
+Wants=network-online.target
+Requires=agentkeys-backend.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/agentkeys/broker.env
+ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1
+Restart=on-failure
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+# Persist audit + keypair under /var/lib/agentkeys (operator must
+# pre-create this dir mode 0700, owned by the agentkeys user).
+Environment=HOME=/var/lib/agentkeys
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentkeys
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo useradd --system --home /var/lib/agentkeys --shell /usr/sbin/nologin agentkeys
+sudo install -d -m 0700 -o agentkeys -g agentkeys /var/lib/agentkeys
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentkeys-backend agentkeys-broker
+sudo systemctl status agentkeys-backend agentkeys-broker
+```
+
+The broker binds to `127.0.0.1:8091` so only the local reverse proxy can reach it. **Never** bind the broker to `0.0.0.0` without TLS — bearer tokens and minted credentials would traverse the network in cleartext (the broker logs a warning on startup if you do, see [`crates/agentkeys-broker-server/src/main.rs::warn_if_non_loopback_without_tls`](../crates/agentkeys-broker-server/src/main.rs)).
+
+### Step 5 — Reverse proxy + TLS
+
+Minimal nginx site for `broker.example.dev`:
+
+```nginx
+# /etc/nginx/sites-available/agentkeys-broker
+server {
+    listen 80;
+    server_name broker.example.dev;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name broker.example.dev;
+
+    ssl_certificate     /etc/letsencrypt/live/broker.example.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/broker.example.dev/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # AWS IAM only fetches the well-known + JWKS during create-open-id-connect-provider;
+    # the rest of the broker is bearer-gated. Keep the proxy thin: no auth,
+    # no caching of /v1/*, just TLS termination.
+    location / {
+        proxy_pass http://127.0.0.1:8091;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_read_timeout 30s;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
+sudo certbot --nginx -d broker.example.dev --agree-tos -m ops@example.dev
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### Step 6 — Smoke test from a client machine
+
+From a laptop that has nothing AWS-shaped configured:
+
+```bash
+curl -sf https://broker.example.dev/healthz                            # → "ok"
+curl -sf https://broker.example.dev/.well-known/openid-configuration | \
+  jq '.issuer == "https://broker.example.dev"'                          # → true
+curl -sf https://broker.example.dev/.well-known/jwks.json | jq '.keys[0].kid'
+
+# End-to-end JWT mint (use a session bearer the operator has provisioned)
+SESSION=<bearer-from-the-backend>
+curl -sf -X POST https://broker.example.dev/v1/mint-oidc-jwt \
+  -H "Authorization: Bearer $SESSION" | jq '.expiration'
+```
+
+If the discovery `issuer` field doesn't equal the URL you're hitting, your `BROKER_OIDC_ISSUER` env var disagrees with the reverse-proxy `server_name` — fix this before running the AWS federation step or `create-open-id-connect-provider` will reject every JWT.
+
+### Step 7 — Wire AWS federation
+
+Once the smoke test above passes, follow [§"Cloud federation deployment"](#cloud-federation-deployment) below to register the OIDC provider with AWS IAM and verify the cloud-enforced isolation property.
+
+### Operations: rotate, observe, harden
+
+- **Rotate the daemon AWS key.** See [`operator-runbook.md` §5](./operator-runbook.md). The broker picks up the new key on the next `systemctl restart agentkeys-broker`; in-flight requests drain per `BROKER_SHUTDOWN_GRACE_SECONDS`.
+- **Watch the audit log.** `sqlite3 /var/lib/agentkeys/.agentkeys/broker/audit.sqlite` per [`operator-runbook.md` §6](./operator-runbook.md). Anomalous mint spikes or `auth_failed` clusters are your earliest signal.
+- **Watch the Let's Encrypt cert.** Certbot's renewal timer ships with the package; verify with `sudo systemctl list-timers | grep certbot`. AWS doesn't pin the cert, but `aws iam create-open-id-connect-provider` does record a thumbprint at registration time — if you swap the issuer to a different CA later, AWS will need the thumbprint refreshed.
+- **Don't enable broker `:8091` ingress.** The host firewall must drop `:8091` from anywhere except `127.0.0.1`. The reverse proxy is the only legitimate caller.
+
 ## Cloud federation deployment
 
 This section is the **operational runbook** for taking the (already-shipped) Phase 2 broker and making AWS (or GCP / Ali Cloud) trust its JWTs without operator-side IAM-user keys. It's not a Stage-7 architecture step — Phase 2 ships complete with the local SQLite audit destination above. Each cloud provider's IAM service has its own registration step, and that step needs the broker reachable over public TLS. That's what this section walks through.
