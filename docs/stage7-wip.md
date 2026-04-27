@@ -1,13 +1,13 @@
 # Stage 7 — WIP notes
 
-> **WIP / scratchpad.** Phase 1 (broker server) shipped in PR [#60](https://github.com/litentry/agentKeys/pull/60). Phase 2 (OIDC issuer absorption + provisioner-scripts AWS-cred wiring) ships in this PR. The remaining federation prerequisites — public TLS hosting + IAM OIDC-provider registration — stay deferred and are documented below for when both prereqs land.
+> **Status (2026-04-27).** Phase 1 (broker server) shipped in PR [#60](https://github.com/litentry/agentKeys/pull/60). Phase 2 (OIDC issuer + provisioner-scripts AWS-cred wiring) ships in PR [#61](https://github.com/litentry/agentKeys/pull/61) and is **architecturally complete**: the Rust broker owns the OIDC surface end-to-end, the audit destination is the broker's local SQLite (one valid choice in the [pluggable audit-destination layer](spec/architecture.md#11-audit-destination-is-pluggable)), and the provisioner subprocess is wired through the broker for AWS-cred minting. What's left is operational deployment for cloud-side OIDC federation (public TLS, `aws iam create-open-id-connect-provider`) — out of scope for the architecture but relevant to the cloud-deployment runbook.
 
 ## What Stage 7 is
 
 Two halves that compose into the canonical "broker, not proxy" architecture:
 
-1. **Phase 1 — Broker server (shipped).** A long-running HTTP service holds the operator's long-lived `agentkeys-daemon` AWS access key and brokers 1-hour scoped credentials to authenticated daemons. Lets app developers run daemons against operator infrastructure without ever touching AWS keys themselves.
-2. **Phase 2 — OIDC issuer (in-progress).** The Rust broker now serves the conforming OIDC discovery + JWKS surface and a bearer-gated `POST /v1/mint-oidc-jwt` endpoint, replacing the standalone TS `services/oidc-stub/` package. Provisioner-scripts AWS-cred wiring is also live: `agentkeys provision <service>` (CLI) and the `agentkeys.provision` MCP tool fetch 1-hour temp creds from the broker and inject them into the scraper subprocess env when `--broker-url` is set. The remaining federation step (`sts:AssumeRoleWithWebIdentity` against a public-TLS-hosted issuer) stays deferred.
+1. **Phase 1 — Broker server (shipped, PR #60).** A long-running HTTP service holds the operator's long-lived `agentkeys-daemon` AWS access key and brokers 1-hour scoped credentials to authenticated daemons. Lets app developers run daemons against operator infrastructure without ever touching AWS keys themselves.
+2. **Phase 2 — OIDC issuer + AWS-cred wiring (shipped, PR #61).** The Rust broker now serves the conforming OIDC discovery + JWKS surface and a bearer-gated `POST /v1/mint-oidc-jwt` endpoint, replacing the standalone TS `services/oidc-stub/` package. Provisioner-scripts AWS-cred wiring is live: `agentkeys provision <service>` (CLI) and the `agentkeys.provision` MCP tool fetch 1-hour temp creds from the broker and inject them into the scraper subprocess env when `--broker-url` is set. The audit destination is the broker's append-only SQLite at `~/.agentkeys/broker/audit.sqlite` — see [§"Audit destination is pluggable" below](#audit-destination-is-pluggable) for why that's a complete v0.1 choice, not a placeholder.
 
 Per [`docs/spec/plans/development-stages.md`](./spec/plans/development-stages.md), this is the "Generalized OIDC Provider" stage after Stage 6 (Federated Own Email).
 
@@ -58,14 +58,14 @@ Acceptance: `curl /healthz` → 200, `curl /readyz` → 200, `mint-aws-creds` re
 **Out of phase 1 (now landing in phase 2):**
 
 - Rust-broker OIDC discovery / JWKS / `mint-oidc-jwt` (delivered — see §"Phase 2 — OIDC issuer (Rust broker)" below).
-- TS [`services/oidc-stub/`](../services/oidc-stub/) retirement (deleted in this PR).
+- TS `services/oidc-stub/` retirement (directory deleted in this PR; OIDC surface now lives entirely in the Rust broker).
 - Provisioner-scripts AWS-cred consumer rewiring (delivered — `agentkeys provision` and `agentkeys.provision` MCP tool now mint creds via the broker when `--broker-url` is set).
 
-**Still deferred:**
+**Operational follow-ups (not architectural blockers):**
 
-- `aws iam create-open-id-connect-provider` against a public TLS endpoint + `sts:AssumeRoleWithWebIdentity` exchange — needs §"Phase 2 federation step" below.
-- Public hosting of the broker / KMS-sealed config source.
-- TEE-derived signer (replaces the on-disk ES256 keypair).
+- `aws iam create-open-id-connect-provider` against a public TLS endpoint + `sts:AssumeRoleWithWebIdentity` exchange. The recipe is in §["Cloud federation deployment"](#cloud-federation-deployment) below. This is a deployment task, not a Stage-7 design task — the broker already serves the conforming OIDC surface; what's missing is just routing public TLS traffic to it.
+- TEE-derived signer (a *higher-assurance* swap of the on-disk ES256 keypair). The on-disk keypair shipped today is a complete v0.1 signer per the [pluggable audit destination](spec/architecture.md#11-audit-destination-is-pluggable) framing; TEE is the v0.2+ hardening path, not a Stage-7 prerequisite.
+- Chain-anchored audit (Heima or otherwise). Phase 2 ships with the broker's local SQLite as the audit destination — also a complete v0.1 choice. Operators who want chain anchoring can swap the audit backend without touching the OIDC issuer code.
 
 ## Phase 2 — OIDC issuer (Rust broker)
 
@@ -89,6 +89,23 @@ The Rust broker exposes three new endpoints. They are the same endpoints the TS 
 
 Both `mint-aws-creds` and `mint-oidc-jwt` write to the same SQLite audit table at `~/.agentkeys/broker/audit.sqlite`. JWT mints land with `requested_role = "oidc_jwt"` and `sts_session_name = <kid>` — operators see one ledger for both credential types.
 
+<a id="audit-destination-is-pluggable"></a>
+#### Why local SQLite is a complete v0.1 audit destination
+
+Earlier docs ([`threat-model-key-custody.md`](spec/threat-model-key-custody.md), `wiki/blockchain-tee-architecture.md`) describe audit + anchoring as Heima-pallet operations. That description is **one instance** of the architecture, not a constraint of it. The audit/anchoring layer is a pluggable backend behind a single interface: append a tamper-evident record of *who did what, when, against which agent*.
+
+Per [`architecture.md` §11](spec/architecture.md#11-audit-destination-is-pluggable), the trait surface accommodates:
+
+- **Federated public chain** — Heima parachain, other Substrate parachains.
+- **General-purpose public chain** — Ethereum, Solana, Sui, Cosmos.
+- **Permissioned / consortium chain** — Hyperledger Fabric, Quorum, Aliyun BaaS (relevant for jurisdictions like China where public-chain anchoring is non-starter).
+- **Plain backend server** — append-only SQLite (what the broker ships today), Postgres + immutable WAL, S3-with-Object-Lock, sealed log services.
+- **TEE-attested append-only log** — Heima TEE + sealed storage, AWS Nitro + KMS, Azure Confidential Ledger.
+
+The Stage 7 broker ships in the "plain backend server" row. SQLite at `~/.agentkeys/broker/audit.sqlite` is append-only by virtue of the application code (only `INSERT`s, never `UPDATE`/`DELETE`), keys are sha256-hashed before write, and the audit-write happens *before* credentials leave the broker — that's the property operators need. Migrating to a chain-anchored destination is a backend swap, not a Stage-7 redesign.
+
+This is what makes Phase 2 architecturally complete today: the OIDC issuer + audit pair is one self-contained unit; the audit's storage backend is a deployment-time choice.
+
 ### Provisioner-scripts AWS-cred wiring
 
 Operators no longer have to source `scripts/stage6-demo-env.sh`. With `--broker-url` set on the daemon, MCP, or CLI:
@@ -100,20 +117,20 @@ Operators no longer have to source `scripts/stage6-demo-env.sh`. With `--broker-
 
 The legacy `stage6-demo-env.sh` flow still works when `--broker-url` is unset; the wiring is purely additive.
 
-## Phase 2 — federation step (still blocked)
+## Cloud federation deployment
 
-This is the half that turns the broker into a generalized OIDC Identity Provider so any AWS account (or GCP / Ali Cloud) can trust our JWTs without operator-side IAM-user keys.
+This section is the **operational runbook** for taking the (already-shipped) Phase 2 broker and making AWS (or GCP / Ali Cloud) trust its JWTs without operator-side IAM-user keys. It's not a Stage-7 architecture step — Phase 2 ships complete with the local SQLite audit destination above. Each cloud provider's IAM service has its own registration step, and that step needs the broker reachable over public TLS. That's what this section walks through.
 
-### Why the federation step is not running yet
+### What's actually needed
 
-- Needs the broker (or a `/.well-known/*` reverse proxy) hosted publicly with a public-CA TLS cert so AWS IAM accepts `create-open-id-connect-provider`.
-- The "right" signer is a TEE-derived ES256 key at path `oidc/issuer/v1`, blocked on [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md). The current on-disk keypair is the local-dev placeholder; swap to TEE when §3 closes by replacing `crates/agentkeys-broker-server/src/oidc.rs::OidcKeypair::load_or_generate` with a TEE oracle call. JWKS, JWT shape, STS exchange, and bucket-policy enforcement all stay identical.
+- The broker (or a `/.well-known/*` reverse proxy in front of it) reachable at `$BROKER_OIDC_ISSUER` over public TLS, so AWS IAM can fetch the JWKS during `create-open-id-connect-provider`. Operator picks: nginx + Let's Encrypt, AWS ALB + ACM, Caddy with auto-TLS, CloudFront + S3 for static `/.well-known/*` + Lambda for sign, etc.
+- Stage 6 AWS setup complete per [`docs/stage6-aws-setup.md`](./stage6-aws-setup.md) (the daemon-IAM-user trust path established there is the fallback while the federated path is being rolled out).
+- A higher-assurance signer if the operator's threat model requires it (TEE-derived ES256 at `oidc/issuer/v1`, blocked on [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md)). The on-disk keypair shipped today is a complete v0.1 signer; TEE is a hardening swap, not a federation prerequisite. When ready, swap by replacing [`crates/agentkeys-broker-server/src/oidc.rs::OidcKeypair::load_or_generate`](../crates/agentkeys-broker-server/src/oidc.rs) with a TEE oracle call. JWKS, JWT shape, STS exchange, and bucket-policy enforcement all stay identical.
 
-### Phase 2 federation test script — preserved for when both prereqs are in place
+### AWS recipe
 
 #### Prereqs
 
-- Stage 6 AWS setup complete per [`docs/stage6-aws-setup.md`](./stage6-aws-setup.md).
 - Phase 1 broker running publicly (so its `/.well-known/openid-configuration` is fetchable over public TLS).
 - `export OIDC_ISSUER="$BROKER_OIDC_ISSUER"` — the exact `BROKER_OIDC_ISSUER` you started the broker with.
 - Verify `curl -sf "$OIDC_ISSUER/.well-known/openid-configuration" | jq .issuer` returns that string.
@@ -210,10 +227,13 @@ Test (b) is what Stage 6's static-IAM path can't prove. Cloud-enforced, zero app
 
 When [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md) closes, replace `crates/agentkeys-broker-server/src/oidc.rs::OidcKeypair::load_or_generate` with a call to the TEE's `derive("oidc/issuer/v1")`. JWKS, JWT shape, STS exchange, and bucket-policy enforcement all stay identical — only the signing backend changes.
 
-## TODO pickups
+## Operational follow-ups (post Phase 2)
 
-- **Public hosting:** terminate TLS at a reverse proxy in front of the Rust broker, or absorb the issuer endpoints behind a CloudFront+ALB pair so `oidc.agentkeys.dev` (or chosen issuer URL) resolves to the broker's `/.well-known/*` surface.
-- **TEE signer swap:** see §5 above.
-- **Promote phase 1 doc:** once the live three-terminal demo passes for a non-operator developer (with no AWS env vars on their machine), promote `docs/operator-runbook.md` from WIP to canonical.
-- **Add the equivalent GCP Workload Identity Federation + Ali Cloud RAM recipes** (Stage 7 target is generalized, not AWS-only).
-- **Hand off the credential-vault question to Stage 8** — the bucket prefix `s3://agentkeys-vault/<wallet>/` is the reuse point; ciphertext + per-epoch DEK rotation live in [`stage8-wip.md`](./stage8-wip.md), not here.
+Phase 2 architecture is complete. The remaining items are deployment and hardening tasks, scoped per-operator:
+
+- **Public TLS hosting** — terminate TLS at a reverse proxy in front of the Rust broker (nginx + Let's Encrypt, AWS ALB + ACM, Caddy, etc.), or absorb the issuer endpoints behind a CloudFront+ALB pair so `oidc.agentkeys.dev` (or chosen issuer URL) resolves to the broker's `/.well-known/*` surface. Required for AWS `create-open-id-connect-provider` registration.
+- **TEE signer swap** — replace the on-disk ES256 keypair with a TEE-derived `oidc/issuer/v1` key when [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md) closes. Hardening, not a Stage-7 prerequisite — see §"Cloud federation deployment" above.
+- **Audit-destination swap** — point the audit log at a chain (Heima, Ethereum, Solana, permissioned) or a sealed log service per the [pluggable audit destination](spec/architecture.md#11-audit-destination-is-pluggable) framing. Configuration choice, not a Stage-7 redesign.
+- **GCP / Ali Cloud federation recipes** — equivalent of the AWS §"Cloud federation deployment" recipe for GCP Workload Identity Federation and Ali Cloud RAM. The OIDC discovery + JWT shape work cross-cloud unchanged; only the IAM-side registration step differs.
+- **Promote phase 1 + 2 doc** — once the live three-terminal demo passes for a non-operator developer (with no AWS env vars on their machine), promote [`docs/operator-runbook.md`](./operator-runbook.md) from WIP to canonical.
+- **Stage 8 hand-off** — the bucket prefix `s3://agentkeys-vault/<wallet>/` is the reuse point with Stage 8; ciphertext + per-epoch DEK rotation live in [`stage8-wip.md`](./stage8-wip.md), not here.
