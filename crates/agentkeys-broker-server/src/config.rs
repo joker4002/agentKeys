@@ -15,6 +15,18 @@ pub struct BrokerConfig {
     /// Hard cap on graceful-shutdown drain time. After SIGTERM, in-flight
     /// requests get this many seconds before the process exits anyway.
     pub shutdown_grace_seconds: u64,
+    /// Public URL the broker advertises as the OIDC issuer (`iss` claim,
+    /// discovery doc `issuer` field, `jwks_uri` prefix). AWS IAM
+    /// `create-open-id-connect-provider` requires this to be a stable HTTPS
+    /// URL in production; localhost HTTP works for local dev.
+    pub oidc_issuer: String,
+    /// Path to the persisted ES256 keypair (mode 0600). Defaults to
+    /// `~/.agentkeys/broker/oidc-keypair.json`.
+    pub oidc_keypair_path: PathBuf,
+    /// Time-to-live (seconds) for minted OIDC JWTs. AWS STS requires the
+    /// token to be valid at the moment of exchange but no longer than the
+    /// role's max session duration; 300s mirrors the TS oidc-stub default.
+    pub oidc_jwt_ttl_seconds: u64,
 }
 
 impl BrokerConfig {
@@ -96,6 +108,29 @@ impl BrokerConfig {
             Err(_) => 30,
         };
 
+        let oidc_issuer = std::env::var("BROKER_OIDC_ISSUER")
+            .unwrap_or_else(|_| "https://oidc.agentkeys.dev".to_string());
+        let oidc_keypair_path = std::env::var("BROKER_OIDC_KEYPAIR_PATH")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(crate::oidc::OidcKeypair::default_path);
+        let oidc_jwt_ttl_seconds = match std::env::var("BROKER_OIDC_JWT_TTL_SECONDS") {
+            Ok(s) => s.parse::<u64>().map_err(|e| {
+                anyhow::anyhow!(
+                    "BROKER_OIDC_JWT_TTL_SECONDS={:?} could not be parsed: {}",
+                    s,
+                    e
+                )
+            })?,
+            Err(_) => 300,
+        };
+        if !(60..=3_600).contains(&oidc_jwt_ttl_seconds) {
+            anyhow::bail!(
+                "BROKER_OIDC_JWT_TTL_SECONDS must be between 60 and 3600, got {}",
+                oidc_jwt_ttl_seconds
+            );
+        }
+
         Ok(Self {
             daemon_access_key_id,
             daemon_secret_access_key,
@@ -106,6 +141,9 @@ impl BrokerConfig {
             session_duration_seconds,
             backend_request_timeout_seconds,
             shutdown_grace_seconds,
+            oidc_issuer,
+            oidc_keypair_path,
+            oidc_jwt_ttl_seconds,
         })
     }
 }

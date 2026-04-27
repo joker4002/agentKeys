@@ -5,6 +5,7 @@ use agentkeys_broker_server::{
     audit::AuditLog,
     config::BrokerConfig,
     create_router,
+    oidc::OidcKeypair,
     state::AppState,
     sts::{AwsStsClient, StsClient},
 };
@@ -68,11 +69,21 @@ async fn main() -> anyhow::Result<()> {
 
     let grace_seconds = config.shutdown_grace_seconds;
 
+    let oidc = OidcKeypair::load_or_generate(&config.oidc_keypair_path)
+        .map_err(|e| anyhow::anyhow!("load OIDC keypair: {}", e))?;
+    tracing::info!(
+        kid = %oidc.kid,
+        issuer = %config.oidc_issuer,
+        path = %config.oidc_keypair_path.display(),
+        "OIDC signer ready"
+    );
+
     let state = Arc::new(AppState {
         config,
         http,
         audit,
         sts: Arc::new(sts),
+        oidc: Arc::new(oidc),
     });
 
     let app = create_router(state);

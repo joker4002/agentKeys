@@ -4,19 +4,22 @@
 
 **Scope:** start, supervise, rotate keys, monitor audit, and migrate from local to hosted. v0.1 deliberately avoids TEE / KMS / hosted-only paths — those land later.
 
-> **WIP / scratchpad.** This runbook ships alongside the v0.1 broker (Stage 7 vertical slice — `mint-aws-creds` + audit only). Sections marked **(later)** describe surface that lands in Stage 7 phase 2 (OIDC federation) or Stage 8 (off-chain vault). Treat them as forward-looking, not load-bearing for v0.1 operators.
+> **WIP / scratchpad.** This runbook ships alongside the v0.1 broker. Stage 7 phase 1 (broker mint-aws-creds + audit) and phase 2 (OIDC issuer surface + provisioner-scripts AWS-cred wiring) are both live. The `sts:AssumeRoleWithWebIdentity` federation step is still deferred — it needs public TLS hosting of the issuer URL, see [`stage7-wip.md`](./stage7-wip.md). Stage 8 (off-chain vault) sections are forward-looking.
 
 ## 1. What the broker is
 
 `agentkeys-broker-server` is the long-running HTTP service that holds the operator's long-lived `agentkeys-daemon` AWS access key and brokers 1-hour scoped credentials to authenticated daemons. It is the boundary that lets app developers run daemons against your infrastructure **without holding any AWS credentials themselves**.
 
-In v0.1 the broker exposes a single user-facing endpoint:
+User-facing endpoints:
 
-- `POST /v1/mint-aws-creds` — bearer-token in, temp AWS creds out.
+- `POST /v1/mint-aws-creds` — bearer-token in, temp AWS creds out (phase 1).
+- `POST /v1/mint-oidc-jwt` — bearer-token in, short-lived ES256 JWT out (phase 2). Suitable for `sts:AssumeRoleWithWebIdentity` once the issuer URL is publicly hosted.
+- `GET /.well-known/openid-configuration` — OIDC discovery doc.
+- `GET /.well-known/jwks.json` — JWK Set with the broker's ES256 P-256 public key + `kid`.
 
-Plus operator-side health checks (`/healthz`, `/readyz`) and an audit log written to local SQLite.
+Operator-side: `/healthz`, `/readyz` health checks, and an audit log written to local SQLite. Both `mint-aws-creds` and `mint-oidc-jwt` write to the same audit table — `requested_role = "oidc_jwt"` distinguishes JWT mints in the ledger.
 
-The OIDC discovery surface (`/.well-known/openid-configuration`, `/.well-known/jwks.json`, `POST /v1/mint-oidc-jwt`) and `sts:AssumeRoleWithWebIdentity` exchange land in Stage 7 phase 2, alongside the public-hosting prereq from [`stage7-wip.md`](./stage7-wip.md).
+The remaining federation step (`aws iam create-open-id-connect-provider --url $BROKER_OIDC_ISSUER` + `sts:AssumeRoleWithWebIdentity`) is the public-hosting recipe in [`stage7-wip.md` §"Phase 2 — federation step"](./stage7-wip.md).
 
 ## 2. Threat model — what the broker is and isn't defending against
 
@@ -47,6 +50,9 @@ The broker reads its configuration from environment variables only — no config
 | `BROKER_SESSION_DURATION_SECONDS` | no | TTL for minted credentials. Default: `3600` (1 h). Min: `900`, max: `43200`. |
 | `BROKER_BACKEND_TIMEOUT_SECONDS` | no | HTTP timeout for backend `/session/validate` calls. Default: `10`. |
 | `BROKER_SHUTDOWN_GRACE_SECONDS` | no | Hard cap on graceful-shutdown drain. Default: `30`. |
+| `BROKER_OIDC_ISSUER` | no | Public URL the broker advertises in the OIDC discovery doc and JWT `iss` claim. Must match the URL used at `aws iam create-open-id-connect-provider` time. Default: `https://oidc.agentkeys.dev`. |
+| `BROKER_OIDC_KEYPAIR_PATH` | no | Path to the persisted ES256 keypair (mode 0600). Generated on first start, reused on subsequent restarts so the registered IAM OIDC provider stays valid. Default: `$HOME/.agentkeys/broker/oidc-keypair.json`. |
+| `BROKER_OIDC_JWT_TTL_SECONDS` | no | TTL (seconds) for minted OIDC JWTs. Default: `300`. Bounded `[60, 3600]`. |
 
 Persist `DAEMON_ACCESS_KEY_ID` and `DAEMON_SECRET_ACCESS_KEY` in `~/.zshenv` (or the equivalent per-shell startup file for non-zsh shells) with file mode 0600 so the operator's shell has them on every login. The names match `scripts/stage6-demo-env.sh` so one persisted set of keys feeds both the legacy demo flow and the broker:
 
@@ -177,7 +183,7 @@ Operator-side, the same binary runs. Configuration source changes from env vars 
 - KMS-sealed configuration source. Env vars only.
 - Secret-manager integration as a config source (Vault, AWS Secrets Manager, GCP Secret Manager). Operator persists the daemon AWS keys in `~/.zshenv` (or supervisor-managed env) themselves.
 - Multi-tenant operator support. One broker process serves one operator's `agentkeys-daemon` key.
-- OIDC `assume-role-with-web-identity` exchange. Direct `assume-role` with the static IAM trust path. The OIDC half lands when public hosting is also in motion (Stage 7 phase 2).
+- `sts:AssumeRoleWithWebIdentity` exchange against the broker's issuer. The broker now serves a conforming OIDC discovery + JWKS surface and a bearer-gated `mint-oidc-jwt` endpoint, but the AWS-side `create-open-id-connect-provider` registration requires the issuer URL to be reachable over public TLS — that hosting step is the remaining blocker (Stage 7 phase 2 federation step).
 - Automatic key rotation. Rotate manually per §5.
 
 ## 10. Further reading

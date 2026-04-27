@@ -20,6 +20,7 @@ If you're looking for setup / demo instructions, go to [`../../dev-setup.md`](..
 | 4 | Pair / Approve / Recover | OTP-gated auth requests; 2-terminal pair flow; alias / email / ENS recovery via identity-link table | 15/11 unit + 2-terminal E2E |
 | 5a | Provisioner (deterministic) | OpenRouter + OpenAI CDP scrapers; `signupEmailOtp` pattern library; HTML-strip + label-aware OTP extractor; mandatory post-provision verify; `agentkeys provision openrouter` | 59/59 unit + live provision |
 | 6 (interim, 2026-04) | Hosted email infra | SES domain verification on `bots.litentry.org`; `agentkeys-daemon` IAM user → `agentkeys-agent` assume-role; S3 inbound bucket; `ses-s3` email backend; end-to-end demo from signup → SES receipt → S3 poll → key extraction | `scripts/stage6-demo-run.sh` prints a valid `sk-or-v1-...` key |
+| 7 phase 1 (2026-04) | Broker server | `agentkeys-broker-server` axum service: bearer-gated `POST /v1/mint-aws-creds`, audit SQLite, supervisor probes; daemon `--broker-url` flag wired up | 22/22 unit + integration |
 
 ### Non-stage work shipped alongside
 
@@ -61,7 +62,13 @@ Today's Stage 6 still lists "interim" AWS-managed DKIM + static IAM user. To cal
 
 ### Stage 7 — Generalized OIDC provider
 
-Expose `oidc.agentkeys.dev` as a conforming OIDC Identity Provider. Any cloud that accepts external OIDC federation (AWS, GCP, Azure, Snowflake, K8s) trusts AgentKeys once and gets per-user-wallet-tagged temp creds via standard federation. Unlocks bring-your-own-domain + per-user cloud-enforced isolation via `PrincipalTag`. Scratch notes: [`../../stage7-wip.md`](../../stage7-wip.md). Blocked on: public TLS for `oidc.agentkeys.dev`, TEE-held ES256 signer at `oidc/issuer/v1` (`heima-gaps §3`).
+Expose `oidc.agentkeys.dev` as a conforming OIDC Identity Provider. Any cloud that accepts external OIDC federation (AWS, GCP, Azure, Snowflake, K8s) trusts AgentKeys once and gets per-user-wallet-tagged temp creds via standard federation. Unlocks bring-your-own-domain + per-user cloud-enforced isolation via `PrincipalTag`. Scratch notes: [`../../stage7-wip.md`](../../stage7-wip.md).
+
+**Phase 1 (shipped, PR #60):** broker server (`crates/agentkeys-broker-server/`) — bearer-validated `POST /v1/mint-aws-creds` against the operator's daemon AWS key, SQLite audit, `/healthz` + `/readyz` supervisor probes.
+
+**Phase 2 (shipping, this PR):** OIDC discovery + JWKS + bearer-gated `POST /v1/mint-oidc-jwt` absorbed into the Rust broker (TS `services/oidc-stub/` retired); CLI/MCP `provision` paths fetch AWS temp creds via the broker when `--broker-url` is set, replacing the `stage6-demo-env.sh` sourcing pattern.
+
+**Still blocked:** public TLS hosting of the issuer URL so `aws iam create-open-id-connect-provider` accepts it; TEE-held ES256 signer at `oidc/issuer/v1` (`heima-gaps §3`).
 
 Stage 7 stops at the isolation primitive. **It does not commit a position on where credential ciphertext lives** — the previously-assumed `pallet-secrets-vault` (on-chain encrypted blob store) is superseded by Stage 8 below, per [`../threat-model-key-custody.md`](../threat-model-key-custody.md).
 

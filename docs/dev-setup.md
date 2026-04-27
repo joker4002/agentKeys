@@ -104,11 +104,17 @@ When the daemon needs to access the operator's S3 vault (to read or store a cred
 
 ### 4.3 Provision a new service
 
-The provisioner scripts run unchanged from your machine:
+The provisioner scripts run unchanged from your machine. With `--broker-url` set, the daemon (or the `agentkeys` CLI directly) calls the broker's `POST /v1/mint-aws-creds` right before spawning the scraper subprocess and injects 1-hour scoped `AWS_*` env vars into the child process. **You no longer need to source `scripts/stage6-demo-env.sh`** — that path is the legacy fallback for ops who run without a broker.
 
 ```bash
 $BIN --broker-url "$AGENTKEYS_BROKER_URL" --session "$AGENTKEYS_BEARER_TOKEN" \
      provision openrouter --identity bot-$(date +%s)@bots.example.dev
+```
+
+Or via the CLI:
+
+```bash
+agentkeys --broker-url "$AGENTKEYS_BROKER_URL" provision openrouter
 ```
 
 Success criteria:
