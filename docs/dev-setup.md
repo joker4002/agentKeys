@@ -45,7 +45,6 @@ Two things the script intentionally does **not** do:
 
 Optional but recommended:
 
-- **1Password CLI** — operators use this for pulling the `agentkeys-daemon` AWS creds without leaking them to shell history.
 - **chrome-devtools-mcp** — auto-wired via `.mcp.json` when you open this repo in Claude Code / Cursor / Zed / Continue.dev. Gives the workflow-collection skill tool-level access to a live Chrome for diagnosing provider-side changes.
 
 ## 2. Build everything (everyone)
@@ -75,7 +74,7 @@ AgentKeys has three roles. Each runs a different set of processes and holds a di
 | Role | What you run | What you hold | Read |
 |---|---|---|---|
 | **App developer** — building an agent against AgentKeys | `agentkeys-daemon` + an agent process | A short-lived bearer token from the operator. **Zero AWS credentials.** | §4 |
-| **App owner / operator** — running the broker for a team | `agentkeys-broker-server` (+ optionally the mock backend in dev) | Long-lived `agentkeys-daemon` AWS access key (1Password). The broker's own master session. | §5 |
+| **App owner / operator** — running the broker for a team | `agentkeys-broker-server` (+ optionally the mock backend in dev) | Long-lived `agentkeys-daemon` AWS access key (persisted in `~/.zshenv` or supervisor-managed env). The broker's own master session. | §5 |
 | **End user** — using a credential-brokered agent | `agentkeys` CLI | A 30-day master session token in OS keychain. | §6 |
 
 **Solo dev?** You'll wear all three hats. Read §5 first to stand up your own broker, then §4 to point a daemon at it, then §6 for the user-facing CLI.
@@ -133,7 +132,7 @@ Run through [`stage6-aws-setup.md`](./stage6-aws-setup.md) through §7 once per 
 - S3 bucket `agentkeys-mail-<ACCOUNT_ID>` with receipt rule writing inbound to `inbound/`
 - Route 53 records: three DKIM CNAMEs, MX, SPF, DMARC
 
-Stash the daemon user's long-lived creds in 1Password (or your OS keychain). **Do not export them globally into your shell anymore** — they only live inside the broker process now (§5.2).
+Persist the daemon user's long-lived creds in `~/.zshenv` (mode 0600) so every shell on this host inherits them. The broker process picks them up at startup; nothing else on the host should be reading from these env vars.
 
 ### 5.2 Run the broker server
 
@@ -142,11 +141,9 @@ The broker holds your AWS daemon credentials and brokers scoped temp credentials
 **Local development shape:**
 
 ```bash
-# Load the daemon AWS key from 1Password (or your secret store) into this shell only.
-export BROKER_DAEMON_ACCESS_KEY_ID=$(op read 'op://AgentKeys/daemon/access-key-id')
-export BROKER_DAEMON_SECRET_ACCESS_KEY=$(op read 'op://AgentKeys/daemon/secret-access-key')
-
-# Configure the broker.
+# BROKER_DAEMON_ACCESS_KEY_ID and BROKER_DAEMON_SECRET_ACCESS_KEY are
+# already in your shell because they're persisted in ~/.zshenv.
+# Per-run config:
 export BROKER_AGENT_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"
 export BROKER_BACKEND_URL="http://127.0.0.1:8090"   # mock backend for v0.1 dev loop
 export BROKER_AUDIT_DB_PATH="$HOME/.agentkeys/broker/audit.sqlite"
@@ -177,9 +174,7 @@ If you're running everything on one box (typical solo dev), you'll want three te
 # Terminal A — mock backend
 cargo run --release -p agentkeys-mock-server -- --port 8090
 
-# Terminal B — broker
-export BROKER_DAEMON_ACCESS_KEY_ID=...
-export BROKER_DAEMON_SECRET_ACCESS_KEY=...
+# Terminal B — broker. BROKER_DAEMON_* already in env via ~/.zshenv.
 export BROKER_AGENT_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 cargo run --release -p agentkeys-broker-server -- --port 8091

@@ -35,9 +35,10 @@ The credential broker that lets app developers run daemons without holding any A
 # Terminal A — mock backend
 cargo run --release -p agentkeys-mock-server -- --port 8090
 
-# Terminal B — broker (with stage6-demo-env.sh sourced or BROKER_DAEMON_* in env)
-export BROKER_DAEMON_ACCESS_KEY_ID=$(op read 'op://AgentKeys/daemon/access-key-id')
-export BROKER_DAEMON_SECRET_ACCESS_KEY=$(op read 'op://AgentKeys/daemon/secret-access-key')
+# Terminal B — broker. Operator has BROKER_DAEMON_ACCESS_KEY_ID +
+# BROKER_DAEMON_SECRET_ACCESS_KEY already in their shell environment
+# (e.g., persisted in ~/.zshenv with mode 0600 — zsh sources it for every
+# shell). The remaining vars are per-run.
 export BROKER_AGENT_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 cargo run --release -p agentkeys-broker-server -- --port 8091

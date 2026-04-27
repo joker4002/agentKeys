@@ -46,14 +46,18 @@ The broker reads its configuration from environment variables only — no config
 | `BROKER_AWS_REGION` | no | AWS region for the STS call. Default: `us-east-1` |
 | `BROKER_SESSION_DURATION_SECONDS` | no | TTL for minted credentials. Default: `3600` (1 h). Min: `900`, max: `43200` |
 
-Pull `BROKER_DAEMON_*` from a real secret store. Recommended: 1Password CLI:
+Persist `BROKER_DAEMON_ACCESS_KEY_ID` and `BROKER_DAEMON_SECRET_ACCESS_KEY` in `~/.zshenv` (or the equivalent per-shell startup file for non-zsh shells) with file mode 0600 so the operator's shell has them on every login:
 
 ```bash
-export BROKER_DAEMON_ACCESS_KEY_ID=$(op read 'op://AgentKeys/daemon/access-key-id')
-export BROKER_DAEMON_SECRET_ACCESS_KEY=$(op read 'op://AgentKeys/daemon/secret-access-key')
+chmod 600 ~/.zshenv
+# inside ~/.zshenv:
+export BROKER_DAEMON_ACCESS_KEY_ID=AKIA...
+export BROKER_DAEMON_SECRET_ACCESS_KEY=...
 ```
 
-Do **not** put these in your shell rc files. Load them once per session and let them expire from memory when the shell exits.
+`~/.zshenv` is sourced by every zsh invocation (login, interactive, script), so the broker process inherits the keys regardless of how it was started. The 0600 mode keeps the file readable only by the operator.
+
+If the host is shared or untrusted, prefer a secret manager that injects the values into the launch environment (systemd `LoadCredential=`, launchd `EnvironmentVariables` plist, or whatever your supervisor supports) rather than a per-user dotfile.
 
 ### 3.2 Run
 
@@ -92,7 +96,7 @@ Logs go to stderr in `tracing-subscriber` JSON format when `RUST_LOG=info` is se
 Long-lived keys age out. Rotation procedure:
 
 1. In IAM, **create** a second access key on the `agentkeys-daemon` user — both old and new keys are now valid.
-2. Update your secret store (1Password) with the new key.
+2. Update `~/.zshenv` (or your supervisor's environment-injection mechanism) with the new key.
 3. Restart the broker — it picks up the new `BROKER_DAEMON_*` from env.
 4. Verify with `curl /readyz` — should return 200.
 5. In IAM, **deactivate** (not delete) the old access key. Wait 24 h.
@@ -165,7 +169,7 @@ Operator-side, the same binary runs. Configuration source changes from env vars 
 
 - TEE / enclave-backed broker. Plaintext on commodity hardware.
 - KMS-sealed configuration source. Env vars only.
-- 1Password CLI integration as a config source. Operator runs `op read` themselves before starting the broker.
+- Secret-manager integration as a config source (Vault, AWS Secrets Manager, GCP Secret Manager). Operator persists the daemon AWS keys in `~/.zshenv` (or supervisor-managed env) themselves.
 - Multi-tenant operator support. One broker process serves one operator's `agentkeys-daemon` key.
 - OIDC `assume-role-with-web-identity` exchange. Direct `assume-role` with the static IAM trust path. The OIDC half lands when public hosting is also in motion (Stage 7 phase 2).
 - Automatic key rotation. Rotate manually per §5.
