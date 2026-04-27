@@ -88,9 +88,43 @@ impl StsClient for AwsStsClient {
     }
 }
 
+/// Test-only stub. Each closure is invoked per call so tests can simulate
+/// transient failures, count invocations, etc.
 #[cfg(any(test, feature = "test-stub"))]
 pub struct StubStsClient {
-    pub fixed_creds: AssumedCredentials,
+    assume: Box<dyn Fn() -> BrokerResult<AssumedCredentials> + Send + Sync>,
+    identity: Box<dyn Fn() -> BrokerResult<()> + Send + Sync>,
+}
+
+#[cfg(any(test, feature = "test-stub"))]
+impl StubStsClient {
+    pub fn ok(creds: AssumedCredentials) -> Self {
+        Self {
+            assume: Box::new(move || Ok(creds.clone())),
+            identity: Box::new(|| Ok(())),
+        }
+    }
+
+    pub fn failing(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        let assume_msg = msg.clone();
+        let identity_msg = msg;
+        Self {
+            assume: Box::new(move || Err(BrokerError::StsError(assume_msg.clone()))),
+            identity: Box::new(move || Err(BrokerError::StsError(identity_msg.clone()))),
+        }
+    }
+
+    /// Identity check passes, but assume_role fails. Models the broker that
+    /// can introspect itself (creds valid for GetCallerIdentity) yet cannot
+    /// assume the agent role (e.g., missing IAM trust).
+    pub fn assume_failing(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        Self {
+            assume: Box::new(move || Err(BrokerError::StsError(msg.clone()))),
+            identity: Box::new(|| Ok(())),
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-stub"))]
@@ -102,10 +136,10 @@ impl StsClient for StubStsClient {
         _session_name: &str,
         _duration_seconds: i32,
     ) -> BrokerResult<AssumedCredentials> {
-        Ok(self.fixed_creds.clone())
+        (self.assume)()
     }
 
     async fn caller_identity_ok(&self) -> BrokerResult<()> {
-        Ok(())
+        (self.identity)()
     }
 }
