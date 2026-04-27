@@ -38,24 +38,30 @@ The broker reads its configuration from environment variables only — no config
 
 | Variable | Required | Description |
 |---|---|---|
-| `BROKER_DAEMON_ACCESS_KEY_ID` | yes | Long-lived `agentkeys-daemon` IAM user access key |
-| `BROKER_DAEMON_SECRET_ACCESS_KEY` | yes | Long-lived `agentkeys-daemon` IAM user secret |
-| `BROKER_AGENT_ROLE_ARN` | yes | ARN of the `agentkeys-agent` role to assume on behalf of daemons |
-| `BROKER_BACKEND_URL` | yes | URL of the AgentKeys backend that issues session tokens (mock-server in dev, chain in v0.2+) |
-| `BROKER_AUDIT_DB_PATH` | no | SQLite path for the audit log. Default: `$HOME/.agentkeys/broker/audit.sqlite` |
-| `BROKER_AWS_REGION` | no | AWS region for the STS call. Default: `us-east-1` |
-| `BROKER_SESSION_DURATION_SECONDS` | no | TTL for minted credentials. Default: `3600` (1 h). Min: `900`, max: `43200` |
+| `DAEMON_ACCESS_KEY_ID` | yes | Long-lived `agentkeys-daemon` IAM user access key. Same var `scripts/stage6-demo-env.sh` reads. (Fallback: `BROKER_DAEMON_ACCESS_KEY_ID`.) |
+| `DAEMON_SECRET_ACCESS_KEY` | yes | Long-lived `agentkeys-daemon` IAM user secret. (Fallback: `BROKER_DAEMON_SECRET_ACCESS_KEY`.) |
+| `BROKER_AGENT_ROLE_ARN` | yes (or `ACCOUNT_ID`) | ARN of the `agentkeys-agent` role. If unset, derived from `ACCOUNT_ID` as `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent`. |
+| `BROKER_BACKEND_URL` | yes | URL of the AgentKeys backend that issues session tokens (mock-server in dev, chain in v0.2+). |
+| `BROKER_AUDIT_DB_PATH` | no | SQLite path for the audit log. Default: `$HOME/.agentkeys/broker/audit.sqlite`. |
+| `BROKER_AWS_REGION` | no | AWS region for the STS call. Falls back to `REGION` (the rest-of-agentKeys convention) before defaulting to `us-east-1`. |
+| `BROKER_SESSION_DURATION_SECONDS` | no | TTL for minted credentials. Default: `3600` (1 h). Min: `900`, max: `43200`. |
+| `BROKER_BACKEND_TIMEOUT_SECONDS` | no | HTTP timeout for backend `/session/validate` calls. Default: `10`. |
+| `BROKER_SHUTDOWN_GRACE_SECONDS` | no | Hard cap on graceful-shutdown drain. Default: `30`. |
 
-Persist `BROKER_DAEMON_ACCESS_KEY_ID` and `BROKER_DAEMON_SECRET_ACCESS_KEY` in `~/.zshenv` (or the equivalent per-shell startup file for non-zsh shells) with file mode 0600 so the operator's shell has them on every login:
+Persist `DAEMON_ACCESS_KEY_ID` and `DAEMON_SECRET_ACCESS_KEY` in `~/.zshenv` (or the equivalent per-shell startup file for non-zsh shells) with file mode 0600 so the operator's shell has them on every login. The names match `scripts/stage6-demo-env.sh` so one persisted set of keys feeds both the legacy demo flow and the broker:
 
 ```bash
 chmod 600 ~/.zshenv
 # inside ~/.zshenv:
-export BROKER_DAEMON_ACCESS_KEY_ID=AKIA...
-export BROKER_DAEMON_SECRET_ACCESS_KEY=...
+export REGION=us-east-1
+export ACCOUNT_ID=429071895007
+export DAEMON_ACCESS_KEY_ID=AKIA...
+export DAEMON_SECRET_ACCESS_KEY=...
 ```
 
 `~/.zshenv` is sourced by every zsh invocation (login, interactive, script), so the broker process inherits the keys regardless of how it was started. The 0600 mode keeps the file readable only by the operator.
+
+The broker also accepts `BROKER_DAEMON_ACCESS_KEY_ID` / `BROKER_DAEMON_SECRET_ACCESS_KEY` as fallbacks if you prefer an explicit prefix. The unprefixed `DAEMON_*` names take precedence so the legacy and new flows stay aligned.
 
 If the host is shared or untrusted, prefer a secret manager that injects the values into the launch environment (systemd `LoadCredential=`, launchd `EnvironmentVariables` plist, or whatever your supervisor supports) rather than a per-user dotfile.
 
@@ -97,7 +103,7 @@ Long-lived keys age out. Rotation procedure:
 
 1. In IAM, **create** a second access key on the `agentkeys-daemon` user — both old and new keys are now valid.
 2. Update `~/.zshenv` (or your supervisor's environment-injection mechanism) with the new key.
-3. Restart the broker — it picks up the new `BROKER_DAEMON_*` from env.
+3. Restart the broker — it picks up the new `DAEMON_*` from env.
 4. Verify with `curl /readyz` — should return 200.
 5. In IAM, **deactivate** (not delete) the old access key. Wait 24 h.
 6. If nothing broke, delete the old key. If something broke, reactivate and roll back.

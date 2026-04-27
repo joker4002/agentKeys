@@ -35,11 +35,10 @@ The credential broker that lets app developers run daemons without holding any A
 # Terminal A — mock backend
 cargo run --release -p agentkeys-mock-server -- --port 8090
 
-# Terminal B — broker. Operator has BROKER_DAEMON_ACCESS_KEY_ID +
-# BROKER_DAEMON_SECRET_ACCESS_KEY already in their shell environment
-# (e.g., persisted in ~/.zshenv with mode 0600 — zsh sources it for every
-# shell). The remaining vars are per-run.
-export BROKER_AGENT_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"
+# Terminal B — broker. Operator has DAEMON_ACCESS_KEY_ID,
+# DAEMON_SECRET_ACCESS_KEY, ACCOUNT_ID, and REGION already in their shell
+# environment (persisted in ~/.zshenv with mode 0600 — zsh sources it for
+# every shell). The broker derives BROKER_AGENT_ROLE_ARN from ACCOUNT_ID.
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 cargo run --release -p agentkeys-broker-server -- --port 8091
 

@@ -141,12 +141,12 @@ The broker holds your AWS daemon credentials and brokers scoped temp credentials
 **Local development shape:**
 
 ```bash
-# BROKER_DAEMON_ACCESS_KEY_ID and BROKER_DAEMON_SECRET_ACCESS_KEY are
-# already in your shell because they're persisted in ~/.zshenv.
-# Per-run config:
-export BROKER_AGENT_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"
+# DAEMON_ACCESS_KEY_ID, DAEMON_SECRET_ACCESS_KEY, ACCOUNT_ID, and REGION
+# are already in your shell because they're persisted in ~/.zshenv (mode
+# 0600). The broker derives BROKER_AGENT_ROLE_ARN from ACCOUNT_ID
+# automatically and falls back BROKER_AWS_REGION → REGION.
+# The only per-run var the broker requires is BROKER_BACKEND_URL:
 export BROKER_BACKEND_URL="http://127.0.0.1:8090"   # mock backend for v0.1 dev loop
-export BROKER_AUDIT_DB_PATH="$HOME/.agentkeys/broker/audit.sqlite"
 
 # Run.
 cargo run --release -p agentkeys-broker-server -- --port 8091
@@ -174,8 +174,7 @@ If you're running everything on one box (typical solo dev), you'll want three te
 # Terminal A — mock backend
 cargo run --release -p agentkeys-mock-server -- --port 8090
 
-# Terminal B — broker. BROKER_DAEMON_* already in env via ~/.zshenv.
-export BROKER_AGENT_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"
+# Terminal B — broker. DAEMON_* + ACCOUNT_ID already in env via ~/.zshenv.
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 cargo run --release -p agentkeys-broker-server -- --port 8091
 
