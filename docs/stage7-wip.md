@@ -268,6 +268,8 @@ For v0.1 operators, two pragmatic options:
 1. **Single-host deployment with persistent state (recommended for self-hosted teams).** Keep the mock-server but add a small wrapper: front it with `systemd` (or Docker `restart: unless-stopped`), and mount the SQLite file on persistent storage — `docs/operator-runbook.md` will track the exact patches needed in the next iteration. Until that lands, treat session loss on restart as part of the operator runbook (have developers re-`init` after a backend restart).
 2. **Skip the mock and wait for Heima.** If your timeline allows, hold this deployment until the chain-backed backend lands and use the real Heima session-management path. Stage 7 phase 2 isn't gated on this — the broker's interface is the same regardless of which backend implements `/session/create` + `/session/validate`.
 
+> **Automated path:** [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) bundles Steps 2–5 (binary install, `agentkeys` system user, systemd units, nginx site, certbot issuance) into a single interactive run-on-the-host script. It's idempotent, supports the three credential modes from Step 3, and prompts before each optional step. Steps 1 (provision the host) and 1b (wire DNS) are still manual prerequisites. After running the script, jump to Step 6 for the smoke test.
+
 ### Step 1 — Provision the host
 
 Pick whatever fits your stack. Two examples that satisfy the requirements (TLS-terminating reverse proxy + ≥ 1 vCPU / 1 GiB RAM + persistent disk):
@@ -280,6 +282,41 @@ Either way you need:
 - A DNS name resolving to the host (e.g. `broker.litentry.org`).
 - A public-CA TLS certificate covering that name (Let's Encrypt is free; ACM is free for ALB use).
 - Firewall: inbound `:443` from anywhere, inbound `:22` from your admin IP, **everything else closed**. The broker's `:8091` and the backend's `:8090` are reached only via localhost or the private network.
+
+### Step 1b — Wire DNS to the broker host
+
+The broker hostname must resolve to the host's public IP **before** certbot runs in Step 5 (Let's Encrypt's HTTP-01 challenge resolves the name and hits port 80). Allocate an Elastic IP (so the address survives stop/start) and add an `A` record. If your DNS lives in AWS Route 53:
+
+```bash
+# 1. Allocate + attach an Elastic IP (run with the right --region for the EC2 instance)
+EIP_ALLOC=$(aws ec2 allocate-address --domain vpc --region us-east-1 --query AllocationId --output text)
+aws ec2 associate-address --region us-east-1 \
+  --instance-id <broker-instance-id> --allocation-id "$EIP_ALLOC"
+EIP=$(aws ec2 describe-addresses --region us-east-1 \
+  --allocation-ids "$EIP_ALLOC" --query 'Addresses[0].PublicIp' --output text)
+
+# 2. Upsert the A record in Route 53 (Route 53 is global; no --region needed)
+HZ=$(aws route53 list-hosted-zones-by-name --dns-name litentry.org. \
+  --query 'HostedZones[0].Id' --output text | sed 's|/hostedzone/||')
+aws route53 change-resource-record-sets --hosted-zone-id "$HZ" \
+  --change-batch "$(jq -n --arg ip "$EIP" '{
+    Changes: [{
+      Action: "UPSERT",
+      ResourceRecordSet: {
+        Name: "broker.litentry.org.",
+        Type: "A",
+        TTL: 300,
+        ResourceRecords: [{ Value: $ip }]
+      }
+    }]
+  }')"
+
+# 3. Verify (use DoH if your local resolver is hijacked by a router/proxy)
+curl -s 'https://cloudflare-dns.com/dns-query?name=broker.litentry.org&type=A' \
+  -H 'accept: application/dns-json' | jq '.Answer'
+```
+
+For non-AWS DNS providers, create an equivalent A record (`broker.litentry.org` → EIP) in their console. The IAM user running these commands needs `ec2:AllocateAddress` / `ec2:AssociateAddress` / `ec2:DescribeAddresses` and `route53:ChangeResourceRecordSets` / `route53:ListHostedZonesByName` — `agentkeys-admin` is IAM-only by default, so attach a temporary inline policy or use a more privileged user for this one-off.
 
 ### Step 2 — Install the binaries
 
