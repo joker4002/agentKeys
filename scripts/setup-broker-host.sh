@@ -11,7 +11,7 @@
 # Usage:
 #   bash scripts/setup-broker-host.sh                        # interactive
 #   bash scripts/setup-broker-host.sh --non-interactive \    # CI
-#     --issuer-url https://broker.example.dev \
+#     --issuer-url https://broker.litentry.org \
 #     --account-id 429071895007 \
 #     [--region us-east-1] \
 #     [--cred-mode instance-profile|profile|static] \
@@ -197,7 +197,7 @@ EOF
       "  • exactly match BROKER_OIDC_ISSUER (this script writes that env var)" \
       "  • exactly match the --url you pass to AWS later" \
       "" \
-      "Example: https://broker.example.dev"
+      "Example: https://broker.litentry.org"
     prompt_required ISSUER_URL "Issuer URL"
   fi
 
@@ -287,7 +287,7 @@ EOF
 fi
 
 # ─── Validate non-interactive inputs ─────────────────────────────────────────
-[[ -n "$ISSUER_URL" ]] || die "--issuer-url is required (e.g. https://broker.example.dev). Drop --non-interactive for an interactive walk-through."
+[[ -n "$ISSUER_URL" ]] || die "--issuer-url is required (e.g. https://broker.litentry.org). Drop --non-interactive for an interactive walk-through."
 [[ -n "$ACCOUNT_ID" ]] || die "--account-id is required. Drop --non-interactive for an interactive walk-through."
 [[ -n "$CRED_MODE" ]]  || CRED_MODE="instance-profile"
 case "$CRED_MODE" in

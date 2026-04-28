@@ -212,7 +212,7 @@ When `broker.agentkeys.dev` (or your hosted equivalent) is live, the migration f
 
 ```diff
 -export AGENTKEYS_BROKER_URL=http://broker.local:8091
-+export AGENTKEYS_BROKER_URL=https://broker.example.dev
++export AGENTKEYS_BROKER_URL=https://broker.litentry.org
 ```
 
 Operator-side, the same binary runs. Configuration source changes from env vars to KMS-sealed config (interface design only in v0.1; full implementation is the Stage 7 phase 2 hosted-deploy work).

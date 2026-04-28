@@ -92,7 +92,7 @@ You're building an agent that needs OpenAI / OpenRouter / X / etc. credentials b
 
 ### 4.1 What you need from the operator
 
-- `AGENTKEYS_BROKER_URL` — e.g. `http://broker.local:8091` or `https://broker.example.dev`.
+- `AGENTKEYS_BROKER_URL` — e.g. `http://broker.local:8091` or `https://broker.litentry.org`.
 - `AGENTKEYS_BEARER_TOKEN` — short-lived; the operator hands these out per-developer.
 
 That's it. No AWS keys, no `aws sts assume-role`, no `stage6-demo-env.sh` sourcing.

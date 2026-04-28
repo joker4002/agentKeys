@@ -231,7 +231,7 @@ This section is for operators who want their broker reachable by daemons running
 ```
 ┌── developer laptop / CI / cloud sandbox ──┐
 │  agentkeys-daemon  (or `agentkeys` CLI)   │
-│  --broker-url https://broker.example.dev  │
+│  --broker-url https://broker.litentry.org  │
 └───────────────────┬───────────────────────┘
                     │ HTTPS (bearer)
                     ▼
@@ -277,7 +277,7 @@ Pick whatever fits your stack. Two examples that satisfy the requirements (TLS-t
 
 Either way you need:
 
-- A DNS name resolving to the host (e.g. `broker.example.dev`).
+- A DNS name resolving to the host (e.g. `broker.litentry.org`).
 - A public-CA TLS certificate covering that name (Let's Encrypt is free; ACM is free for ALB use).
 - Firewall: inbound `:443` from anywhere, inbound `:22` from your admin IP, **everything else closed**. The broker's `:8091` and the backend's `:8090` are reached only via localhost or the private network.
 
@@ -377,7 +377,7 @@ These values are not secrets and live in the systemd unit directly (Step 4):
 ACCOUNT_ID=429071895007
 REGION=us-east-1
 BROKER_BACKEND_URL=http://127.0.0.1:8090
-BROKER_OIDC_ISSUER=https://broker.example.dev
+BROKER_OIDC_ISSUER=https://broker.litentry.org
 ```
 
 `BROKER_OIDC_ISSUER` **must** match the public URL the reverse proxy serves — AWS rejects `create-open-id-connect-provider` if the registered URL doesn't equal the `iss` claim emitted by the broker.
@@ -426,7 +426,7 @@ Environment=HOME=/var/lib/agentkeys
 Environment=ACCOUNT_ID=429071895007
 Environment=REGION=us-east-1
 Environment=BROKER_BACKEND_URL=http://127.0.0.1:8090
-Environment=BROKER_OIDC_ISSUER=https://broker.example.dev
+Environment=BROKER_OIDC_ISSUER=https://broker.litentry.org
 # Uncomment ONE of the next two lines depending on the credential path:
 #   3a (EC2 instance profile): nothing — IMDS handles it.
 #   3b (named profile):
@@ -462,23 +462,23 @@ The broker binds to `127.0.0.1:8091` so only the local reverse proxy can reach i
 
 ### Step 5 — Reverse proxy + TLS
 
-Minimal nginx site for `broker.example.dev`:
+Minimal nginx site for `broker.litentry.org`:
 
 ```nginx
 # /etc/nginx/sites-available/agentkeys-broker
 server {
     listen 80;
-    server_name broker.example.dev;
+    server_name broker.litentry.org;
     location /.well-known/acme-challenge/ { root /var/www/certbot; }
     location / { return 301 https://$host$request_uri; }
 }
 
 server {
     listen 443 ssl http2;
-    server_name broker.example.dev;
+    server_name broker.litentry.org;
 
-    ssl_certificate     /etc/letsencrypt/live/broker.example.dev/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/broker.example.dev/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/broker.litentry.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/broker.litentry.org/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
     # AWS IAM only fetches the well-known + JWKS during create-open-id-connect-provider;
@@ -497,7 +497,7 @@ server {
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
-sudo certbot --nginx -d broker.example.dev --agree-tos -m ops@example.dev
+sudo certbot --nginx -d broker.litentry.org --agree-tos -m ops@litentry.org
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -506,14 +506,14 @@ sudo nginx -t && sudo systemctl reload nginx
 From a laptop that has nothing AWS-shaped configured:
 
 ```bash
-curl -sf https://broker.example.dev/healthz                            # → "ok"
-curl -sf https://broker.example.dev/.well-known/openid-configuration | \
-  jq '.issuer == "https://broker.example.dev"'                          # → true
-curl -sf https://broker.example.dev/.well-known/jwks.json | jq '.keys[0].kid'
+curl -sf https://broker.litentry.org/healthz                            # → "ok"
+curl -sf https://broker.litentry.org/.well-known/openid-configuration | \
+  jq '.issuer == "https://broker.litentry.org"'                          # → true
+curl -sf https://broker.litentry.org/.well-known/jwks.json | jq '.keys[0].kid'
 
 # End-to-end JWT mint (use a session bearer the operator has provisioned)
 SESSION=<bearer-from-the-backend>
-curl -sf -X POST https://broker.example.dev/v1/mint-oidc-jwt \
+curl -sf -X POST https://broker.litentry.org/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION" | jq '.expiration'
 ```
 
