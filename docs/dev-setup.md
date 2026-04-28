@@ -32,6 +32,13 @@ Two things the script intentionally does **not** do:
 1. **Install Google Chrome.** The CDP scrapers attach to real Chrome at `localhost:9222`; install it from <https://www.google.com/chrome/>.
 2. **Touch AWS infra.** That's the one-time operator setup in §5.2.
 
+### Other setup scripts at a glance
+
+| Script | Audience | What it does |
+|---|---|---|
+| [`scripts/setup-dev-env.sh`](../scripts/setup-dev-env.sh) | Anyone — fresh dev machine | Installs every prerequisite above, builds workspace, runs smoke tests. (The one you just ran.) |
+| [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) | Operator — fresh broker host | Provisions a Linux host into a running broker: builds binaries, creates the `agentkeys` system user, drops systemd units, optional nginx + Let's Encrypt. Idempotent. See [`stage7-wip.md` "Remote deployment"](./stage7-wip.md) for the manual long-form walk-through. |
+
 ### Manual matrix (if you'd rather pick tools yourself)
 
 | Tool | Why | Install |
@@ -138,35 +145,36 @@ Run through [`stage6-aws-setup.md`](./stage6-aws-setup.md) through §7 once per 
 - S3 bucket `agentkeys-mail-<ACCOUNT_ID>` with receipt rule writing inbound to `inbound/`
 - Route 53 records: three DKIM CNAMEs, MX, SPF, DMARC
 
-Persist the daemon user's long-lived creds in `~/.zshenv` (mode 0600) so every shell on this host inherits them. The broker process picks them up at startup; nothing else on the host should be reading from these env vars.
+Manage the daemon user's long-lived AWS keys via a **named profile** in `~/.aws/credentials` (mode 0600). The broker uses the AWS SDK's default credential chain — `AWS_PROFILE` (set by `awsp` or your shell), the shared credentials file, or an EC2 instance profile via IMDS. **No long-lived AWS keys live in env vars.** See [`operator-runbook.md` §3.1](./operator-runbook.md) for the full credential story.
 
 ### 5.2 Run the broker server
 
-The broker holds your AWS daemon credentials and brokers scoped temp credentials to authenticated daemons. Same binary local + hosted; only the configuration source differs.
+The broker holds your AWS daemon credentials (via the SDK default chain) and brokers scoped temp credentials to authenticated daemons. Same binary local + hosted; only the credential source differs.
 
 **Local development shape:**
 
 ```bash
-# DAEMON_ACCESS_KEY_ID, DAEMON_SECRET_ACCESS_KEY, ACCOUNT_ID, and REGION
-# are already in your shell because they're persisted in ~/.zshenv (mode
-# 0600). The broker derives BROKER_AGENT_ROLE_ARN from ACCOUNT_ID
-# automatically and falls back BROKER_AWS_REGION → REGION.
-# The only per-run var the broker requires is BROKER_BACKEND_URL:
-export BROKER_BACKEND_URL="http://127.0.0.1:8090"   # mock backend for v0.1 dev loop
+# Activate the daemon profile so the AWS SDK can resolve credentials.
+awsp agentkeys-daemon                                # or: export AWS_PROFILE=agentkeys-daemon
 
-# Run.
+# Non-secret config: BROKER_BACKEND_URL is required; the rest derive
+# from ACCOUNT_ID + REGION already in your shell.
+export BROKER_BACKEND_URL="http://127.0.0.1:8090"    # mock backend for v0.1 dev loop
+
 cargo run --release -p agentkeys-broker-server -- --port 8091
-# → broker listening on 0.0.0.0:8091
+# → "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)"
+# → "broker listening on 0.0.0.0:8091"
 ```
 
 The broker:
 
 1. Validates incoming bearer tokens against `BROKER_BACKEND_URL` (the mock server in dev; the real chain backend in v0.2+).
-2. Calls `sts:assume-role` on `BROKER_AGENT_ROLE_ARN` using its env-var-loaded daemon key.
+2. Calls `sts:assume-role` on `BROKER_AGENT_ROLE_ARN` using whatever credentials the SDK default chain returned.
 3. Returns 1-hour temp creds to the caller.
 4. Logs every mint to `BROKER_AUDIT_DB_PATH` (SQLite, one row per mint).
 
 For runbook detail (start / supervise / rotate / monitor / migrate to hosted), see [`docs/operator-runbook.md`](./operator-runbook.md).
+For the automated remote-host bootstrap, see [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh).
 
 ### 5.3 Hand off bearer tokens to your developers
 
@@ -180,7 +188,8 @@ If you're running everything on one box (typical solo dev), you'll want three te
 # Terminal A — mock backend
 cargo run --release -p agentkeys-mock-server -- --port 8090
 
-# Terminal B — broker. DAEMON_* + ACCOUNT_ID already in env via ~/.zshenv.
+# Terminal B — broker. AWS credentials come from the active profile.
+awsp agentkeys-daemon
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 cargo run --release -p agentkeys-broker-server -- --port 8091
 
@@ -226,7 +235,7 @@ The stage-done script is the authoritative evaluator — never self-grade. If it
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Cannot find package 'tsx'` | Running a scraper from repo root instead of `provisioner-scripts/` | Use `scripts/stage6-demo-run.sh`, or `cd provisioner-scripts` first |
-| `ExpiredToken` from broker | Broker's daemon AWS key was rotated; broker process holds the old one | Restart the broker process — it re-reads `BROKER_DAEMON_*` from env on start |
+| `ExpiredToken` from broker | Broker's daemon AWS key was rotated; broker process holds the old one | Restart the broker process — the SDK re-reads `~/.aws/credentials` (or IMDS / env vars) on start |
 | `401 Unauthorized` from broker | Bearer token expired (30-day TTL), or token issued against a different backend | Re-run `agentkeys init` against the broker's `BROKER_BACKEND_URL` |
 | Scraper hangs at `waiting for Turnstile` for >2 min | Turnstile showing a visible checkbox | Click it in the Chrome window from §5.4 |
 | Turnstile repeatedly fails even after checkbox | Chromium profile fingerprint flagged | `rm -rf /tmp/agentkeys-chrome-profile` and restart Chrome |

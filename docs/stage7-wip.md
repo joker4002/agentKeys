@@ -35,10 +35,11 @@ The credential broker that lets app developers run daemons without holding any A
 # Terminal A — mock backend
 cargo run --release -p agentkeys-mock-server -- --port 8090
 
-# Terminal B — broker. Operator has DAEMON_ACCESS_KEY_ID,
-# DAEMON_SECRET_ACCESS_KEY, ACCOUNT_ID, and REGION already in their shell
-# environment (persisted in ~/.zshenv with mode 0600 — zsh sources it for
-# every shell). The broker derives BROKER_AGENT_ROLE_ARN from ACCOUNT_ID.
+# Terminal B — broker. AWS credentials come from the operator's
+# ~/.aws/credentials profile (e.g. agentkeys-daemon) via `awsp` or
+# AWS_PROFILE. ACCOUNT_ID + REGION live in the operator's shell. The
+# broker derives BROKER_AGENT_ROLE_ARN from ACCOUNT_ID.
+awsp agentkeys-daemon
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 cargo run --release -p agentkeys-broker-server -- --port 8091
 
@@ -125,7 +126,7 @@ A four-terminal walk-through that exercises everything Phase 2 ships, with no AW
 
 - A release build: `cargo build --release -p agentkeys-mock-server -p agentkeys-broker-server -p agentkeys-cli` (≈ 90 s cold).
 - `jq` and `curl` on `$PATH`.
-- For the AWS-side check (step 6), `DAEMON_ACCESS_KEY_ID` + `DAEMON_SECRET_ACCESS_KEY` + `ACCOUNT_ID` from your operator setup; for offline-only, skip step 6 and use `--skip-startup-check`.
+- For the AWS-side check (step 4b + 6), `awsp agentkeys-daemon` (or another profile with `sts:AssumeRole` on `agentkeys-agent`) plus `ACCOUNT_ID` from your operator setup. For offline-only, skip those steps and use `--skip-startup-check`.
 
 ### Walk-through
 
@@ -137,16 +138,17 @@ A four-terminal walk-through that exercises everything Phase 2 ships, with no AW
 # but is NOT a long-running production backend. See the "Remote
 # deployment" section below for the production backend story.
 
-# Terminal B — broker. For the offline path (no live AWS round-trip),
-# pass --skip-startup-check; for the live path source your daemon creds
-# first per docs/operator-runbook.md §3.1.
+# Terminal B — broker. Two ways to pass AWS credentials:
+#   • Offline path (no AWS round-trip):   --skip-startup-check, no creds needed.
+#   • Live path:                          awsp agentkeys-daemon  (SDK default chain)
+# See docs/operator-runbook.md §3.1 for the full credential story.
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 export BROKER_OIDC_ISSUER=http://localhost:8091   # http for dev only; production must be https
-export DAEMON_ACCESS_KEY_ID=AKIA-offline-stub
-export DAEMON_SECRET_ACCESS_KEY=offline-stub-secret
-export ACCOUNT_ID=000000000000
+export ACCOUNT_ID=000000000000                    # offline path tolerates a stub
 ./target/release/agentkeys-broker-server --port 8091 --skip-startup-check
-# expect: "OIDC signer ready" with kid=v1-<unix-secs>, then "broker listening on 0.0.0.0:8091"
+# expect: "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)"
+#         "OIDC signer ready" with kid=v1-<unix-secs>
+#         "broker listening on 0.0.0.0:8091"
 
 # Terminal C — checks
 # 1. Healthz
@@ -296,21 +298,86 @@ sudo install -m 0755 \
   /usr/local/bin/
 ```
 
-### Step 3 — Persisted operator config
+### Step 3 — AWS credentials + non-secret config
 
-Persist the broker's required env vars in a 0600-mode file (`~/.zshenv` for zsh ops, `/etc/agentkeys/broker.env` for systemd):
+The broker resolves AWS credentials through the SDK default chain. Pick one of three paths, in order of preference:
+
+#### 3a. EC2 instance profile (recommended on AWS)
+
+If the broker host is an EC2 instance, attach an IAM **instance profile** with `sts:AssumeRole` permission on `agentkeys-agent`. The SDK pulls credentials from IMDS automatically — **no secrets land on the host's filesystem, no env vars, no rotation runbook**.
+
+```bash
+# One-time, from your admin workstation:
+ROLE_NAME=agentkeys-broker-host
+INSTANCE_PROFILE=$ROLE_NAME
+
+# Trust policy: only this EC2 role may assume.
+aws iam create-role --role-name $ROLE_NAME --assume-role-policy-document "$(jq -n '{
+  Version: "2012-10-17",
+  Statement: [{Effect:"Allow", Principal:{Service:"ec2.amazonaws.com"}, Action:"sts:AssumeRole"}]
+}')"
+
+# Inline policy: the only thing the broker host can do is sts:AssumeRole on agentkeys-agent.
+aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerAssumeAgent \
+  --policy-document "$(jq -n --arg account "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [{Effect:"Allow", Action:"sts:AssumeRole",
+                 Resource:"arn:aws:iam::\($account):role/agentkeys-agent"}]
+  }')"
+
+aws iam create-instance-profile --instance-profile-name $INSTANCE_PROFILE
+aws iam add-role-to-instance-profile --instance-profile-name $INSTANCE_PROFILE --role-name $ROLE_NAME
+aws ec2 associate-iam-instance-profile \
+  --instance-id <broker-host-instance-id> \
+  --iam-instance-profile Name=$INSTANCE_PROFILE
+```
+
+Verify from the host: `aws sts get-caller-identity` should print the assumed role ARN.
+
+#### 3b. Named profile in `~/.aws/credentials` (non-EC2 hosts)
+
+Hosts outside AWS (DigitalOcean, Hetzner, etc.) can't use IMDS. Drop the operator user's profile into `~/.aws/credentials` for the `agentkeys` system user:
+
+```bash
+sudo install -d -m 0700 -o agentkeys -g agentkeys /var/lib/agentkeys/.aws
+sudo -u agentkeys tee /var/lib/agentkeys/.aws/credentials >/dev/null <<'EOF'
+[agentkeys-daemon]
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+EOF
+sudo chmod 600 /var/lib/agentkeys/.aws/credentials
+
+sudo -u agentkeys tee /var/lib/agentkeys/.aws/config >/dev/null <<'EOF'
+[profile agentkeys-daemon]
+region = us-east-1
+EOF
+sudo chmod 600 /var/lib/agentkeys/.aws/config
+```
+
+The systemd unit below sets `Environment=HOME=/var/lib/agentkeys` so the SDK finds these files; the unit also sets `AWS_PROFILE=agentkeys-daemon` so it picks the right profile.
+
+#### 3c. Legacy static-keys env file (only if 3a/3b are not options)
 
 ```bash
 sudo install -d -m 0700 /etc/agentkeys
 sudo tee /etc/agentkeys/broker.env >/dev/null <<'EOF'
 DAEMON_ACCESS_KEY_ID=AKIA...
 DAEMON_SECRET_ACCESS_KEY=...
+EOF
+sudo chmod 600 /etc/agentkeys/broker.env
+```
+
+Only the systemd unit's `EnvironmentFile=` references this; nothing else on the host should read it.
+
+#### Non-secret config (all three paths)
+
+These values are not secrets and live in the systemd unit directly (Step 4):
+
+```
 ACCOUNT_ID=429071895007
 REGION=us-east-1
 BROKER_BACKEND_URL=http://127.0.0.1:8090
 BROKER_OIDC_ISSUER=https://broker.example.dev
-EOF
-sudo chmod 600 /etc/agentkeys/broker.env
 ```
 
 `BROKER_OIDC_ISSUER` **must** match the public URL the reverse proxy serves — AWS rejects `create-open-id-connect-provider` if the registered URL doesn't equal the `iss` claim emitted by the broker.
@@ -353,15 +420,26 @@ Requires=agentkeys-backend.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/agentkeys/broker.env
+# Non-secret config goes inline; AWS credentials come from the SDK's
+# default chain (IMDS for 3a, ~/.aws/* for 3b, EnvironmentFile for 3c).
+Environment=HOME=/var/lib/agentkeys
+Environment=ACCOUNT_ID=429071895007
+Environment=REGION=us-east-1
+Environment=BROKER_BACKEND_URL=http://127.0.0.1:8090
+Environment=BROKER_OIDC_ISSUER=https://broker.example.dev
+# Uncomment ONE of the next two lines depending on the credential path:
+#   3a (EC2 instance profile): nothing — IMDS handles it.
+#   3b (named profile):
+#Environment=AWS_PROFILE=agentkeys-daemon
+#   3c (legacy static keys):
+#EnvironmentFile=/etc/agentkeys/broker.env
 ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1
 Restart=on-failure
 RestartSec=5s
 User=agentkeys
 Group=agentkeys
-# Persist audit + keypair under /var/lib/agentkeys (operator must
-# pre-create this dir mode 0700, owned by the agentkeys user).
-Environment=HOME=/var/lib/agentkeys
+# Persist audit + keypair (and ~/.aws if 3b) under /var/lib/agentkeys —
+# operator must pre-create this dir mode 0700, owned by the agentkeys user.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

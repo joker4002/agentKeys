@@ -2,8 +2,14 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
-    pub daemon_access_key_id: String,
-    pub daemon_secret_access_key: String,
+    /// Optional. When *both* `daemon_access_key_id` and
+    /// `daemon_secret_access_key` are set, the broker uses static IAM-user
+    /// keys (legacy path). When either is unset, the broker falls back to
+    /// the AWS SDK's default credential chain — picking up `AWS_PROFILE`
+    /// from `~/.aws/credentials`, an EC2 instance profile via IMDS, etc.
+    /// The chain path is preferred for new deployments.
+    pub daemon_access_key_id: Option<String>,
+    pub daemon_secret_access_key: Option<String>,
     pub agent_role_arn: String,
     pub backend_url: String,
     pub audit_db_path: PathBuf,
@@ -31,25 +37,27 @@ pub struct BrokerConfig {
 
 impl BrokerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        // DAEMON_ACCESS_KEY_ID / DAEMON_SECRET_ACCESS_KEY are the same vars
-        // scripts/stage6-demo-env.sh reads — operator persists them once in
-        // ~/.zshenv and both the legacy demo script and the broker pick them
-        // up. BROKER_DAEMON_* names are accepted as a fallback for callers
-        // that prefer the explicit prefix.
+        // DAEMON_ACCESS_KEY_ID / DAEMON_SECRET_ACCESS_KEY are now optional.
+        // When both are present, the broker uses them directly (legacy path
+        // matching scripts/stage6-demo-env.sh). When either is missing, the
+        // broker delegates credential resolution to the AWS SDK's default
+        // chain — `AWS_PROFILE` (from `awsp` or your shell), `~/.aws/`
+        // shared files, or EC2 IMDS instance profile. The chain path is the
+        // recommended one for new deployments.
         let daemon_access_key_id = first_env(&[
             "DAEMON_ACCESS_KEY_ID",
             "BROKER_DAEMON_ACCESS_KEY_ID",
-        ])
-        .ok_or_else(|| {
-            anyhow::anyhow!("missing required env var: DAEMON_ACCESS_KEY_ID (or BROKER_DAEMON_ACCESS_KEY_ID)")
-        })?;
+        ]);
         let daemon_secret_access_key = first_env(&[
             "DAEMON_SECRET_ACCESS_KEY",
             "BROKER_DAEMON_SECRET_ACCESS_KEY",
-        ])
-        .ok_or_else(|| {
-            anyhow::anyhow!("missing required env var: DAEMON_SECRET_ACCESS_KEY (or BROKER_DAEMON_SECRET_ACCESS_KEY)")
-        })?;
+        ]);
+        if daemon_access_key_id.is_some() != daemon_secret_access_key.is_some() {
+            anyhow::bail!(
+                "DAEMON_ACCESS_KEY_ID and DAEMON_SECRET_ACCESS_KEY must be set together \
+                 (or both unset to use the AWS SDK default credential chain via AWS_PROFILE)."
+            );
+        }
         // BROKER_AGENT_ROLE_ARN can be derived from ACCOUNT_ID for the
         // canonical Stage 6 role name. Operator can still override.
         let agent_role_arn = std::env::var("BROKER_AGENT_ROLE_ARN").or_else(|_| {

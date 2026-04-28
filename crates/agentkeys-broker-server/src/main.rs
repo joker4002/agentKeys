@@ -42,12 +42,20 @@ async fn main() -> anyhow::Result<()> {
     warn_if_non_loopback_without_tls(&args.bind);
 
     let audit = AuditLog::open(&config.audit_db_path)?;
-    let sts = AwsStsClient::from_keys(
-        &config.daemon_access_key_id,
-        &config.daemon_secret_access_key,
-        &config.aws_region,
-    )
-    .await;
+    let sts = match (&config.daemon_access_key_id, &config.daemon_secret_access_key) {
+        (Some(akid), Some(secret)) => {
+            tracing::info!(
+                "AWS credentials: static IAM-user keys (DAEMON_ACCESS_KEY_ID env)"
+            );
+            AwsStsClient::from_keys(akid, secret, &config.aws_region).await
+        }
+        _ => {
+            tracing::info!(
+                "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)"
+            );
+            AwsStsClient::with_default_chain(&config.aws_region).await
+        }
+    };
 
     if !args.skip_startup_check {
         match sts.caller_identity_ok().await {
@@ -55,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => {
                 tracing::error!(error = %e, "startup STS check failed — refusing to bind");
                 anyhow::bail!(
-                    "startup STS check failed: {}. Verify BROKER_DAEMON_ACCESS_KEY_ID / BROKER_DAEMON_SECRET_ACCESS_KEY / BROKER_AWS_REGION, or pass --skip-startup-check for offline dev.",
+                    "startup STS check failed: {}. Either set AWS_PROFILE (or attach an EC2 instance profile) so the SDK's default chain can resolve credentials, or set DAEMON_ACCESS_KEY_ID + DAEMON_SECRET_ACCESS_KEY for the legacy static-keys path. Verify BROKER_AWS_REGION too. Pass --skip-startup-check for offline dev.",
                     e
                 );
             }

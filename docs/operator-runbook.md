@@ -35,45 +35,82 @@ The remaining federation step (`aws iam create-open-id-connect-provider --url $B
 
 ## 3. Start the broker
 
-### 3.1 Required configuration
+### 3.1 AWS credentials
 
-The broker reads its configuration from environment variables only — no config file in v0.1.
+The broker resolves AWS credentials through the AWS SDK's default provider chain — **named profiles in `~/.aws/credentials`** (recommended for local dev), **EC2 instance profile via IMDS** (recommended for cloud deployments), or static IAM-user keys in env vars (legacy fallback).
+
+#### Recommended: named profiles + `awsp`
+
+Profiles live in `~/.aws/credentials` and `~/.aws/config` (mode `0600`). One profile per role; switch with `awsp <name>` or `export AWS_PROFILE=<name>`. Example layout:
+
+```
+~/.aws/credentials             # mode 0600
+[agentkeys-admin]              # admin operations
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+
+[agentkeys-broker]             # EC2 Instance Connect to broker host
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+
+[agentkeys-daemon]             # what the broker process assumes from
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+```
+
+```
+~/.aws/config                  # mode 0600
+[profile agentkeys-admin]
+region = us-east-1
+output = json
+
+[profile agentkeys-broker]
+region = us-east-1
+
+[profile agentkeys-daemon]
+region = us-east-1
+```
+
+Run the broker with the daemon profile active:
+
+```bash
+awsp agentkeys-daemon          # sets AWS_PROFILE=agentkeys-daemon
+agentkeys-broker-server --port 8091
+# → "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)"
+```
+
+The broker logs which credential path it picked at startup, so misconfiguration is visible in the first second of the log.
+
+#### Recommended: EC2 instance profile
+
+When the broker runs on EC2, attach an instance profile granting `sts:AssumeRole` on `agentkeys-agent`. The SDK picks credentials from IMDS automatically — no env vars, no shared files, no rotation step. This is the path `scripts/setup-broker-host.sh` sets up.
+
+#### Legacy fallback: static IAM-user keys in env
+
+Set both `DAEMON_ACCESS_KEY_ID` *and* `DAEMON_SECRET_ACCESS_KEY` (or the `BROKER_DAEMON_*` aliases). The broker logs `AWS credentials: static IAM-user keys (DAEMON_ACCESS_KEY_ID env)` when it picks this path. Setting only one of the pair is rejected at startup. Prefer profiles or instance-profile.
+
+### 3.2 Other configuration
 
 | Variable | Required | Description |
 |---|---|---|
-| `DAEMON_ACCESS_KEY_ID` | yes | Long-lived `agentkeys-daemon` IAM user access key. Same var `scripts/stage6-demo-env.sh` reads. (Fallback: `BROKER_DAEMON_ACCESS_KEY_ID`.) |
-| `DAEMON_SECRET_ACCESS_KEY` | yes | Long-lived `agentkeys-daemon` IAM user secret. (Fallback: `BROKER_DAEMON_SECRET_ACCESS_KEY`.) |
-| `BROKER_AGENT_ROLE_ARN` | yes (or `ACCOUNT_ID`) | ARN of the `agentkeys-agent` role. If unset, derived from `ACCOUNT_ID` as `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent`. |
 | `BROKER_BACKEND_URL` | yes | URL of the AgentKeys backend that issues session tokens (mock-server in dev, chain in v0.2+). |
+| `BROKER_AGENT_ROLE_ARN` | yes (or `ACCOUNT_ID`) | ARN of the `agentkeys-agent` role. If unset, derived from `ACCOUNT_ID` as `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent`. |
+| `BROKER_AWS_REGION` | no | AWS region for the STS call. Falls back to `REGION` (the rest-of-agentKeys convention) before defaulting to `us-east-1`. The active profile's `region` setting is used by the SDK independently for credential lookup. |
 | `BROKER_AUDIT_DB_PATH` | no | SQLite path for the audit log. Default: `$HOME/.agentkeys/broker/audit.sqlite`. |
-| `BROKER_AWS_REGION` | no | AWS region for the STS call. Falls back to `REGION` (the rest-of-agentKeys convention) before defaulting to `us-east-1`. |
 | `BROKER_SESSION_DURATION_SECONDS` | no | TTL for minted credentials. Default: `3600` (1 h). Min: `900`, max: `43200`. |
 | `BROKER_BACKEND_TIMEOUT_SECONDS` | no | HTTP timeout for backend `/session/validate` calls. Default: `10`. |
 | `BROKER_SHUTDOWN_GRACE_SECONDS` | no | Hard cap on graceful-shutdown drain. Default: `30`. |
 | `BROKER_OIDC_ISSUER` | no | Public URL the broker advertises in the OIDC discovery doc and JWT `iss` claim. Must match the URL used at `aws iam create-open-id-connect-provider` time. Default: `https://oidc.agentkeys.dev`. |
 | `BROKER_OIDC_KEYPAIR_PATH` | no | Path to the persisted ES256 keypair (mode 0600). Generated on first start, reused on subsequent restarts so the registered IAM OIDC provider stays valid. Default: `$HOME/.agentkeys/broker/oidc-keypair.json`. |
 | `BROKER_OIDC_JWT_TTL_SECONDS` | no | TTL (seconds) for minted OIDC JWTs. Default: `300`. Bounded `[60, 3600]`. |
+| `DAEMON_ACCESS_KEY_ID` / `DAEMON_SECRET_ACCESS_KEY` | no (legacy) | Static IAM-user keys. Only used when no profile / instance profile / SDK default is available. Both must be set together. |
 
-Persist `DAEMON_ACCESS_KEY_ID` and `DAEMON_SECRET_ACCESS_KEY` in `~/.zshenv` (or the equivalent per-shell startup file for non-zsh shells) with file mode 0600 so the operator's shell has them on every login. The names match `scripts/stage6-demo-env.sh` so one persisted set of keys feeds both the legacy demo flow and the broker:
+`ACCOUNT_ID` is read indirectly to derive `BROKER_AGENT_ROLE_ARN`. Persist non-secret values (region, account ID, role ARN, OIDC issuer URL) wherever your shell prefers; the broker no longer needs secrets in its environment.
 
-```bash
-chmod 600 ~/.zshenv
-# inside ~/.zshenv:
-export REGION=us-east-1
-export ACCOUNT_ID=429071895007
-export DAEMON_ACCESS_KEY_ID=AKIA...
-export DAEMON_SECRET_ACCESS_KEY=...
-```
-
-`~/.zshenv` is sourced by every zsh invocation (login, interactive, script), so the broker process inherits the keys regardless of how it was started. The 0600 mode keeps the file readable only by the operator.
-
-The broker also accepts `BROKER_DAEMON_ACCESS_KEY_ID` / `BROKER_DAEMON_SECRET_ACCESS_KEY` as fallbacks if you prefer an explicit prefix. The unprefixed `DAEMON_*` names take precedence so the legacy and new flows stay aligned.
-
-If the host is shared or untrusted, prefer a secret manager that injects the values into the launch environment (systemd `LoadCredential=`, launchd `EnvironmentVariables` plist, or whatever your supervisor supports) rather than a per-user dotfile.
-
-### 3.2 Run
+### 3.3 Run
 
 ```bash
+awsp agentkeys-daemon                                          # or attach instance profile
 cargo run --release -p agentkeys-broker-server -- --port 8091
 # → broker listening on 0.0.0.0:8091
 ```
@@ -81,10 +118,13 @@ cargo run --release -p agentkeys-broker-server -- --port 8091
 Or from the built binary:
 
 ```bash
+awsp agentkeys-daemon
 ./target/release/agentkeys-broker-server --port 8091
 ```
 
-### 3.3 Verify it came up
+The first second of the log shows which credential path the broker picked: `AWS credentials: SDK default chain ...` or `AWS credentials: static IAM-user keys ...`. Always check this before declaring the broker healthy in a new environment.
+
+### 3.4 Verify it came up
 
 ```bash
 curl -sf http://127.0.0.1:8091/healthz       # → 200 ok
@@ -105,14 +145,24 @@ Logs go to stderr in `tracing-subscriber` JSON format when `RUST_LOG=info` is se
 
 ## 5. Rotate the daemon AWS key
 
-Long-lived keys age out. Rotation procedure:
+Long-lived keys age out. Rotation procedure depends on the credential path:
+
+### Named profile (recommended)
 
 1. In IAM, **create** a second access key on the `agentkeys-daemon` user — both old and new keys are now valid.
-2. Update `~/.zshenv` (or your supervisor's environment-injection mechanism) with the new key.
-3. Restart the broker — it picks up the new `DAEMON_*` from env.
+2. Update the `agentkeys-daemon` profile in `~/.aws/credentials` with the new key.
+3. Restart the broker — the SDK re-reads the shared file on each `aws_config::defaults().load()` (i.e., on process restart).
 4. Verify with `curl /readyz` — should return 200.
 5. In IAM, **deactivate** (not delete) the old access key. Wait 24 h.
 6. If nothing broke, delete the old key. If something broke, reactivate and roll back.
+
+### EC2 instance profile
+
+Rotation is automatic — IMDS-vended credentials refresh on a schedule managed by AWS. No operator step.
+
+### Legacy static-keys env-var path
+
+Same as the profile flow but step 2 updates the `DAEMON_*` env vars in your supervisor config.
 
 **Cadence recommendation:** rotate every 90 days minimum, immediately on any operator-laptop compromise.
 

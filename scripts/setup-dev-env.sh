@@ -222,6 +222,9 @@ Next steps:
   2. One-time AWS infra:  docs/stage6-aws-setup.md
   3. Run the demo:        docs/dev-setup.md  (sections 4 + 5)
 
+If you're an operator standing up a fresh broker host:
+  bash scripts/setup-broker-host.sh --help
+
 If you opened a fresh shell, source your cargo env:
   source "$HOME/.cargo/env"
 EOF

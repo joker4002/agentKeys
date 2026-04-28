@@ -53,8 +53,8 @@ async fn spawn_broker_with_sts(
         OidcKeypair::generate_and_persist(&tmp.path().join("oidc-keypair.json")).unwrap();
 
     let config = BrokerConfig {
-        daemon_access_key_id: "AKIA-fake".into(),
-        daemon_secret_access_key: "fake-secret".into(),
+        daemon_access_key_id: Some("AKIA-fake".into()),
+        daemon_secret_access_key: Some("fake-secret".into()),
         agent_role_arn: STUB_ROLE_ARN.into(),
         backend_url,
         audit_db_path: PathBuf::from(":memory:"),
