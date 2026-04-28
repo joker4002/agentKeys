@@ -497,13 +497,21 @@ WantedBy=multi-user.target
 EOF
 
 # ─── 6. nginx (optional) ──────────────────────────────────────────────────────
-if [[ "$WITH_NGINX" == "yes" ]]; then
-  if ! have nginx; then
-    log "Installing nginx"
-    "${PM_INSTALL[@]}" nginx
-  fi
-  log "Writing nginx site for $ISSUER_HOST"
-  sudo tee /etc/nginx/sites-available/agentkeys-broker >/dev/null <<EOF
+# Two-phase nginx config to avoid the certbot ↔ nginx chicken-and-egg:
+# nginx will not start if its config references LE cert files that don't
+# exist yet, but `certbot --nginx` runs `nginx -t` before issuing — so
+# the first run must produce a config nginx can load *without* a cert.
+#
+#   Phase A (no cert yet):   :80-only with the ACME challenge location.
+#                            Operator issues the cert via webroot mode.
+#   Phase B (cert exists):   adds the :443 server block with proxy_pass.
+#
+# Re-running this script after issuance flips A → B automatically.
+write_nginx_site() {
+  local cert_path="/etc/letsencrypt/live/$ISSUER_HOST/fullchain.pem"
+  if sudo test -f "$cert_path"; then
+    log "Writing nginx site for $ISSUER_HOST (HTTPS — LE cert detected)"
+    sudo tee /etc/nginx/sites-available/agentkeys-broker >/dev/null <<EOF
 server {
     listen 80;
     server_name $ISSUER_HOST;
@@ -515,7 +523,6 @@ server {
     listen 443 ssl http2;
     server_name $ISSUER_HOST;
 
-    # certbot will fill these in when you run \`sudo certbot --nginx\` (Step 9).
     ssl_certificate     /etc/letsencrypt/live/$ISSUER_HOST/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$ISSUER_HOST/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -530,10 +537,43 @@ server {
     }
 }
 EOF
-  if [[ -d /etc/nginx/sites-enabled ]]; then
-    sudo ln -sf /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
+  else
+    log "Writing nginx site for $ISSUER_HOST (HTTP-only — no LE cert yet)"
+    log "After issuing a cert, re-run this script to flip on TLS."
+    sudo tee /etc/nginx/sites-available/agentkeys-broker >/dev/null <<EOF
+# HTTP-only initial config. To issue the Let's Encrypt cert:
+#     sudo certbot certonly --webroot -w /var/www/certbot -d $ISSUER_HOST \\
+#       --agree-tos -m <ops@your.org> --non-interactive
+# then re-run scripts/setup-broker-host.sh to flip on the :443 block.
+server {
+    listen 80;
+    server_name $ISSUER_HOST;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / {
+        return 503 "TLS cert not yet issued — see setup-broker-host.sh\n";
+        default_type text/plain;
+    }
+}
+EOF
+  fi
+}
+
+if [[ "$WITH_NGINX" == "yes" ]]; then
+  if ! have nginx; then
+    log "Installing nginx"
+    "${PM_INSTALL[@]}" nginx
   fi
   sudo install -d -m 0755 /var/www/certbot
+  write_nginx_site
+  if [[ -d /etc/nginx/sites-enabled ]]; then
+    sudo ln -sf /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
+    sudo rm -f /etc/nginx/sites-enabled/default
+  fi
+  if sudo nginx -t; then
+    sudo systemctl reload nginx 2>/dev/null || sudo systemctl restart nginx
+  else
+    warn "nginx -t failed — leaving service in current state. Inspect /etc/nginx/sites-available/agentkeys-broker."
+  fi
 fi
 
 # ─── 7. certbot (optional) ────────────────────────────────────────────────────
@@ -617,12 +657,31 @@ cat <<EOF
 EOF
 
 if [[ "$WITH_NGINX" == "yes" ]]; then
-  cat <<EOF
-  TLS:
-    sudo certbot --nginx -d $ISSUER_HOST --agree-tos -m <ops@your.org>
-    sudo nginx -t && sudo systemctl reload nginx
+  if sudo test -f "/etc/letsencrypt/live/$ISSUER_HOST/fullchain.pem"; then
+    cat <<EOF
+  TLS: cert already issued — nginx is serving HTTPS.
+    sudo certbot renew --dry-run    # verify auto-renewal is wired
 
 EOF
+  else
+    cat <<EOF
+  TLS: nginx is HTTP-only until the cert is issued.
+    1. Confirm DNS resolves to this host's public IP:
+         dig +short $ISSUER_HOST @1.1.1.1
+    2. Confirm port 80 is reachable from anywhere (security group + host firewall).
+    3. Issue the cert via webroot mode (works while nginx serves :80):
+         sudo certbot certonly --webroot -w /var/www/certbot -d $ISSUER_HOST \\
+           --agree-tos -m <ops@your.org> --non-interactive
+    4. Re-run this script to flip on the :443 block:
+         bash scripts/setup-broker-host.sh
+    5. Verify renewal:
+         sudo certbot renew --dry-run
+
+  Note: do NOT use \`certbot --nginx\` for the first issuance — its preflight
+  \`nginx -t\` will fail because the :443 ssl block doesn't exist until step 4.
+
+EOF
+  fi
 fi
 
 cat <<EOF
