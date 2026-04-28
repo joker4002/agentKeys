@@ -29,6 +29,32 @@ For v0.1: run on a host you trust, rotate the daemon key on a schedule (§3), wa
 | Stage 7 design + acceptance test | [`stage7-wip.md`](./stage7-wip.md) |
 | Three-role mental model (operator vs developer vs end-user) | [`dev-setup.md`](./dev-setup.md) |
 
+### 1.1 Session bearers — how callers get them
+
+Both **developers** building agents and **end users** running them mint their own session bearers via `agentkeys init` against the **backend**. The two roles use exactly the same code path; from the broker's point of view they're indistinguishable. The bearer goes into the OS keychain on the caller's machine; the operator never hand-delivers tokens.
+
+The friction in v0.1 is not the bearer — it's *reaching the backend's `/session/create`*:
+
+| Backend exposure | Who can `agentkeys init` | When to use |
+|---|---|---|
+| **Loopback only** (default in `setup-broker-host.sh`) | Operator only, plus anyone the operator gives SSH access to (forward `-L 8090:127.0.0.1:8090`) | Conservative default. Pick this until you have either real backend auth or a trust boundary you're comfortable with. |
+| **Public via nginx proxy** — add a `location /session/` block on `broker.litentry.org` that proxies to `http://127.0.0.1:8090` | Anyone with the URL | Acceptable for an internal team you already trust, **not** for an open service. The mock-server's `/session/create` accepts any `auth_token` string with zero validation; making it public means "anyone can mint a session against any wallet." |
+| **Heima chain RPC** (v0.2+) | Anyone with a wallet (chain validates the signature) | Production. Fully self-serve; no operator handoff for either role. |
+
+Today, an operator standing up `broker.litentry.org` for a small trusted team can either:
+
+1. **Keep the backend loopback-only** and hand each developer either an SSH key (so they tunnel to `:8090` and self-mint) or a one-shot bearer minted on their behalf (`curl 127.0.0.1:8090/session/create` from the host).
+2. **Proxy `/session/create` through nginx** by adding to `/etc/nginx/sites-available/agentkeys-broker`:
+   ```nginx
+   location = /session/create {
+       proxy_pass http://127.0.0.1:8090;
+       proxy_set_header Host $host;
+   }
+   ```
+   Then `agentkeys init --backend https://broker.litentry.org` works for everyone — same flow as the end-user `agentkeys init` path. Do **not** also proxy `/session/validate` — only the broker on loopback should call that.
+
+Once Heima's chain backend lands, this knob disappears: the chain's RPC is public by construction, identity is gated by wallet signature, and `agentkeys init` is fully self-serve for both roles.
+
 ---
 
 ## 2. AWS credentials
