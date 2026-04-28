@@ -137,7 +137,7 @@ You operate the AgentKeys infrastructure for a team. You hold the long-lived `ag
 
 ### 5.1 One-time: AWS setup
 
-Run through [`stage6-aws-setup.md`](./stage6-aws-setup.md) through §7 once per AWS account. Afterwards you'll have:
+Run through [`cloud-setup.md`](./cloud-setup.md) §1–§3 once per AWS account. Afterwards you'll have:
 
 - SES domain identity verified on `bots.litentry.org` (or your substitute via `AGENTKEYS_EMAIL_DOMAIN`)
 - `agentkeys-daemon` IAM user with `sts:AssumeRole` only
@@ -145,7 +145,7 @@ Run through [`stage6-aws-setup.md`](./stage6-aws-setup.md) through §7 once per 
 - S3 bucket `agentkeys-mail-<ACCOUNT_ID>` with receipt rule writing inbound to `inbound/`
 - Route 53 records: three DKIM CNAMEs, MX, SPF, DMARC
 
-Manage the daemon user's long-lived AWS keys via a **named profile** in `~/.aws/credentials` (mode 0600). The broker uses the AWS SDK's default credential chain — `AWS_PROFILE` (set by `awsp` or your shell), the shared credentials file, or an EC2 instance profile via IMDS. **No long-lived AWS keys live in env vars.** See [`operator-runbook.md` §3.1](./operator-runbook.md) for the full credential story.
+Manage the daemon user's long-lived AWS keys via a **named profile** in `~/.aws/credentials` (mode 0600). The broker uses the AWS SDK's default credential chain — `AWS_PROFILE` (set by `awsp` or your shell), the shared credentials file, or an EC2 instance profile via IMDS. **No long-lived AWS keys live in env vars.** See [`operator-runbook.md` §2](./operator-runbook.md#2-aws-credentials) for the full credential story.
 
 ### 5.2 Run the broker server
 
@@ -242,7 +242,7 @@ The stage-done script is the authoritative evaluator — never self-grade. If it
 | Mock server won't bind port 8090 | Stale process | `lsof -i :8090`, kill, restart |
 | Broker won't bind port 8091 | Stale process | `lsof -i :8091`, kill, restart |
 | `agentkeys init` double-prompts on macOS | Known keyring-rs update path | Filed under Stage 9 "idempotent init" item |
-| `bot-<ts>@bots.litentry.org` email never arrives | DNS / MX / SES receipt-rule misconfigured, or bucket missing write perm | `aws s3 ls s3://$BUCKET/inbound/ --recursive` — if empty >60s after signup, re-verify §2–§5 of `stage6-aws-setup.md` |
+| `bot-<ts>@bots.litentry.org` email never arrives | DNS / MX / SES receipt-rule misconfigured, or bucket missing write perm | `aws s3 ls s3://$BUCKET/inbound/ --recursive` — if empty >60s after signup, re-verify [`cloud-setup.md` §1–§2](./cloud-setup.md#1-domain--dns) |
 | `MalformedPolicyDocument: ... failed legacy parsing` during operator setup | Heredoc-generated JSON lost a `$VAR:r` / `$VAR:h` to a zsh modifier | Use the `jq -n --arg … '{…}'` pattern — never heredoc JSON into AWS calls |
 
 ## 9. When a provider changes their flow
@@ -254,8 +254,8 @@ The longer-term plan (Stage 5b) is to detect drift automatically from telemetry 
 ## 10. Further reading
 
 - [`spec/plans/development-stages.md`](./spec/plans/development-stages.md) — Shipped / Active / Planned roadmap
-- [`stage6-aws-setup.md`](./stage6-aws-setup.md) — one-time AWS infra (operator role)
-- [`stage7-wip.md`](./stage7-wip.md) — broker server + OIDC-federated future
+- [`cloud-setup.md`](./cloud-setup.md) — one-time AWS infra (DNS, SES, S3, IAM, OIDC federation)
+- [`stage7-wip.md`](./stage7-wip.md) — broker server design + acceptance test
 - [`operator-runbook.md`](./operator-runbook.md) — start, supervise, rotate, monitor the broker
 - [`spec/credential-backend-interface.md`](./spec/credential-backend-interface.md) — 15-method trait contract
 - [`spec/ses-email-architecture.md`](./spec/ses-email-architecture.md) — Stage 6 email pipeline deep-dive

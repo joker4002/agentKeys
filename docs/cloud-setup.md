@@ -1,0 +1,548 @@
+# Cloud setup — AgentKeys
+
+**Audience:** the operator provisioning the cloud account that hosts AgentKeys infrastructure.
+**Scope:** one file, every cloud-side resource. Read top-down once per account, then jump back to the section you're touching.
+
+The runbook is split by concern, not by stage:
+
+| § | Concern | When you do this |
+|---|---------|------------------|
+| [§0 Identities](#0-identities--mental-model) | The four IAM principals and what each one is for | Read first |
+| [§1 Domain + DNS](#1-domain--dns) | Email subdomain (Stage 6) + broker subdomain (Stage 7) | Once per account |
+| [§2 Inbound mail](#2-inbound-mail-backend) | SES + S3 receipt rule (Stage 6) | Once per account |
+| [§3 IAM users + role](#3-iam-identities) | `agentkeys-{admin,broker,daemon}` + `agentkeys-data-role` | Once per account |
+| [§4 OIDC federation](#4-oidc-federation-stage-7) | Register the broker as an OIDC provider, swap to PrincipalTag-scoped trust | After §1–§3 + a publicly-reachable broker |
+| [§5 EC2 broker host](#5-ec2-broker-host-optional) | EIP, A record, security group | Only if you're hosting the broker on AWS |
+| [§6 Cleanup](#6-cleanup) | Tear-down recipe | When you want to delete it all |
+
+**Cloud-portability:** §1 (DNS) and §2 (inbound mail) are the cloud-replaceable layers — Tencent Cloud SimpleDM + COS would slot in here unchanged at the §3+ boundary. See [§2.2](#22-future-tencent-cloud-simpledm--cos).
+
+---
+
+## 0. Identities — mental model
+
+| Identity | Type | Holds | Purpose |
+|---|---|---|---|
+| `agentkeys-admin` | IAM user | Long-lived access key | One-shot provisioning. Runs every command in this doc. IAM-admin scope. |
+| `agentkeys-broker` | IAM user | Long-lived access key | Operator's SSH-into-EC2 path via EC2 Instance Connect. No data-plane access. |
+| `agentkeys-daemon` | IAM user | Long-lived access key | The **broker process** uses this at runtime. Only permission: `sts:AssumeRole` on `agentkeys-data-role`. |
+| `agentkeys-data-role` | IAM role | (assumed) | The actual S3/SES permissions live here. `agentkeys-daemon` (Stage 6) or the OIDC provider (Stage 7) is allowed to assume it. |
+| `agentkeys-broker-host` | IAM role | (assumed by EC2) | Optional. If the broker runs on EC2, attach this as the instance profile so the daemon never sees a static key. |
+
+Why "data role" and not "agent role": the project word "agent" already means three things (the AI agent, the AgentKeys product, an IAM role). The role holds **data-plane** permissions, so `agentkeys-data-role` it is. (Renamed from `agentkeys-agent` 2026-04-28; the broker still accepts the legacy `BROKER_AGENT_ROLE_ARN` env var.)
+
+**Prereqs for everything below:**
+
+```bash
+# AWS CLI v2 + a working agentkeys-admin profile
+awsp agentkeys-admin                                              # set AWS_PROFILE
+aws sts get-caller-identity                                       # → agentkeys-admin
+
+# Shell vars used throughout the runbook
+export REGION=us-east-1                                           # SES inbound: us-east-1, us-west-2, eu-west-1
+export DOMAIN=bots.litentry.org                                   # Stage 6 email subdomain
+export BROKER_HOST=broker.litentry.org                            # Stage 7 broker public hostname
+export PARENT_ZONE_ID=Z09723983CFJOHAE3VC65                       # existing litentry.org Route 53 zone
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export BUCKET=agentkeys-mail-${ACCOUNT_ID}                        # global-unique by account-id suffix
+echo "REGION=$REGION DOMAIN=$DOMAIN BROKER_HOST=$BROKER_HOST ACCOUNT_ID=$ACCOUNT_ID BUCKET=$BUCKET"
+```
+
+> **Why `jq -n --arg` and not `cat > file.json <<EOF`:** `jq --arg` passes values outside shell parameter expansion, sidestepping the zsh modifier bug (`$VAR:r` etc.) that silently corrupts ARNs. JSON is validated on construction, command substitution feeds the result straight into `--policy-document`, no file lands on disk.
+
+---
+
+## 1. Domain + DNS
+
+Two subdomains under the existing `litentry.org` zone — no NS delegation needed because both records live in the parent zone:
+
+- `bots.litentry.org` — agent email subdomain (used by SES inbound).
+- `broker.litentry.org` — broker public hostname (TLS-terminating reverse proxy).
+
+If you're using a different parent domain, swap `litentry.org` and `PARENT_ZONE_ID` accordingly. Confirm the zone is reachable before continuing:
+
+```bash
+aws route53 get-hosted-zone --id "$PARENT_ZONE_ID" \
+  --query 'HostedZone.{name: Name, private: Config.PrivateZone}'
+# → {"name": "litentry.org.", "private": false}
+```
+
+### 1.1 Email subdomain — DKIM + SPF + DMARC + MX
+
+After §2.1 (SES domain identity) you'll have three DKIM tokens to publish. The block below publishes those plus the standard SPF / DMARC / MX records in one Route 53 change:
+
+```bash
+read -r T1 T2 T3 <<<"$(aws sesv2 get-email-identity --region "$REGION" \
+  --email-identity "$DOMAIN" --query 'DkimAttributes.Tokens' --output text)"
+
+aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
+  --change-batch "$(jq -n \
+    --arg domain "$DOMAIN" --arg region "$REGION" \
+    --arg t1 "$T1" --arg t2 "$T2" --arg t3 "$T3" \
+    '{
+      Comment: "AgentKeys email infra for \($domain)",
+      Changes: [
+        {Action:"UPSERT", ResourceRecordSet:{Name:"\($t1)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t1).dkim.amazonses.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:"\($t2)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t2).dkim.amazonses.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:"\($t3)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t3).dkim.amazonses.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$domain, Type:"MX",  TTL:300, ResourceRecords:[{Value:"10 inbound-smtp.\($region).amazonaws.com"}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$domain, Type:"TXT", TTL:300, ResourceRecords:[{Value:"\"v=spf1 include:amazonses.com -all\""}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:"_dmarc.\($domain)", Type:"TXT", TTL:300, ResourceRecords:[{Value:"\"v=DMARC1; p=quarantine; rua=mailto:dmarc@\($domain)\""}]}}
+      ]
+    }')"
+```
+
+### 1.2 Broker subdomain — A record to EIP
+
+Done as part of [§5 EC2 broker host](#5-ec2-broker-host-optional), once you know the host's public IP. If the broker lives outside AWS (DigitalOcean, Hetzner, etc.), upsert the A record now using the host's static IP — the rest of the runbook is identical.
+
+---
+
+## 2. Inbound mail backend
+
+### 2.1 AWS SES + S3
+
+#### Verify the SES domain identity
+
+```bash
+aws sesv2 create-email-identity \
+  --region "$REGION" --email-identity "$DOMAIN" \
+  --dkim-signing-attributes NextSigningKeyLength=RSA_2048_BIT
+```
+
+Now run [§1.1](#11-email-subdomain--dkim--spf--dmarc--mx) to publish the DKIM/SPF/DMARC/MX records. Wait ~5 min, then:
+
+```bash
+aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
+  --query '{verified: VerifiedForSendingStatus, dkim: DkimAttributes.Status}'
+# → {"verified": true, "dkim": "SUCCESS"}
+```
+
+> **DKIM key custody:** in this interim setup, AWS SES holds the private DKIM key. We never see it. Trust surface: AWS-internal compromise could forge mail signed as us — bounded blast radius (reputation, not user-data custody). Migration target is TEE-held BYODKIM when [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) closes; do **not** intermediate-step to "BYODKIM with file-stored key" (strictly worse than AWS-managed).
+
+#### Create the S3 bucket for inbound mail
+
+The bucket policy in [§3.5](#35-s3-bucket-policy) wires SES write + role read; we'll come back to it after the IAM identities exist.
+
+```bash
+aws s3api create-bucket \
+  --region "$REGION" --bucket "$BUCKET" \
+  $([ "$REGION" != "us-east-1" ] && echo "--create-bucket-configuration LocationConstraint=$REGION")
+
+aws s3api put-public-access-block --bucket "$BUCKET" \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+# 30-day TTL on inbound objects (throwaway-inbox model)
+aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
+  --lifecycle-configuration "$(jq -n '{
+    Rules: [{ID:"inbound-30d-ttl", Status:"Enabled", Filter:{Prefix:"inbound/"}, Expiration:{Days:30}}]
+  }')"
+```
+
+#### Create the SES receipt rule
+
+```bash
+aws ses create-receipt-rule-set --rule-set-name agentkeys --region "$REGION" 2>/dev/null || true
+aws ses create-receipt-rule --region "$REGION" --rule-set-name agentkeys \
+  --rule "$(jq -n --arg domain "$DOMAIN" --arg bucket "$BUCKET" '{
+    Name: "agentkeys-inbound", Enabled: true, ScanEnabled: true, TlsPolicy: "Optional",
+    Recipients: [$domain],
+    Actions: [{S3Action: {BucketName: $bucket, ObjectKeyPrefix: "inbound/"}}]
+  }')"
+aws ses set-active-receipt-rule-set --rule-set-name agentkeys --region "$REGION"
+```
+
+Inbound MIME lands at `s3://$BUCKET/inbound/<msg_id>`. The first object you'll see is `inbound/AMAZON_SES_SETUP_NOTIFICATION` — AWS's "I successfully wrote to your bucket" marker. Real test mail follows.
+
+#### Spam handling (read-time filter)
+
+The SES scanners stamp `X-SES-Spam-Verdict` / `X-SES-Virus-Verdict` headers. The provisioner-scripts `ses-s3` adapter drops messages where either is `FAIL`. No write-time Lambda; trivial receipt rule.
+
+#### Sandbox vs production sending
+
+Inbound is unaffected by SES sandbox status. You only need to request production access when the agent **sends** mail to arbitrary addresses (replies, notifications). Console → Support → "Service limit increase" → "SES Sending Limits" → "Request Production Access".
+
+### 2.2 Future: Tencent Cloud SimpleDM + COS
+
+For deployments serving China-region traffic, the analogous backend is:
+
+| Layer | AWS (current) | Tencent Cloud (future) |
+|---|---|---|
+| Email service | SES (SendRawEmail / receipt rules) | SimpleDM (`SendEmail` + receive-rule policies) |
+| Object store | S3 + bucket policy | COS + bucket-policy / CAM role |
+| Identity service | IAM users + roles + STS AssumeRole | CAM users + roles + STS AssumeRole |
+| OIDC federation | `iam:CreateOpenIDConnectProvider` | CAM `CreateOIDCConfig` |
+
+The provisioner-scripts `email-backends/` interface already abstracts the inbound contract (object key + raw MIME). A Tencent backend slots in as `tencent-simpledm-cos`, with the same upstream API as `ses-s3`. Identity layout in §3 stays unchanged structurally — replace `iam` with `cam` calls. **No work in this runbook depends on AWS specifically except the AWS CLI invocations** — the IAM model maps 1:1 onto CAM.
+
+---
+
+## 3. IAM identities
+
+### 3.1 `agentkeys-daemon` IAM user (broker runtime)
+
+```bash
+aws iam create-user --user-name agentkeys-daemon
+aws iam create-access-key --user-name agentkeys-daemon
+# → save AccessKeyId + SecretAccessKey to your secret manager. NOT to git.
+
+aws iam put-user-policy --user-name agentkeys-daemon \
+  --policy-name agentkeys-daemon-assume-role \
+  --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow", Action: "sts:AssumeRole",
+      Resource: "arn:aws:iam::\($acct):role/agentkeys-data-role"
+    }]
+  }')"
+```
+
+The daemon user can do exactly one thing: assume `agentkeys-data-role`. Any S3/SES action goes through the role's permissions, never the user's.
+
+### 3.2 `agentkeys-data-role`
+
+The role's trust policy starts with the **static-IAM-user** variant (Stage 6). [§4.2](#42-replace-the-roles-trust-policy-federated-variant) swaps it for the OIDC-federated variant once the broker is publicly reachable.
+
+```bash
+aws iam create-role --role-name agentkeys-data-role \
+  --assume-role-policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Principal: {AWS: "arn:aws:iam::\($acct):user/agentkeys-daemon"},
+      Action: "sts:AssumeRole"
+    }]
+  }')"
+
+aws iam put-role-policy --role-name agentkeys-data-role \
+  --policy-name agentkeys-data-role-inline \
+  --policy-document "$(jq -n \
+    --arg bucket "$BUCKET" --arg region "$REGION" \
+    --arg acct "$ACCOUNT_ID" --arg domain "$DOMAIN" \
+    '{
+      Version: "2012-10-17",
+      Statement: [
+        {Effect:"Allow", Action:"s3:ListBucket", Resource:"arn:aws:s3:::\($bucket)"},
+        {Effect:"Allow", Action:"s3:GetObject",  Resource:"arn:aws:s3:::\($bucket)/*"},
+        {Effect:"Allow", Action:"ses:SendRawEmail", Resource:"arn:aws:ses:\($region):\($acct):identity/\($domain)"}
+      ]
+    }')"
+
+export ROLE_ARN=$(aws iam get-role --role-name agentkeys-data-role --query 'Role.Arn' --output text)
+echo "ROLE_ARN=$ROLE_ARN"
+```
+
+### 3.3 `agentkeys-admin`, `agentkeys-broker` (already provisioned)
+
+If you've come this far, `agentkeys-admin` exists (you're using it now). `agentkeys-broker` is whatever IAM user you SSH into the broker EC2 with via EC2 Instance Connect — its perms are out of scope here (`ec2-instance-connect:SendSSHPublicKey` on the host's instance ID is sufficient).
+
+### 3.4 `agentkeys-broker-host` instance profile (optional, EC2-only)
+
+If the broker runs on EC2, attach this so the daemon never holds a static key. The host's runtime credentials come from IMDS.
+
+```bash
+ROLE_NAME=agentkeys-broker-host
+
+aws iam create-role --role-name $ROLE_NAME \
+  --assume-role-policy-document "$(jq -n '{
+    Version: "2012-10-17",
+    Statement: [{Effect:"Allow", Principal:{Service:"ec2.amazonaws.com"}, Action:"sts:AssumeRole"}]
+  }')"
+
+aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerAssumeData \
+  --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [{Effect:"Allow", Action:"sts:AssumeRole",
+                 Resource:"arn:aws:iam::\($acct):role/agentkeys-data-role"}]
+  }')"
+
+aws iam create-instance-profile --instance-profile-name $ROLE_NAME
+aws iam add-role-to-instance-profile --instance-profile-name $ROLE_NAME --role-name $ROLE_NAME
+aws ec2 associate-iam-instance-profile --region "$REGION" \
+  --instance-id <broker-host-instance-id> \
+  --iam-instance-profile Name=$ROLE_NAME
+```
+
+### 3.5 S3 bucket policy
+
+Now that `agentkeys-data-role` exists, attach the bucket policy. The static-IAM-user variant: SES writes inbound, role reads everything.
+
+```bash
+aws s3api put-bucket-policy --bucket "$BUCKET" \
+  --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "AllowSESWriteInbound", Effect: "Allow",
+        Principal: {Service: "ses.amazonaws.com"},
+        Action: "s3:PutObject",
+        Resource: "arn:aws:s3:::\($bucket)/*",
+        Condition: {StringEquals: {"aws:Referer": $acct}}
+      },
+      {
+        Sid: "AllowDaemonRead", Effect: "Allow",
+        Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
+        Action: ["s3:GetObject", "s3:ListBucket"],
+        Resource: ["arn:aws:s3:::\($bucket)", "arn:aws:s3:::\($bucket)/*"]
+      }
+    ]
+  }')"
+```
+
+The federated variant (PrincipalTag-scoped) lands in [§4.3](#43-upgrade-bucket-policy-to-principaltag-scoped).
+
+---
+
+## 4. OIDC federation (Stage 7)
+
+Replaces the `agentkeys-daemon → AssumeRole` path in §3.2 with `OIDC-broker-JWT → AssumeRoleWithWebIdentity`. The benefit: per-user isolation enforced **inside AWS** (via PrincipalTag on the assumed session), not just by the daemon's app code.
+
+### 4.1 Prereqs
+
+- §1–§3 done.
+- Broker reachable at `https://$BROKER_HOST` over public TLS (see [§5](#5-ec2-broker-host-optional) for the EC2 wiring + `scripts/setup-broker-host.sh` for the host bootstrap).
+- The broker's discovery doc agrees with `$BROKER_HOST` byte-for-byte:
+  ```bash
+  export OIDC_ISSUER="https://$BROKER_HOST"
+  curl -sf "$OIDC_ISSUER/.well-known/openid-configuration" | jq -e ".issuer == \"$OIDC_ISSUER\""
+  # → true
+  ```
+  If `false`, fix the broker's `BROKER_OIDC_ISSUER` env var before continuing — AWS validates the registered URL against the JWT `iss` claim byte-for-byte (no scheme, trailing slash, or hostname-only forms allowed):
+  ```bash
+  sudo sed -i \
+    "s|^Environment=BROKER_OIDC_ISSUER=.*|Environment=BROKER_OIDC_ISSUER=$OIDC_ISSUER|" \
+    /etc/systemd/system/agentkeys-broker.service
+  sudo systemctl daemon-reload && sudo systemctl restart agentkeys-broker
+  ```
+
+### 4.2 Register the OIDC provider
+
+Pre-check for stale state from earlier bring-ups:
+
+```bash
+aws iam list-open-id-connect-providers
+```
+
+- Empty list → fresh slate; proceed.
+- ARN ends in `$BROKER_HOST` → already registered; skip the create, jump to the trust-policy update.
+- ARN ends in a different host → delete, then register the correct one:
+  ```bash
+  aws iam delete-open-id-connect-provider \
+    --open-id-connect-provider-arn arn:aws:iam::${ACCOUNT_ID}:oidc-provider/<stale-host>
+  ```
+
+Register:
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url "$OIDC_ISSUER" \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list ''
+export OIDC_PROVIDER_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/$BROKER_HOST"
+
+aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn "$OIDC_PROVIDER_ARN" \
+  --query '{Url: Url, ClientIDList: ClientIDList}'
+# → {"Url": "https://broker.litentry.org", "ClientIDList": ["sts.amazonaws.com"]}
+```
+
+AWS auto-derives the cert thumbprint from the Let's Encrypt chain. The thumbprint stays valid across cert renewals because LE uses a stable intermediate CA.
+
+### 4.3 Replace the role's trust policy (federated variant)
+
+Principal flips from `agentkeys-daemon` to the OIDC provider; the `sts:TagSession` + `aws:RequestTag/agentkeys_user_wallet` condition is what cloud-enforces per-user isolation in [§4.4](#44-upgrade-bucket-policy-to-principaltag-scoped).
+
+```bash
+aws iam update-assume-role-policy --role-name agentkeys-data-role \
+  --policy-document "$(jq -n \
+    --arg provider "$OIDC_PROVIDER_ARN" \
+    --arg aud_key "${BROKER_HOST}:aud" \
+    '{
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Principal: {Federated: $provider},
+        Action: ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
+        Condition: {
+          StringEquals: {($aud_key): "sts.amazonaws.com"},
+          StringNotEquals: {"aws:RequestTag/agentkeys_user_wallet": ""}
+        }
+      }]
+    }')"
+```
+
+### 4.4 Upgrade bucket policy to PrincipalTag-scoped
+
+Replaces `AllowDaemonRead` from §3.5. The cloud now enforces "the assumed session can only touch the prefix matching its PrincipalTag" — even if app code has a bug.
+
+```bash
+aws s3api put-bucket-policy --bucket "$BUCKET" \
+  --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" '{
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "AllowSESWriteInbound", Effect: "Allow",
+        Principal: {Service: "ses.amazonaws.com"},
+        Action: "s3:PutObject",
+        Resource: "arn:aws:s3:::\($bucket)/*",
+        Condition: {StringEquals: {"aws:Referer": $acct}}
+      },
+      {
+        Sid: "AllowDaemonReadOwnPrefix", Effect: "Allow",
+        Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
+        Action: ["s3:GetObject", "s3:ListBucket"],
+        Resource: [
+          "arn:aws:s3:::\($bucket)",
+          "arn:aws:s3:::\($bucket)/${aws:PrincipalTag/agentkeys_user_wallet}/*"
+        ],
+        Condition: {
+          StringEquals: {"s3:prefix": "${aws:PrincipalTag/agentkeys_user_wallet}/"}
+        }
+      }
+    ]
+  }')"
+```
+
+### 4.5 End-to-end proof
+
+Mint a JWT, assume the role with it, prove that wallet A can read its own prefix but **not** wallet B's:
+
+```bash
+# 1. Mint a session bearer against the backend (mock-server in dev, chain in v0.2+)
+SESSION=$(curl -sf -X POST http://127.0.0.1:8090/session/create \
+  -H 'content-type: application/json' \
+  -d '{"auth_token":"federation-proof"}' | jq -r .session)
+
+# 2. Mint an OIDC JWT via the broker (bearer → JWT)
+JWT=$(curl -sf -X POST "$OIDC_ISSUER/v1/mint-oidc-jwt" \
+  -H "Authorization: Bearer $SESSION" | jq -r .jwt)
+WALLET=$(jq -R 'split(".") | .[1] | @base64d | fromjson | .agentkeys_user_wallet' <<<"$JWT" -r)
+
+# 3. Exchange JWT for AWS temp creds
+CREDS=$(aws sts assume-role-with-web-identity \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role" \
+  --role-session-name "fed-proof-$(date +%s)" \
+  --web-identity-token "$JWT")
+export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .Credentials.SessionToken)
+
+# 4a. Own prefix — should succeed (empty list is fine, no AccessDenied)
+aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$WALLET/"
+
+# 4b. KEY MOMENT — someone else's prefix MUST AccessDenied
+aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "0xdeadbeef/"
+# → AccessDenied
+```
+
+Step 4b is the property the static-IAM path (§3) cannot prove: cloud-enforced isolation, zero app-side trust required.
+
+### 4.6 (Future) TEE-derived signer swap
+
+The on-disk ES256 keypair shipped today is a complete v0.1 signer. When [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md) closes, swap [`crates/agentkeys-broker-server/src/oidc.rs::OidcKeypair::load_or_generate`](../crates/agentkeys-broker-server/src/oidc.rs) for a TEE oracle call. JWKS, JWT shape, STS exchange, and bucket policy stay identical — only the signing backend changes.
+
+---
+
+## 5. EC2 broker host (optional)
+
+If the broker runs on EC2 (the recommended path for AWS-native deployments), wire DNS + EIP + security group before running [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) on the box.
+
+### 5.1 Allocate + attach an Elastic IP
+
+```bash
+EIP_ALLOC=$(aws ec2 allocate-address --domain vpc --region "$REGION" --query AllocationId --output text)
+aws ec2 associate-address --region "$REGION" \
+  --instance-id <broker-instance-id> --allocation-id "$EIP_ALLOC"
+EIP=$(aws ec2 describe-addresses --region "$REGION" \
+  --allocation-ids "$EIP_ALLOC" --query 'Addresses[0].PublicIp' --output text)
+echo "EIP=$EIP"
+```
+
+### 5.2 Wire the A record
+
+```bash
+aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
+  --change-batch "$(jq -n --arg name "$BROKER_HOST." --arg ip "$EIP" '{
+    Changes: [{
+      Action: "UPSERT",
+      ResourceRecordSet: {Name: $name, Type: "A", TTL: 300, ResourceRecords: [{Value: $ip}]}
+    }]
+  }')"
+
+# Verify (use DoH if your local resolver hijacks port 53)
+curl -s "https://cloudflare-dns.com/dns-query?name=$BROKER_HOST&type=A" \
+  -H 'accept: application/dns-json' | jq '.Answer[0].data'
+```
+
+### 5.3 Open security-group ports 80 + 443
+
+Let's Encrypt's HTTP-01 challenge needs port 80 open from anywhere; the broker serves on 443 afterward. SSH (22) should be admin-IP-only.
+
+```bash
+INSTANCE_ID=<broker-instance-id>
+SG=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
+  --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
+
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG" \
+  --protocol tcp --port 443 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG" \
+  --protocol tcp --port 80  --cidr 0.0.0.0/0
+```
+
+### 5.4 Bootstrap the host
+
+SSH in as `agentkeys-broker` (via EC2 Instance Connect: `aws ec2-instance-connect ssh --instance-id $INSTANCE_ID`) and run:
+
+```bash
+git clone https://github.com/litentry/agentKeys.git
+cd agentKeys
+sudo bash scripts/setup-broker-host.sh
+# Interactive walk-through; pick instance-profile credential mode
+# (assuming §3.4 attached agentkeys-broker-host).
+```
+
+The script writes systemd units, an HTTP-only nginx config, then prints the certbot command. After cert issuance, re-run the script — it detects the cert file and flips on the `:443` ssl block.
+
+---
+
+## 6. Cleanup
+
+```bash
+# OIDC federation (if §4 ran)
+aws iam delete-open-id-connect-provider \
+  --open-id-connect-provider-arn "$OIDC_PROVIDER_ARN" 2>/dev/null
+
+# IAM
+aws iam delete-role-policy --role-name agentkeys-data-role --policy-name agentkeys-data-role-inline
+aws iam delete-role        --role-name agentkeys-data-role
+for KEY in $(aws iam list-access-keys --user-name agentkeys-daemon --query 'AccessKeyMetadata[*].AccessKeyId' --output text); do
+  aws iam delete-access-key --user-name agentkeys-daemon --access-key-id "$KEY"
+done
+aws iam delete-user-policy --user-name agentkeys-daemon --policy-name agentkeys-daemon-assume-role
+aws iam delete-user        --user-name agentkeys-daemon
+
+# Optional: the broker-host instance profile
+aws iam remove-role-from-instance-profile --instance-profile-name agentkeys-broker-host --role-name agentkeys-broker-host 2>/dev/null
+aws iam delete-instance-profile --instance-profile-name agentkeys-broker-host 2>/dev/null
+aws iam delete-role-policy --role-name agentkeys-broker-host --policy-name BrokerAssumeData 2>/dev/null
+aws iam delete-role        --role-name agentkeys-broker-host 2>/dev/null
+
+# SES + S3
+aws ses set-active-receipt-rule-set --rule-set-name "" --region "$REGION"
+aws sesv2 delete-email-identity --region "$REGION" --email-identity "$DOMAIN"
+aws s3 rm "s3://$BUCKET" --recursive
+aws s3api delete-bucket --bucket "$BUCKET"
+
+# DNS records on the parent zone are NOT auto-deleted — you'll need to
+# remove the DKIM CNAMEs, MX, SPF, DMARC, and broker A record by hand
+# if you want a clean zone.
+```
+
+---
+
+## Follow-ups tracked elsewhere
+
+- **TEE-BYODKIM** — replace AWS-managed DKIM. Depends on [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md).
+- **TEE-derived OIDC signer** — replace on-disk ES256. Depends on [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md).
+- **Per-address S3 prefix routing** — currently all inbound lands in `inbound/`; per-`<wallet>/<address>/` prefix routing wants either a SES Lambda or subdomain receipt rules.
+- **GCP / Tencent recipes** — equivalent of §4 against GCP Workload Identity Federation and Tencent CAM. JWT/JWKS shape works cross-cloud unchanged; only the registration step differs.

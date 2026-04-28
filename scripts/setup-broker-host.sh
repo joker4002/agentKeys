@@ -2,8 +2,9 @@
 # AgentKeys broker-host bootstrap.
 #
 # Provisions a fresh Linux host into a running broker. Automates the manual
-# steps in docs/stage7-wip.md "Remote deployment" §1-7. Idempotent — safe
-# to re-run after partial failures.
+# steps in docs/stage7-wip.md "Remote deployment". Idempotent — safe to
+# re-run after partial failures. Cloud-account setup (IAM, SES, S3, OIDC
+# federation) lives in docs/cloud-setup.md.
 #
 # Run with no flags on a TTY for an interactive walk-through that explains
 # each decision before it's made. Pass flags / --non-interactive for CI.
@@ -178,10 +179,11 @@ if $INTERACTIVE; then
 ================================================================================
   AgentKeys broker host bootstrap — interactive
 ================================================================================
-This script walks through the steps in docs/stage7-wip.md "Remote deployment"
-on this host. It will install packages, create a system user, drop systemd
-units, and (optionally) configure nginx + certbot. Re-runs are safe; existing
-files won't be overwritten without your input.
+This script walks through the host-side bootstrap from docs/stage7-wip.md
+"Remote deployment". It will install packages, create a system user, drop
+systemd units, and (optionally) configure nginx + certbot. Re-runs are safe;
+existing files won't be overwritten without your input. Cloud-account setup
+(IAM, SES, S3, OIDC federation) is separate — see docs/cloud-setup.md.
 
 You'll be asked about each optional step before it happens. Pass --help for
 the non-interactive flag set.
@@ -698,8 +700,8 @@ cat <<EOF
     curl -sf $ISSUER_URL/.well-known/openid-configuration | jq '.issuer == "$ISSUER_URL"'
     curl -sf $ISSUER_URL/.well-known/jwks.json | jq '.keys[0].kid'
 
-  Then continue with docs/stage7-wip.md "Cloud federation deployment" §"AWS recipe"
-  to register the OIDC provider with AWS IAM.
+  Then continue with docs/cloud-setup.md §4 "OIDC federation" to register
+  the OIDC provider with AWS IAM and verify cloud-enforced isolation.
 
 ================================================================================
 EOF

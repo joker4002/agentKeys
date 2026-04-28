@@ -194,13 +194,13 @@ The split exists so the long-lived secret (user access key) only does ONE thing 
 | Auth flow | `sts:AssumeRole` from IAM user (static keys) | `sts:AssumeRoleWithWebIdentity` from OIDC JWT |
 | AWS resource count | Same singletons | Same singletons (no new IAM per user) |
 | Failure mode if app has a bug | User A could read user B's mail | AccessDenied from cloud — bug caught at the boundary |
-| Where to read more | This spec + [`docs/stage6-aws-setup.md`](../stage6-aws-setup.md) | [`docs/stage7-wip.md`](../stage7-wip.md), §10.4 PrincipalTag pattern below |
+| Where to read more | This spec + [`docs/cloud-setup.md`](../cloud-setup.md) | [`docs/cloud-setup.md` §4](../cloud-setup.md#4-oidc-federation-stage-7) + §10.4 PrincipalTag pattern below |
 
 The migration from Stage 6 to Stage 7 is mostly a trust-policy rewrite + a `Resource`/`Condition` swap on the bucket policy (see §10.4). No new IAM resources, no per-user provisioning. Singleton stays singleton.
 
 ### What this spec does NOT cover (intentionally)
 
-- **Operator setup specifics** (account ID, hosted zone ID, exact ARNs) live in [`docs/stage6-aws-setup.md`](../stage6-aws-setup.md), the operator-facing runbook. Reference that for the actual AWS CLI calls.
+- **Operator setup specifics** (account ID, hosted zone ID, exact ARNs) live in [`docs/cloud-setup.md`](../cloud-setup.md), the operator-facing runbook. Reference that for the actual AWS CLI calls.
 - **PrincipalTag enforcement details** are in §10.4 below + [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md).
 - **OIDC issuer key derivation + JWKS** are in §10.5 + [`wiki/oidc-federation.md`](../../wiki/oidc-federation.md).
 
