@@ -583,7 +583,34 @@ This section is the **operational runbook** for taking the (already-shipped) Pha
 
 - Phase 1 broker running publicly (so its `/.well-known/openid-configuration` is fetchable over public TLS).
 - `export OIDC_ISSUER="$BROKER_OIDC_ISSUER"` — the exact `BROKER_OIDC_ISSUER` you started the broker with.
-- Verify `curl -sf "$OIDC_ISSUER/.well-known/openid-configuration" | jq .issuer` returns that string.
+- Verify the discovery doc's `iss` claim matches **byte-for-byte** (must be `https://…`, no trailing slash, no scheme-less hostname). AWS rejects the `AssumeRoleWithWebIdentity` call later if these disagree:
+  ```bash
+  curl -sf "$OIDC_ISSUER/.well-known/openid-configuration" | jq -e ".issuer == \"$OIDC_ISSUER\""
+  # → true
+  ```
+  If this prints `false`, fix the broker's `BROKER_OIDC_ISSUER` env var on the host before continuing — see [Operator runbook §"Fix scheme-less issuer URL"](./operator-runbook.md) or sed the systemd unit:
+  ```bash
+  sudo sed -i \
+    "s|^Environment=BROKER_OIDC_ISSUER=.*|Environment=BROKER_OIDC_ISSUER=$OIDC_ISSUER|" \
+    /etc/systemd/system/agentkeys-broker.service
+  sudo systemctl daemon-reload && sudo systemctl restart agentkeys-broker
+  ```
+
+#### 0. Check for stale provider state
+
+Before registering, confirm there isn't a previous registration with a wrong URL still on the account (a common artifact of fixing the issuer mid-bring-up):
+
+```bash
+aws iam list-open-id-connect-providers
+```
+
+- Empty list (`"OpenIDConnectProviderList": []`) → fresh slate, proceed to step 1.
+- A provider whose ARN ends in your current `OIDC_ISSUER` host → already registered, skip step 1, proceed to step 2 (verify with `aws iam get-open-id-connect-provider --open-id-connect-provider-arn <arn>` that the URL matches).
+- A provider whose ARN ends in a **different** host (or a stale variant of yours) → delete it before registering the correct one:
+  ```bash
+  aws iam delete-open-id-connect-provider \
+    --open-id-connect-provider-arn arn:aws:iam::${ACCOUNT_ID}:oidc-provider/<stale-host>
+  ```
 
 #### 1. Register the OIDC provider in IAM
 
@@ -593,7 +620,14 @@ aws iam create-open-id-connect-provider \
   --client-id-list sts.amazonaws.com \
   --thumbprint-list ''
 export OIDC_PROVIDER_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/$(echo $OIDC_ISSUER | sed 's|https://||')"
+
+# Verify it stuck and AWS could fetch the JWKS:
+aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn "$OIDC_PROVIDER_ARN" \
+  --query '{Url: Url, ClientIDList: ClientIDList, ThumbprintList: ThumbprintList}'
 ```
+
+The IAM user running this needs `iam:CreateOpenIDConnectProvider` and `iam:GetOpenIDConnectProvider` (the standard `agentkeys-admin` IAM-admin scope covers both). AWS auto-derives the cert thumbprint from the Let's Encrypt chain at registration time — if certbot rotates the cert later, the thumbprint stays valid because LE uses the same intermediate CA.
 
 #### 2. Replace the role's trust policy with the federated variant
 
