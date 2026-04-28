@@ -83,7 +83,7 @@ The broker logs which credential path it picked at startup, so misconfiguration 
 
 #### Recommended: EC2 instance profile
 
-When the broker runs on EC2, attach an instance profile granting `sts:AssumeRole` on `agentkeys-agent`. The SDK picks credentials from IMDS automatically — no env vars, no shared files, no rotation step. This is the path `scripts/setup-broker-host.sh` sets up.
+When the broker runs on EC2, attach an instance profile granting `sts:AssumeRole` on `agentkeys-data-role`. The SDK picks credentials from IMDS automatically — no env vars, no shared files, no rotation step. This is the path `scripts/setup-broker-host.sh` sets up.
 
 #### Legacy fallback: static IAM-user keys in env
 
@@ -94,7 +94,7 @@ Set both `DAEMON_ACCESS_KEY_ID` *and* `DAEMON_SECRET_ACCESS_KEY` (or the `BROKER
 | Variable | Required | Description |
 |---|---|---|
 | `BROKER_BACKEND_URL` | yes | URL of the AgentKeys backend that issues session tokens (mock-server in dev, chain in v0.2+). |
-| `BROKER_AGENT_ROLE_ARN` | yes (or `ACCOUNT_ID`) | ARN of the `agentkeys-agent` role. If unset, derived from `ACCOUNT_ID` as `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent`. |
+| `BROKER_DATA_ROLE_ARN` | yes (or `ACCOUNT_ID`) | ARN of the `agentkeys-data-role` IAM role the broker assumes-into. If unset, derived from `ACCOUNT_ID` as `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-data-role`. The legacy `BROKER_AGENT_ROLE_ARN` is still accepted as a fallback for pre-2026-04-28 deployments. |
 | `BROKER_AWS_REGION` | no | AWS region for the STS call. Falls back to `REGION` (the rest-of-agentKeys convention) before defaulting to `us-east-1`. The active profile's `region` setting is used by the SDK independently for credential lookup. |
 | `BROKER_AUDIT_DB_PATH` | no | SQLite path for the audit log. Default: `$HOME/.agentkeys/broker/audit.sqlite`. |
 | `BROKER_SESSION_DURATION_SECONDS` | no | TTL for minted credentials. Default: `3600` (1 h). Min: `900`, max: `43200`. |
@@ -105,7 +105,7 @@ Set both `DAEMON_ACCESS_KEY_ID` *and* `DAEMON_SECRET_ACCESS_KEY` (or the `BROKER
 | `BROKER_OIDC_JWT_TTL_SECONDS` | no | TTL (seconds) for minted OIDC JWTs. Default: `300`. Bounded `[60, 3600]`. |
 | `DAEMON_ACCESS_KEY_ID` / `DAEMON_SECRET_ACCESS_KEY` | no (legacy) | Static IAM-user keys. Only used when no profile / instance profile / SDK default is available. Both must be set together. |
 
-`ACCOUNT_ID` is read indirectly to derive `BROKER_AGENT_ROLE_ARN`. Persist non-secret values (region, account ID, role ARN, OIDC issuer URL) wherever your shell prefers; the broker no longer needs secrets in its environment.
+`ACCOUNT_ID` is read indirectly to derive `BROKER_DATA_ROLE_ARN`. Persist non-secret values (region, account ID, role ARN, OIDC issuer URL) wherever your shell prefers; the broker no longer needs secrets in its environment.
 
 ### 3.3 Run
 
@@ -176,7 +176,7 @@ CREATE TABLE mint_log (
     minted_at       INTEGER NOT NULL,        -- unix seconds
     requester_token TEXT NOT NULL,           -- bearer token (hashed; see §6.1)
     requester_wallet TEXT NOT NULL,          -- wallet the token resolved to
-    requested_role  TEXT NOT NULL,           -- BROKER_AGENT_ROLE_ARN at mint time
+    requested_role  TEXT NOT NULL,           -- BROKER_DATA_ROLE_ARN at mint time
     session_duration_seconds INTEGER NOT NULL,
     sts_session_name TEXT NOT NULL,          -- value passed to AssumeRole; visible in CloudTrail
     outcome         TEXT NOT NULL,           -- "ok" | "auth_failed" | "sts_error"
@@ -224,7 +224,7 @@ Operator-side, the same binary runs. Configuration source changes from env vars 
 | Broker `/readyz` returns 503 with `backend_unreachable` | `BROKER_BACKEND_URL` wrong, mock-server not running | Check the URL; restart mock-server |
 | Broker `/readyz` returns 503 with `sts_error` | Daemon AWS key invalid, expired, or missing `sts:AssumeRole` permission | Verify with `aws sts get-caller-identity` using the same env vars |
 | `POST /v1/mint-aws-creds` returns 401 | Bearer token expired or issued against a different backend | Caller re-runs `agentkeys init` against `BROKER_BACKEND_URL` |
-| `POST /v1/mint-aws-creds` returns 502 with `sts_error` | IAM trust policy on `agentkeys-agent` doesn't allow the daemon user | Check the role's trust policy in IAM |
+| `POST /v1/mint-aws-creds` returns 502 with `sts_error` | IAM trust policy on `agentkeys-data-role` doesn't allow the daemon user | Check the role's trust policy in IAM |
 | Audit DB grows unbounded | No retention policy in v0.1 | Run a periodic `DELETE FROM mint_log WHERE minted_at < ?` from cron, or `sqlite3 .. VACUUM` |
 
 ## 9. What's NOT in scope for v0.1

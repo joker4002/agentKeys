@@ -16,7 +16,7 @@ use agentkeys_broker_server::sts::{AssumedCredentials, StsClient, StubStsClient}
 use serde_json::Value;
 use tempfile::TempDir;
 
-const STUB_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/agentkeys-agent";
+const STUB_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/agentkeys-data-role";
 
 fn stub_creds() -> AssumedCredentials {
     AssumedCredentials {
@@ -55,7 +55,7 @@ async fn spawn_broker_with_sts(
     let config = BrokerConfig {
         daemon_access_key_id: Some("AKIA-fake".into()),
         daemon_secret_access_key: Some("fake-secret".into()),
-        agent_role_arn: STUB_ROLE_ARN.into(),
+        data_role_arn: STUB_ROLE_ARN.into(),
         backend_url,
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),

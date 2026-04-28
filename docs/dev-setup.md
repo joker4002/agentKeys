@@ -141,7 +141,7 @@ Run through [`stage6-aws-setup.md`](./stage6-aws-setup.md) through §7 once per 
 
 - SES domain identity verified on `bots.litentry.org` (or your substitute via `AGENTKEYS_EMAIL_DOMAIN`)
 - `agentkeys-daemon` IAM user with `sts:AssumeRole` only
-- `agentkeys-agent` role with SES + S3 permissions
+- `agentkeys-data-role` role with SES + S3 permissions
 - S3 bucket `agentkeys-mail-<ACCOUNT_ID>` with receipt rule writing inbound to `inbound/`
 - Route 53 records: three DKIM CNAMEs, MX, SPF, DMARC
 
@@ -169,7 +169,7 @@ cargo run --release -p agentkeys-broker-server -- --port 8091
 The broker:
 
 1. Validates incoming bearer tokens against `BROKER_BACKEND_URL` (the mock server in dev; the real chain backend in v0.2+).
-2. Calls `sts:assume-role` on `BROKER_AGENT_ROLE_ARN` using whatever credentials the SDK default chain returned.
+2. Calls `sts:assume-role` on `BROKER_DATA_ROLE_ARN` using whatever credentials the SDK default chain returned.
 3. Returns 1-hour temp creds to the caller.
 4. Logs every mint to `BROKER_AUDIT_DB_PATH` (SQLite, one row per mint).
 

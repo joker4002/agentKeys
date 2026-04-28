@@ -19,7 +19,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 use tempfile::TempDir;
 
-const STUB_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/agentkeys-agent";
+const STUB_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/agentkeys-data-role";
 const TEST_ISSUER: &str = "https://oidc.test.invalid";
 
 fn stub_creds() -> AssumedCredentials {
@@ -54,7 +54,7 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
     let config = BrokerConfig {
         daemon_access_key_id: Some("AKIA-fake".into()),
         daemon_secret_access_key: Some("fake-secret".into()),
-        agent_role_arn: STUB_ROLE_ARN.into(),
+        data_role_arn: STUB_ROLE_ARN.into(),
         backend_url,
         audit_db_path: PathBuf::from(":memory:"),
         aws_region: "us-east-1".into(),

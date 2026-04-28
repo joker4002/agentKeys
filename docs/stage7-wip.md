@@ -38,7 +38,7 @@ cargo run --release -p agentkeys-mock-server -- --port 8090
 # Terminal B — broker. AWS credentials come from the operator's
 # ~/.aws/credentials profile (e.g. agentkeys-daemon) via `awsp` or
 # AWS_PROFILE. ACCOUNT_ID + REGION live in the operator's shell. The
-# broker derives BROKER_AGENT_ROLE_ARN from ACCOUNT_ID.
+# broker derives BROKER_DATA_ROLE_ARN from ACCOUNT_ID.
 awsp agentkeys-daemon
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 cargo run --release -p agentkeys-broker-server -- --port 8091
@@ -51,7 +51,7 @@ SESSION=$(curl -sf -X POST http://127.0.0.1:8090/session/create \
 CREDS=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-aws-creds \
   -H "Authorization: Bearer $SESSION")
 echo "$CREDS" | jq '{access_key_id, expiration, wallet}'
-# → real 1h temp creds, scoped to the assumed agentkeys-agent role
+# → real 1h temp creds, scoped to the assumed agentkeys-data-role role
 ```
 
 Acceptance: `curl /healthz` → 200, `curl /readyz` → 200, `mint-aws-creds` returns creds, audit row appears in `~/.agentkeys/broker/audit.sqlite`.
@@ -126,7 +126,7 @@ A four-terminal walk-through that exercises everything Phase 2 ships, with no AW
 
 - A release build: `cargo build --release -p agentkeys-mock-server -p agentkeys-broker-server -p agentkeys-cli` (≈ 90 s cold).
 - `jq` and `curl` on `$PATH`.
-- For the AWS-side check (step 4b + 6), `awsp agentkeys-daemon` (or another profile with `sts:AssumeRole` on `agentkeys-agent`) plus `ACCOUNT_ID` from your operator setup. For offline-only, skip those steps and use `--skip-startup-check`.
+- For the AWS-side check (step 4b + 6), `awsp agentkeys-daemon` (or another profile with `sts:AssumeRole` on `agentkeys-data-role`) plus `ACCOUNT_ID` from your operator setup. For offline-only, skip those steps and use `--skip-startup-check`.
 
 ### Walk-through
 
@@ -190,7 +190,7 @@ export AGENTKEYS_BROKER_URL=http://127.0.0.1:8091
 # 6. Audit log inspection
 sqlite3 ~/.agentkeys/broker/audit.sqlite \
   "SELECT outcome, requested_role, requester_wallet, occurred_at FROM mint_audit ORDER BY id DESC LIMIT 10;"
-# expect: a row per mint, with requested_role IN ('arn:aws:iam::*:role/agentkeys-agent', 'oidc_jwt')
+# expect: a row per mint, with requested_role IN ('arn:aws:iam::*:role/agentkeys-data-role', 'oidc_jwt')
 ```
 
 ### Acceptance
@@ -304,7 +304,7 @@ The broker resolves AWS credentials through the SDK default chain. Pick one of t
 
 #### 3a. EC2 instance profile (recommended on AWS)
 
-If the broker host is an EC2 instance, attach an IAM **instance profile** with `sts:AssumeRole` permission on `agentkeys-agent`. The SDK pulls credentials from IMDS automatically — **no secrets land on the host's filesystem, no env vars, no rotation runbook**.
+If the broker host is an EC2 instance, attach an IAM **instance profile** with `sts:AssumeRole` permission on `agentkeys-data-role`. The SDK pulls credentials from IMDS automatically — **no secrets land on the host's filesystem, no env vars, no rotation runbook**.
 
 ```bash
 # One-time, from your admin workstation:
@@ -317,12 +317,12 @@ aws iam create-role --role-name $ROLE_NAME --assume-role-policy-document "$(jq -
   Statement: [{Effect:"Allow", Principal:{Service:"ec2.amazonaws.com"}, Action:"sts:AssumeRole"}]
 }')"
 
-# Inline policy: the only thing the broker host can do is sts:AssumeRole on agentkeys-agent.
+# Inline policy: the only thing the broker host can do is sts:AssumeRole on agentkeys-data-role.
 aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerAssumeAgent \
   --policy-document "$(jq -n --arg account "$ACCOUNT_ID" '{
     Version: "2012-10-17",
     Statement: [{Effect:"Allow", Action:"sts:AssumeRole",
-                 Resource:"arn:aws:iam::\($account):role/agentkeys-agent"}]
+                 Resource:"arn:aws:iam::\($account):role/agentkeys-data-role"}]
   }')"
 
 aws iam create-instance-profile --instance-profile-name $INSTANCE_PROFILE
@@ -566,7 +566,7 @@ Replaces [`stage6-aws-setup.md` §3b](./stage6-aws-setup.md) (static IAM user). 
 OIDC_ISSUER_HOST="$(echo "$OIDC_ISSUER" | sed 's|https://||')"
 
 aws iam update-assume-role-policy \
-  --role-name agentkeys-agent \
+  --role-name agentkeys-data-role \
   --policy-document "$(jq -n \
     --arg provider "$OIDC_PROVIDER_ARN" \
     --arg aud_key "${OIDC_ISSUER_HOST}:aud" \
@@ -592,7 +592,7 @@ Replaces the `AllowDaemonRead` statement in [`stage6-aws-setup.md` §4](./stage6
 {
   "Sid": "AllowDaemonReadOwnPrefix",
   "Effect": "Allow",
-  "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent"},
+  "Principal": {"AWS": "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role"},
   "Action": ["s3:GetObject", "s3:ListBucket"],
   "Resource": [
     "arn:aws:s3:::$BUCKET",
@@ -620,7 +620,7 @@ WALLET=$(jq -R 'split(".") | .[1] | @base64d | fromjson | .agentkeys_user_wallet
 
 # Exchange for temp creds
 CREDS=$(aws sts assume-role-with-web-identity \
-  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent" \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role" \
   --role-session-name "stage7-wip-$(date +%s)" \
   --web-identity-token "$JWT")
 export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)

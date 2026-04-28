@@ -124,7 +124,7 @@ graph TB
     end
     subgraph IAM[" IAM "]
         User["Singleton user agentkeys-daemon<br/>inline: sts:AssumeRole only"]
-        Role["Singleton role agentkeys-agent<br/>inline: s3:Get/List + ses:SendRawEmail"]
+        Role["Singleton role agentkeys-data-role<br/>inline: s3:Get/List + ses:SendRawEmail"]
     end
     subgraph APP[" Daemon "]
         Daemon[provisioner-scripts ses-s3 backend]
@@ -173,7 +173,7 @@ IAM user "agentkeys-daemon"
   ↓
 sts:AssumeRole → temp creds (1h, auto-refreshed)
   ↓
-IAM role "agentkeys-agent"
+IAM role "agentkeys-data-role"
   ├─ trust policy: trusts agentkeys-daemon (the user above)
   ├─ inline policy:
   │   ├─ s3:ListBucket on agentkeys-mail-${ACCOUNT_ID}
@@ -306,7 +306,7 @@ Stage 6 hosts every user's inbox in one AWS account, one S3 bucket, one IAM role
     {
       "Sid": "AllowListOwnPrefix",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-agent" },
+      "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-data-role" },
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::agentkeys-mail",
       "Condition": { "StringLike": { "s3:prefix": "${aws:PrincipalTag/agentkeys_user_wallet}/*" } }
@@ -314,14 +314,14 @@ Stage 6 hosts every user's inbox in one AWS account, one S3 bucket, one IAM role
     {
       "Sid": "AllowCrudOwnPrefix",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-agent" },
+      "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-data-role" },
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       "Resource": "arn:aws:s3:::agentkeys-mail/${aws:PrincipalTag/agentkeys_user_wallet}/*"
     },
     {
       "Sid": "DenyEverythingElse",
       "Effect": "Deny",
-      "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-agent" },
+      "Principal": { "AWS": "arn:aws:iam::<acct>:role/agentkeys-data-role" },
       "NotAction": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
       "Resource": "*"
     }
@@ -427,7 +427,7 @@ AgentMail is a **good reference for the SES underpinnings** — but structurally
 |---|---|
 | 1 | Register `agentkeys-email.io`. SES domain verification. DNS: MX, DKIM (AWS_SES managed), SPF, DMARC. Request SES production access. |
 | 2 | S3 bucket `agentkeys-mail` with per-user-prefix structure + `aws:PrincipalTag/agentkeys_user_wallet` bucket policy + lifecycle rules. SES receipt rule with `S3Action` writing raw MIME directly to the bucket (no Lambda). |
-| 3 | IAM OIDC provider `oidc.agentkeys.dev` registered in our AWS account. IAM role `agentkeys-agent` with trust policy pinned to TEE enclave + requiring non-empty `agentkeys_user_wallet` claim. Role permissions for `s3:GetObject`/`s3:ListBucket` (per prefix) and `ses:SendRawEmail` (with `ses:FromAddress` condition). |
+| 3 | IAM OIDC provider `oidc.agentkeys.dev` registered in our AWS account. IAM role `agentkeys-data-role` with trust policy pinned to TEE enclave + requiring non-empty `agentkeys_user_wallet` claim. Role permissions for `s3:GetObject`/`s3:ListBucket` (per prefix) and `ses:SendRawEmail` (with `ses:FromAddress` condition). |
 | 4 | TEE-side ES256 OIDC-issuer key derivation at `oidc/issuer/v1` + JWT minter. Thin HTTPS proxy at `oidc.agentkeys.dev` serving static discovery doc + JWKS (Let's Encrypt). |
 | 5 | `SesEmailAuthority` Rust impl: implements `mint_read_creds(inbox) -> STS response` and `mint_send_creds(inbox) -> STS response` via `sts:AssumeRoleWithWebIdentity`. Emits `CredsMinted` audit extrinsic per call. |
 | 6 | Daemon MCP tools: `email.list` (S3 list), `email.get` (S3 get + MIME parse locally), `email.send` (assemble MIME + SES SendRawEmail). Each unwraps into `mint` + direct AWS call. |

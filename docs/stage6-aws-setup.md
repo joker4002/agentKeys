@@ -1,7 +1,7 @@
 # Stage 6 AWS Setup Runbook
 
 **Audience:** the operator setting up Stage 6's hosted-email infra on real AWS for the first time. Default path is a subdomain on an existing parent (`bots.litentry.org` on AWS account `429071895007`); the wiki-canonical standalone `@agentkeys-email.io` path is the post-interim option.
-**Outcome:** an AWS account with SES domain verified, `agentkeys-daemon` IAM user + `agentkeys-agent` role (static-IAM-user trust), S3 bucket + bucket policy, SES receipt rule writing inbound to S3. Once done, the Stage 6 code (mock-server + CLI + provisioner-scripts adapters) can talk to real AWS, and the Stage 5b live demo unblocks. The OIDC-federated variant (TEE-signed JWT → PrincipalTag isolation) is Stage 7 work; test preserved in [`stage7-wip.md`](./stage7-wip.md).
+**Outcome:** an AWS account with SES domain verified, `agentkeys-daemon` IAM user + `agentkeys-data-role` role (static-IAM-user trust), S3 bucket + bucket policy, SES receipt rule writing inbound to S3. Once done, the Stage 6 code (mock-server + CLI + provisioner-scripts adapters) can talk to real AWS, and the Stage 5b live demo unblocks. The OIDC-federated variant (TEE-signed JWT → PrincipalTag isolation) is Stage 7 work; test preserved in [`stage7-wip.md`](./stage7-wip.md).
 **Status:** interim build. TEE-held BYODKIM and TEE-signed OIDC JWTs are deferred until [`heima-gaps-vs-desired-architecture.md`](./spec/heima-gaps-vs-desired-architecture.md) §3 + §4 close. AWS-managed DKIM is used as the Stage 6 interim; replace it with TEE-BYODKIM later.
 
 ## 0. Preconditions
@@ -130,9 +130,11 @@ aws sesv2 get-email-identity --region "$REGION" --email-identity "$DOMAIN" \
 >
 > **Swap to TEE-BYODKIM happens when [`heima-gaps §4`](./spec/heima-gaps-vs-desired-architecture.md) closes.** Until then, the Stage 6 interim accepts the AWS-custody tradeoff. Do NOT upgrade to "BYODKIM with file-stored key" — that path is strictly worse than AWS-managed (lower availability, similar trust surface).
 
-## 3. IAM: daemon user + `agentkeys-agent` role
+## 3. IAM: daemon user + `agentkeys-data-role`
 
-This Stage 6 runbook uses **static IAM-user trust** as the interim: create a dedicated IAM user `agentkeys-daemon`, create the `agentkeys-agent` role that trusts only that user, and attach the S3/SES inline permissions. The user's access keys get injected into the daemon's env at runtime; the daemon calls `sts:AssumeRole` to get temp creds before touching S3 or SES.
+> **Note (2026-04-28):** This role was renamed from `agentkeys-agent` → `agentkeys-data-role` to disambiguate from the project's "agent" terminology (the AI agent the credentials are minted *for* is a separate concept from the IAM role the broker assumes *into*). The broker still accepts the legacy `BROKER_AGENT_ROLE_ARN` env var for unmigrated deployments; new deployments should use `BROKER_DATA_ROLE_ARN` and the new role name throughout.
+
+This Stage 6 runbook uses **static IAM-user trust** as the interim: create a dedicated IAM user `agentkeys-daemon`, create the `agentkeys-data-role` role that trusts only that user, and attach the S3/SES inline permissions. The user's access keys get injected into the daemon's env at runtime; the daemon calls `sts:AssumeRole` to get temp creds before touching S3 or SES.
 
 For the full OIDC-federated variant (where a TEE-minted JWT is exchanged at STS for temp creds tagged with `agentkeys_user_wallet`), see [`stage7-wip.md`](./stage7-wip.md). That path delivers cryptographic per-user isolation via PrincipalTag but requires `oidc.agentkeys.dev` hosted publicly with a Let's Encrypt cert — deferred because (a) the hosting adds a Stage 7 dependency and (b) the "right" signer for that path is a TEE-derived ES256 key, blocked on [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md).
 
@@ -167,18 +169,18 @@ aws iam put-user-policy \
     Statement: [{
       Effect: "Allow",
       Action: "sts:AssumeRole",
-      Resource: "arn:aws:iam::\($acct):role/agentkeys-agent"
+      Resource: "arn:aws:iam::\($acct):role/agentkeys-data-role"
     }]
   }')"
 ```
 
 > **Why `jq --arg` instead of `cat > file.json <<EOF`.** `jq --arg` passes env values outside shell-parameter-expansion, so zsh modifier shortcuts (`$VAR:r`, `$VAR:h`, etc.) never corrupt ARNs. JSON is validated on construction. Command substitution (`$(...)`) feeds it straight into the AWS CLI arg — no file lands on disk, nothing persists to confuse a later re-run.
 
-### 3b. Create the `agentkeys-agent` role
+### 3b. Create the `agentkeys-data-role`
 
 ```bash
 aws iam create-role \
-  --role-name agentkeys-agent \
+  --role-name agentkeys-data-role \
   --assume-role-policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
     Version: "2012-10-17",
     Statement: [{
@@ -188,15 +190,15 @@ aws iam create-role \
     }]
   }')"
 
-export ROLE_ARN=$(aws iam get-role --role-name agentkeys-agent --query 'Role.Arn' --output text)
+export ROLE_ARN=$(aws iam get-role --role-name agentkeys-data-role --query 'Role.Arn' --output text)
 echo "ROLE_ARN=$ROLE_ARN"
 
 # Role's permissions: read from S3 bucket, send from SES. (The bucket is
 # created in §4; the role policy can reference it by ARN before the bucket
 # exists — AWS doesn't validate resource-existence on put-role-policy.)
 aws iam put-role-policy \
-  --role-name agentkeys-agent \
-  --policy-name agentkeys-agent-inline \
+  --role-name agentkeys-data-role \
+  --policy-name agentkeys-data-role-inline \
   --policy-document "$(jq -n \
     --arg bucket "$BUCKET" \
     --arg region "$REGION" \
@@ -216,7 +218,7 @@ aws iam put-role-policy \
 
 ## 4. S3 bucket for inbound mail
 
-Now that `agentkeys-agent` exists, we can apply the full bucket policy in one shot — no split.
+Now that `agentkeys-data-role` exists, we can apply the full bucket policy in one shot — no split.
 
 ```bash
 aws s3api create-bucket \
@@ -229,7 +231,7 @@ aws s3api put-public-access-block \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
-Bucket policy — SES writes inbound, `agentkeys-agent` role reads:
+Bucket policy — SES writes inbound, `agentkeys-data-role` role reads:
 
 ```bash
 aws s3api put-bucket-policy --bucket "$BUCKET" \
@@ -250,7 +252,7 @@ aws s3api put-bucket-policy --bucket "$BUCKET" \
         {
           Sid: "AllowDaemonRead",
           Effect: "Allow",
-          Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-agent"},
+          Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
           Action: ["s3:GetObject", "s3:ListBucket"],
           Resource: ["arn:aws:s3:::\($bucket)", "arn:aws:s3:::\($bucket)/*"]
         }
@@ -425,7 +427,7 @@ PARENT_ZONE_ID=Z09723983CFJOHAE3VC65
 SES_VERIFIED=<yes|no>
 DKIM_STATUS=<SUCCESS|PENDING|FAILED>
 BUCKET_ARN=arn:aws:s3:::agentkeys-mail-429071895007
-ROLE_ARN=arn:aws:iam::429071895007:role/agentkeys-agent
+ROLE_ARN=arn:aws:iam::429071895007:role/agentkeys-data-role
 DAEMON_USER_ARN=arn:aws:iam::429071895007:user/agentkeys-daemon
 DAEMON_ACCESS_KEY_ID=<redacted>
 DAEMON_SECRET_ACCESS_KEY=<redacted>  # share via 1Password, NOT in chat
@@ -447,8 +449,8 @@ I'll then wire `AGENTKEYS_EMAIL_BACKEND=ses-s3` in provisioner-scripts to read f
 aws ses set-active-receipt-rule-set --rule-set-name "" --region "$REGION"
 
 # Drop the role
-aws iam delete-role-policy --role-name agentkeys-agent --policy-name agentkeys-agent-inline
-aws iam delete-role --role-name agentkeys-agent
+aws iam delete-role-policy --role-name agentkeys-data-role --policy-name agentkeys-data-role-inline
+aws iam delete-role --role-name agentkeys-data-role
 
 # Drop the daemon user (list + delete access keys first — can't delete a user with keys)
 for KEY in $(aws iam list-access-keys --user-name agentkeys-daemon --query 'AccessKeyMetadata[*].AccessKeyId' --output text); do

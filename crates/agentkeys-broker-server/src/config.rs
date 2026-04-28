@@ -10,7 +10,7 @@ pub struct BrokerConfig {
     /// The chain path is preferred for new deployments.
     pub daemon_access_key_id: Option<String>,
     pub daemon_secret_access_key: Option<String>,
-    pub agent_role_arn: String,
+    pub data_role_arn: String,
     pub backend_url: String,
     pub audit_db_path: PathBuf,
     pub aws_region: String,
@@ -58,15 +58,21 @@ impl BrokerConfig {
                  (or both unset to use the AWS SDK default credential chain via AWS_PROFILE)."
             );
         }
-        // BROKER_AGENT_ROLE_ARN can be derived from ACCOUNT_ID for the
+        // BROKER_DATA_ROLE_ARN can be derived from ACCOUNT_ID for the
         // canonical Stage 6 role name. Operator can still override.
-        let agent_role_arn = std::env::var("BROKER_AGENT_ROLE_ARN").or_else(|_| {
-            std::env::var("ACCOUNT_ID")
-                .map(|account_id| format!("arn:aws:iam::{}:role/agentkeys-agent", account_id))
-        })
-        .map_err(|_| anyhow::anyhow!(
-            "missing required env var: set BROKER_AGENT_ROLE_ARN explicitly, or set ACCOUNT_ID and the broker will derive arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent"
-        ))?;
+        // BROKER_AGENT_ROLE_ARN is accepted as a fallback for callers
+        // that haven't migrated yet (renamed 2026-04-28: agentkeys-agent
+        // → agentkeys-data-role to disambiguate from the project's
+        // "agent" terminology).
+        let data_role_arn = std::env::var("BROKER_DATA_ROLE_ARN")
+            .or_else(|_| std::env::var("BROKER_AGENT_ROLE_ARN"))
+            .or_else(|_| {
+                std::env::var("ACCOUNT_ID")
+                    .map(|account_id| format!("arn:aws:iam::{}:role/agentkeys-data-role", account_id))
+            })
+            .map_err(|_| anyhow::anyhow!(
+                "missing required env var: set BROKER_DATA_ROLE_ARN explicitly (legacy: BROKER_AGENT_ROLE_ARN), or set ACCOUNT_ID and the broker will derive arn:aws:iam::$ACCOUNT_ID:role/agentkeys-data-role"
+            ))?;
         let backend_url = required_env("BROKER_BACKEND_URL")?;
         let audit_db_path = std::env::var("BROKER_AUDIT_DB_PATH")
             .ok()
@@ -142,7 +148,7 @@ impl BrokerConfig {
         Ok(Self {
             daemon_access_key_id,
             daemon_secret_access_key,
-            agent_role_arn,
+            data_role_arn,
             backend_url,
             audit_db_path,
             aws_region,

@@ -204,13 +204,13 @@ EOF
   if [[ -z "$ACCOUNT_ID" ]]; then
     explain "AWS account ID" \
       "12-digit account ID for the AWS account that holds your" \
-      "agentkeys-daemon IAM user (or role) and the agentkeys-agent role." \
-      "Used to derive BROKER_AGENT_ROLE_ARN if not overridden."
+      "agentkeys-daemon IAM user (or role) and the agentkeys-data-role role." \
+      "Used to derive BROKER_DATA_ROLE_ARN if not overridden."
     prompt_required ACCOUNT_ID "Account ID"
   fi
 
   explain "AWS region" \
-    "Region the broker calls STS in. Use the region your agentkeys-agent" \
+    "Region the broker calls STS in. Use the region your agentkeys-data-role" \
     "role and the operator's S3 bucket already live in."
   prompt_default REGION "Region" "$REGION"
 
@@ -578,7 +578,7 @@ case "$CRED_MODE" in
     cat <<EOF
   AWS credentials (instance-profile mode):
     1. Create an IAM role with trust policy {ec2.amazonaws.com → sts:AssumeRole}.
-    2. Attach an inline policy granting sts:AssumeRole on the agentkeys-agent role.
+    2. Attach an inline policy granting sts:AssumeRole on the agentkeys-data-role role.
     3. Wrap the role in an instance profile and associate it to this EC2 instance.
     4. Restart the broker:  sudo systemctl restart agentkeys-broker
     5. Tail logs and look for "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)".
