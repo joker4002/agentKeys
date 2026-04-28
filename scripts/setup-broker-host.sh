@@ -286,8 +286,16 @@ EOF
   fi
 fi
 
-# ─── Validate non-interactive inputs ─────────────────────────────────────────
+# ─── Validate inputs ─────────────────────────────────────────────────────────
 [[ -n "$ISSUER_URL" ]] || die "--issuer-url is required (e.g. https://broker.litentry.org). Drop --non-interactive for an interactive walk-through."
+case "$ISSUER_URL" in
+  https://*) ;;
+  http://*)  warn "issuer URL uses http:// — AWS IAM requires TLS; create-open-id-connect-provider will reject this. Continuing anyway."; ;;
+  *)         die "--issuer-url must start with https:// (got '$ISSUER_URL'). The bare hostname is not a valid OIDC issuer; AWS validates the iss claim byte-for-byte."; ;;
+esac
+# Strip trailing slash — BROKER_OIDC_ISSUER must match the JWT iss claim
+# byte-for-byte, and AWS rejects mismatches at AssumeRoleWithWebIdentity time.
+ISSUER_URL="${ISSUER_URL%/}"
 [[ -n "$ACCOUNT_ID" ]] || die "--account-id is required. Drop --non-interactive for an interactive walk-through."
 [[ -n "$CRED_MODE" ]]  || CRED_MODE="instance-profile"
 case "$CRED_MODE" in
