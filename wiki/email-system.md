@@ -184,7 +184,7 @@ graph TB
     end
     subgraph IAM[" IAM "]
         User["Singleton user 'agentkeys-daemon'<br/>+ inline policy: only sts:AssumeRole"]
-        Role["Singleton role 'agentkeys-agent'<br/>+ inline policy: s3:Get/List + ses:SendRawEmail"]
+        Role["Singleton role 'agentkeys-data-role'<br/>+ inline policy: s3:Get/List + ses:SendRawEmail"]
     end
     subgraph APP[" Our code "]
         Daemon[Daemon process]
@@ -206,7 +206,7 @@ graph TB
 | Singleton — one per AWS account regardless of user count | Per-user — logical, no AWS resource per user |
 |---|---|
 | 1 IAM user `agentkeys-daemon` | N throwaway addresses `bot-<random>@<domain>` (DB / on-chain) |
-| 1 IAM role `agentkeys-agent` | N S3 objects under `inbound/<msg-id>.eml` (lifecycle-capped) |
+| 1 IAM role `agentkeys-data-role` | N S3 objects under `inbound/<msg-id>.eml` (lifecycle-capped) |
 | 1 S3 bucket | (no other AWS resources scale per user) |
 | 1 SES domain identity | |
 | 1 SES wildcard receipt rule on `*@<domain>` | |
@@ -229,7 +229,7 @@ operator's long-lived AWS access keys (stored in 1Password)
   ↓ injected to daemon as AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env
 IAM user (agentkeys-daemon)
   ↓ sts:AssumeRole — only action this user can perform
-IAM role (agentkeys-agent)
+IAM role (agentkeys-data-role)
   ↓ returns 1h temp creds (auto-refreshed)
 S3 GetObject + ses:SendRawEmail API calls
 ```
@@ -240,7 +240,7 @@ Compromise of the long-lived access keys is bounded to "attacker can assume the 
 
 | | Stage 6 interim (shipped today) | Stage 7 target |
 |---|---|---|
-| Bucket policy | `agentkeys-agent` reads whole bucket | `agentkeys-agent` only reads prefix matching `${aws:PrincipalTag/agentkeys_user_wallet}` |
+| Bucket policy | `agentkeys-data-role` reads whole bucket | `agentkeys-data-role` only reads prefix matching `${aws:PrincipalTag/agentkeys_user_wallet}` |
 | Per-user separation | App-side — daemon filters by `To:` header | Cloud-side — bucket policy denies cross-prefix reads |
 | Failure mode if our app has a bug | User A could read user B's mail | `AccessDenied` from S3 |
 | Auth flow | Long-lived IAM user → `sts:AssumeRole` | OIDC JWT (with `agentkeys_user_wallet` claim) → `sts:AssumeRoleWithWebIdentity` |

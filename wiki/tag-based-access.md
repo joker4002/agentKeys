@@ -45,7 +45,7 @@ TEE Authority (mint step):
 AWS STS (exchange step):
   POST sts:AssumeRoleWithWebIdentity
     WebIdentityToken = <JWT>
-    RoleArn = arn:aws:iam::<acct>:role/agentkeys-agent
+    RoleArn = arn:aws:iam::<acct>:role/agentkeys-data-role
   → validates JWT via our JWKS
   → maps JWT claim agentkeys_user_wallet → session tag (PrincipalTag)
   → returns temp creds (AccessKey, SecretKey, SessionToken)
@@ -154,7 +154,7 @@ During `AssumeRoleWithWebIdentity`, AWS maps principal tags declared in the OIDC
     {
       "Sid": "AllowListOwnPrefix",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::123456789012:role/agentkeys-agent" },
+      "Principal": { "AWS": "arn:aws:iam::123456789012:role/agentkeys-data-role" },
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::agentkeys-mail",
       "Condition": {
@@ -168,14 +168,14 @@ During `AssumeRoleWithWebIdentity`, AWS maps principal tags declared in the OIDC
     {
       "Sid": "AllowCrudOwnPrefix",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::123456789012:role/agentkeys-agent" },
+      "Principal": { "AWS": "arn:aws:iam::123456789012:role/agentkeys-data-role" },
       "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       "Resource": "arn:aws:s3:::agentkeys-mail/${aws:PrincipalTag/agentkeys_user_wallet}/*"
     },
     {
       "Sid": "DenyEverythingElse",
       "Effect": "Deny",
-      "Principal": { "AWS": "arn:aws:iam::123456789012:role/agentkeys-agent" },
+      "Principal": { "AWS": "arn:aws:iam::123456789012:role/agentkeys-data-role" },
       "NotAction": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
       "Resource": "*"
     }
@@ -183,7 +183,7 @@ During `AssumeRoleWithWebIdentity`, AWS maps principal tags declared in the OIDC
 }
 ```
 
-Every user assumes the **same role** — `agentkeys-agent`. But each session carries a different PrincipalTag derived from their JWT claim, and the bucket policy expands `${aws:PrincipalTag/agentkeys_user_wallet}` per session. User A with tag `0xABC` sees only `agentkeys-mail/0xABC/*`. User B with tag `0xBEEF` sees only `agentkeys-mail/0xBEEF/*`. Cryptographic separation, zero code on our side.
+Every user assumes the **same role** — `agentkeys-data-role`. But each session carries a different PrincipalTag derived from their JWT claim, and the bucket policy expands `${aws:PrincipalTag/agentkeys_user_wallet}` per session. User A with tag `0xABC` sees only `agentkeys-mail/0xABC/*`. User B with tag `0xBEEF` sees only `agentkeys-mail/0xBEEF/*`. Cryptographic separation, zero code on our side.
 
 ---
 
@@ -258,7 +258,7 @@ Tag-based access control is the **technical mechanism that lets rule #4 (broker-
 - [ ] Include `agentkeys_user_wallet` in the TEE's JWT claim-set (parallel with existing `sub`)
 - [ ] Update OIDC discovery doc to list the claim in `claims_supported`
 - [ ] Register the OIDC provider in each AWS account we operate
-- [ ] Create the `agentkeys-agent` role with trust policy requiring the claim + pinned to enclave mrenclave
+- [ ] Create the `agentkeys-data-role` role with trust policy requiring the claim + pinned to enclave mrenclave
 - [ ] Apply the shared-bucket policy using `${aws:PrincipalTag/agentkeys_user_wallet}`
 - [ ] Integration test: mint two JWTs for two different wallets; verify each can access only its prefix; verify `agentkeys_user_wallet=""` is denied
 - [ ] Chain-audit extrinsic at mint time includes the claim values (redacted appropriately)

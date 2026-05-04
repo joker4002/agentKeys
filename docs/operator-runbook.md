@@ -1,188 +1,210 @@
-# Operator Runbook — AgentKeys Broker Server
+# Operator runbook — AgentKeys broker
 
-**Audience:** the person running `agentkeys-broker-server` for a team. If you're an app developer trying to use a broker someone else runs, see [`dev-setup.md` §4](./dev-setup.md). If you're an end user of an agent, see [`dev-setup.md` §6](./dev-setup.md).
+**Audience:** the person running `agentkeys-broker-server` for a team. App developers using a broker someone else runs read [`dev-setup.md` §4](./dev-setup.md). End users of an agent read [`dev-setup.md` §6](./dev-setup.md).
 
-**Scope:** start, supervise, rotate keys, monitor audit, and migrate from local to hosted. v0.1 deliberately avoids TEE / KMS / hosted-only paths — those land later.
+**What the broker is.** A long-running HTTP service that holds the operator's `agentkeys-daemon` AWS access key (or assumes a role via instance profile) and mints two kinds of short-lived credentials to authenticated daemons:
 
-> **WIP / scratchpad.** This runbook ships alongside the v0.1 broker (Stage 7 vertical slice — `mint-aws-creds` + audit only). Sections marked **(later)** describe surface that lands in Stage 7 phase 2 (OIDC federation) or Stage 8 (off-chain vault). Treat them as forward-looking, not load-bearing for v0.1 operators.
+| Endpoint | Output |
+|---|---|
+| `POST /v1/mint-aws-creds` | 1 h scoped AWS temp creds via `sts:AssumeRole`. |
+| `POST /v1/mint-oidc-jwt`  | Short-lived ES256 JWT for `sts:AssumeRoleWithWebIdentity`. |
+| `GET  /.well-known/openid-configuration` | OIDC discovery doc. |
+| `GET  /.well-known/jwks.json` | JWK Set with the broker's public key + `kid`. |
+| `GET  /healthz`, `/readyz` | Supervisor probes. |
 
-## 1. What the broker is
+Both `mint-*` endpoints write a row to `~/.agentkeys/broker/audit.sqlite` before credentials leave the process.
 
-`agentkeys-broker-server` is the long-running HTTP service that holds the operator's long-lived `agentkeys-daemon` AWS access key and brokers 1-hour scoped credentials to authenticated daemons. It is the boundary that lets app developers run daemons against your infrastructure **without holding any AWS credentials themselves**.
+**Threat model.** Defends against developer-laptop compromise (devs hold only short-lived bearers; the long-lived AWS key never leaves the broker host). Does **not** defend against broker-process compromise — that's the v0.2+ TEE story; see [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md).
 
-In v0.1 the broker exposes a single user-facing endpoint:
+For v0.1: run on a host you trust, rotate the daemon key on a schedule (§3), watch the audit log (§4).
 
-- `POST /v1/mint-aws-creds` — bearer-token in, temp AWS creds out.
+---
 
-Plus operator-side health checks (`/healthz`, `/readyz`) and an audit log written to local SQLite.
+## 1. Setup pointers
 
-The OIDC discovery surface (`/.well-known/openid-configuration`, `/.well-known/jwks.json`, `POST /v1/mint-oidc-jwt`) and `sts:AssumeRoleWithWebIdentity` exchange land in Stage 7 phase 2, alongside the public-hosting prereq from [`stage7-wip.md`](./stage7-wip.md).
+| Task | Where |
+|---|---|
+| AWS account provisioning (IAM, SES, S3, OIDC federation) | [`cloud-setup.md`](./cloud-setup.md) |
+| Broker-host bootstrap (binaries, systemd, nginx, certbot) | [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) + [`stage7-wip.md` §"Remote deployment"](./stage7-wip.md#remote-deployment) |
+| Stage 7 design + acceptance test | [`stage7-wip.md`](./stage7-wip.md) |
+| Three-role mental model (operator vs developer vs end-user) | [`dev-setup.md`](./dev-setup.md) |
 
-## 2. Threat model — what the broker is and isn't defending against
+### 1.1 Session bearers — how callers get them
 
-**Defends against:** developer laptops being lost, stolen, or compromised. Without the broker, every developer holds the same long-lived daemon AWS key — one compromise burns everyone. With the broker, only the broker process holds the long-lived key; developer machines hold only short-lived bearer tokens.
+Both **developers** building agents and **end users** running them mint their own session bearers via `agentkeys init` against the **backend**. The two roles use exactly the same code path; from the broker's point of view they're indistinguishable. The bearer goes into the OS keychain on the caller's machine; the operator never hand-delivers tokens.
 
-**Does NOT defend against:** broker process compromise. If an attacker gets RCE on the broker, they get the long-lived AWS key and can mint arbitrary scoped credentials. The v0.1 broker runs on commodity hardware in plaintext; TEE-backed hosting is the v0.2+ evolution. See [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) for the broader position.
+The friction in v0.1 is not the bearer — it's *reaching the backend's `/session/create`*:
 
-**Operator implications for v0.1:**
-
-- Run the broker on a host you trust. Don't co-tenant with untrusted workloads.
-- Rotate the daemon AWS key on a schedule (§5).
-- Watch the audit log (§6) — anomalous mint patterns are your earliest signal.
-
-## 3. Start the broker
-
-### 3.1 Required configuration
-
-The broker reads its configuration from environment variables only — no config file in v0.1.
-
-| Variable | Required | Description |
+| Backend exposure | Who can `agentkeys init` | When to use |
 |---|---|---|
-| `DAEMON_ACCESS_KEY_ID` | yes | Long-lived `agentkeys-daemon` IAM user access key. Same var `scripts/stage6-demo-env.sh` reads. (Fallback: `BROKER_DAEMON_ACCESS_KEY_ID`.) |
-| `DAEMON_SECRET_ACCESS_KEY` | yes | Long-lived `agentkeys-daemon` IAM user secret. (Fallback: `BROKER_DAEMON_SECRET_ACCESS_KEY`.) |
-| `BROKER_AGENT_ROLE_ARN` | yes (or `ACCOUNT_ID`) | ARN of the `agentkeys-agent` role. If unset, derived from `ACCOUNT_ID` as `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-agent`. |
-| `BROKER_BACKEND_URL` | yes | URL of the AgentKeys backend that issues session tokens (mock-server in dev, chain in v0.2+). |
-| `BROKER_AUDIT_DB_PATH` | no | SQLite path for the audit log. Default: `$HOME/.agentkeys/broker/audit.sqlite`. |
-| `BROKER_AWS_REGION` | no | AWS region for the STS call. Falls back to `REGION` (the rest-of-agentKeys convention) before defaulting to `us-east-1`. |
-| `BROKER_SESSION_DURATION_SECONDS` | no | TTL for minted credentials. Default: `3600` (1 h). Min: `900`, max: `43200`. |
-| `BROKER_BACKEND_TIMEOUT_SECONDS` | no | HTTP timeout for backend `/session/validate` calls. Default: `10`. |
-| `BROKER_SHUTDOWN_GRACE_SECONDS` | no | Hard cap on graceful-shutdown drain. Default: `30`. |
+| **Loopback only** (default in `setup-broker-host.sh`) | Operator only, plus anyone the operator gives SSH access to (forward `-L 8090:127.0.0.1:8090`) | Conservative default. Pick this until you have either real backend auth or a trust boundary you're comfortable with. |
+| **Public via nginx proxy** — add a `location /session/` block on `broker.litentry.org` that proxies to `http://127.0.0.1:8090` | Anyone with the URL | Acceptable for an internal team you already trust, **not** for an open service. The mock-server's `/session/create` accepts any `auth_token` string with zero validation; making it public means "anyone can mint a session against any wallet." |
+| **Heima chain RPC** (v0.2+) | Anyone with a wallet (chain validates the signature) | Production. Fully self-serve; no operator handoff for either role. |
 
-Persist `DAEMON_ACCESS_KEY_ID` and `DAEMON_SECRET_ACCESS_KEY` in `~/.zshenv` (or the equivalent per-shell startup file for non-zsh shells) with file mode 0600 so the operator's shell has them on every login. The names match `scripts/stage6-demo-env.sh` so one persisted set of keys feeds both the legacy demo flow and the broker:
+Today, an operator standing up `broker.litentry.org` for a small trusted team can either:
 
-```bash
-chmod 600 ~/.zshenv
-# inside ~/.zshenv:
-export REGION=us-east-1
-export ACCOUNT_ID=429071895007
-export DAEMON_ACCESS_KEY_ID=AKIA...
-export DAEMON_SECRET_ACCESS_KEY=...
+1. **Keep the backend loopback-only** and hand each developer either an SSH key (so they tunnel to `:8090` and self-mint) or a one-shot bearer minted on their behalf (`curl 127.0.0.1:8090/session/create` from the host).
+2. **Proxy `/session/create` through nginx** by adding to `/etc/nginx/sites-available/agentkeys-broker`:
+   ```nginx
+   location = /session/create {
+       proxy_pass http://127.0.0.1:8090;
+       proxy_set_header Host $host;
+   }
+   ```
+   Then `agentkeys init --backend https://broker.litentry.org` works for everyone — same flow as the end-user `agentkeys init` path. Do **not** also proxy `/session/validate` — only the broker on loopback should call that.
+
+Once Heima's chain backend lands, this knob disappears: the chain's RPC is public by construction, identity is gated by wallet signature, and `agentkeys init` is fully self-serve for both roles.
+
+---
+
+## 2. AWS credentials
+
+The broker resolves AWS credentials through the SDK default provider chain. Pick **one** path:
+
+### 2.1 EC2 instance profile (recommended on AWS)
+
+The host's instance profile (`agentkeys-broker-host`, see [`cloud-setup.md` §3.4](./cloud-setup.md#34-agentkeys-broker-host-instance-profile-optional-ec2-only)) carries `sts:AssumeRole` on `agentkeys-data-role`. The SDK pulls credentials from IMDS automatically — no env vars, no shared files, no rotation runbook. Verify with `aws sts get-caller-identity` from the host.
+
+### 2.2 Named profile (non-EC2 hosts)
+
+Drop the daemon user's keys into `~/.aws/credentials` for the system user the broker runs as. The systemd unit sets `AWS_PROFILE=agentkeys-daemon`:
+
+```
+~/.aws/credentials              # mode 0600
+[agentkeys-daemon]
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+
+~/.aws/config                   # mode 0600
+[profile agentkeys-daemon]
+region = us-east-1
 ```
 
-`~/.zshenv` is sourced by every zsh invocation (login, interactive, script), so the broker process inherits the keys regardless of how it was started. The 0600 mode keeps the file readable only by the operator.
+For local dev: `awsp agentkeys-daemon` (or `export AWS_PROFILE=agentkeys-daemon`) before `cargo run`.
 
-The broker also accepts `BROKER_DAEMON_ACCESS_KEY_ID` / `BROKER_DAEMON_SECRET_ACCESS_KEY` as fallbacks if you prefer an explicit prefix. The unprefixed `DAEMON_*` names take precedence so the legacy and new flows stay aligned.
+### 2.3 Static keys in env (legacy)
 
-If the host is shared or untrusted, prefer a secret manager that injects the values into the launch environment (systemd `LoadCredential=`, launchd `EnvironmentVariables` plist, or whatever your supervisor supports) rather than a per-user dotfile.
+Set `DAEMON_ACCESS_KEY_ID` *and* `DAEMON_SECRET_ACCESS_KEY` (both required together; setting only one is rejected at startup). Prefer 2.1 or 2.2.
 
-### 3.2 Run
+The broker logs which path it picked at startup: `AWS credentials: SDK default chain ...` or `AWS credentials: static IAM-user keys ...`. Always check this in the first second of the log.
+
+---
+
+## 3. Configuration
+
+| Env var | Required | Notes |
+|---|---|---|
+| `BROKER_BACKEND_URL` | yes | Backend that issues / validates session bearers (mock-server in dev, chain in v0.2+). |
+| `BROKER_DATA_ROLE_ARN` | yes (or `ACCOUNT_ID`) | ARN of `agentkeys-data-role`. Falls back to `arn:aws:iam::$ACCOUNT_ID:role/agentkeys-data-role`. Legacy `BROKER_AGENT_ROLE_ARN` accepted for unmigrated deployments. |
+| `BROKER_OIDC_ISSUER` | for production | Public URL emitted as `iss`. **Must** match the `aws iam create-open-id-connect-provider --url` value byte-for-byte. Default: `https://oidc.agentkeys.dev`. |
+| `BROKER_AWS_REGION` | no | STS region. Falls back to `REGION`, then `us-east-1`. |
+| `BROKER_AUDIT_DB_PATH` | no | Default: `$HOME/.agentkeys/broker/audit.sqlite`. |
+| `BROKER_OIDC_KEYPAIR_PATH` | no | Default: `$HOME/.agentkeys/broker/oidc-keypair.json` (mode 0600). |
+| `BROKER_OIDC_JWT_TTL_SECONDS` | no | Default `300`. Bounded `[60, 3600]`. |
+| `BROKER_SESSION_DURATION_SECONDS` | no | TTL for AWS-cred mints. Default `3600`. Bounded `[900, 43200]`. |
+| `BROKER_BACKEND_TIMEOUT_SECONDS` | no | HTTP timeout to backend. Default `10`. |
+| `BROKER_SHUTDOWN_GRACE_SECONDS` | no | Graceful drain cap. Default `30`. |
+| `DAEMON_ACCESS_KEY_ID` / `DAEMON_SECRET_ACCESS_KEY` | legacy | Static IAM keys (§2.3). Both required if used. |
+
+---
+
+## 4. Run + supervise
+
+For production, use [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) — writes systemd units for both the broker and mock backend, with `Restart=on-failure` and a dedicated `agentkeys` system user. Logs to journald (`journalctl -u agentkeys-broker -f`).
+
+For local dev:
 
 ```bash
+awsp agentkeys-daemon                                              # or attach instance profile
 cargo run --release -p agentkeys-broker-server -- --port 8091
-# → broker listening on 0.0.0.0:8091
 ```
 
-Or from the built binary:
+Verify it came up:
 
 ```bash
-./target/release/agentkeys-broker-server --port 8091
+curl -sf http://127.0.0.1:8091/healthz       # → "ok"
+curl -sf http://127.0.0.1:8091/readyz        # → 200 if backend + STS reachable, 503 otherwise
 ```
 
-### 3.3 Verify it came up
+`/readyz` checks that `BROKER_BACKEND_URL` is reachable and that the broker's daemon credentials can call `sts:GetCallerIdentity`. Use this as your supervisor probe.
 
-```bash
-curl -sf http://127.0.0.1:8091/healthz       # → 200 ok
-curl -sf http://127.0.0.1:8091/readyz        # → 200 ok if backend + STS reachable, 503 otherwise
-```
-
-`/readyz` checks: the configured `BROKER_BACKEND_URL` is reachable, and the broker's daemon credentials can call `sts:GetCallerIdentity`. Use this as your supervisor health probe.
-
-## 4. Supervise
-
-The broker is a stateless HTTP service (audit DB aside). Restart it freely — there's no in-memory session state to preserve. Recommended supervision:
-
-- **systemd** (Linux operator host): unit file with `Restart=on-failure`, `EnvironmentFile=` pointing at a 0600 file (or `LoadCredential=`).
-- **launchd** (macOS dev box): plist with `KeepAlive` + `ThrottleInterval`.
-- **PM2 / supervisord** are also fine — anything that respawns on crash.
-
-Logs go to stderr in `tracing-subscriber` JSON format when `RUST_LOG=info` is set. Aggregate them with whatever you already use (journald, CloudWatch, Loki).
+---
 
 ## 5. Rotate the daemon AWS key
 
-Long-lived keys age out. Rotation procedure:
+| Path | Procedure |
+|---|---|
+| **Instance profile (§2.1)** | Automatic. IMDS-vended credentials refresh on AWS's schedule. No operator step. |
+| **Named profile (§2.2)** | (1) IAM `create-access-key` for `agentkeys-daemon` — both keys now valid. (2) Update `~/.aws/credentials`. (3) `sudo systemctl restart agentkeys-broker`. (4) `curl /readyz` → 200. (5) IAM `update-access-key --status Inactive` on the old key. (6) Wait 24 h. (7) Delete old key (or reactivate + roll back). |
+| **Static keys (§2.3)** | Same as named-profile but step 2 updates the `DAEMON_*` env vars in your supervisor config / `EnvironmentFile=`. |
 
-1. In IAM, **create** a second access key on the `agentkeys-daemon` user — both old and new keys are now valid.
-2. Update `~/.zshenv` (or your supervisor's environment-injection mechanism) with the new key.
-3. Restart the broker — it picks up the new `DAEMON_*` from env.
-4. Verify with `curl /readyz` — should return 200.
-5. In IAM, **deactivate** (not delete) the old access key. Wait 24 h.
-6. If nothing broke, delete the old key. If something broke, reactivate and roll back.
+**Cadence:** rotate every 90 days minimum; immediately on any operator-laptop compromise.
 
-**Cadence recommendation:** rotate every 90 days minimum, immediately on any operator-laptop compromise.
+---
 
 ## 6. Audit
 
-Every credential mint is logged to `BROKER_AUDIT_DB_PATH` (default `~/.agentkeys/broker/audit.sqlite`). Schema:
+Schema (`~/.agentkeys/broker/audit.sqlite`):
 
 ```sql
 CREATE TABLE mint_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    minted_at       INTEGER NOT NULL,        -- unix seconds
-    requester_token TEXT NOT NULL,           -- bearer token (hashed; see §6.1)
-    requester_wallet TEXT NOT NULL,          -- wallet the token resolved to
-    requested_role  TEXT NOT NULL,           -- BROKER_AGENT_ROLE_ARN at mint time
+    minted_at       INTEGER NOT NULL,         -- unix seconds
+    requester_token TEXT NOT NULL,            -- sha256(bearer); never the raw token
+    requester_wallet TEXT NOT NULL,
+    requested_role  TEXT NOT NULL,            -- ARN, or "oidc_jwt" for JWT mints
     session_duration_seconds INTEGER NOT NULL,
-    sts_session_name TEXT NOT NULL,          -- value passed to AssumeRole; visible in CloudTrail
-    outcome         TEXT NOT NULL,           -- "ok" | "auth_failed" | "sts_error"
-    outcome_detail  TEXT                     -- nullable; error message on failure
+    sts_session_name TEXT NOT NULL,           -- visible in CloudTrail
+    outcome         TEXT NOT NULL,            -- "ok" | "auth_failed" | "sts_error" | "backend_error"
+    outcome_detail  TEXT
 );
-
-CREATE INDEX idx_mint_log_minted_at ON mint_log(minted_at);
-CREATE INDEX idx_mint_log_wallet    ON mint_log(requester_wallet);
 ```
 
 Inspect:
 
 ```bash
 sqlite3 ~/.agentkeys/broker/audit.sqlite \
-  "SELECT minted_at, requester_wallet, outcome FROM mint_log ORDER BY id DESC LIMIT 20"
+  "SELECT minted_at, requester_wallet, requested_role, outcome \
+     FROM mint_log ORDER BY id DESC LIMIT 20"
 ```
 
-**(later)** Stage 8 will mirror this audit data on-chain via a `BlobWritten` extrinsic per [`stage8-wip.md`](./stage8-wip.md). Until then, the SQLite file is the only audit surface — back it up.
+**Anomaly signals:**
 
-### 6.1 Why the bearer token is hashed in the audit log
+- One `requester_wallet` minting at >10× the normal rate → token compromised.
+- `outcome="auth_failed"` clusters → someone fishing for valid bearers.
+- `outcome="sts_error"` clusters → IAM trust policy or daemon key misconfigured.
 
-Storing the raw bearer token in the audit DB would mean a read of the audit DB compromises every active session. The audit log records `sha256(token)` so a leaked audit DB cannot be replayed against the backend. The `requester_wallet` column is the join key for the human-meaningful "who minted this" question.
+Bearer tokens are stored as `sha256(token)` so a leaked audit DB cannot be replayed against the backend; `requester_wallet` is the join key for "who minted this".
 
-### 6.2 What anomalies look like
+---
 
-- Same `requester_wallet` minting at >10× normal rate → token compromised, possibly replay-attempted from elsewhere.
-- `outcome="auth_failed"` clusters → someone is fishing for valid tokens.
-- `outcome="sts_error"` clusters → the operator's IAM trust policy or daemon key is misconfigured.
-
-## 7. Migrate from local to hosted **(later)**
-
-When `broker.agentkeys.dev` (or your hosted equivalent) is live, the migration for app developers is one env var:
-
-```diff
--export AGENTKEYS_BROKER_URL=http://broker.local:8091
-+export AGENTKEYS_BROKER_URL=https://broker.example.dev
-```
-
-Operator-side, the same binary runs. Configuration source changes from env vars to KMS-sealed config (interface design only in v0.1; full implementation is the Stage 7 phase 2 hosted-deploy work).
-
-## 8. Common failure modes
+## 7. Common failure modes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Broker `/readyz` returns 503 with `backend_unreachable` | `BROKER_BACKEND_URL` wrong, mock-server not running | Check the URL; restart mock-server |
-| Broker `/readyz` returns 503 with `sts_error` | Daemon AWS key invalid, expired, or missing `sts:AssumeRole` permission | Verify with `aws sts get-caller-identity` using the same env vars |
-| `POST /v1/mint-aws-creds` returns 401 | Bearer token expired or issued against a different backend | Caller re-runs `agentkeys init` against `BROKER_BACKEND_URL` |
-| `POST /v1/mint-aws-creds` returns 502 with `sts_error` | IAM trust policy on `agentkeys-agent` doesn't allow the daemon user | Check the role's trust policy in IAM |
-| Audit DB grows unbounded | No retention policy in v0.1 | Run a periodic `DELETE FROM mint_log WHERE minted_at < ?` from cron, or `sqlite3 .. VACUUM` |
+| `/readyz` returns 503 with `backend_unreachable` | `BROKER_BACKEND_URL` wrong / mock-server down | Check the URL; restart the backend. |
+| `/readyz` returns 503 with `sts_error` | Daemon key invalid, expired, or missing `sts:AssumeRole` permission | `aws sts get-caller-identity` with the same env / profile. |
+| `mint-aws-creds` returns 401 | Bearer expired or issued against a different backend | Caller re-runs `agentkeys init` against `BROKER_BACKEND_URL`. |
+| `mint-aws-creds` returns 502 with `sts_error` | Trust policy on `agentkeys-data-role` doesn't allow the daemon user | Check the role's trust policy; see [`cloud-setup.md` §3.2](./cloud-setup.md#32-agentkeys-data-role). |
+| `mint-oidc-jwt` returns 502 / discovery doc `iss` ≠ requested URL | `BROKER_OIDC_ISSUER` mismatch | sed the systemd unit; see [`stage7-wip.md`](./stage7-wip.md). |
+| AWS rejects `AssumeRoleWithWebIdentity` | `BROKER_OIDC_ISSUER` and `aws iam create-open-id-connect-provider --url` disagree byte-for-byte | Re-register the OIDC provider per [`cloud-setup.md` §4.2](./cloud-setup.md#42-register-the-oidc-provider). |
+| Audit DB grows unbounded | No retention policy in v0.1 | Cron `DELETE FROM mint_log WHERE minted_at < ?` + `VACUUM`. |
 
-## 9. What's NOT in scope for v0.1
+---
+
+## 8. Out of scope for v0.1
 
 - TEE / enclave-backed broker. Plaintext on commodity hardware.
-- KMS-sealed configuration source. Env vars only.
-- Secret-manager integration as a config source (Vault, AWS Secrets Manager, GCP Secret Manager). Operator persists the daemon AWS keys in `~/.zshenv` (or supervisor-managed env) themselves.
-- Multi-tenant operator support. One broker process serves one operator's `agentkeys-daemon` key.
-- OIDC `assume-role-with-web-identity` exchange. Direct `assume-role` with the static IAM trust path. The OIDC half lands when public hosting is also in motion (Stage 7 phase 2).
+- KMS-sealed configuration. Env vars only.
+- Vault / Secrets Manager / GCP Secret Manager integration. Operator persists the daemon key themselves.
+- Multi-tenant broker. One process serves one operator's `agentkeys-daemon` key.
 - Automatic key rotation. Rotate manually per §5.
 
-## 10. Further reading
+---
 
-- [`dev-setup.md`](./dev-setup.md) — the three-role guide. Read §3 first if you're not sure which role you are.
-- [`stage6-aws-setup.md`](./stage6-aws-setup.md) — one-time IAM + SES + S3 setup that produces the daemon key the broker holds.
-- [`stage7-wip.md`](./stage7-wip.md) — full Stage 7 design, including the OIDC-federation half deferred to phase 2.
-- [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) — broader security position the broker is one component of.
+## 9. Further reading
+
+- [`cloud-setup.md`](./cloud-setup.md) — one-time AWS provisioning (DNS, SES, S3, IAM, OIDC federation).
+- [`stage7-wip.md`](./stage7-wip.md) — Stage 7 design + acceptance test.
+- [`dev-setup.md`](./dev-setup.md) — three-role guide for app developers and end users.
+- [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) — the broader security position the broker is one component of.

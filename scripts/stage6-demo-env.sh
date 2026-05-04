@@ -25,7 +25,7 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 CREDS=$(AWS_ACCESS_KEY_ID="$DAEMON_ACCESS_KEY_ID" \
         AWS_SECRET_ACCESS_KEY="$DAEMON_SECRET_ACCESS_KEY" \
   aws sts assume-role \
-    --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-agent" \
+    --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role" \
     --role-session-name "stage6-demo-$(date +%s)" 2>&1)
 
 if ! echo "$CREDS" | jq -e .Credentials >/dev/null 2>&1; then
