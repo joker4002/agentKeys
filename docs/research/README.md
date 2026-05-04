@@ -25,10 +25,8 @@ The three plans grew out of a single question — *"what does `agentkeys init` a
 
 ## Tracking issues
 
-Each plan has a corresponding issue tracking next steps. See:
+Each plan has a corresponding issue tracking next steps:
 
-- OIDC federation deployment (deferred): the federation half of Stage 7 ships in a follow-up issue once an operator wants the cloud-enforced PrincipalTag isolation.
-- Auth implementation (Option A path): port `walletloginlogic.go` + `emailloginlogic.go` + `googleoauthcallbacklogic.go` to Rust in `agentkeys-broker-server`; coordinate the Heima `CLIENT_ID_AGENTKEYS` patch with Litentry.
-- Option C zero-Heima broker: explore on a separate branch — different architecture from main; not a drop-in for the current broker.
-
-(Issue numbers will be added once the issues are filed.)
+- [#62](https://github.com/litentry/agentKeys/issues/62) — **OIDC federation deployment (deferred)**. Federation infrastructure ships in PR #61; the cloud-enforced PrincipalTag isolation acceptance test is deferred until auth lands.
+- [#63](https://github.com/litentry/agentKeys/issues/63) — **Auth implementation (Option A path)**. Port `walletloginlogic.go` + `emailloginlogic.go` + `googleoauthcallbacklogic.go` to Rust in `agentkeys-broker-server`; coordinate the Heima `CLIENT_ID_AGENTKEYS` patch with Litentry.
+- [#64](https://github.com/litentry/agentKeys/issues/64) — **Option C zero-Heima broker (separate branch)**. Pluggable architecture, no Heima dependency in v0; recommended branch `claude/agentkeys-pluggable-broker`.
