@@ -38,8 +38,32 @@ rand_core = { version = "0.6", features = ["std"] }
 getrandom = "0.2"
 
 [features]
-default = []
-test-stub = []
+# Plan §3 / §3.5 — pluggable trait surface, feature-gated per layer.
+# v0 default ships the WalletSig + ClientSideKeystore + SqliteAnchor combination.
+# v0 testnet adds auth-email-link + auth-oauth2-google + audit-evm.
+# Heima/Solana/Passkey/Apple/GitHub deferred to v1+.
+default              = ["auth-wallet-sig", "wallet-keystore", "audit-sqlite"]
+
+# Auth methods. Per-method external deps land in subsequent stories:
+# US-006 adds k256+sha3 to auth-wallet-sig; Phase A.1 adds lettre+aws-sdk-sesv2
+# to auth-email-link; Phase A.2's OAuth2 reuses unconditional jsonwebtoken+reqwest.
+auth-wallet-sig      = []
+auth-email-link      = []
+auth-oauth2          = []
+auth-oauth2-google   = ["auth-oauth2"]
+auth-oauth2-github   = ["auth-oauth2"]            # v1+
+auth-oauth2-apple    = ["auth-oauth2"]            # v1+
+
+# Wallet provisioners.
+wallet-keystore      = []                          # v0; ClientSideKeystore (no extra deps)
+
+# Audit anchors.
+audit-sqlite         = []                          # default; uses unconditional rusqlite
+audit-evm            = []                          # Phase C; alloy deps land in US-031
+audit-solana         = []                          # v1; deferred
+
+# Test infrastructure.
+test-stub            = []                          # existing — stubs STS/SES/RPC for offline tests
 
 [dev-dependencies]
 agentkeys-broker-server = { path = ".", features = ["test-stub"] }
