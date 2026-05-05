@@ -72,12 +72,42 @@ async fn spawn_broker_with_sts(
         .connect_timeout(std::time::Duration::from_millis(500))
         .build()
         .unwrap();
+    // Stage 7 stubs — see oidc_flow.rs for rationale.
+    let session_keypair = {
+        let path = tmp.path().join("session-keypair.json");
+        agentkeys_broker_server::jwt::SessionKeypair::generate_and_persist(&path).unwrap()
+    };
+    let nonce_store = std::sync::Arc::new(
+        agentkeys_broker_server::storage::AuthNonceStore::open_in_memory().unwrap(),
+    );
+    let wallet_store = std::sync::Arc::new(
+        agentkeys_broker_server::storage::WalletStore::open_in_memory().unwrap(),
+    );
+    let sqlite_anchor: std::sync::Arc<dyn agentkeys_broker_server::plugins::audit::AuditAnchor> =
+        std::sync::Arc::new(
+            agentkeys_broker_server::plugins::audit::sqlite::SqliteAnchor::open_in_memory().unwrap(),
+        );
+    let registry = std::sync::Arc::new(agentkeys_broker_server::plugins::PluginRegistry {
+        auth: std::collections::HashMap::new(),
+        wallet: std::sync::Arc::new(
+            agentkeys_broker_server::plugins::wallet::keystore::ClientSideKeystoreProvisioner::new(
+                std::sync::Arc::clone(&wallet_store),
+            ),
+        ),
+        audit: vec![sqlite_anchor],
+    });
     let state = Arc::new(AppState {
         config,
         http,
         audit: AuditLog::open_in_memory().unwrap(),
         sts,
         oidc: Arc::new(oidc),
+        session_keypair: std::sync::Arc::new(session_keypair),
+        registry,
+        audit_policy: agentkeys_broker_server::plugins::audit::AuditPolicy::SqlitePrimary,
+        wallet_store,
+        nonce_store,
+        tier2: std::sync::Arc::new(agentkeys_broker_server::state::Tier2State::default()),
     });
     let app = create_router(state.clone());
 

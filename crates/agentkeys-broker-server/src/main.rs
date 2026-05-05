@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use agentkeys_broker_server::{
     audit::AuditLog,
+    boot::{run_tier1, Tier2Profile},
     config::BrokerConfig,
     create_router,
-    oidc::OidcKeypair,
-    state::AppState,
+    state::{AppState, Tier2State},
     sts::{AwsStsClient, StsClient},
 };
 use clap::Parser;
@@ -41,18 +41,29 @@ async fn main() -> anyhow::Result<()> {
 
     warn_if_non_loopback_without_tls(&args.bind);
 
+    // Tier 1 — synchronous refuse-to-boot per plan §6. Loads keypairs,
+    // validates plugin selection, opens stores, builds registry. Any
+    // failure here exits with a single-line BOOT_FAIL message.
+    let boot_artifacts = run_tier1(&config)?;
+    let tier2_profile = Tier2Profile::from_config(&config);
+    tracing::info!(
+        strict = tier2_profile.strict,
+        email_link = tier2_profile.email_link_enabled,
+        audit_evm = tier2_profile.audit_evm_enabled,
+        "Tier-1 boot complete; Tier-2 reachability checks deferred until after listener bind"
+    );
+
+    // Legacy mint-log preserved through US-011. Open it alongside the
+    // new plugin-trait-based audit anchors.
     let audit = AuditLog::open(&config.audit_db_path)?;
+
     let sts = match (&config.daemon_access_key_id, &config.daemon_secret_access_key) {
         (Some(akid), Some(secret)) => {
-            tracing::info!(
-                "AWS credentials: static IAM-user keys (DAEMON_ACCESS_KEY_ID env)"
-            );
+            tracing::info!("AWS credentials: static IAM-user keys (DAEMON_ACCESS_KEY_ID env)");
             AwsStsClient::from_keys(akid, secret, &config.aws_region).await
         }
         _ => {
-            tracing::info!(
-                "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)"
-            );
+            tracing::info!("AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)");
             AwsStsClient::with_default_chain(&config.aws_region).await
         }
     };
@@ -76,31 +87,32 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let grace_seconds = config.shutdown_grace_seconds;
-
-    let oidc = OidcKeypair::load_or_generate(&config.oidc_keypair_path)
-        .map_err(|e| anyhow::anyhow!("load OIDC keypair: {}", e))?;
-    tracing::info!(
-        kid = %oidc.kid,
-        issuer = %config.oidc_issuer,
-        path = %config.oidc_keypair_path.display(),
-        "OIDC signer ready"
-    );
+    let tier2 = Arc::new(Tier2State::default());
 
     let state = Arc::new(AppState {
         config,
         http,
         audit,
         sts: Arc::new(sts),
-        oidc: Arc::new(oidc),
+        oidc: boot_artifacts.oidc_keypair,
+        session_keypair: boot_artifacts.session_keypair,
+        registry: boot_artifacts.registry,
+        audit_policy: boot_artifacts.audit_policy,
+        wallet_store: boot_artifacts.wallet_store,
+        nonce_store: boot_artifacts.nonce_store,
+        tier2: Arc::clone(&tier2),
     });
+
+    // Spawn Tier-2 reachability probes asynchronously. /readyz returns
+    // 503 with structured detail until each check passes; broker is
+    // already serving /healthz=200 so liveness probes succeed.
+    spawn_tier2_probes(Arc::clone(&state), tier2_profile);
 
     let app = create_router(state);
     let addr = format!("{}:{}", args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("broker listening on {}", addr);
 
-    // Wrap the graceful-shutdown future in a hard timeout so a single hung
-    // request can't block process exit forever.
     let serve_result = tokio::time::timeout(
         std::time::Duration::from_secs(60 * 60 * 24),
         axum::serve(listener, app).with_graceful_shutdown(async move {
@@ -122,16 +134,57 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Spawn the Tier-2 reachability probes that flip the AtomicBool flags
+/// on `Tier2State` as each external dependency becomes reachable.
+///
+/// Phase 0 ships only the backend probe (the only Tier-2 check whose
+/// dependencies exist this early). SES + EVM probes land in Phase A.1
+/// and Phase C respectively, behind their feature gates.
+fn spawn_tier2_probes(
+    state: Arc<AppState>,
+    profile: agentkeys_broker_server::boot::Tier2Profile,
+) {
+    use std::sync::atomic::Ordering;
+    let backend_url = profile.backend_url.clone();
+    let strict = profile.strict;
+
+    tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            loop {
+                let url = format!("{}/healthz", backend_url.trim_end_matches('/'));
+                let res = state
+                    .http
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .send()
+                    .await;
+                let ok = matches!(&res, Ok(r) if r.status().is_success());
+                state.tier2.backend_reachable.store(ok, Ordering::Relaxed);
+                if ok {
+                    tracing::info!(url = %url, "Tier-2 backend probe: reachable");
+                    break;
+                }
+                if strict {
+                    tracing::error!(url = %url, "BROKER_REFUSE_TO_BOOT_STRICT=true and backend unreachable; exiting");
+                    std::process::exit(1);
+                }
+                tracing::warn!(
+                    url = %url,
+                    "Tier-2 backend probe: unreachable; /readyz will return 503 until reachable"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            }
+        }
+    });
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
     #[cfg(unix)]
     let terminate = async {
-        // expect(): if we cannot register a SIGTERM handler the process is
-        // running in a hardened environment that intentionally blocks signal
-        // handling. Failing loud is better than silently exiting on startup
-        // (which is what `if let Ok(...)` did).
         let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to register SIGTERM handler — running in a sandbox that blocks signals?");
         sig.recv().await;

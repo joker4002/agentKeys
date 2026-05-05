@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod auth;
+pub mod boot;
 pub mod config;
 pub mod env;
 pub mod error;
