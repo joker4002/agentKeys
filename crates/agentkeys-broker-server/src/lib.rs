@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod env;
 pub mod error;
 pub mod handlers;
 pub mod oidc;
