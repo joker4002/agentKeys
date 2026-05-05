@@ -239,7 +239,8 @@
         {
           "id": "US-016",
           "title": "Phase 0 codex review round 1 — all P0/P1 closed",
-          "passes": false,
+          "passes": true,
+          "commit": "(this commit)",
           "acceptanceCriteria": [
             "docs/spec/plans/issue-64/codex-round1.md created with codex CLI output (or codex-rescue subagent output)",
             "Findings list with severity P0/P1/P2/P3 each",

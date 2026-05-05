@@ -57,10 +57,10 @@ Total: 9 of 16 Phase 0 stories complete. ~94 tests passing across lib + integrat
 |---|---|---|---|
 | US-011 mint upgrade (session JWT + per-call sig + AuditAnchor gate) | `1edb4f6` | 10 unit + 5 v2 + 9 legacy | PASS |
 | US-013 tests/invariant_load_bearing.rs (6 cases a-f) | `8657d74` | 7/7 | PASS |
-| US-016 Phase 0 codex review round 1 | (in flight) | — | RUNNING |
+| US-016 Phase 0 codex review round 1 + round 2 | (this commit) | 0 P0, 0 P1, 14 P2, 6 P3 across both rounds | PASS — stop rule fired |
 
-Phase 0 totals after Session 2: **15 of 16 stories complete** pre-codex; codex review round 1 in progress to gate ship.
+Phase 0 totals after Session 2: **16 of 16 stories complete**. Round 1 + round 2 found only P2/P3; plan rule 9 stop rule fires; Phase 0 ships with P2/P3 rolled to V0.1-FOLLOWUPS.md.
 
-## Remaining Phase 0 stories (1)
+## Phase 0 ship verdict
 
-- US-016 Phase 0 codex review round 1 — running via codex-rescue subagent (this session)
+**SHIP.** Round 1 (`codex-round1.md`) + round 2 (`codex-round2.md`) both find zero P0/P1; the 20 total findings are P2/P3 and rolled to `V0.1-FOLLOWUPS.md` for Phases A.1, A.2, B, C, D-rest, E to consume in priority order.
