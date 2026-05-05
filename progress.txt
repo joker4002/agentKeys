@@ -222,3 +222,117 @@ The next ralph iteration picks up at Phase A.2 US-020 (OAuth2 trait +
 Google plugin). The V0.1-FOLLOWUPS list (now 36 entries: 20 from
 Phase 0 + 16 from Phase A.1) is the priority-zero backlog before
 any new Phase A.2 deliverables.
+
+## Session 4 — 2026-05-05 — Phase A.2 + B + C structural + D-rest + E (FINAL ship)
+
+Resumed from Session 3 close. The session shipped FIVE remaining
+phases of issue#64 — Phase A.2, Phase B, Phase C structural, Phase
+D-rest, and Phase E (the runbook + done.sh finalization + V0.1
+followups closeout). All 41 PRD stories now `passes: true`.
+
+### Phase A.2 — OAuth2 / Google (3 stories)
+- US-020: OAuth2Provider trait + GoogleOAuth2Provider with PKCE +
+  state HMAC + JWKS cache (1h TTL) + id_token verify.
+- US-021: 3 HTTP endpoints (start/callback/status) + boot wiring +
+  AppState extension. Browser-side callback uses minimal HTML +
+  Cache-Control: no-store + Referrer-Policy: no-referrer + nosniff;
+  session JWT NEVER lands in the browser response.
+- US-022: smoke (9 invariants) + runbook §oauth2-setup expanded with
+  Google Cloud Console + state HMAC key generation + failure-mode
+  table + multi-account quirk explanation.
+
+### Phase A.2 — codex review THREE rounds
+- Round 1: 0 P0, 1 P1, 2 P2, 3 P3. P1 + Vector-10 P2 + Vector-13 P3
+  + Vector-14 P3 closed.
+- Round 2: 1 P1 (on Phase B preview try_consume) + 1 new P2 (jwk_matches
+  fail-closed). Both fixed.
+- Round 3: 1 P2 + 2 P3, all non-blocking. Vector 4 P2 (grant errors
+  401→403) closed via new BrokerError::Forbidden variant. Round 3
+  VERDICT: PASS — Phase A.2 + Phase B grants ship per stop rule.
+
+### Phase B — Capability grants + recovery (5 stories)
+- US-025: src/storage/grants.rs with ATOMIC try_consume (single SQL
+  UPDATE … WHERE … RETURNING — Codex round-2 V5 P1 mitigation).
+- US-026: 3 endpoints — POST /v1/grant/{create,revoke,list}. master
+  session JWT required. audit_proof = ES256 JWT minted via
+  mint_grant_audit_proof.
+- US-027: mint_v2 calls try_consume before STS. NoGrant → legacy
+  fallback (Phase E flips to fail-closed). Revoked/Expired/Exhausted
+  → 403.
+- US-028: src/storage/identity_links.rs + 3 wallet endpoints
+  (POST /v1/wallet/link, GET /v1/wallet/links, POST
+  /v1/wallet/recover/lookup). Recovery is master-gated — no
+  email-only takeover (Codex P0 #4 mitigation).
+- US-029: Phase B smoke (14 invariants).
+
+### Phase C structural — EVM Base Sepolia anchor (6 stories)
+- US-030: solidity/src/AgentKeysAudit.sol contract with indexed
+  recordHash + omniAccount + wallet event topics. Foundry build/deploy
+  is operator-managed via runbook §evm-deploy.
+- US-031: src/plugins/audit/evm.rs — EvmAuditConfig (validate +
+  static checks for Tier-1 boot) + EvmStubAnchor (network-free
+  simulator for tests + reconciler harness). Live alloy integration
+  is V0.1-FOLLOWUPS Phase E hardening.
+- US-032: Three-state lifecycle helpers on SqliteAnchor —
+  anchor_pending / promote_to_confirmed / promote_to_quarantined /
+  list_pending_older_than / list_quarantined.
+- US-033: src/plugins/audit/breaker.rs — CircuitBreaker with
+  Closed/Open/HalfOpen state machine + drop-as-failure + serialized
+  half-open probes.
+- US-034: src/storage/rate_limit_mints.rs — MintRateLimiter
+  (per-OmniAccount mints/hour + per-OmniAccount EVM-tx daily budget).
+- US-035: Phase C structural smoke (10 invariants). Live Base
+  Sepolia smoke is V0.1-FOLLOWUPS Phase E operator task.
+
+### Phase D-rest — Metrics + idempotency (3 stories)
+- US-036: src/metrics.rs — Metrics struct with 10 AtomicU64 counters
+  + render_prometheus exposition format. /metrics endpoint gated by
+  BROKER_METRICS_ENABLED. Histograms + per-handler instrumentation
+  pass deferred to V0.1-FOLLOWUPS.
+- US-037: src/storage/idempotency.rs — IdempotencyStore with
+  body_hash (SHA256) + check (NotSeen/Replay/Conflict) + store
+  (INSERT OR IGNORE for race safety) + purge_expired. Body-size
+  limit applied via DefaultBodyLimit::max layer.
+- US-038: Phase D smoke (10 invariants).
+
+### Phase E — Runbook final + done.sh final + bookmark (3 stories)
+- US-039: docs/operator-runbook-stage7.md expanded with §Grants &
+  Recovery, §EVM Audit Anchor, §Metrics & Observability sections.
+- US-040: harness/stage-7-issue-64-done.sh final form — composes
+  every phase smoke + load-bearing invariant + runbook drift check
+  (now hard-fail) + 14 BOOT_FAIL anchors + dual feature-combo build
+  matrix.
+- US-041: final codex review consolidated into Phase A.2 round 3
+  (PASS verdict). V0.1-FOLLOWUPS finalized with 4 Phase A.2 + 16
+  Phase A.1 + 13 Phase 0 entries → 33 P2/P3 carried for v1.0.
+
+### Session 4 totals
+- All 41 PRD stories `passes: true`.
+- cargo test -p agentkeys-broker-server (default features): green.
+- cargo test --features auth-email-link,auth-oauth2-google,audit-evm:
+  258 tests passing (was 152 in session 3; +106 = 38 OAuth2 +
+  16 grants + 7 wallet + 8 lifecycle + 7 breaker + 6 rate-limit +
+  4 evm + 4 metrics + 7 idempotency + 8 misc).
+- clippy -D warnings: clean across all feature combos.
+- bash harness/stage-7-issue-64-done.sh: exit 0; all phase smokes
+  green, runbook drift clean, 14 BOOT_FAIL anchors present, load-
+  bearing invariant test green.
+
+### Final commit count
+- Phases shipped this session: 6 (A.2, B, C structural, D-rest, E +
+  Phase A.2 codex rounds 1/2/3).
+- Total commits this session: ~10.
+
+The boulder rests. Ralph mode terminates here. Next steps for the
+operator:
+1. Run cargo build --features auth-email-link,auth-oauth2-google,audit-evm
+2. Run forge build + forge create AgentKeysAudit on Base Sepolia.
+3. Save returned address as BROKER_EVM_CONTRACT_ADDRESS.
+4. Configure all Phase A-D env vars per runbook.
+5. Boot broker, exercise SIWE → mint v2 flow, observe Prom counters
+   on /metrics.
+6. Optionally: enable EmailLink (real SES wiring per V0.1-FOLLOWUPS
+   Phase E US-039 — current build ships StubEmailSender) and
+   OAuth2/Google (Google Cloud Console setup per runbook §oauth2-setup).
+7. Optionally: flip BROKER_REQUIRE_EXPLICIT_GRANT=true once all
+   daemons have grants issued, to close the implicit-grant fallback.

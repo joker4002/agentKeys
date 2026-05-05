@@ -332,6 +332,214 @@ in their browser and would otherwise be auto-signed-in to the wrong one.
 
 ---
 
+## Grants & Recovery (Phase B — US-025/026/027/028)
+
+### Grants overview
+
+Per plan §3.5.5: a master OmniAccount issues `POST /v1/grant/create` to
+authorize a specific daemon address to mint AWS credentials for a
+specific `(service, scope_path)`, bounded by `expires_at` + `max_uses`.
+Each grant carries an `audit_proof` — a broker-signed JWT over the
+canonical grant content. Tampering with the SQLite row breaks
+`audit_proof` verification (DB exfiltration cannot produce a
+verified-but-tampered grant).
+
+```bash
+# Master creates a grant for daemon 0xabc to mint S3 creds for bots/0xabc/.
+curl -X POST https://broker.example.com/v1/grant/create \
+  -H "Authorization: Bearer $MASTER_SESSION_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "daemon_address": "0xabc...",
+    "service":        "s3",
+    "scope_path":     "bots/0xabc/",
+    "expires_at":     1893456000,
+    "max_uses":       1000
+  }'
+# Returns {"grant_id":"grn-...","audit_proof":"eyJ...",...}
+
+# Master lists their grants.
+curl https://broker.example.com/v1/grant/list \
+  -H "Authorization: Bearer $MASTER_SESSION_JWT"
+
+# Master revokes a grant. Instant — one row update. Re-revoke is a no-op.
+curl -X POST https://broker.example.com/v1/grant/revoke \
+  -H "Authorization: Bearer $MASTER_SESSION_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"grant_id":"grn-..."}'
+```
+
+### Migration window — implicit-grant fallback
+
+The mint endpoint currently allows mints WITHOUT an explicit grant for
+backward-compatibility with Phase 0 daemons (legacy `NoGrant` path
+documented inline in `src/handlers/mint.rs::mint_v2`). The audit log
+records these mints with an empty `grant_id` column.
+
+**This is an intentional Phase 0→Phase B migration window.** Phase E
+US-039 will flip the default to fail-closed (`NoGrant` → 403). Operators
+should:
+
+1. Roll out the broker with grants enabled (this build).
+2. Call `/v1/grant/create` for every existing daemon address.
+3. Verify mints continue to succeed (now with non-empty `grant_id` in
+   audit rows).
+4. Set `BROKER_REQUIRE_EXPLICIT_GRANT=true` (Phase E env var) to flip
+   the default to fail-closed.
+5. Audit any 403s for daemons that didn't get a grant.
+
+### Recovery flow
+
+Per plan §3.5.5: recovery is master-gated, NOT email-only re-binding
+(Codex P0 #4 from earlier review). The flow:
+
+1. User loses their master wallet but holds a previously-linked email
+   or oauth2 identity.
+2. User calls `POST /v1/wallet/recover/lookup` with their email →
+   broker returns the master's OmniAccount.
+3. User reaches the master out-of-band (same person on a different
+   device, or a trusted relationship).
+4. Master authenticates fresh via `/v1/auth/wallet/{start,verify}` and
+   calls `/v1/grant/create` on the user's NEW daemon address.
+5. New daemon mints with the new grant. Old daemon's grant can be
+   `/v1/grant/revoke`'d.
+
+`POST /v1/wallet/link` is master-only. Cross-master claim
+(different OmniAccount tries to claim an identity already owned by a
+different master) returns 401.
+
+`POST /v1/wallet/recover/lookup` is intentionally unauthenticated —
+the OmniAccount is a SHA256 hash and discovery does not enable
+impersonation. The actual recovery grant always requires master consent.
+
+`BROKER_RECOVERY_GRANT_DELAY_SECONDS` is an optional time-lock before a
+recovery grant becomes active (off by default for v0). Operators can
+enable for environments where compromised-master defense is critical.
+
+---
+
+## EVM Audit Anchor — Base Sepolia (Phase C — US-030/031/032/033/034/035)
+
+### What ships in this build (v0)
+
+- `src/plugins/audit/evm.rs`: `EvmAuditConfig` + `EvmStubAnchor` (the
+  stub round-trips without network — used by tests + reconciler harness).
+- `src/plugins/audit/breaker.rs`: `CircuitBreaker` with
+  Closed/Open/HalfOpen state machine, drop-as-failure semantics,
+  serialized half-open probes.
+- `src/plugins/audit/sqlite.rs`: three-state lifecycle helpers
+  (`anchor_pending` / `promote_to_confirmed` / `promote_to_quarantined`
+  / `list_pending_older_than` / `list_quarantined`) for dual-anchor mode.
+- `src/storage/rate_limit_mints.rs`: `MintRateLimiter` enforcing
+  per-OmniAccount mints/hour + per-OmniAccount EVM-tx daily budget.
+- `solidity/src/AgentKeysAudit.sol`: append-only audit log contract
+  with indexed `recordHash` + `omniAccount` + `wallet` event topics.
+
+### What you do as an operator (deploy + go-live)
+
+#### 1. Deploy the contract to Base Sepolia
+
+Install Foundry: <https://book.getfoundry.sh/getting-started/installation>.
+
+```bash
+cd crates/agentkeys-broker-server/solidity
+forge build
+forge test
+# Set up env vars first (see runbook for keystore generation).
+export BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
+export PRIVATE_KEY=$(cat /etc/agentkeys/fee-payer.priv)
+forge create src/AgentKeysAudit.sol:AgentKeysAudit \
+  --rpc-url $BASE_SEPOLIA_RPC_URL \
+  --private-key $PRIVATE_KEY
+# Save returned address as BROKER_EVM_CONTRACT_ADDRESS.
+```
+
+Persist the deployment metadata at
+`crates/agentkeys-broker-server/solidity/deployments/base-sepolia.json`
+so the broker repo carries the canonical contract address.
+
+#### 2. Fund the fee-payer wallet
+
+The broker submits one transaction per mint to the audit contract —
+each tx costs gas. Fund the fee-payer wallet on Base Sepolia (use the
+public faucet at <https://www.alchemy.com/faucets/base-sepolia>).
+
+`BROKER_EVM_FEE_PAYER_MIN_BALANCE` (default 0.001 ETH) is the
+threshold below which the EVM anchor flips to `Unready` — set to a
+value that gives you ~30 min of mint capacity at peak.
+
+#### 3. Configure the broker
+
+Set Phase C env vars per `## Env Vars` table above. Critical:
+- `BROKER_AUDIT_ANCHORS=sqlite,evm_testnet`
+- `BROKER_AUDIT_POLICY=dual_strict`
+- `BROKER_EVM_RPC_URL=https://sepolia.base.org`
+- `BROKER_EVM_CHAIN_ID=84532`
+- `BROKER_EVM_CONTRACT_ADDRESS=0x...` (from step 1)
+- `BROKER_EVM_FEE_PAYER_KEYSTORE=/etc/agentkeys/fee-payer.keystore.json`
+- `BROKER_EVM_FEE_PAYER_PASSWORD_FILE=/etc/agentkeys/fee-payer.pw` (mode 0600)
+
+#### 4. Live alloy integration (V0.1-FOLLOWUPS Phase E hardening)
+
+The current build registers `EvmStubAnchor` for the `evm_testnet`
+audit anchor selection — it simulates round-trip behavior without
+network I/O. The alloy-driven `EvmAuditAnchor` (live transaction
+submission, receipt polling, log topic verification) lands as a Phase
+E hardening pass. Until then, the structural layer (three-state
+lifecycle, breaker, gas-drain) ships with the stub.
+
+### Gas-drain mitigations (US-034)
+
+Even with the explicit grant boundary, an attacker who steals a
+session JWT could try to amplify mints into draining the fee-payer.
+Three layers of defense:
+
+1. **Per-OmniAccount mints/hour** (`BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI`,
+   default 30): enforced via `MintRateLimiter::check_mint`. Returns
+   429 with `Retry-After`.
+2. **Per-OmniAccount daily EVM-tx budget**
+   (`BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET`, default 100): enforced
+   via `MintRateLimiter::check_evm_tx`. Independently capped from
+   STS calls so the on-chain spend is bounded.
+3. **Fee-payer min-balance floor**
+   (`BROKER_EVM_FEE_PAYER_MIN_BALANCE`): broker flips EVM anchor to
+   `Unready` immediately when balance drops below; mints serve 503.
+
+---
+
+## Metrics & Observability (Phase D-rest — US-036)
+
+### Prometheus counters
+
+Set `BROKER_METRICS_ENABLED=true` to expose `GET /metrics` with the
+standard exposition format. Counters available:
+
+- `agentkeys_broker_mints_total` / `_failed_total`
+- `agentkeys_broker_audit_writes_total` / `_failed_total`
+- `agentkeys_broker_auth_attempts_total`
+- `agentkeys_broker_auth_failed_unauthorized_total` / `_rate_limited_total` / `_other_total`
+- `agentkeys_broker_idempotency_hits_total` / `_conflicts_total`
+
+When `BROKER_METRICS_ENABLED` is unset or `false`, `/metrics` returns
+404 — operators who don't run a Prometheus scraper should leave it
+disabled to avoid leaking counter shapes to unauthenticated probers.
+
+Histograms (mint_latency, audit_write_latency) + per-handler counter
+bumps land in V0.1-FOLLOWUPS Phase E hardening.
+
+### Idempotency-Key
+
+The mint endpoint accepts an `Idempotency-Key: <ulid>` header. Bodies
+that hash to the same fingerprint within the 5-minute window return
+the cached response (no re-mint, no STS quota burn). Same key + a
+different body returns 422.
+
+`BROKER_REQUEST_BODY_LIMIT_BYTES` enforces the request body size limit
+(default 1 MiB) at router level (DefaultBodyLimit middleware) — closes
+Codex R2-F18 (declared-but-unenforced).
+
+---
+
 ## Smoke Validation
 
 Run the harness smoke script:
