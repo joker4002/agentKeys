@@ -247,9 +247,88 @@ The broker's `BROKER_DATA_ROLE_ARN` must point at this role.
 
 ## OAuth2 Setup
 
-(Phase A.2 — pending.) Full procedure for registering a Google OAuth
-web app, configuring the redirect URI, and minting the
-`BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE` lands in US-022.
+(Phase A.2 — US-020/021/022.) The broker supports OAuth2 / OpenID Connect
+sign-in with id_token + PKCE + state HMAC + CLI polling per plan §3.5.4.
+v0 ships Google as the only provider; GitHub and Apple are wired into the
+trait surface and gated behind their own Cargo features for v1+.
+
+### Google Cloud Console
+
+1. Open <https://console.cloud.google.com/apis/credentials> in a project
+   you own (create one first if needed).
+2. **APIs & Services → Credentials → Create Credentials → OAuth client ID.**
+3. Application type: **Web application**.
+4. Authorized redirect URIs: add the public callback URL of your broker
+   exactly as you'll configure `BROKER_OAUTH2_REDIRECT_URI`. Example:
+
+   ```
+   https://broker.example.com/auth/oauth2/callback
+   ```
+
+   Google enforces an exact match — trailing slashes, scheme, host, and
+   path all matter. If the broker is fronted by a reverse proxy, register
+   the public URL the user's browser sees, not the internal one.
+5. Click **Create**. Save:
+   - the **Client ID** → goes into `BROKER_OAUTH2_GOOGLE_CLIENT_ID`;
+   - the **Client secret** → write to a file, `chmod 600`, set
+     `BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE` to its path.
+6. Under **OAuth consent screen** make sure your support email and app
+   name are filled in (Google blocks sign-in until these are present).
+
+### State HMAC key
+
+`BROKER_OAUTH2_STATE_HMAC_KEY_PATH` must point at a file containing at
+least 32 random bytes. Generate with:
+
+```bash
+head -c 32 /dev/urandom > /etc/agentkeys/oauth2-state.hmac.key
+chmod 600 /etc/agentkeys/oauth2-state.hmac.key
+```
+
+The key signs the OAuth2 `state` parameter so a maliciously crafted
+callback (e.g. CSRF) cannot drive the broker into completing a flow on
+behalf of a user who never started one. Rotate by writing a new file +
+restarting the broker; in-flight flows older than `state` TTL (10 min)
+will fail and the CLI will start a fresh flow.
+
+### Smoke
+
+After setting the env vars and restarting:
+
+```bash
+# 1. Initiate
+curl -X POST http://localhost:8091/v1/auth/oauth2/start \
+  -H 'content-type: application/json' \
+  -d '{"provider":"google"}'
+# Returns {"request_id":"oa2-…","authorization_url":"https://accounts.google.com/...","poll_url":"/v1/auth/oauth2/status/oa2-…"}
+
+# 2. Open authorization_url in a browser, sign in with your Google account.
+#    Google redirects back to the broker's /auth/oauth2/callback.
+
+# 3. Poll
+curl http://localhost:8091/v1/auth/oauth2/status/oa2-…
+# Returns {"status":"verified","session_jwt":"eyJ…","omni_account":"…","identity_type":"oauth2_google","identity_value":"<google-sub>"}
+```
+
+The session JWT NEVER appears in the browser-facing callback response —
+it lands on the CLI poll only (plan §3.5.4 security posture).
+
+### Failure modes
+
+| Symptom on CLI poll | Cause | Fix |
+|---|---|---|
+| `status:"failed"` + `reason` containing `user_denied` | User clicked "cancel" on Google's consent screen | Retry; the user must re-initiate from the CLI. |
+| `status:"failed"` + reason containing `expired` | id_token's `exp` < broker's clock | NTP-sync the broker host; re-initiate. |
+| `status:"failed"` + reason containing `audience` | Mismatched `BROKER_OAUTH2_GOOGLE_CLIENT_ID` (ID rotated in Console without restart) | Restart broker after env var change. |
+| `state: HMAC mismatch` 401 on callback | `BROKER_OAUTH2_STATE_HMAC_KEY_PATH` was rotated mid-flow | Expected — flow must be re-initiated. |
+| `request_id 400` from CLI poll | Flow timed out (>10 min between start + click) | Re-initiate. |
+
+### Multi-account browser quirk
+
+`prompt=select_account` is hardcoded in the authorization URL so the
+broker always forces Google's account chooser. This defends against the
+silent-wrong-account scenario where a user has multiple Google accounts
+in their browser and would otherwise be auto-signed-in to the wrong one.
 
 ---
 

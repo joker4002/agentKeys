@@ -264,9 +264,9 @@
       "phase": "A.2",
       "title": "OAuth2 / Google (id_token + PKCE + state-CSRF + CLI polling)",
       "stories": [
-        { "id": "US-020", "title": "OAuth2 provider trait + Google plugin", "passes": false, "acceptanceCriteria": ["src/plugins/auth/oauth2/{mod.rs,google.rs} (cfg auth-oauth2-google)", "PKCE verifier + state HMAC + JWKS cache 1h", "id_token verify: iss, aud, exp, iat skew 60s, nonce binding", "Identity binding uses sub (not email) for OmniAccount", "tests cover: state CSRF rejection, missing PKCE → 401, expired id_token → 401, wrong aud → 401, happy path"] },
-        { "id": "US-021", "title": "OAuth2 endpoints (start/callback/status)", "passes": false, "acceptanceCriteria": ["POST /v1/auth/oauth2/start, GET /auth/oauth2/callback, GET /v1/auth/oauth2/status/:id", "callback uses Cache-Control:no-store + Referrer-Policy:no-referrer", "session JWT delivered via polling endpoint, not browser", "rate-limit on start per-IP-minutely"] },
-        { "id": "US-022", "title": "OAuth2 smoke (in stage-7-phaseA-smoke.sh) + runbook §oauth2-setup + codex round", "passes": false, "acceptanceCriteria": ["smoke uses --features test-stub for Google token + JWKS endpoints", "runbook section explains Google Cloud Console setup", "codex review round closes P0/P1"] }
+        { "id": "US-020", "title": "OAuth2 provider trait + Google plugin", "passes": true, "commit": "(this commit)", "acceptanceCriteria": ["src/plugins/auth/oauth2/{mod.rs,google.rs} (cfg auth-oauth2-google)", "PKCE verifier + state HMAC + JWKS cache 1h", "id_token verify: iss, aud, exp, iat skew 60s, nonce binding", "Identity binding uses sub (not email) for OmniAccount", "tests cover: state CSRF rejection, missing PKCE → 401, expired id_token → 401, wrong aud → 401, happy path"] },
+        { "id": "US-021", "title": "OAuth2 endpoints (start/callback/status)", "passes": true, "commit": "(this commit)", "acceptanceCriteria": ["POST /v1/auth/oauth2/start, GET /auth/oauth2/callback, GET /v1/auth/oauth2/status/:id", "callback uses Cache-Control:no-store + Referrer-Policy:no-referrer", "session JWT delivered via polling endpoint, not browser", "rate-limit on start per-IP-minutely"] },
+        { "id": "US-022", "title": "OAuth2 smoke (in stage-7-phaseA-smoke.sh) + runbook §oauth2-setup + codex round", "passes": true, "commit": "(this commit)", "acceptanceCriteria": ["smoke uses --features test-stub for Google token + JWKS endpoints", "runbook section explains Google Cloud Console setup", "codex review round closes P0/P1"] }
       ]
     },
     {
