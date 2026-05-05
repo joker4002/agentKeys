@@ -51,13 +51,16 @@ Per-phase decisions appended below as work proceeds.
 
 Total: 9 of 16 Phase 0 stories complete. ~94 tests passing across lib + integration. Workspace build green. /readyz aggregator now lives — every plug-in's `ready()` + 4 Tier-2 atomics surface in a single structured JSON response with per-check runbook anchor URLs.
 
-## Remaining Phase 0 stories (7)
+## Session 2 commit log (Phase 0 close-out, 2026-05-05)
 
-In priority order:
-- US-009 POST /v1/auth/wallet/{start,verify} endpoints (uses SiweWalletAuth)
-- US-010 POST /v1/auth/exchange backward-compat shim
-- US-011 /v1/mint-aws-creds upgrade (session JWT + per-call sig + audit gate)
-- US-013 tests/invariant_load_bearing.rs (all 6 cases — depends on US-009/010/011)
-- US-014 harness/stage-7-phase0-smoke.sh + stage-7-done.sh skeleton
-- US-015 docs/operator-runbook-stage7.md draft (env table from env.rs)
-- US-016 Phase 0 codex review round 1
+| Story | Commit | Tests | Status |
+|---|---|---|---|
+| US-011 mint upgrade (session JWT + per-call sig + AuditAnchor gate) | `1edb4f6` | 10 unit + 5 v2 + 9 legacy | PASS |
+| US-013 tests/invariant_load_bearing.rs (6 cases a-f) | `8657d74` | 7/7 | PASS |
+| US-016 Phase 0 codex review round 1 | (in flight) | — | RUNNING |
+
+Phase 0 totals after Session 2: **15 of 16 stories complete** pre-codex; codex review round 1 in progress to gate ship.
+
+## Remaining Phase 0 stories (1)
+
+- US-016 Phase 0 codex review round 1 — running via codex-rescue subagent (this session)

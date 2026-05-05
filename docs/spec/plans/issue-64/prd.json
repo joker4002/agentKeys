@@ -172,7 +172,8 @@
         {
           "id": "US-011",
           "title": "/v1/mint-aws-creds upgraded — session JWT + per-call daemon signature (§3.5.2)",
-          "passes": false,
+          "passes": true,
+          "commit": "1edb4f6",
           "acceptanceCriteria": [
             "Body now requires {request_id, issued_at, intent {agent_id, service, scope_path}, auth {address, signature}}",
             "Verifies session JWT (Authorization header) and per-call daemon signature (over canonical CBOR of body minus auth.signature)",
@@ -198,7 +199,8 @@
         {
           "id": "US-013",
           "title": "tests/invariant_load_bearing.rs — all 6 cases (a-f) per plan §2",
-          "passes": false,
+          "passes": true,
+          "commit": "8657d74",
           "acceptanceCriteria": [
             "tests/invariant_load_bearing.rs runs against in-process broker with FailingAuditAnchor fixture",
             "Case (a) happy path: full SIWE → wallet → mint → audit-write green",

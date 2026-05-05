@@ -136,3 +136,33 @@ Next-iteration suggested commit order:
 6. US-014 smoke + done.sh
 7. US-015 runbook
 8. US-016 codex round 1
+
+## Session 2 — 2026-05-05 — Phase 0 close-out (15 of 16 stories)
+
+Resumed from Session 1 pause. The session knocked off the remaining
+stories serially: US-011 mint upgrade → US-013 invariant test →
+US-016 codex review.
+
+#### US-011 — /v1/mint-aws-creds upgrade — PASSED 2026-05-05 (commit 1edb4f6)
+Files: src/handlers/mint.rs (rewritten), tests/mint_v2_flow.rs (new).
+Tests: 10 unit + 5 v2 integration + 9 legacy integration; ALL pass.
+Plan §3.5.2 + §2 grounding: session JWT bearer + per-call daemon signature over canonical-JSON-bytes-minus-auth.signature, EIP-191 envelope, ecrecover-must-match-auth.address. AuditAnchor write loop short-circuits on first failure → response 500, no creds, audit-anchored=None. Wallet-binding gate ensures auth.address == claims.agentkeys.wallet_address.
+Backwards compat: looks_like_session_jwt heuristic (eyJ + 3 segments) routes to v2; everything else falls through to mint_legacy verbatim. Codex P0 #14 (permanent dual-accept) mitigated by documented v0→v1 cutover.
+Learning: STS call happens BEFORE audit anchor write per plan §2.e (speculative latency optimization). The gate is the response — credentials never appear in the response body unless every audit anchor confirmed durability.
+
+#### US-013 — tests/invariant_load_bearing.rs — PASSED 2026-05-05 (commit 8657d74)
+Files: tests/invariant_load_bearing.rs (new, 574 LOC).
+Tests: 7/7 (6 cases a-f + 1 helper-compile). All pass.
+Plan §2 + rule 7 (day-1 contract). Single test file exercising every failure mode of the load-bearing invariant. Test fixtures: FailingAuditAnchor (always returns AuditError::Storage; ready()=Ready so /readyz pre-check doesn't pre-fail), CountingStsClient (Arc<AtomicUsize> tracks assume_role calls so cases (b)-(d) can assert "STS NEVER called"). AuditTopology enum drives registry composition per test.
+Phase 0 simplifications documented in test comments:
+- Case (d) missing-grant: Phase B introduces real grants; Phase 0 stand-in is forged-JWT-rejected-at-verify.
+- Case (f) dual-anchor partial-failure: Phase 0 only asserts short-circuit + no-creds; full quarantine state machine ships in Phase C alongside EvmTestnetAnchor.
+
+#### US-016 — Phase 0 codex review round 1 — IN FLIGHT
+Subagent: codex-rescue dispatched 2026-05-05 with 15 attack vectors covering mint dispatch, audit gate, nonce TOCTOU, keypair purpose tagging, plugin registry empties, Tier-2 backoff, /readyz JSON shape, JWT-shape heuristic false-positives, JSON vs CBOR canonicalization, per-call sig endpoint binding, OmniAccount hash boundary, test coverage of mint_v2 branches, refuse-to-boot completeness, dead code in handlers::health, AppState dual-audit transition. Findings + verdict will land in docs/spec/plans/issue-64/codex-round1.md when the review completes.
+
+### Session 2 totals
+
+cargo test -p agentkeys-broker-server: ~115 tests passing (79 lib unit + 9 mint_flow + 6 oidc_flow + 4 auth_wallet_flow + 5 mint_v2_flow + 7 invariant_load_bearing + 4 boot + 1 healthz handler reused). Workspace build green at every commit. clippy clean.
+
+15 of 16 Phase 0 stories committed; US-016 in flight via subagent.
