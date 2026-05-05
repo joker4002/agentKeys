@@ -19,8 +19,8 @@ use state::SharedState;
 
 pub fn create_router(state: SharedState) -> Router {
     Router::new()
-        .route("/healthz", get(handlers::health::healthz))
-        .route("/readyz", get(handlers::health::readyz))
+        .route("/healthz", get(handlers::broker_status::healthz))
+        .route("/readyz", get(handlers::broker_status::readyz))
         .route("/v1/mint-aws-creds", post(handlers::mint::mint_aws_creds))
         .route(
             "/.well-known/openid-configuration",

@@ -263,10 +263,22 @@ async fn healthz_returns_ok_without_backend_round_trip() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
 
+// Stage 7 §3.5 + §7: /readyz now aggregates plug-in Readiness +
+// Tier-2 atomic flags (set asynchronously by spawn_tier2_probes in
+// main.rs). The test helper does not spawn that probe, so we flip
+// the atomic directly to simulate a successful probe.
+fn mark_backend_reachable(state: &agentkeys_broker_server::state::AppState) {
+    state
+        .tier2
+        .backend_reachable
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[tokio::test]
-async fn readyz_succeeds_when_backend_and_stub_sts_are_up() {
+async fn readyz_succeeds_when_tier2_backend_reachable_and_plugins_ready() {
     let backend_url = spawn_mock_backend().await;
-    let (broker_url, _) = spawn_broker(backend_url).await;
+    let (broker_url, state) = spawn_broker(backend_url).await;
+    mark_backend_reachable(&state);
 
     let client = reqwest::Client::new();
     let resp = client.get(format!("{}/readyz", broker_url)).send().await.unwrap();
@@ -274,30 +286,39 @@ async fn readyz_succeeds_when_backend_and_stub_sts_are_up() {
 }
 
 #[tokio::test]
-async fn readyz_reports_503_when_sts_is_down() {
+async fn readyz_reports_503_when_tier2_backend_not_reachable() {
+    // Default Tier2State.backend_reachable = false; aggregator returns 503.
     let backend_url = spawn_mock_backend().await;
-    let (broker_url, _) = spawn_broker_with_sts(
-        backend_url,
-        Arc::new(StubStsClient::failing("simulated bad creds")),
-    )
-    .await;
+    let (broker_url, _state) = spawn_broker(backend_url).await;
 
     let client = reqwest::Client::new();
     let resp = client.get(format!("{}/readyz", broker_url)).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["sts_ok"], false);
-    assert_eq!(body["backend_ok"], true);
+    assert_eq!(body["status"], "unready");
+    let checks = body["checks"].as_array().unwrap();
+    assert!(
+        checks.iter().any(|c| c["name"] == "tier2/backend"),
+        "expected tier2/backend in checks list, got body: {}",
+        body
+    );
+    assert!(
+        checks.iter().any(|c| c["docs"].as_str().is_some()),
+        "every check must carry a docs URL"
+    );
 }
 
 #[tokio::test]
-async fn readyz_reports_503_when_backend_is_down() {
+async fn readyz_503_remains_when_dead_backend_url_configured() {
+    // Even with a dead URL configured, the synchronous /readyz reads
+    // cached atomics — so we just confirm it's still 503 in the absence
+    // of a successful Tier-2 probe.
     let dead_backend = "http://127.0.0.1:1".to_string();
-    let (broker_url, _) = spawn_broker(dead_backend).await;
+    let (broker_url, _state) = spawn_broker(dead_backend).await;
 
     let client = reqwest::Client::new();
     let resp = client.get(format!("{}/readyz", broker_url)).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["backend_ok"], false);
+    assert_eq!(body["status"], "unready");
 }
