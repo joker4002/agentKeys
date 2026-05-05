@@ -20,22 +20,16 @@ build. The pre-Stage-7 broker (PR #60 + PR #61) continues to use
 
 ## Quickstart
 
-The Stage 7 reference deployment hosts the broker at
-`broker.litentry.org` and the legacy backend at
-`backend.litentry.org`. Substitute your own DNS names for any
-self-hosted deployment — the env-var values below are templates, not
-secrets.
-
 ```bash
 # 1. Generate both ES256 keypairs (Plan §3.5.6 — purpose-tagged).
 agentkeys-broker-server keygen --purpose oidc    --out  ~/.agentkeys/broker/oidc-keypair.json
 agentkeys-broker-server keygen --purpose session --out  ~/.agentkeys/broker/session-keypair.json
 chmod 600 ~/.agentkeys/broker/{oidc,session}-keypair.json
 
-# 2. Set the load-bearing env vars (Stage 7 Litentry reference deployment).
-export BROKER_BACKEND_URL=https://backend.litentry.org
+# 2. Set the load-bearing env vars.
+export BROKER_BACKEND_URL=https://backend.example.com
 export BROKER_DATA_ROLE_ARN=arn:aws:iam::000000000000:role/agentkeys-data-role
-export BROKER_OIDC_ISSUER=https://broker.litentry.org
+export BROKER_OIDC_ISSUER=https://broker.example.com
 export BROKER_OIDC_KEYPAIR_PATH=~/.agentkeys/broker/oidc-keypair.json
 export BROKER_SESSION_KEYPAIR_PATH=~/.agentkeys/broker/session-keypair.json
 export BROKER_AUTH_METHODS=wallet_sig
@@ -48,81 +42,6 @@ agentkeys-broker-server --bind 127.0.0.1 --port 8091
 
 For a curl-driven sanity test of the SIWE → mint-session-JWT flow, see
 [§Smoke Validation](#smoke-validation) below.
-
-### Stage 7 Litentry reference deployment — full env file
-
-For a production-ready testnet deployment that exercises every Phase
-A-D feature, copy `/etc/agentkeys/broker.env` from the template below
-and `chmod 600`. The only values you must change are the AWS account
-ID (`000000000000` → your account), the OAuth2 client_id, and the EVM
-contract address (filled in after `forge create`).
-
-```bash
-# /etc/agentkeys/broker.env — Stage 7 Litentry reference deployment.
-
-# --- Core ---
-BROKER_BACKEND_URL=https://backend.litentry.org
-BROKER_DATA_ROLE_ARN=arn:aws:iam::000000000000:role/agentkeys-data-role
-BROKER_OIDC_ISSUER=https://broker.litentry.org
-BROKER_AWS_REGION=us-east-1
-BROKER_AUDIT_DB_PATH=/var/lib/agentkeys/broker/audit.sqlite
-BROKER_DATA_DIR=/var/lib/agentkeys/broker/data
-BROKER_SHUTDOWN_GRACE_SECONDS=30
-
-# --- Keypairs (Plan §3.5.6 — both required, purpose-tagged) ---
-BROKER_OIDC_KEYPAIR_PATH=/etc/agentkeys/oidc-keypair.json
-BROKER_SESSION_KEYPAIR_PATH=/etc/agentkeys/session-keypair.json
-BROKER_OIDC_JWT_TTL_SECONDS=300
-BROKER_SESSION_JWT_TTL_SECONDS=18000
-
-# --- Auth methods (Phase 0 + A.1 + A.2) ---
-BROKER_AUTH_METHODS=wallet_sig,email_link,oauth2_google
-BROKER_WALLET_PROVISIONER=client_keystore
-
-# --- Email-link (Phase A.1) ---
-BROKER_EMAIL_HMAC_KEY_PATH=/etc/agentkeys/email.hmac.key
-BROKER_EMAIL_FROM_ADDRESS=auth@litentry.org
-BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY=5
-BROKER_EMAIL_RATE_LIMIT_PER_IP_MINUTELY=30
-
-# --- OAuth2 / Google (Phase A.2) ---
-BROKER_OAUTH2_PROVIDERS=google
-BROKER_OAUTH2_REDIRECT_URI=https://broker.litentry.org/auth/oauth2/callback
-BROKER_OAUTH2_GOOGLE_CLIENT_ID=YOUR-GOOGLE-CLIENT-ID.apps.googleusercontent.com
-BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE=/etc/agentkeys/oauth2-google.secret
-BROKER_OAUTH2_STATE_HMAC_KEY_PATH=/etc/agentkeys/oauth2-state.hmac.key
-BROKER_OAUTH2_JWKS_TTL_SECONDS=3600
-BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY=30
-
-# --- Audit anchors (Phase C — Base Sepolia testnet) ---
-BROKER_AUDIT_ANCHORS=sqlite,evm_testnet
-BROKER_AUDIT_POLICY=dual_strict
-BROKER_EVM_RPC_URL=https://sepolia.base.org
-BROKER_EVM_CHAIN_ID=84532
-BROKER_EVM_CONTRACT_ADDRESS=0x0000000000000000000000000000000000000000   # ← fill in after forge create
-BROKER_EVM_FEE_PAYER_KEYSTORE=/etc/agentkeys/fee-payer.keystore.json
-BROKER_EVM_FEE_PAYER_PASSWORD_FILE=/etc/agentkeys/fee-payer.pw
-BROKER_EVM_FEE_PAYER_MIN_BALANCE=1000000000000000   # 0.001 ETH in wei
-BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET=100
-
-# --- Per-identity rate limits (Phase C gas-drain) ---
-BROKER_RATE_LIMIT_MINTS_PER_HOUR_PER_OMNI=30
-BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP=60
-
-# --- Phase D-rest hardening ---
-BROKER_METRICS_ENABLED=true
-BROKER_REQUEST_BODY_LIMIT_BYTES=1048576
-
-# --- Recovery (Phase B) ---
-BROKER_RECOVERY_GRANT_DELAY_SECONDS=0   # 0 = no time-lock; raise to e.g. 86400 for 24h cooldown
-```
-
-Boot with:
-
-```bash
-set -a; . /etc/agentkeys/broker.env; set +a
-agentkeys-broker-server --bind 0.0.0.0 --port 8091
-```
 
 ---
 
@@ -343,7 +262,7 @@ trait surface and gated behind their own Cargo features for v1+.
    exactly as you'll configure `BROKER_OAUTH2_REDIRECT_URI`. Example:
 
    ```
-   https://broker.litentry.org/auth/oauth2/callback
+   https://broker.example.com/auth/oauth2/callback
    ```
 
    Google enforces an exact match — trailing slashes, scheme, host, and
@@ -427,7 +346,7 @@ verified-but-tampered grant).
 
 ```bash
 # Master creates a grant for daemon 0xabc to mint S3 creds for bots/0xabc/.
-curl -X POST https://broker.litentry.org/v1/grant/create \
+curl -X POST https://broker.example.com/v1/grant/create \
   -H "Authorization: Bearer $MASTER_SESSION_JWT" \
   -H "Content-Type: application/json" \
   -d '{
@@ -440,11 +359,11 @@ curl -X POST https://broker.litentry.org/v1/grant/create \
 # Returns {"grant_id":"grn-...","audit_proof":"eyJ...",...}
 
 # Master lists their grants.
-curl https://broker.litentry.org/v1/grant/list \
+curl https://broker.example.com/v1/grant/list \
   -H "Authorization: Bearer $MASTER_SESSION_JWT"
 
 # Master revokes a grant. Instant — one row update. Re-revoke is a no-op.
-curl -X POST https://broker.litentry.org/v1/grant/revoke \
+curl -X POST https://broker.example.com/v1/grant/revoke \
   -H "Authorization: Bearer $MASTER_SESSION_JWT" \
   -H "Content-Type: application/json" \
   -d '{"grant_id":"grn-..."}'
