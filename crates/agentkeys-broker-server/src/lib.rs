@@ -4,6 +4,7 @@ pub mod config;
 pub mod env;
 pub mod error;
 pub mod handlers;
+pub mod identity;
 pub mod oidc;
 pub mod plugins;
 pub mod state;

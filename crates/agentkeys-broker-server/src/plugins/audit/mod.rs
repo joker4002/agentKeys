@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use super::Readiness;
 
+#[cfg(feature = "audit-sqlite")]
+pub mod sqlite;
+
+#[cfg(feature = "audit-sqlite")]
+pub use sqlite::SqliteAnchor;
+
 /// The canonical record written to every configured audit anchor when a
 /// credential is minted. The `record_hash` is `SHA256(canonical_cbor(record))`
 /// computed once and used as the de-duplication key across anchors.

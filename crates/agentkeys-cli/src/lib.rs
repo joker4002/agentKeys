@@ -633,6 +633,9 @@ pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) 
                 agentkeys_types::AgentIdentity::Email(s) => format!("email:{s}"),
                 agentkeys_types::AgentIdentity::Ens(s) => format!("ens:{s}"),
                 agentkeys_types::AgentIdentity::WalletAddress(w) => w.0.clone(),
+                agentkeys_types::AgentIdentity::OAuth2 { provider, sub } => {
+                    format!("oauth2_{provider}:{sub}")
+                }
             };
             format!("Recover agent '{identity}'")
         }
