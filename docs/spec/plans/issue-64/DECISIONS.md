@@ -46,18 +46,18 @@ Per-phase decisions appended below as work proceeds.
 | US-005 dual keypair purpose | `130f684` | jwt/{mod,session,issue,verify}.rs + oidc.rs purpose field | 10/10 | PASS |
 | US-007 ClientSideKeystore | `61a737b` | storage/wallets.rs + plugins/wallet/{mod,keystore}.rs | 9/9 | PASS |
 | US-006 SiweWalletAuth | `51a5191` | storage/auth_nonces.rs + plugins/auth/{mod ⟵ ex auth.rs, wallet_sig}.rs + Cargo k256+sha3 | 11+7 | PASS |
+| US-003 tiered refuse-to-boot | `171d141` | boot.rs (new) + state.rs (extended AppState) + main.rs (rewritten) + lib.rs + tests fixtures updated | 4 + 9+6 | PASS |
+| US-012 broker_status /readyz | `7bbe20d` | handlers/broker_status.rs (new) + handlers/mod.rs + lib.rs route + tests/mint_flow.rs readyz updated | 9 readyz | PASS |
 
-Total: 7 of 16 Phase 0 stories complete. ~71 unit tests passing in agentkeys-broker-server. Workspace build green.
+Total: 9 of 16 Phase 0 stories complete. ~94 tests passing across lib + integration. Workspace build green. /readyz aggregator now lives — every plug-in's `ready()` + 4 Tier-2 atomics surface in a single structured JSON response with per-check runbook anchor URLs.
 
-## Remaining Phase 0 stories (9)
+## Remaining Phase 0 stories (7)
 
-In priority order (US-006 unblocks 9/10/11):
-- US-003 boot.rs Tier-1/Tier-2 wiring + main.rs integration
+In priority order:
 - US-009 POST /v1/auth/wallet/{start,verify} endpoints (uses SiweWalletAuth)
 - US-010 POST /v1/auth/exchange backward-compat shim
 - US-011 /v1/mint-aws-creds upgrade (session JWT + per-call sig + audit gate)
-- US-012 broker_status.rs operational /readyz aggregator
-- US-013 tests/invariant_load_bearing.rs (all 6 cases)
+- US-013 tests/invariant_load_bearing.rs (all 6 cases — depends on US-009/010/011)
 - US-014 harness/stage-7-phase0-smoke.sh + stage-7-done.sh skeleton
 - US-015 docs/operator-runbook-stage7.md draft (env table from env.rs)
 - US-016 Phase 0 codex review round 1

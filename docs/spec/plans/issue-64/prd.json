@@ -53,7 +53,8 @@
         {
           "id": "US-003",
           "title": "Tiered refuse-to-boot (boot.rs) per plan §6",
-          "passes": false,
+          "passes": true,
+          "commit": "171d141",
           "acceptanceCriteria": [
             "src/boot.rs exists with run_tier1() (sync, refuse-to-boot) and run_tier2(state) (async, boot-to-Unready)",
             "Tier-1 validates all required env vars present, types parse, paths readable, OIDC issuer https in non-dev mode (BROKER_DEV_MODE=true relaxes)",
@@ -182,7 +183,8 @@
         {
           "id": "US-012",
           "title": "broker_status.rs — operational /readyz aggregating plugin readiness (§7)",
-          "passes": false,
+          "passes": true,
+          "commit": "7bbe20d",
           "acceptanceCriteria": [
             "src/handlers/broker_status.rs replaces existing readyz handler",
             "Iterates registry plugins + Tier-2 reachability state, builds JSON {status, degraded, checks: [{name, status, reason, since, docs}], ready: [...]}",
