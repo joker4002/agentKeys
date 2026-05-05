@@ -146,7 +146,8 @@
         {
           "id": "US-009",
           "title": "POST /v1/auth/wallet/{start,verify} endpoints",
-          "passes": false,
+          "passes": true,
+          "commit": "0959acd",
           "acceptanceCriteria": [
             "src/handlers/auth/{wallet_start.rs, wallet_verify.rs} new files",
             "POST /v1/auth/wallet/start: body {address, chain_id} → 200 {request_id, siwe_message}",
@@ -158,7 +159,8 @@
         {
           "id": "US-010",
           "title": "POST /v1/auth/exchange backward-compat shim (§3.5.7)",
-          "passes": false,
+          "passes": true,
+          "commit": "0959acd",
           "acceptanceCriteria": [
             "src/handlers/auth/exchange.rs accepts the legacy backend-validated bearer (current src/auth.rs path), returns a session JWT after one validation",
             "Bearer validated by HTTP-calling BROKER_BACKEND_URL/session/validate (existing path)",
@@ -212,7 +214,8 @@
         {
           "id": "US-014",
           "title": "harness/stage-7-phase0-smoke.sh + stage-7-done.sh skeleton",
-          "passes": false,
+          "passes": true,
+          "commit": "0daaf2c",
           "acceptanceCriteria": [
             "harness/stage-7-phase0-smoke.sh: starts broker with v0 default features, curl-driven SIWE → mint flow against a fixture wallet, asserts SQLite row appears, asserts /readyz returns 200",
             "Script exits 0 on success, non-zero on any assertion failure",
@@ -223,7 +226,8 @@
         {
           "id": "US-015",
           "title": "docs/operator-runbook-stage7.md — draft (§Phase 0 deliverable)",
-          "passes": false,
+          "passes": true,
+          "commit": "0daaf2c",
           "acceptanceCriteria": [
             "docs/operator-runbook-stage7.md created with sections: Prerequisites, Env Vars (auto-generated table from env.rs), Boot Sequence (Tier-1 then Tier-2), TLS termination, OIDC issuer DNS, AWS IAM trust, Smoke validation, Troubleshooting (top 5 errors with cause/fix/anchor)",
             "Env-var table includes every const from env.rs grouped by Group",
