@@ -38,5 +38,53 @@ pub fn create_router(state: SharedState) -> Router {
             post(handlers::auth::wallet_verify::wallet_verify),
         )
         .route("/v1/auth/exchange", post(handlers::auth::exchange::exchange))
+        .pipe(register_email_link_routes)
         .with_state(state)
+}
+
+/// Email-link routes — feature-gated via `auth-email-link`. Defined as
+/// a free function (rather than inline) so the no-feature build still
+/// compiles cleanly.
+#[cfg(feature = "auth-email-link")]
+fn register_email_link_routes(router: Router<state::SharedState>) -> Router<state::SharedState> {
+    router
+        .route(
+            "/v1/auth/email/request",
+            post(handlers::auth::email_request::email_request),
+        )
+        .route(
+            "/v1/auth/email/verify",
+            post(handlers::auth::email_verify::email_verify)
+                .get(handlers::auth::email_verify::email_verify_method_not_allowed),
+        )
+        .route(
+            "/v1/auth/email/status/:request_id",
+            get(handlers::auth::email_status::email_status),
+        )
+        .route(
+            "/auth/email/landing",
+            get(handlers::auth::email_landing::email_landing),
+        )
+}
+
+#[cfg(not(feature = "auth-email-link"))]
+fn register_email_link_routes(router: Router<state::SharedState>) -> Router<state::SharedState> {
+    router
+}
+
+/// Tiny helper trait that lets `create_router` chain `pipe(...)` over
+/// the email-link route registration without a noisy intermediate let-binding.
+trait Pipe: Sized {
+    fn pipe<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Self) -> R;
+}
+
+impl<T> Pipe for T {
+    fn pipe<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Self) -> R,
+    {
+        f(self)
+    }
 }

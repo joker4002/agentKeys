@@ -6,6 +6,14 @@
 //!   legacy backend-validated bearer for a new session JWT.
 
 pub mod exchange;
+#[cfg(feature = "auth-email-link")]
+pub mod email_landing;
+#[cfg(feature = "auth-email-link")]
+pub mod email_request;
+#[cfg(feature = "auth-email-link")]
+pub mod email_status;
+#[cfg(feature = "auth-email-link")]
+pub mod email_verify;
 pub mod wallet_start;
 pub mod wallet_verify;
 

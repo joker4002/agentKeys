@@ -38,6 +38,15 @@ pub struct AppState {
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
     pub tier2: Arc<Tier2State>,
+    /// Concrete handle to the EmailLink plugin (Phase A.1, US-018).
+    /// `None` when `auth-email-link` feature is disabled OR when
+    /// `BROKER_AUTH_METHODS` doesn't include `email_link`. The trait-
+    /// object form is also registered in `registry.auth["email_link"]`
+    /// for the trait-driven CLI poll path; this concrete reference
+    /// exists so the browser-side `/v1/auth/email/verify` handler can
+    /// call `consume_token` + `mark_verified` directly.
+    #[cfg(feature = "auth-email-link")]
+    pub email_link: Option<Arc<crate::plugins::auth::EmailLinkAuth>>,
 }
 
 pub type SharedState = Arc<AppState>;

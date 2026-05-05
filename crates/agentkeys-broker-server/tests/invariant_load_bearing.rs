@@ -238,6 +238,8 @@ async fn spawn_broker(
         wallet_store,
         nonce_store,
         tier2: Arc::new(Tier2State::default()),
+        #[cfg(feature = "auth-email-link")]
+        email_link: None,
     });
     state
         .tier2

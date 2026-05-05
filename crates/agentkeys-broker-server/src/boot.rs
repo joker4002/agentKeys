@@ -39,6 +39,15 @@ pub struct BootArtifacts {
     pub audit_policy: AuditPolicy,
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
+    /// Concrete EmailLink plugin handle (Phase A.1, US-018). Populated
+    /// when `email_link` is in `BROKER_AUTH_METHODS` AND the
+    /// `auth-email-link` feature is compiled in. The registry's auth
+    /// HashMap also carries this plugin as an `Arc<dyn UserAuthMethod>`
+    /// for the trait-driven CLI path; this field exists so the browser-
+    /// side `/v1/auth/email/verify` handler can call `consume_token` +
+    /// `mark_verified` on the concrete type.
+    #[cfg(feature = "auth-email-link")]
+    pub email_link: Option<Arc<crate::plugins::auth::EmailLinkAuth>>,
 }
 
 /// Format and emit a `BOOT_FAIL: …` error to stderr-bound logs and return
@@ -167,7 +176,7 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
     })?;
 
     // 7. Build the PluginRegistry. v0 default is wallet_sig + client_keystore + sqlite.
-    let registry = build_registry(
+    let built = build_registry(
         &auth_methods_raw,
         &wallet_provisioner_name,
         &audit_anchors_raw,
@@ -177,13 +186,24 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
     )?;
 
     Ok(BootArtifacts {
-        registry: Arc::new(registry),
+        registry: Arc::new(built.registry),
         oidc_keypair,
         session_keypair,
         audit_policy,
         wallet_store,
         nonce_store,
+        #[cfg(feature = "auth-email-link")]
+        email_link: built.email_link,
     })
+}
+
+/// Internal struct returned by `build_registry` so we can carry both
+/// the trait-object PluginRegistry AND the concrete EmailLinkAuth
+/// handle out together.
+struct BuiltRegistry {
+    registry: PluginRegistry,
+    #[cfg(feature = "auth-email-link")]
+    email_link: Option<Arc<crate::plugins::auth::EmailLinkAuth>>,
 }
 
 /// Synchronous probe of which Tier-2 reachability checks are enabled.
@@ -252,13 +272,15 @@ fn build_registry(
     nonce_store: Arc<AuthNonceStore>,
     wallet_store: Arc<WalletStore>,
     config: &BrokerConfig,
-) -> anyhow::Result<PluginRegistry> {
+) -> anyhow::Result<BuiltRegistry> {
     use crate::plugins::auth::UserAuthMethod;
     use crate::plugins::wallet::WalletProvisioner;
 
     // Auth methods.
     let mut auth_map: std::collections::HashMap<String, Arc<dyn UserAuthMethod>> =
         std::collections::HashMap::new();
+    #[cfg(feature = "auth-email-link")]
+    let mut email_link_concrete: Option<Arc<crate::plugins::auth::EmailLinkAuth>> = None;
     for method in auth_methods_raw.split(',').map(str::trim) {
         match method {
             #[cfg(feature = "auth-wallet-sig")]
@@ -271,6 +293,111 @@ fn build_registry(
                     config.oidc_issuer.clone(),
                 );
                 auth_map.insert("wallet_sig".to_string(), Arc::new(plugin));
+            }
+            #[cfg(feature = "auth-email-link")]
+            "email_link" => {
+                use crate::plugins::auth::{EmailLinkAuth, StubEmailSender};
+                use crate::storage::{EmailRateLimitStore, EmailTokenStore};
+                // HMAC key
+                let hmac_path = std::env::var(env::BROKER_EMAIL_HMAC_KEY_PATH).map_err(|_| {
+                    boot_fail(
+                        env::BROKER_EMAIL_HMAC_KEY_PATH,
+                        "(unset)",
+                        "required when email_link is in BROKER_AUTH_METHODS",
+                        "email-hmac-key",
+                    )
+                })?;
+                let hmac_key = std::fs::read(&hmac_path).map_err(|e| {
+                    boot_fail(
+                        env::BROKER_EMAIL_HMAC_KEY_PATH,
+                        &hmac_path,
+                        format!("read failed: {}", e),
+                        "email-hmac-key",
+                    )
+                })?;
+                let from_address =
+                    std::env::var(env::BROKER_EMAIL_FROM_ADDRESS).map_err(|_| {
+                        boot_fail(
+                            env::BROKER_EMAIL_FROM_ADDRESS,
+                            "(unset)",
+                            "required when email_link is in BROKER_AUTH_METHODS",
+                            "email-from-address",
+                        )
+                    })?;
+                // Stores: SQLite files under config.audit_db_path's parent dir.
+                let parent = config
+                    .audit_db_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let token_store = Arc::new(
+                    EmailTokenStore::open(&parent.join("email_tokens.sqlite")).map_err(|e| {
+                        boot_fail(
+                            env::BROKER_AUDIT_DB_PATH,
+                            &parent.display().to_string(),
+                            format!("EmailTokenStore: {}", e),
+                            "email-tokens-db",
+                        )
+                    })?,
+                );
+                let rl_store = Arc::new(
+                    EmailRateLimitStore::open(&parent.join("email_rate_limits.sqlite"))
+                        .map_err(|e| {
+                            boot_fail(
+                                env::BROKER_AUDIT_DB_PATH,
+                                &parent.display().to_string(),
+                                format!("EmailRateLimitStore: {}", e),
+                                "email-rate-limits-db",
+                            )
+                        })?,
+                );
+                // Rate-limit defaults.
+                let per_email = std::env::var(env::BROKER_EMAIL_RATE_LIMIT_PER_EMAIL_HOURLY)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(5);
+                let per_ip = std::env::var(env::BROKER_EMAIL_RATE_LIMIT_PER_IP_MINUTELY)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(30);
+                // Landing URL base derived from oidc_issuer host. Note:
+                // production deployments typically front the broker behind
+                // a reverse proxy; the operator can override via a future
+                // BROKER_EMAIL_LANDING_URL_BASE env var (V0.1-FOLLOWUPS).
+                let landing_base = format!(
+                    "{}/auth/email/landing",
+                    config.oidc_issuer.trim_end_matches('/')
+                );
+                // SES verify cache path.
+                let data_dir = std::env::var(env::BROKER_DATA_DIR)
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| parent.clone());
+                let ses_cache_path = data_dir.join("ses-verify.json");
+                // Stub email sender for Phase A.1; real SES wiring lands
+                // as a fast-follow per V0.1-FOLLOWUPS R2-F8.
+                let sender = Arc::new(StubEmailSender::new());
+                let plugin = EmailLinkAuth::new(
+                    sender,
+                    Arc::clone(&token_store),
+                    Arc::clone(&rl_store),
+                    from_address,
+                    landing_base,
+                    hmac_key,
+                    ses_cache_path,
+                    per_email,
+                    per_ip,
+                )
+                .map_err(|e| {
+                    boot_fail(
+                        env::BROKER_EMAIL_HMAC_KEY_PATH,
+                        &hmac_path,
+                        format!("EmailLinkAuth::new: {}", e),
+                        "email-link-construct",
+                    )
+                })?;
+                let plugin_arc = Arc::new(plugin);
+                auth_map.insert("email_link".to_string(), plugin_arc.clone());
+                email_link_concrete = Some(plugin_arc);
             }
             "" => {
                 // Empty entry from `BROKER_AUTH_METHODS=""` or trailing comma.
@@ -340,10 +467,14 @@ fn build_registry(
         ));
     }
 
-    Ok(PluginRegistry {
-        auth: auth_map,
-        wallet,
-        audit,
+    Ok(BuiltRegistry {
+        registry: PluginRegistry {
+            auth: auth_map,
+            wallet,
+            audit,
+        },
+        #[cfg(feature = "auth-email-link")]
+        email_link: email_link_concrete,
     })
 }
 

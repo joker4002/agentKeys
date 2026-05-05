@@ -101,6 +101,8 @@ async fn main() -> anyhow::Result<()> {
         wallet_store: boot_artifacts.wallet_store,
         nonce_store: boot_artifacts.nonce_store,
         tier2: Arc::clone(&tier2),
+        #[cfg(feature = "auth-email-link")]
+        email_link: boot_artifacts.email_link,
     });
 
     // Spawn Tier-2 reachability probes asynchronously. /readyz returns

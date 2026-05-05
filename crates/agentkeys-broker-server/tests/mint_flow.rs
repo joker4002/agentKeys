@@ -108,6 +108,8 @@ async fn spawn_broker_with_sts(
         wallet_store,
         nonce_store,
         tier2: std::sync::Arc::new(agentkeys_broker_server::state::Tier2State::default()),
+        #[cfg(feature = "auth-email-link")]
+        email_link: None,
     });
     let app = create_router(state.clone());
 
