@@ -45,5 +45,19 @@ Per-phase decisions appended below as work proceeds.
 | US-004 + US-008 OmniAccount + SqliteAnchor | `80c01f6` | identity/, plugins/audit/{mod,sqlite}.rs + 4 cross-crate match-arm fixes | 9 + 8 | PASS |
 | US-005 dual keypair purpose | `130f684` | jwt/{mod,session,issue,verify}.rs + oidc.rs purpose field | 10/10 | PASS |
 | US-007 ClientSideKeystore | `61a737b` | storage/wallets.rs + plugins/wallet/{mod,keystore}.rs | 9/9 | PASS |
+| US-006 SiweWalletAuth | `51a5191` | storage/auth_nonces.rs + plugins/auth/{mod ⟵ ex auth.rs, wallet_sig}.rs + Cargo k256+sha3 | 11+7 | PASS |
 
-Total: 6 of 16 Phase 0 stories complete. ~51 unit tests passing in agentkeys-broker-server. Workspace build green.
+Total: 7 of 16 Phase 0 stories complete. ~71 unit tests passing in agentkeys-broker-server. Workspace build green.
+
+## Remaining Phase 0 stories (9)
+
+In priority order (US-006 unblocks 9/10/11):
+- US-003 boot.rs Tier-1/Tier-2 wiring + main.rs integration
+- US-009 POST /v1/auth/wallet/{start,verify} endpoints (uses SiweWalletAuth)
+- US-010 POST /v1/auth/exchange backward-compat shim
+- US-011 /v1/mint-aws-creds upgrade (session JWT + per-call sig + audit gate)
+- US-012 broker_status.rs operational /readyz aggregator
+- US-013 tests/invariant_load_bearing.rs (all 6 cases)
+- US-014 harness/stage-7-phase0-smoke.sh + stage-7-done.sh skeleton
+- US-015 docs/operator-runbook-stage7.md draft (env table from env.rs)
+- US-016 Phase 0 codex review round 1

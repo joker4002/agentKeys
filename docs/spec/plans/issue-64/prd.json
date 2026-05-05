@@ -98,7 +98,8 @@
         {
           "id": "US-006",
           "title": "WalletSig plugin — SIWE (EIP-4361) wrapping EIP-191 (§3.5.1)",
-          "passes": false,
+          "passes": true,
+          "commit": "51a5191",
           "acceptanceCriteria": [
             "src/plugins/auth/wallet_sig.rs implements UserAuthMethod for SiweWallet",
             "challenge() generates a SIWE message body with domain (from BROKER_OIDC_ISSUER host), URI, version, chain_id, nonce (32-byte), issued_at, expiration_time (issued_at + 45min), resources",
