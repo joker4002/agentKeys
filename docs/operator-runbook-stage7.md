@@ -29,7 +29,7 @@ chmod 600 ~/.agentkeys/broker/{oidc,session}-keypair.json
 # 2. Set the load-bearing env vars.
 export BROKER_BACKEND_URL=https://backend.example.com
 export BROKER_DATA_ROLE_ARN=arn:aws:iam::000000000000:role/agentkeys-data-role
-export BROKER_OIDC_ISSUER=https://broker.example.com
+export BROKER_OIDC_ISSUER=https://broker.litentry.org
 export BROKER_OIDC_KEYPAIR_PATH=~/.agentkeys/broker/oidc-keypair.json
 export BROKER_SESSION_KEYPAIR_PATH=~/.agentkeys/broker/session-keypair.json
 export BROKER_AUTH_METHODS=wallet_sig
@@ -262,7 +262,7 @@ trait surface and gated behind their own Cargo features for v1+.
    exactly as you'll configure `BROKER_OAUTH2_REDIRECT_URI`. Example:
 
    ```
-   https://broker.example.com/auth/oauth2/callback
+   https://broker.litentry.org/auth/oauth2/callback
    ```
 
    Google enforces an exact match — trailing slashes, scheme, host, and
@@ -346,7 +346,7 @@ verified-but-tampered grant).
 
 ```bash
 # Master creates a grant for daemon 0xabc to mint S3 creds for bots/0xabc/.
-curl -X POST https://broker.example.com/v1/grant/create \
+curl -X POST https://broker.litentry.org/v1/grant/create \
   -H "Authorization: Bearer $MASTER_SESSION_JWT" \
   -H "Content-Type: application/json" \
   -d '{
@@ -359,11 +359,11 @@ curl -X POST https://broker.example.com/v1/grant/create \
 # Returns {"grant_id":"grn-...","audit_proof":"eyJ...",...}
 
 # Master lists their grants.
-curl https://broker.example.com/v1/grant/list \
+curl https://broker.litentry.org/v1/grant/list \
   -H "Authorization: Bearer $MASTER_SESSION_JWT"
 
 # Master revokes a grant. Instant — one row update. Re-revoke is a no-op.
-curl -X POST https://broker.example.com/v1/grant/revoke \
+curl -X POST https://broker.litentry.org/v1/grant/revoke \
   -H "Authorization: Bearer $MASTER_SESSION_JWT" \
   -H "Content-Type: application/json" \
   -d '{"grant_id":"grn-..."}'
