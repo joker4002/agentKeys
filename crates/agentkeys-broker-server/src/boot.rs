@@ -350,10 +350,7 @@ fn build_registry(
 /// Extract host portion from a URL like `https://broker.example.com/path` →
 /// `broker.example.com`. Used for the SIWE `domain` field.
 fn url_host(url: &str) -> String {
-    let after_scheme = url
-        .splitn(2, "://")
-        .nth(1)
-        .unwrap_or(url);
+    let after_scheme = url.split_once("://").map(|x| x.1).unwrap_or(url);
     after_scheme
         .split('/')
         .next()
