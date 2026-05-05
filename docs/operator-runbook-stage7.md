@@ -20,16 +20,39 @@ build. The pre-Stage-7 broker (PR #60 + PR #61) continues to use
 
 ## Quickstart
 
+This block reuses the env vars set by [`docs/cloud-setup.md`](./cloud-setup.md)
+§0 (`REGION`, `BROKER_HOST`, `ACCOUNT_ID`) and the role ARN created by
+§3.2. **Run cloud-setup.md §0 + §3 + §4 first** — the broker has no
+useful state without those resources.
+
 ```bash
+# (Source the same shell vars cloud-setup.md §0 sets. If you've already
+#  run cloud-setup.md in this shell they are already exported.)
+awsp agentkeys-admin
+export REGION=us-east-1
+export BROKER_HOST=broker.litentry.org
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
 # 1. Generate both ES256 keypairs (Plan §3.5.6 — purpose-tagged).
 agentkeys-broker-server keygen --purpose oidc    --out  ~/.agentkeys/broker/oidc-keypair.json
 agentkeys-broker-server keygen --purpose session --out  ~/.agentkeys/broker/session-keypair.json
 chmod 600 ~/.agentkeys/broker/{oidc,session}-keypair.json
 
 # 2. Set the load-bearing env vars.
-export BROKER_BACKEND_URL=https://backend.example.com
-export BROKER_DATA_ROLE_ARN=arn:aws:iam::000000000000:role/agentkeys-data-role
-export BROKER_OIDC_ISSUER=https://broker.litentry.org
+#    BROKER_BACKEND_URL: the legacy session-validation backend (mock-server
+#      in v0.1, real chain backend in v0.2+). `scripts/setup-broker-host.sh`
+#      installs the mock-server as a systemd unit on the broker host's
+#      loopback, so the value is `http://127.0.0.1:8090`. See "What is the
+#      backend?" below.
+#    BROKER_DATA_ROLE_ARN: the role created by cloud-setup.md §3.2 —
+#      derived from ACCOUNT_ID, not invented.
+#    BROKER_OIDC_ISSUER: the public hostname the broker advertises to AWS
+#      as its JWT issuer; AWS reads JWKS from <issuer>/.well-known/jwks.json.
+#      Per cloud-setup.md §4.1 this MUST be `https://$BROKER_HOST` exactly.
+export BROKER_BACKEND_URL=http://127.0.0.1:8090
+export BROKER_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
+export BROKER_AWS_REGION=$REGION
+export BROKER_OIDC_ISSUER=https://$BROKER_HOST
 export BROKER_OIDC_KEYPAIR_PATH=~/.agentkeys/broker/oidc-keypair.json
 export BROKER_SESSION_KEYPAIR_PATH=~/.agentkeys/broker/session-keypair.json
 export BROKER_AUTH_METHODS=wallet_sig
@@ -42,6 +65,53 @@ agentkeys-broker-server --bind 127.0.0.1 --port 8091
 
 For a curl-driven sanity test of the SIWE → mint-session-JWT flow, see
 [§Smoke Validation](#smoke-validation) below.
+
+### What is the backend? What is the OIDC issuer? Why two URLs?
+
+`BROKER_BACKEND_URL` and `BROKER_OIDC_ISSUER` look superficially similar
+(both are HTTP URLs, both belong to AgentKeys infrastructure) but they
+solve **opposite problems** and never refer to the same service.
+
+| | `BROKER_BACKEND_URL` | `BROKER_OIDC_ISSUER` |
+|---|---|---|
+| **Direction** | Broker calls **OUT** to it (server-to-server). | Broker is identified **AS** it (broker = the issuer). |
+| **Who reads it** | The broker process itself. | AWS IAM, when it validates a JWT during `sts:AssumeRoleWithWebIdentity`. |
+| **What lives there** | The legacy session-validation backend (`agentkeys-mock-server` today; chain backend in v0.2+). Exposes `/healthz` + `/session/validate`. | The broker itself — `<issuer>/.well-known/openid-configuration` and `<issuer>/.well-known/jwks.json` are served by the same `agentkeys-broker-server` process this runbook deploys. |
+| **Network exposure** | **Internal only.** `scripts/setup-broker-host.sh` colocates the mock-server on the broker host's loopback, so the value is `http://127.0.0.1:8090`. Never publicly reachable. | **Public-facing TLS-terminated URL.** AWS IAM must be able to fetch the JWKS over the open internet — exactly the URL given in `cloud-setup.md §4.1` (`https://broker.litentry.org`). |
+| **Validated against** | Broker's own readiness probe (Tier-2 `/healthz`). | AWS IAM matches the JWT's `iss` claim **byte-for-byte** at `AssumeRoleWithWebIdentity` time. Trailing slashes, scheme, path — all matter. |
+| **What it returns** | A JSON `{"valid":true,...}` body when the broker calls `POST /session/validate` with a legacy bearer. | A JWKS JSON document (the broker's ES256 public key, with `kid`). |
+| **Stage** | Pre-Stage-7 path. Post-Stage-7, Phase 0 SIWE wallet-sig auth replaces this for new daemons; the backend stays only to serve `/v1/auth/exchange` for legacy daemons during the migration window (Plan §3.5.7). | Stage 7 onward — the broker IS the issuer. Was previously stamped by the mock-server. |
+
+A concrete request flow makes the split obvious:
+
+```
+                                                       ┌─ BROKER_OIDC_ISSUER
+                                                       │  = https://broker.litentry.org
+                                                       │  (PUBLIC — AWS reaches this)
+┌──────────────────┐  legacy bearer        ┌───────────▼───────────┐
+│  agentkeys-cli   ├──────────────────────▶│ agentkeys-broker-     │
+│  / agentkeys-    │  /v1/mint-aws-creds   │ server                │
+│  daemon          │                       │                       │
+└──────────────────┘                       │ ┌───────────────────┐ │
+                                           │ │ POST /session/    │ │
+                                           │ │   validate        │ │
+                                           │ └─────────┬─────────┘ │
+                                           └───────────│───────────┘
+                                                       │
+                                                       ▼
+                                           ┌──────────────────────┐
+                                           │ agentkeys-mock-server│
+                                           │  on  127.0.0.1:8090  │ ← BROKER_BACKEND_URL
+                                           │  (INTERNAL — only the│
+                                           │   broker reaches it) │
+                                           └──────────────────────┘
+```
+
+**Two URLs, two trust relationships:**
+- `BROKER_BACKEND_URL` answers "is this caller's bearer token still valid?" — broker is the **client**, backend is the **server**.
+- `BROKER_OIDC_ISSUER` answers "AWS, here's a JWT, please trust it because the issuer URL serves a matching JWKS" — broker is the **server / identity provider**, AWS IAM is the **client**.
+
+Collapsing the two into one URL would either expose the legacy session-validation API to the public internet (security regression) or hide the JWKS behind a non-public hostname (AWS IAM's `create-open-id-connect-provider` would refuse to fetch it).
 
 ---
 
