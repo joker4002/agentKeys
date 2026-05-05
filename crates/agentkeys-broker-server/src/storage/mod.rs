@@ -18,6 +18,8 @@ pub mod grants;
 pub mod identity_links;
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth_pending;
+#[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
+pub mod rate_limit_mints;
 pub mod wallets;
 
 pub use auth_nonces::{AuthNonceStore, ConsumeOutcome};
@@ -29,4 +31,6 @@ pub use grants::{Grant, GrantConsumeOutcome, GrantStore};
 pub use identity_links::{IdentityLink, IdentityLinkStore};
 #[cfg(feature = "auth-oauth2")]
 pub use oauth_pending::{OAuth2PendingConsume, OAuth2PendingStatus, OAuth2PendingStore};
+#[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
+pub use rate_limit_mints::MintRateLimiter;
 pub use wallets::WalletStore;

@@ -640,6 +640,21 @@ fn build_registry(
             "sqlite" => {
                 audit.push(open_sqlite_anchor(config)?);
             }
+            #[cfg(feature = "audit-evm")]
+            "evm_testnet" => {
+                // Phase C US-031: real alloy-driven EVM anchor lands as
+                // a Phase E operator hardening task (alloy adds ~1m to
+                // compile time and requires a live Base Sepolia deploy).
+                // For v0 testnet the broker registers an `EvmStubAnchor`
+                // that simulates round-trip behavior without network I/O
+                // — operators flip BROKER_AUDIT_EVM_LIVE=true once they
+                // deploy AgentKeysAudit.sol via Foundry per runbook
+                // §evm-deploy. Tracked in V0.1-FOLLOWUPS as Phase E task.
+                use crate::plugins::audit::EvmStubAnchor;
+                let evm = std::sync::Arc::new(EvmStubAnchor::new())
+                    as std::sync::Arc<dyn crate::plugins::audit::AuditAnchor>;
+                audit.push(evm);
+            }
             "" => continue,
             other => {
                 return Err(boot_fail(

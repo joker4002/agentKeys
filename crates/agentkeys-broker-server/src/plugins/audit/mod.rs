@@ -10,9 +10,15 @@ use serde::{Deserialize, Serialize};
 
 use super::Readiness;
 
+pub mod breaker;
+#[cfg(feature = "audit-evm")]
+pub mod evm;
 #[cfg(feature = "audit-sqlite")]
 pub mod sqlite;
 
+pub use breaker::{BreakerConfig, BreakerError, BreakerState, CircuitBreaker};
+#[cfg(feature = "audit-evm")]
+pub use evm::{EvmAuditConfig, EvmAuditError, EvmStubAnchor};
 #[cfg(feature = "audit-sqlite")]
 pub use sqlite::SqliteAnchor;
 
