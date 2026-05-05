@@ -1,69 +1,138 @@
-# Stage 5a — Ralph progress log
+# Stage 7 — Ralph progress log (issue litentry/agentKeys#64)
 
-Started: 2026-04-16
+Started: 2026-05-05
+Plan: docs/spec/plans/issue-64/PLAN.md (mirror of ~/.claude/plans/now-i-just-merged-idempotent-plum.md)
+Reviewer: codex (per --critic=codex)
+Branch: claude/dazzling-mirzakhani-2a06bc (independent of sibling claude/quizzical-ellis-d6f1e9)
 
-## Context
-Stage 4 complete (15/11 tests passing per harness/stage-4-done.sh).
-Stage 5a PRD: .omc/prd.json with 15 stories.
-Source of truth: docs/spec/plans/development-stages.md Stage 5a section.
-Reviewer: architect (default).
+## Session 1 — 2026-05-05 — Phase 0 foundation (6 of 16 stories)
 
-## Learnings across iterations
-(append as discovered)
+### Context
 
-## Story log
+Issue #64 wants a pluggable broker (auth + wallet + audit layers) production-ready
+on testnet. Pre-PR: PR #61 (OIDC issuer + AWS-cred wiring) just merged to main.
+Sibling branch `claude/quizzical-ellis-d6f1e9` carries 6 codex rounds of prior work
+on the same idea — used as REFERENCE for which artifacts (Solidity contract,
+schema, breaker design) are worth harvesting, but starting structure fresh under
+the user's 11 process rules.
 
-### US-001 — ProvisionEvent enum in agentkeys-types — PASSED 2026-04-16
-Files: crates/agentkeys-types/src/provision.rs (new), crates/agentkeys-types/src/lib.rs (mod + re-exports).
-Tests: 5 new. cargo test -p agentkeys-types = 8/8 pass.
-Learning: initial attempt used `#[serde(tag="kind")]` on TripwireKind and `tag="code"` on ProvisionErrorCode. When nested inside ProvisionEvent variant fields, this produced double-nested JSON like `{"code":{"code":"..."}}`. Fixed by removing the inner tag attrs; unit-variant enums serialize cleanly as bare strings with rename_all="snake_case". Roundtrip works either way but the cleaner schema matters for the TypeScript mirror in US-006.
+Reviewer pass before implementation: 4 parallel reviews (CEO/eng/design/codex)
+landed actionable findings. Plan refined with §3.5 grounded in dexs-backend
+reference (port-vs-greenfield analysis): SIWE wrapping EIP-191, per-call daemon
+signatures on mint, single ES256 issuer with purpose tagging, fragment-token
+email-link, OAuth2 with id_token+PKCE+state-CSRF, capability grants as
+first-class data, master-gated recovery, gas-drain mitigations, tiered
+refuse-to-boot — all listed in DECISIONS.md.
 
-### US-002 — Provisioner crate skeleton + deps — PASSED 2026-04-16
-Files: crates/agentkeys-provisioner/Cargo.toml, src/lib.rs, src/error.rs, src/tripwire.rs, src/metrics.rs.
-ProvisionError enum uses thiserror with variants covering every failure shape from the plan: InProgress, SpawnFailed, SubprocessFailed, MalformedEvent, Timeout, Tripwire, VerificationFailed, VerificationEndpointDown, StoreFailed (includes obtained_key_masked for user recovery), Internal.
-to_code() method maps ProvisionError to ProvisionErrorCode for MCP responses.
-cargo check passes cleanly.
-Learning: the initial Write attempts for Cargo.toml + lib.rs failed with "File has not been read yet" because they were minimal pre-existing files. Must Read before Write even when the existing content is trivial.
+### VCS exception (D5)
 
-### US-003 — Rust orchestrator subprocess spawn + line-delimited JSON IPC parsing — PASSED 2026-04-16
-Files: crates/agentkeys-provisioner/src/subprocess.rs (new), lib.rs (re-exports).
-Implementation: tokio::process::Command with piped stdout/stderr, tokio::io::BufReader::lines() for line-by-line parsing, tokio::time::timeout for wall-clock enforcement, tokio::spawn for concurrent stdout/stderr readers + child wait. Child killed on timeout.
-Tests (5 pass): spawn_and_receive_progress_then_success, subprocess_timeout_triggers_error, ipc_malformed_json_aborts, subprocess_error_event_propagates_as_success_flag, subprocess_failed_exit_without_terminal_event.
-Design: non-zero exit WITHOUT a terminal (Success or Error) event is SubprocessFailed; with a terminal event it's a valid outcome (the subprocess announced its own failure). This lets scripts emit a structured error and exit non-zero cleanly.
-Learning: needed `use tokio::io::AsyncReadExt;` to bring read_to_string into scope for stderr collection. The compiler error was explicit about the fix.
+This is a git worktree, not a jj workspace. jj's working copy is the main
+repo at /Users/agent-jojo/Projects/agentKeys/ — it cannot see edits inside
+the worktree. Pragmatic exception: use `git` for commits inside the worktree.
 
-### US-004 — Concurrency mutex with PROVISION_IN_PROGRESS sentinel — PASSED 2026-04-16
-Files: crates/agentkeys-provisioner/src/orchestrator.rs (new).
-Implementation: Arc<Mutex<Option<ActiveProvision>>> on Provisioner; try_claim() returns a ProvisionGuard RAII handle. Second call returns Err(InProgress{active_service}) immediately. ProvisionGuard::drop clears the mutex, including poison recovery via a MutexExt trait that calls clear_poison().
-Tests (3 pass): concurrent_provision_rejected, guard_releases_on_drop (bonus), mutex_recovery_after_panic.
-Learning: MutexGuard poison recovery is tricky; handled by wrapping std::sync::Mutex::lock() with a custom path that extracts the inner value from PoisonError when needed, and a MutexExt trait that calls clear_poison() before relocking.
+### Story log — Phase 0 — COMPLETED
 
-### ARCHITECT REVIEW — Stage 5a CONDITIONAL_APPROVAL (2026-04-16, Opus tier)
+#### US-001 — src/env.rs centralized env-var module — PASSED 2026-05-05 (commit 32d3dd3)
+Files: crates/agentkeys-broker-server/src/env.rs (new, 51 const + Group enum + all() registry + print_table()),
+       src/lib.rs (mod env), src/config.rs (refactor — no raw BROKER_* literals remain).
+Plan home created: docs/spec/plans/issue-64/{PLAN.md, DECISIONS.md, AMBIGUITIES.md, V0.1-FOLLOWUPS.md, prd.json}.
+Tests: 5/5 (env::tests::*).
+Acceptance: ✓ all 5 criteria met. grep returns zero hits in src/config.rs.
+Learning: Group enum exhaustive match in tests forces compile-time update if a variant is added.
 
-Every acceptance criterion in US-001..US-015 met or defensibly equivalent. Follow-ups flagged as non-blocking Stage 5b work:
+#### US-002 — Plugin trait scaffolding — PASSED 2026-05-05 (commit d6e5bba)
+Files: crates/agentkeys-broker-server/src/plugins/{mod.rs, auth.rs, wallet.rs, audit.rs} (new),
+       src/lib.rs (mod), Cargo.toml (feature gates).
+Cargo features: default = [auth-wallet-sig, wallet-keystore, audit-sqlite] + opt-in
+                auth-email-link, auth-oauth2-google, audit-evm + v1+ stubs.
+Tests: 8/8 (plugins::tests::*, plugins::auth::tests::*, plugins::wallet::tests::*, plugins::audit::tests::*).
+Acceptance: ✓ all 8 criteria met.
+Learning: Per-trait error enums use thiserror with explicit variants matching plan §6 / §Phase C —
+          Storage / Network / CircuitOpen / BudgetExceeded / VerificationMismatch / NotFound / Internal.
 
-1. `orchestrator.rs:106-108` `re_verify_existing` is a placeholder returning `true` unconditionally. Duplicate provisions never hit the real verify endpoint. Fix in 5b: thread the verifier into `run_provision` or add `re_verify_credential(service, key)` to CredentialBackend.
-2. `cmd_provision` (cli/src/lib.rs) does not stream Progress events to stderr during subprocess. Requires orchestrator streaming-API refactor. 5b.
-3. Phantom chaos test emits `{code:"store_failed"}` instead of a dedicated `verification_failed` code. Add `ProvisionErrorCode::VerificationFailed` variant and wire through in 5b.
-4. US-009 uses hand-crafted HTML via `page.route()+route.fulfill()` instead of a literal `.har` file. Functionally equivalent for the hermetic regression seam; README documents the choice. Optional normalization in 5b.
+#### US-004 + US-008 (bundled) — OmniAccount + SqliteAnchor port — PASSED 2026-05-05 (commit 80c01f6)
+Files: src/identity/{mod.rs, omni_account.rs} (new),
+       src/plugins/audit/{mod.rs ⟵ ex audit.rs, sqlite.rs} (restructure + new),
+       agentkeys-types::AgentIdentity::OAuth2{provider,sub} variant added,
+       4 cross-crate match-arm updates.
+Tests: 9 (identity::tests::*) + 8 (plugins::audit::tests::*) — all pass.
+Plan §3.5 grounding: AGENTKEYS_CLIENT_ID = "agentkeys" pinned; distinct from dexs-backend's "wildmeta".
+Acceptance: ✓ all criteria for both stories met.
+Learning: Adding AgentIdentity::OAuth2 cascades match-arm errors to 5 sites — borrow checker doing its
+          job. Module-conflict E0761: had `plugins/audit.rs` AND `plugins/audit/mod.rs` simultaneously
+          after writing the sqlite submodule. Fix: merged trait content into mod.rs, deleted standalone.
+          Same pattern recurs for `plugins/wallet/` in US-007.
 
-Optimality suggestions (non-blocking):
-- Streaming `orchestrator.run_provision` (`spawn_and_stream`) replaces collect-then-inspect. Enables real-time CLI progress, immediate tripwire response, MCP server-sent events.
-- Consolidate service-dispatch: factor the `match service { "openrouter" => ... }` logic in cli + mcp into `agentkeys-provisioner::service_script_command(service)`.
-- Extract a `NoopBackend` default impl in agentkeys-core so test code doesn't duplicate ~20-line no-op impls per crate.
-- Make `event_to_error` match exhaustive — current `_` fallthrough loses VerificationFailed, EmailBackendDown, Timeout, MalformedEvent semantics.
+#### US-005 — Dual ES256 keypairs with purpose tagging — PASSED 2026-05-05 (commit 130f684)
+Files: src/jwt/{mod.rs, session.rs, issue.rs, verify.rs} (new),
+       src/oidc.rs (purpose field + pub(crate) helpers),
+       src/lib.rs (mod jwt).
+Tests: 10/10 (jwt::session::tests::*, jwt::issue::tests::*, jwt::verify::tests::*).
+Closes Codex P0 #7 (footgun): on-disk JSON carries `"purpose"` field; load() refuses purpose mismatch.
+Backwards-compat: legacy OIDC keypair files (no `purpose` field) load as `Oidc` via #[serde(default)].
+                  SessionKeypair::load is strict — no migration window.
+Learning: assertion-style mismatch — used err.to_string().contains("oidc") which fails because the
+          error formats with Debug-cased "Oidc". Fix: lowercase the haystack before contains.
 
-### TURN SUMMARY 2026-04-16 (ralph iteration 1)
-Completed stories: US-001, US-002, US-003, US-004 (4 of 15).
-Rust foundation is done: types enum, provisioner crate skeleton, subprocess IPC orchestrator, mutex concurrency. 17 tests pass across agentkeys-types + agentkeys-provisioner.
-Committed via jj: "agentkeys: stage 5a -- US-001..004 ProvisionEvent enum + provisioner crate".
+#### US-007 — ClientSideKeystoreProvisioner + WalletStore — PASSED 2026-05-05 (commit 61a737b)
+Files: src/storage/{mod.rs, wallets.rs} (new),
+       src/plugins/wallet/{mod.rs ⟵ ex wallet.rs, keystore.rs} (restructure + new),
+       src/lib.rs (mod storage).
+Tests: 9/9 (3 type tests + 6 keystore behavior tests).
+Acceptance: ✓ all criteria met.
+Plan §3.5 grounding: MetaMask model — broker stores only (omni, addr, role, parent_addr, created_at).
+                     Composite PK on (omni_account, address) lets a user have multiple wallets.
+Learning: bind() must detect both role mismatch AND parent mismatch on re-bind. A daemon silently
+          switching masters under the same (omni, address) would be data corruption otherwise.
 
-Next turn should resume with US-005 (provisioner-scripts TypeScript workspace scaffold). All remaining stories (US-005..015) are:
-- TypeScript workspace + lib/email + lib/verify + scrapers/openrouter + patterns/signup_email_otp + phantom chaos test
-- orchestrator wire to verify+store (US-012) builds on US-003+US-008
-- MCP tool + CLI UX (US-013, US-014)
-- harness/stage-5a-done.sh + jj bookmark (US-015)
+### Story log — Phase 0 — REMAINING (10 of 16)
 
-Unresolved at turn boundary:
-- Pre-existing uncommitted work on session_store.rs got bundled into the Stage 5a commit — user may want to split via jj commit -i or accept as-is
-- fix/issue-34-session-store-base-dir bookmark shows as divergent; not my change, flagged for later resolution
+In priority order:
+- US-003: tiered refuse-to-boot in src/boot.rs + main.rs wiring
+- US-006: WalletSig SIWE plugin (k256 ecrecover + sha3, single-use nonce table) + auth_nonces storage
+- US-009: POST /v1/auth/wallet/{start, verify} endpoints
+- US-010: POST /v1/auth/exchange backward-compat shim
+- US-011: /v1/mint-aws-creds upgraded — session JWT verify + per-call daemon signature + audit gate
+- US-012: src/handlers/broker_status.rs operational /readyz aggregating PluginRegistry
+- US-013: tests/invariant_load_bearing.rs — all 6 cases (a-f) per plan §2
+- US-014: harness/stage-7-phase0-smoke.sh + harness/stage-7-done.sh skeleton
+- US-015: docs/operator-runbook-stage7.md draft (env table auto-generated from env.rs)
+- US-016: Phase 0 codex review round 1 (must close P0/P1; P2 stop rule)
+
+### Architectural decisions made during this session
+
+(All flow into DECISIONS.md.)
+
+- The trait shapes from US-002 are pinned. Subsequent stories implement against them.
+- `IdentityType::canonical()` strings pinned ("evm", "email", "oauth2_google", etc.) — feed
+  OmniAccount derivation; renaming any is a breaking change.
+- `AGENTKEYS_CLIENT_ID = "agentkeys"` pinned in identity/omni_account.rs — same reason.
+- ES256 keypair on-disk format includes `"purpose"`. Default for legacy OIDC files is `purpose=oidc`
+  (backwards-compat). Session keypair load is strict.
+- WalletStore composite PK is (omni_account, address). Re-bind is idempotent on identical role+parent;
+  mismatch is rejected.
+- Audit log v2 schema is `plugin_mint_log` (new table); legacy `mint_log` (existing src/audit.rs::AuditLog)
+  preserved until US-011 migrates the mint handler.
+
+### Build + test totals across the session
+
+cargo build -p agentkeys-broker-server: green at every commit point.
+cargo test -p agentkeys-broker-server: ~51 broker-server tests passing as of `61a737b`.
+Cross-crate: agentkeys-types + agentkeys-core + agentkeys-cli + agentkeys-mock-server all build
+with the AgentIdentity::OAuth2 variant added.
+Workspace build: green.
+
+## Handoff to next ralph iteration
+
+Pick up from US-006 (WalletSig SIWE) — it's the highest-priority remaining because US-009 + US-011
+both depend on it. US-003 (boot.rs) can start in parallel.
+
+Next-iteration suggested commit order:
+1. US-006 WalletSig SIWE (~700 LOC + tests; needs k256 + sha3 deps under auth-wallet-sig feature)
+2. US-003 boot.rs + main.rs wiring
+3. US-009 + US-010 + US-011 endpoints
+4. US-012 broker_status
+5. US-013 invariant test
+6. US-014 smoke + done.sh
+7. US-015 runbook
+8. US-016 codex round 1

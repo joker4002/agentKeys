@@ -33,3 +33,17 @@
 - **M3 — End-to-end measure:** Operator deploy success (current default).
 
 Per-phase decisions appended below as work proceeds.
+
+---
+
+## Session 1 — 2026-05-05 — Phase 0 commit log
+
+| Story | Commit | Files | Tests | Status |
+|---|---|---|---|---|
+| US-001 env.rs | `32d3dd3` | env.rs (new) + lib.rs + config.rs refactor + plan home | 5/5 | PASS |
+| US-002 plugin traits | `d6e5bba` | plugins/{mod,auth,wallet,audit}.rs + Cargo.toml features | 8/8 | PASS |
+| US-004 + US-008 OmniAccount + SqliteAnchor | `80c01f6` | identity/, plugins/audit/{mod,sqlite}.rs + 4 cross-crate match-arm fixes | 9 + 8 | PASS |
+| US-005 dual keypair purpose | `130f684` | jwt/{mod,session,issue,verify}.rs + oidc.rs purpose field | 10/10 | PASS |
+| US-007 ClientSideKeystore | `61a737b` | storage/wallets.rs + plugins/wallet/{mod,keystore}.rs | 9/9 | PASS |
+
+Total: 6 of 16 Phase 0 stories complete. ~51 unit tests passing in agentkeys-broker-server. Workspace build green.
