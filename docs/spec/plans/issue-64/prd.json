@@ -273,8 +273,8 @@
       "phase": "C.0",
       "title": "Graceful shutdown + migrations (lifted from D before chain anchor)",
       "stories": [
-        { "id": "US-023", "title": "Graceful shutdown (SIGTERM → drain → exit)", "passes": false, "acceptanceCriteria": ["main.rs uses tokio signal listener", "in-flight requests drain up to BROKER_SHUTDOWN_GRACE_SECONDS", "tests/graceful_shutdown.rs simulates SIGTERM mid-request and asserts response completes"] },
-        { "id": "US-024", "title": "Migration discipline + 0001_v2_schema.sql", "passes": false, "acceptanceCriteria": ["migrations/0001_v2_schema.sql checked in (audited port from sibling-branch design — rewrite per user rules)", "boot runs migrations cleanly; refuse-to-boot on migration failure", "tests cover: fresh DB migrates, existing-but-old DB migrates, broken migration aborts boot"] }
+        { "id": "US-023", "title": "Graceful shutdown (SIGTERM → drain → exit)", "passes": true, "commit": "(this commit)", "acceptanceCriteria": ["main.rs uses tokio signal listener", "in-flight requests drain up to BROKER_SHUTDOWN_GRACE_SECONDS", "tests/graceful_shutdown.rs simulates SIGTERM mid-request and asserts response completes"] },
+        { "id": "US-024", "title": "Migration discipline + 0001_v2_schema.sql", "passes": true, "commit": "(this commit)", "acceptanceCriteria": ["migrations/0001_v2_schema.sql checked in (audited port from sibling-branch design — rewrite per user rules)", "boot runs migrations cleanly; refuse-to-boot on migration failure", "tests cover: fresh DB migrates, existing-but-old DB migrates, broken migration aborts boot"] }
       ]
     },
     {

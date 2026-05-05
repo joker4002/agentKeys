@@ -166,3 +166,59 @@ Subagent: codex-rescue dispatched 2026-05-05 with 15 attack vectors covering min
 cargo test -p agentkeys-broker-server: ~115 tests passing (79 lib unit + 9 mint_flow + 6 oidc_flow + 4 auth_wallet_flow + 5 mint_v2_flow + 7 invariant_load_bearing + 4 boot + 1 healthz handler reused). Workspace build green at every commit. clippy clean.
 
 15 of 16 Phase 0 stories committed; US-016 in flight via subagent.
+
+## Session 3 — 2026-05-05 — Phase 0 close-out + Phase A.1 + Phase C.0
+
+Resumed from Session 2 pause. Closed Phase 0 (US-016 codex rounds
+1+2 in `772ef7e`), shipped the operator checkpoint (`2f83749`), and
+moved through Phase A.1 + Phase C.0 in a single session.
+
+### Phase 0 close-out
+- US-016 codex rounds 1+2 — both rounds find only P2/P3, plan rule 9
+  stop rule fires; 20 findings rolled to V0.1-FOLLOWUPS.md.
+- PHASE-0-CHECKPOINT.md ships with full demo recipe (build, keygen,
+  boot, exercise SIWE, mint v2, verify audit row).
+
+### Phase A.1 — EmailLink magic-link auth method (3/3 stories SHIPPED)
+- US-017 (`9a1e0d4`): EmailLink plugin + storage. EmailSender trait
+  abstraction with StubEmailSender for tests; real SES wiring deferred
+  to Phase E US-039. 27 new tests (12 plugin + 9 storage tokens + 6
+  rate limits).
+- US-018 (committed via prd.json passes flag): 4 HTTP endpoints
+  (request/verify/status/landing), boot.rs construction with HMAC
+  key + rate limit env vars, AppState extension with concrete
+  Arc<EmailLinkAuth> handle for browser-side handlers, 7 integration
+  tests in tests/email_flow.rs covering full request → click → poll
+  flow + GET-on-verify-returns-405 prefetch defense + replay
+  rejection + landing-page security headers.
+- US-019: Phase A.1 smoke (9 invariants) + codex rounds 1+2. Round 1
+  finds 4 P2 + 5 P3; round 2 finds 2 P2 + 5 P3; both rounds satisfy
+  the same-severity stop rule. 16 Phase A.1 P2/P3 items rolled to
+  V0.1-FOLLOWUPS.md.
+
+### Phase C.0 — Graceful shutdown + migrations (2/2 stories)
+- US-023: graceful_shutdown integration test landed. Phase 0's
+  main.rs already wired SIGTERM → grace-drain → exit; US-023
+  promotes that to a tested invariant — handler_completes_when_shutdown
+  + server_exits_after_grace_period.
+- US-024: migrations/0001_v2_schema.sql is the canonical reference
+  for the v2 schema. Each store module's init_schema() runs the
+  equivalent CREATE TABLE IF NOT EXISTS at boot; the SQL file is
+  the single-source-of-truth review surface AND the future input
+  for a real migration runner (deferred to Phase E US-039).
+
+### Session 3 totals
+
+cargo test -p agentkeys-broker-server (default features): 116 tests
+cargo test -p agentkeys-broker-server (--features auth-email-link):
+  152 tests (+ 2 graceful_shutdown integration)
+
+Phase 0 + Phase A.1 + Phase C.0 SHIPPED. Remaining: Phase A.2 (OAuth2),
+Phase B (capability grants + recovery), Phase C (EVM Base Sepolia
+anchor — large), Phase D-rest (metrics + idempotency), Phase E
+(runbook final + done.sh final).
+
+The next ralph iteration picks up at Phase A.2 US-020 (OAuth2 trait +
+Google plugin). The V0.1-FOLLOWUPS list (now 36 entries: 20 from
+Phase 0 + 16 from Phase A.1) is the priority-zero backlog before
+any new Phase A.2 deliverables.
