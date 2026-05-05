@@ -9,6 +9,7 @@ pub mod jwt;
 pub mod oidc;
 pub mod plugins;
 pub mod state;
+pub mod storage;
 pub mod sts;
 
 use axum::{routing::{get, post}, Router};

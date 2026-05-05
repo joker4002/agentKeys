@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 use super::auth::VerifiedIdentity;
 use super::Readiness;
 
+#[cfg(feature = "wallet-keystore")]
+pub mod keystore;
+
+#[cfg(feature = "wallet-keystore")]
+pub use keystore::ClientSideKeystoreProvisioner;
+
 /// EVM-style wallet address (0x-prefixed lowercase hex).
 ///
 /// Newtype so the type system can distinguish between addresses and other
