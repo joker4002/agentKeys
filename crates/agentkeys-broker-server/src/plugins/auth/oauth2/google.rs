@@ -43,11 +43,16 @@ struct GoogleJwk {
     kid: String,
     n: String,
     e: String,
+    /// JSON Web Key Type. Google publishes `"RSA"`. We require
+    /// `kty == "RSA"` (or empty for forward-compat) before using a key
+    /// for signature verification (Codex round-1 Vector 13 P3).
     #[serde(default)]
-    #[allow(dead_code)]
     kty: String,
+    /// Key usage. Google publishes `"sig"`. We require `use == "sig"`
+    /// (or empty for forward-compat) before using a key for signature
+    /// verification — defense-in-depth against accepting an
+    /// encryption-only key with a matching `kid`.
     #[serde(default, rename = "use")]
-    #[allow(dead_code)]
     usage: String,
 }
 
@@ -173,7 +178,7 @@ impl GoogleOAuth2Provider {
         if let Ok(guard) = self.jwks_cache.read() {
             if let Some(cache) = guard.as_ref() {
                 if now - cache.fetched_at < self.jwks_ttl_seconds {
-                    if let Some(found) = cache.keys.iter().find(|k| k.kid == kid) {
+                    if let Some(found) = cache.keys.iter().find(|k| jwk_matches(k, kid)) {
                         return Ok(found.clone());
                     }
                 }
@@ -182,9 +187,23 @@ impl GoogleOAuth2Provider {
         // Cache miss / stale / kid not found → refresh.
         let keys = self.refresh_jwks().await?;
         keys.into_iter()
-            .find(|k| k.kid == kid)
+            .find(|k| jwk_matches(k, kid))
             .ok_or_else(|| OAuth2Error::InvalidIdToken(format!("kid {} not in JWKS", kid)))
     }
+}
+
+/// Codex round-1 Vector 13 P3 mitigation: tighten JWK lookup so an
+/// encryption-only key with the matching `kid` cannot be picked up for
+/// signature verification. Google JWKS only ever publishes signing keys
+/// today, but defense-in-depth: require `kty == "RSA"` and `use ==
+/// "sig"` (or empty/missing).
+fn jwk_matches(jwk: &GoogleJwk, kid: &str) -> bool {
+    if jwk.kid != kid {
+        return false;
+    }
+    let kty_ok = jwk.kty.is_empty() || jwk.kty == "RSA";
+    let use_ok = jwk.usage.is_empty() || jwk.usage == "sig";
+    kty_ok && use_ok
 }
 
 #[async_trait]
@@ -284,11 +303,16 @@ impl OAuth2Provider for GoogleOAuth2Provider {
         let data = decode::<IdTokenClaims>(id_token, &key, &validation).map_err(|e| {
             // jsonwebtoken's error kinds are explicit; map them to our
             // OAuth2Error so the callback handler can render the right
-            // status code.
+            // status code. Codex round-1 Vector 14 P3 mitigation: also
+            // surface InvalidIssuer with a structured message rather
+            // than the catch-all.
             use jsonwebtoken::errors::ErrorKind;
             match e.kind() {
                 ErrorKind::ExpiredSignature => OAuth2Error::Expired,
                 ErrorKind::InvalidAudience => OAuth2Error::WrongAud,
+                ErrorKind::InvalidIssuer => {
+                    OAuth2Error::InvalidIdToken("wrong issuer (iss claim)".into())
+                }
                 _ => OAuth2Error::InvalidIdToken(e.to_string()),
             }
         })?;

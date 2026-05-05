@@ -303,6 +303,46 @@ pub struct HandleCallbackOutcome {
     pub identity_type: IdentityType,
 }
 
+/// Error from [`OAuth2Auth::handle_callback`] tagged with whether THIS
+/// invocation actually consumed the pending row.
+///
+/// Codex round-1 P1 mitigation (Vector 6, callback consume/mark_failed
+/// race): the callback handler must only `mark_failed` rows it owns.
+/// `owned_request_id: Some(id)` ⇒ this invocation atomically transitioned
+/// the row out of `pending`, so any later failure here is OUR failure
+/// and we are entitled to flip the row to `failed`. `owned_request_id:
+/// None` ⇒ the failure happened pre-consume (bad state, expired flow,
+/// already consumed by a concurrent callback) and we MUST NOT touch
+/// any row keyed by the recovered request_id — doing so would clobber
+/// a still-in-flight legitimate callback into `failed`.
+#[derive(Debug)]
+pub struct CallbackError {
+    pub inner: AuthError,
+    pub owned_request_id: Option<String>,
+}
+
+impl CallbackError {
+    fn pre_consume(err: AuthError) -> Self {
+        Self {
+            inner: err,
+            owned_request_id: None,
+        }
+    }
+
+    fn post_consume(err: AuthError, request_id: String) -> Self {
+        Self {
+            inner: err,
+            owned_request_id: Some(request_id),
+        }
+    }
+}
+
+impl From<CallbackError> for AuthError {
+    fn from(e: CallbackError) -> Self {
+        e.inner
+    }
+}
+
 impl OAuth2Auth {
     pub fn new(
         provider: Arc<dyn OAuth2Provider>,
@@ -407,14 +447,27 @@ impl OAuth2Auth {
     /// consume the pending row, exchange the code, verify the id_token.
     /// Returns the (request_id, sub, email) so the HTTP handler can mint
     /// the session JWT and call `pending_store.mark_verified`.
+    ///
+    /// Errors are tagged with [`CallbackError::owned_request_id`]:
+    /// `Some(id)` ⇒ this invocation atomically consumed the row, so the
+    /// caller may safely flip the row to `failed`; `None` ⇒ the failure
+    /// happened pre-consume (state, expired, already-consumed-by-concurrent),
+    /// and the caller MUST NOT touch any row by id (the legitimate
+    /// concurrent flow may still be in flight). Codex round-1 Vector 6 P1
+    /// mitigation.
     pub async fn handle_callback(
         &self,
         code: &str,
         state: &str,
         now: i64,
-    ) -> Result<HandleCallbackOutcome, AuthError> {
-        let payload = self.verify_state(state, now)?;
-        let consumed = self.pending_store.consume(&payload.rid, now)?;
+    ) -> Result<HandleCallbackOutcome, CallbackError> {
+        let payload = self
+            .verify_state(state, now)
+            .map_err(CallbackError::pre_consume)?;
+        let consumed = self
+            .pending_store
+            .consume(&payload.rid, now)
+            .map_err(CallbackError::pre_consume)?;
         let (provider, pkce_verifier, nonce) = match consumed {
             OAuth2PendingConsume::Available {
                 provider,
@@ -422,36 +475,58 @@ impl OAuth2Auth {
                 nonce,
             } => (provider, pkce_verifier, nonce),
             OAuth2PendingConsume::Expired => {
-                return Err(AuthError::Expired("oauth2 flow expired".into()));
+                return Err(CallbackError::pre_consume(AuthError::Expired(
+                    "oauth2 flow expired".into(),
+                )));
             }
             OAuth2PendingConsume::NotFoundOrConsumed => {
-                return Err(AuthError::Unauthorized(
+                // Concurrent callback won the race — DO NOT touch the row.
+                return Err(CallbackError::pre_consume(AuthError::Unauthorized(
                     "oauth2 pending row not found or already consumed".into(),
-                ));
+                )));
             }
         };
+        // From here on, this invocation OWNS the row — failures past this
+        // point should be surfaced to the CLI poll via mark_failed.
+        let request_id = payload.rid.clone();
         if provider != self.provider.provider_name() {
-            return Err(AuthError::InvalidRequest(format!(
-                "callback provider mismatch: pending={} current={}",
-                provider,
-                self.provider.provider_name()
-            )));
-        }
-        if nonce != payload.n {
-            return Err(AuthError::Unauthorized(
-                "nonce mismatch (state ↔ pending)".into(),
+            return Err(CallbackError::post_consume(
+                AuthError::InvalidRequest(format!(
+                    "callback provider mismatch: pending={} current={}",
+                    provider,
+                    self.provider.provider_name()
+                )),
+                request_id,
             ));
         }
-        let exchange = self
+        if nonce != payload.n {
+            return Err(CallbackError::post_consume(
+                AuthError::Unauthorized("nonce mismatch (state ↔ pending)".into()),
+                request_id,
+            ));
+        }
+        let exchange = match self
             .provider
             .exchange_code(code, &pkce_verifier, &self.redirect_uri)
-            .await?;
-        let verified = self
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(CallbackError::post_consume(e.into(), request_id));
+            }
+        };
+        let verified = match self
             .provider
             .verify_id_token(&exchange.id_token, &nonce)
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(CallbackError::post_consume(e.into(), request_id));
+            }
+        };
         Ok(HandleCallbackOutcome {
-            request_id: payload.rid,
+            request_id,
             sub: verified.sub,
             email: verified.email,
             identity_type: self.provider.identity_type(),
@@ -472,6 +547,12 @@ impl UserAuthMethod for OAuth2Auth {
         }
         if !self.pending_store.writable() {
             return Readiness::unready("oauth2_pending table not writable");
+        }
+        // Codex round-1 Vector 10 P2 mitigation: also check rate-limit
+        // store writability so a corrupt oauth2_rate_limits.sqlite
+        // doesn't sneak past /readyz.
+        if !self.rate_limit_store.writable() {
+            return Readiness::unready("oauth2 rate-limit table not writable");
         }
         provider_ready
     }
@@ -683,7 +764,13 @@ mod tests {
 
         let now = unix_now().unwrap();
         let res = p.handle_callback("auth-code-123", &tampered, now).await;
-        assert!(matches!(res, Err(AuthError::Unauthorized(_))), "got: {:?}", res);
+        match &res {
+            Err(e) => {
+                assert!(matches!(e.inner, AuthError::Unauthorized(_)), "got: {:?}", res);
+                assert!(e.owned_request_id.is_none(), "tampered state must NOT own a row");
+            }
+            _ => panic!("expected Err, got: {:?}", res),
+        }
     }
 
     #[tokio::test]
@@ -708,11 +795,19 @@ mod tests {
         let now = unix_now().unwrap();
         let _first = p.handle_callback("auth-code-123", &state, now).await.unwrap();
         let replay = p.handle_callback("auth-code-123", &state, now).await;
-        assert!(
-            matches!(replay, Err(AuthError::Unauthorized(_))),
-            "got: {:?}",
-            replay
-        );
+        match &replay {
+            Err(e) => {
+                assert!(matches!(e.inner, AuthError::Unauthorized(_)), "got: {:?}", replay);
+                // P1 fix: replay against an already-consumed row must NOT
+                // be tagged as owned — otherwise the handler would
+                // mark_failed the legitimate in-flight flow.
+                assert!(
+                    e.owned_request_id.is_none(),
+                    "replay must NOT own a request_id (legitimate flow may still be in flight)"
+                );
+            }
+            _ => panic!("expected replay Err, got: {:?}", replay),
+        }
     }
 
     #[tokio::test]
@@ -737,7 +832,18 @@ mod tests {
         .unwrap();
         let now = unix_now().unwrap();
         let res = p.handle_callback("c", &state, now).await;
-        assert!(matches!(&res, Err(AuthError::Unauthorized(m)) if m.contains("expired")), "got: {:?}", res);
+        match &res {
+            Err(e) => {
+                assert!(
+                    matches!(&e.inner, AuthError::Unauthorized(m) if m.contains("expired")),
+                    "got: {:?}",
+                    res
+                );
+                // expired id_token is post-consume — caller MAY mark_failed.
+                assert!(e.owned_request_id.is_some(), "post-consume failure must own request_id");
+            }
+            _ => panic!("expected Err, got: {:?}", res),
+        }
     }
 
     #[tokio::test]
@@ -762,7 +868,17 @@ mod tests {
         .unwrap();
         let now = unix_now().unwrap();
         let res = p.handle_callback("c", &state, now).await;
-        assert!(matches!(&res, Err(AuthError::Unauthorized(m)) if m.contains("audience")), "got: {:?}", res);
+        match &res {
+            Err(e) => {
+                assert!(
+                    matches!(&e.inner, AuthError::Unauthorized(m) if m.contains("audience")),
+                    "got: {:?}",
+                    res
+                );
+                assert!(e.owned_request_id.is_some(), "post-consume failure must own request_id");
+            }
+            _ => panic!("expected Err, got: {:?}", res),
+        }
     }
 
     #[tokio::test]

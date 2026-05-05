@@ -128,6 +128,21 @@ impl EmailRateLimitStore {
         })
     }
 
+    /// Quick writability probe used by /readyz aggregators (Codex
+    /// round-1 Vector 10 P2 mitigation: OAuth2Auth::ready() calls this
+    /// alongside `pending_store.writable()` so a corrupt rate-limit DB
+    /// doesn't sneak past liveness checks).
+    pub fn writable(&self) -> bool {
+        let Ok(conn) = self.conn.lock() else {
+            return false;
+        };
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _readyz_probe (id INTEGER PRIMARY KEY)",
+            [],
+        )
+        .is_ok()
+    }
+
     /// Periodic janitor — drop windows older than 2× the largest
     /// configured window. Caller decides cadence.
     pub fn purge_old_windows(&self, now: i64, retention_seconds: i64) -> Result<usize, AuthError> {

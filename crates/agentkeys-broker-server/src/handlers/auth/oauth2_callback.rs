@@ -94,14 +94,16 @@ pub async fn oauth2_callback(
         let outcome = match plugin.handle_callback(code, state_token, now).await {
             Ok(o) => o,
             Err(e) => {
-                // Try to record the failure to the pending row so the
-                // CLI poll surfaces a structured `failed` status.
-                if let Ok(payload) = plugin.verify_state(state_token, now) {
-                    let _ = plugin
-                        .pending_store
-                        .mark_failed(&payload.rid, &e.to_string());
+                // Codex round-1 Vector 6 P1 mitigation: only mark_failed
+                // when THIS invocation actually consumed the row.
+                // owned_request_id=None means the failure happened
+                // pre-consume (bad state, already-consumed by a
+                // concurrent callback) — touching the row would clobber
+                // a legitimate flow still in flight.
+                if let Some(rid) = e.owned_request_id.as_deref() {
+                    let _ = plugin.pending_store.mark_failed(rid, &e.inner.to_string());
                 }
-                return Err(super::wallet_start_map_auth_err(e));
+                return Err(super::wallet_start_map_auth_err(e.inner));
             }
         };
 
