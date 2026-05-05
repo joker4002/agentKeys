@@ -6,7 +6,15 @@
 //! A.2, grants + identity_links in Phase B.
 
 pub mod auth_nonces;
+#[cfg(feature = "auth-email-link")]
+pub mod email_rate_limits;
+#[cfg(feature = "auth-email-link")]
+pub mod email_tokens;
 pub mod wallets;
 
 pub use auth_nonces::{AuthNonceStore, ConsumeOutcome};
+#[cfg(feature = "auth-email-link")]
+pub use email_rate_limits::{EmailRateLimitStore, RateLimitOutcome};
+#[cfg(feature = "auth-email-link")]
+pub use email_tokens::{EmailConsumeOutcome, EmailRequestStatus, EmailTokenStore};
 pub use wallets::WalletStore;

@@ -10,9 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use super::Readiness;
 
+#[cfg(feature = "auth-email-link")]
+pub mod email_link;
 #[cfg(feature = "auth-wallet-sig")]
 pub mod wallet_sig;
 
+#[cfg(feature = "auth-email-link")]
+pub use email_link::{EmailLinkAuth, EmailSendError, EmailSender, SesVerifyCache, StubEmailSender};
 #[cfg(feature = "auth-wallet-sig")]
 pub use wallet_sig::SiweWalletAuth;
 
