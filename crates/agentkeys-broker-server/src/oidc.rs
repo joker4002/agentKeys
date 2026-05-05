@@ -202,8 +202,10 @@ pub(crate) fn set_owner_only_inner(_path: &Path) -> BrokerResult<()> {
 }
 
 /// Bridges `rand_core 0.6` (what `p256` 0.13 expects) to the system OS RNG.
-/// `pub(crate)` so the parallel `SessionKeypair` can reuse it.
-pub(crate) mod rand_compat {
+/// `pub` so the parallel `SessionKeypair` can reuse it AND so integration
+/// tests can construct fresh signing keys without pulling in their own
+/// rand_core wrapper.
+pub mod rand_compat {
     pub struct OsRngWrapper;
 
     impl rand_core::CryptoRng for OsRngWrapper {}
