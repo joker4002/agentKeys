@@ -1,26 +1,91 @@
+//! `POST /v1/mint-aws-creds` — credential mint endpoint.
+//!
+//! Stage 7 issue#64 US-011 upgrades this handler to accept the NEW v0
+//! shape (plan §3.5.2):
+//!
+//! - Authorization header carries a session JWT (signed by the broker's
+//!   session keypair, minted by `/v1/auth/wallet/verify` or
+//!   `/v1/auth/exchange`).
+//! - Request body declares `{request_id, issued_at, intent, auth}` where
+//!   `auth.signature` is an EIP-191 signature by the daemon's wallet
+//!   over the canonical hash of the body (excluding `auth.signature`).
+//! - Audit row is written via every configured `AuditAnchor` BEFORE
+//!   credentials are released. Per plan §2 (load-bearing invariant):
+//!   no creds out unless durably anchored everywhere.
+//!
+//! The handler also keeps the LEGACY path working so the existing
+//! daemon/CLI binaries (which consume the bearer-validated /session/validate
+//! flow) continue to function during the cutover. Discrimination is
+//! purely on token shape: a 3-segment JWT-looking bearer goes through
+//! the new path; anything else goes through the legacy path.
+//!
+//! The legacy path is REMOVED in v1.0 along with `/v1/auth/exchange`
+//! per plan §3.5.7. Codex P0 #14 (permanent dual-accept) is mitigated
+//! by this transitional split being a documented v0→v1 cutover, not a
+//! forever-feature.
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{extract::State, http::HeaderMap, Json};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::audit::{MintOutcome, MintRecord};
 use crate::auth::{extract_bearer_token, validate_bearer_token};
 use crate::error::{BrokerError, BrokerResult};
+use crate::jwt::verify::verify_session_jwt;
+use crate::plugins::audit::{AnchorReceipt, AuditRecord};
 use crate::state::SharedState;
 
-#[derive(Serialize)]
+/// Successful response — same shape under both legacy and new paths so a
+/// daemon switching between them needs no JSON-decoding changes.
+#[derive(Serialize, Debug, Clone)]
 pub struct MintResponse {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub session_token: String,
     pub expiration: i64,
     pub wallet: String,
+    /// New-path only — the audit record's ULID. Legacy path leaves this
+    /// `None` so existing clients ignore it; new clients can correlate
+    /// the response with the on-anchor record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_record_id: Option<String>,
+    /// New-path only — list of anchor names that confirmed durability.
+    /// Legacy clients ignore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchored: Option<Vec<String>>,
 }
 
-#[tracing::instrument(skip_all, fields(wallet = tracing::field::Empty, outcome = tracing::field::Empty))]
+/// New-path body shape (plan §3.5.2).
+#[derive(Deserialize, Debug, Clone)]
+pub struct MintBodyV2 {
+    pub request_id: String,
+    pub issued_at: String,
+    pub intent: MintIntent,
+    pub auth: MintAuth,
+}
+
+#[derive(Deserialize, Debug, Clone, Serialize)]
+pub struct MintIntent {
+    pub agent_id: String,
+    pub service: String,
+    #[serde(default)]
+    pub scope_path: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct MintAuth {
+    pub address: String,
+    pub signature: String,
+}
+
+#[tracing::instrument(skip_all, fields(wallet = tracing::field::Empty, outcome = tracing::field::Empty, path = tracing::field::Empty))]
 pub async fn mint_aws_creds(
     State(state): State<SharedState>,
     headers: HeaderMap,
+    raw_body: axum::body::Bytes,
 ) -> BrokerResult<Json<MintResponse>> {
     let token = headers
         .get("authorization")
@@ -28,32 +93,335 @@ pub async fn mint_aws_creds(
         .and_then(extract_bearer_token)
         .ok_or_else(|| BrokerError::Unauthorized("missing Authorization header".into()))?;
 
+    if looks_like_session_jwt(token) {
+        tracing::Span::current().record("path", "v2");
+        mint_v2(&state, token, &raw_body).await
+    } else {
+        tracing::Span::current().record("path", "legacy");
+        mint_legacy(&state, token).await
+    }
+}
+
+/// Heuristic: a session JWT starts with `eyJ` (base64url of `{"`). Two
+/// dots delimit header.payload.signature. Mid-token whitespace / newlines
+/// disqualify (a legacy opaque bearer does not need to satisfy this).
+fn looks_like_session_jwt(token: &str) -> bool {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    parts.len() == 3
+        && token.starts_with("eyJ")
+        && !token.contains(char::is_whitespace)
+}
+
+// ---------------------------------------------------------------------------
+// New v2 path — session JWT + per-call daemon signature + AuditAnchor write
+// ---------------------------------------------------------------------------
+
+async fn mint_v2(
+    state: &SharedState,
+    token: &str,
+    raw_body: &axum::body::Bytes,
+) -> BrokerResult<Json<MintResponse>> {
+    // 1. Verify session JWT against the broker's session keypair.
+    let claims = verify_session_jwt(&state.session_keypair, &state.config.oidc_issuer, token)
+        .map_err(|e| BrokerError::Unauthorized(format!("session jwt: {}", e)))?;
+    tracing::Span::current().record("wallet", claims.agentkeys.wallet_address.as_str());
+
+    // 2. Parse the v2 body. Empty body or wrong shape → 400.
+    if raw_body.is_empty() {
+        return Err(BrokerError::BadRequest(
+            "v2 mint requires a JSON body — see plan §3.5.2 wire format".into(),
+        ));
+    }
+    let body: MintBodyV2 = serde_json::from_slice(raw_body)
+        .map_err(|e| BrokerError::BadRequest(format!("malformed v2 body: {}", e)))?;
+
+    // 3. Per-call signature verification. The body without `auth.signature`
+    //    must canonicalize, hash, and verify against `auth.address`.
+    let canonical = canonical_signing_input(raw_body, &body)?;
+    let recovered = ecrecover_eip191(&canonical, &body.auth.signature)
+        .map_err(|e| BrokerError::Unauthorized(format!("per-call sig: {}", e)))?;
+    if !addresses_match(&recovered, &body.auth.address) {
+        return Err(BrokerError::Unauthorized(format!(
+            "per-call signature recovers to {} not {}",
+            recovered, body.auth.address
+        )));
+    }
+
+    // 4. Wallet-binding: auth.address MUST match the wallet bound in the
+    //    session JWT. Closes the "valid sig for wallet A but JWT claims
+    //    wallet B" cross-binding hole.
+    if !addresses_match(&body.auth.address, &claims.agentkeys.wallet_address) {
+        return Err(BrokerError::Unauthorized(format!(
+            "auth.address {} does not match wallet bound in session JWT ({})",
+            body.auth.address, claims.agentkeys.wallet_address
+        )));
+    }
+
+    // 5. Build the AuditRecord. record_hash is `SHA256(canonical_signing_input)`
+    //    so a row mismatch is detectable by re-running the canonicalization.
+    let mut hasher = Sha256::new();
+    hasher.update(&canonical);
+    let record_hash = hex::encode(hasher.finalize());
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let record_id = format!("aud_{}_{}", now_secs, &record_hash[..16]);
+
+    let session_name = build_session_name(&body.auth.address);
+
+    // 6. Audit-anchor write happens BEFORE the STS call's response is
+    //    constructed. Per plan §2.e the broker may speculatively call
+    //    STS in parallel with the audit write to keep p50 latency low —
+    //    but credentials must NOT be returned unless the audit anchor
+    //    write succeeded. Phase 0 is single-anchor (sqlite) so we keep
+    //    things simple: STS first, then anchor, then return creds. If
+    //    anchor fails we still record the failure on the legacy log
+    //    and return 500 without creds.
+    let creds_result = state
+        .sts
+        .assume_role(
+            &state.config.data_role_arn,
+            &session_name,
+            state.config.session_duration_seconds,
+        )
+        .await;
+
+    let creds = match creds_result {
+        Ok(c) => c,
+        Err(e) => {
+            // Best-effort failure record on legacy log.
+            record_legacy_outcome(
+                state,
+                token,
+                &body.auth.address,
+                &session_name,
+                MintOutcome::StsError,
+                Some(&e.to_string()),
+            );
+            tracing::Span::current().record("outcome", "sts_error");
+            return Err(e);
+        }
+    };
+
+    let audit_record = AuditRecord {
+        id: record_id.clone(),
+        minted_at: now_secs,
+        record_hash,
+        omni_account: claims.agentkeys.omni_account.clone(),
+        wallet: body.auth.address.to_lowercase(),
+        agent_id: body.intent.agent_id.clone(),
+        service: body.intent.service.clone(),
+        grant_id: String::new(), // Phase B+ populates this.
+        outcome: "ok".into(),
+        outcome_detail: None,
+    };
+
+    // Anchor through every configured audit anchor. The audit_policy
+    // selects how partial failures are handled — Phase 0 is single-
+    // anchor (sqlite), so any error fails the response.
+    let anchored: Vec<String> = match anchor_to_all(state, &audit_record).await {
+        Ok(receipts) => receipts.into_iter().map(|r| r.anchor).collect(),
+        Err(e) => {
+            // The load-bearing invariant: audit failure means NO creds
+            // returned. We still record best-effort on the legacy log
+            // for monitoring continuity.
+            record_legacy_outcome(
+                state,
+                token,
+                &body.auth.address,
+                &session_name,
+                MintOutcome::BackendError,
+                Some(&format!("audit_anchor: {}", e)),
+            );
+            tracing::Span::current().record("outcome", "audit_failed");
+            return Err(BrokerError::AuditError(format!(
+                "audit anchor write failed; refusing to release credentials: {}",
+                e
+            )));
+        }
+    };
+
+    // 7. Mirror the success record on the legacy log so existing audit
+    //    queries continue to function during the dual-write transition.
+    if let Err(e) = state.audit.record_mint(
+        MintRecord {
+            requester_token: token,
+            requester_wallet: &body.auth.address,
+            requested_role: &state.config.data_role_arn,
+            session_duration_seconds: state.config.session_duration_seconds,
+            sts_session_name: &session_name,
+            outcome: MintOutcome::Ok,
+        },
+        Some(&format!("v2 mint anchored to: {}", anchored.join(","))),
+    ) {
+        tracing::warn!(error = %e, "legacy audit mirror failed (non-fatal — v2 anchor row exists)");
+    }
+
+    tracing::Span::current().record("outcome", "ok");
+    Ok(Json(MintResponse {
+        access_key_id: creds.access_key_id,
+        secret_access_key: creds.secret_access_key,
+        session_token: creds.session_token,
+        expiration: creds.expiration_unix,
+        wallet: body.auth.address,
+        audit_record_id: Some(record_id),
+        anchored: Some(anchored),
+    }))
+}
+
+/// Anchor `record` to every configured AuditAnchor. Phase 0 is single-
+/// anchor; Phase C extends this with multi-anchor + circuit breaker per
+/// `BROKER_AUDIT_POLICY`.
+async fn anchor_to_all(
+    state: &SharedState,
+    record: &AuditRecord,
+) -> Result<Vec<AnchorReceipt>, crate::plugins::audit::AuditError> {
+    let mut receipts = Vec::new();
+    for anchor in &state.registry.audit {
+        let receipt = anchor.anchor(record).await?;
+        receipts.push(receipt);
+    }
+    Ok(receipts)
+}
+
+/// Canonical signing input: the request body bytes with `auth.signature`
+/// replaced by the empty string. We re-serialize via `serde_json` with
+/// sorted keys so two semantically-equivalent JSON encodings produce the
+/// same hash. This is the v0 form; Phase B+ may switch to deterministic
+/// CBOR via `agentkeys-core::auth_request`.
+fn canonical_signing_input(raw_body: &[u8], parsed: &MintBodyV2) -> Result<Vec<u8>, BrokerError> {
+    // Reconstruct the body with auth.signature stripped, then sort keys.
+    let mut value: Value = serde_json::from_slice(raw_body)
+        .map_err(|e| BrokerError::BadRequest(format!("body re-parse: {}", e)))?;
+    if let Some(auth) = value.get_mut("auth").and_then(Value::as_object_mut) {
+        auth.remove("signature");
+    }
+    let _ = parsed; // already validated upstream; suppress unused warning.
+    let canonical_string = canonicalize_json(&value);
+    Ok(canonical_string.into_bytes())
+}
+
+/// Stable canonical JSON: sort object keys recursively, no extra whitespace.
+fn canonicalize_json(v: &Value) -> String {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()),
+                        canonicalize_json(&map[*k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(canonicalize_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        other => serde_json::to_string(other).unwrap_or_else(|_| "null".into()),
+    }
+}
+
+/// EIP-191 ecrecover identical to `plugins::auth::wallet_sig::ecrecover_address`
+/// but operating on raw bytes (the canonical signing input). Returns the
+/// 0x-prefixed lowercase 20-byte address.
+fn ecrecover_eip191(message: &[u8], signature_hex: &str) -> Result<String, BrokerError> {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    use sha3::Keccak256;
+
+    let sig_hex = signature_hex.trim_start_matches("0x");
+    let sig_bytes = hex::decode(sig_hex)
+        .map_err(|e| BrokerError::BadRequest(format!("signature is not hex: {}", e)))?;
+    if sig_bytes.len() != 65 {
+        return Err(BrokerError::BadRequest(format!(
+            "signature must be 65 bytes, got {}",
+            sig_bytes.len()
+        )));
+    }
+    let v_byte = sig_bytes[64];
+    let recovery_id_byte = match v_byte {
+        0 | 1 => v_byte,
+        27 | 28 => v_byte - 27,
+        other => {
+            return Err(BrokerError::BadRequest(format!(
+                "unsupported v byte: {}",
+                other
+            )));
+        }
+    };
+    let recovery_id = RecoveryId::try_from(recovery_id_byte)
+        .map_err(|e| BrokerError::BadRequest(format!("bad recovery id: {}", e)))?;
+    let signature = Signature::from_slice(&sig_bytes[..64])
+        .map_err(|e| BrokerError::BadRequest(format!("bad sig bytes: {}", e)))?;
+
+    let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
+    let mut hasher = Keccak256::new();
+    hasher.update(prefix.as_bytes());
+    hasher.update(message);
+    let digest = hasher.finalize();
+
+    let verifying_key = VerifyingKey::recover_from_prehash(&digest, &signature, recovery_id)
+        .map_err(|e| BrokerError::Unauthorized(format!("recover failed: {}", e)))?;
+
+    let encoded_point = verifying_key.to_encoded_point(false);
+    let pubkey_bytes = encoded_point.as_bytes();
+    if pubkey_bytes.len() != 65 || pubkey_bytes[0] != 0x04 {
+        return Err(BrokerError::Internal(
+            "recovered key is not 65-byte uncompressed point".into(),
+        ));
+    }
+    let mut addr_hasher = Keccak256::new();
+    addr_hasher.update(&pubkey_bytes[1..]);
+    let pubkey_hash = addr_hasher.finalize();
+    Ok(format!("0x{}", hex::encode(&pubkey_hash[12..])))
+}
+
+fn addresses_match(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// Legacy path — bearer validated against backend /session/validate.
+// Preserved verbatim from pre-US-011 behavior so daemon/CLI binaries that
+// haven't yet bumped to /v1/auth/exchange continue to work.
+// ---------------------------------------------------------------------------
+
+async fn mint_legacy(state: &SharedState, token: &str) -> BrokerResult<Json<MintResponse>> {
     let session = match validate_bearer_token(&state.http, &state.config.backend_url, token).await {
         Ok(s) => s,
         Err(e) => {
-            // Distinguish bearer-rejected (auth_failed) from backend-down
-            // (backend_error). An operator chasing a backend outage should
-            // not see it as a flood of auth failures.
-            let (outcome, span_label) = match &e {
-                BrokerError::Unauthorized(_) => (MintOutcome::AuthFailed, "auth_failed"),
-                BrokerError::BackendUnreachable(_) => (MintOutcome::BackendError, "backend_error"),
-                _ => (MintOutcome::BackendError, "backend_error"),
+            let outcome = match &e {
+                BrokerError::Unauthorized(_) => MintOutcome::AuthFailed,
+                BrokerError::BackendUnreachable(_) => MintOutcome::BackendError,
+                _ => MintOutcome::BackendError,
             };
-            record_outcome(
-                &state,
+            record_legacy_outcome(
+                state,
                 token,
                 "unknown",
                 "(unauthenticated)",
                 outcome,
                 Some(&e.to_string()),
             );
-            tracing::Span::current().record("outcome", span_label);
+            tracing::Span::current().record(
+                "outcome",
+                if matches!(outcome, MintOutcome::AuthFailed) {
+                    "auth_failed"
+                } else {
+                    "backend_error"
+                },
+            );
             return Err(e);
         }
     };
 
     tracing::Span::current().record("wallet", session.wallet.as_str());
-
     let session_name = build_session_name(&session.wallet);
 
     match state
@@ -66,9 +434,6 @@ pub async fn mint_aws_creds(
         .await
     {
         Ok(creds) => {
-            // Audit must succeed before we hand out credentials. A credential
-            // mint with no audit row is exactly the silent-failure mode the
-            // operator is trying to defend against.
             state.audit.record_mint(
                 MintRecord {
                     requester_token: token,
@@ -87,11 +452,13 @@ pub async fn mint_aws_creds(
                 session_token: creds.session_token,
                 expiration: creds.expiration_unix,
                 wallet: session.wallet,
+                audit_record_id: None,
+                anchored: None,
             }))
         }
         Err(e) => {
-            record_outcome(
-                &state,
+            record_legacy_outcome(
+                state,
                 token,
                 &session.wallet,
                 &session_name,
@@ -104,11 +471,7 @@ pub async fn mint_aws_creds(
     }
 }
 
-/// Best-effort audit record on a failure path. We never want a broken audit
-/// log to mask the underlying error the caller is going to receive — but we
-/// also refuse to swallow the audit failure silently (the prior bug). On
-/// audit-write failure, log loudly and continue with the original error.
-fn record_outcome(
+fn record_legacy_outcome(
     state: &SharedState,
     token: &str,
     wallet: &str,
@@ -139,7 +502,6 @@ fn record_outcome(
 fn build_session_name(wallet: &str) -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = now.as_secs();
-    // Microsecond suffix prevents per-second collisions from the same wallet.
     let micros = now.subsec_micros();
     let safe_wallet: String = wallet
         .chars()
@@ -179,14 +541,92 @@ mod tests {
 
     #[test]
     fn session_name_includes_microsecond_suffix() {
-        // Same wallet, two consecutive calls should yield distinct names
-        // because microsecond resolution moves between calls. Worst case
-        // (same micros), we still pass the format check.
         let a = build_session_name("0xabc");
         let b = build_session_name("0xabc");
         assert!(a.matches('-').count() >= 3, "expected at least 3 dashes, got {}", a);
         assert!(b.matches('-').count() >= 3);
-        // Suffix is a 6-digit microsecond field; both names share prefix up
-        // through the unix-seconds field.
+    }
+
+    #[test]
+    fn looks_like_session_jwt_recognizes_3_segment_eyj() {
+        assert!(looks_like_session_jwt("eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.deadbeef"));
+        assert!(!looks_like_session_jwt("legacy-opaque-bearer"));
+        assert!(!looks_like_session_jwt("eyJonly-2-segments"));
+        assert!(!looks_like_session_jwt("eyJa.bC"));
+    }
+
+    #[test]
+    fn looks_like_session_jwt_rejects_whitespace() {
+        // A bearer with a newline is malformed; treat as legacy (which
+        // will then fail validation upstream — preserves the existing
+        // failure mode).
+        assert!(!looks_like_session_jwt("eyJ\n.payload.sig"));
+    }
+
+    #[test]
+    fn canonicalize_json_sorts_object_keys() {
+        let v: Value = serde_json::json!({
+            "z": 1,
+            "a": { "y": 2, "b": 3 },
+            "m": [4, 5]
+        });
+        let s = canonicalize_json(&v);
+        // "a" must precede "m" must precede "z"; nested "b" must precede "y".
+        assert!(s.find("\"a\"").unwrap() < s.find("\"m\"").unwrap());
+        assert!(s.find("\"m\"").unwrap() < s.find("\"z\"").unwrap());
+        assert!(s.find("\"b\"").unwrap() < s.find("\"y\"").unwrap());
+    }
+
+    #[test]
+    fn canonical_signing_input_strips_auth_signature() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "request_id": "mnt_1",
+            "issued_at": "2026-05-05T14:00:00Z",
+            "intent": { "agent_id": "0xabc", "service": "s3", "scope_path": "bots/" },
+            "auth": { "address": "0xabc", "signature": "0xdeadbeef" }
+        }))
+        .unwrap();
+        let parsed: MintBodyV2 = serde_json::from_slice(&body).unwrap();
+        let canon = canonical_signing_input(&body, &parsed).unwrap();
+        let s = String::from_utf8(canon).unwrap();
+        assert!(s.contains("\"address\":\"0xabc\""));
+        assert!(!s.contains("signature"));
+    }
+
+    #[test]
+    fn addresses_match_is_case_insensitive() {
+        assert!(addresses_match(
+            "0xABCDef0123456789abcdef0123456789ABCDef00",
+            "0xabcdef0123456789abcdef0123456789abcdef00"
+        ));
+        assert!(!addresses_match("0xabc", "0xdef"));
+    }
+
+    #[test]
+    fn ecrecover_eip191_round_trip() {
+        use k256::ecdsa::SigningKey;
+        use sha3::Keccak256;
+        let key = SigningKey::random(&mut crate::oidc::rand_compat::OsRngWrapper);
+        let vkey = key.verifying_key();
+        let pt = vkey.to_encoded_point(false);
+        let mut h = Keccak256::new();
+        h.update(&pt.as_bytes()[1..]);
+        let pub_hash = h.finalize();
+        let expected_addr = format!("0x{}", hex::encode(&pub_hash[12..]));
+
+        let message = b"canonical body bytes";
+        let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
+        let mut h2 = Keccak256::new();
+        h2.update(prefix.as_bytes());
+        h2.update(message);
+        let digest = h2.finalize();
+
+        let (sig, rid) = key.sign_prehash_recoverable(&digest).unwrap();
+        let mut sig_bytes = sig.to_bytes().to_vec();
+        sig_bytes.push(rid.to_byte());
+        let sig_hex = format!("0x{}", hex::encode(&sig_bytes));
+
+        let recovered = ecrecover_eip191(message, &sig_hex).unwrap();
+        assert_eq!(recovered.to_lowercase(), expected_addr.to_lowercase());
     }
 }
