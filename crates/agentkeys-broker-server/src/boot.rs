@@ -29,7 +29,7 @@ use crate::jwt::SessionKeypair;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::{AuditAnchor, AuditPolicy};
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, GrantStore, WalletStore};
+use crate::storage::{AuthNonceStore, GrantStore, IdentityLinkStore, WalletStore};
 
 /// Outcome of the synchronous Tier-1 boot phase.
 pub struct BootArtifacts {
@@ -40,6 +40,7 @@ pub struct BootArtifacts {
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
     pub grant_store: Arc<GrantStore>,
+    pub identity_link_store: Arc<IdentityLinkStore>,
     /// Concrete EmailLink plugin handle (Phase A.1, US-018). Populated
     /// when `email_link` is in `BROKER_AUTH_METHODS` AND the
     /// `auth-email-link` feature is compiled in. The registry's auth
@@ -171,6 +172,16 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             )
         })?,
     );
+    let identity_link_store = Arc::new(
+        IdentityLinkStore::open(&identity_links_path(config)).map_err(|e| {
+            boot_fail(
+                env::BROKER_AUDIT_DB_PATH,
+                &config.audit_db_path.display().to_string(),
+                format!("IdentityLinkStore: {}", e),
+                "identity-links-db",
+            )
+        })?,
+    );
 
     // 5. Validate + parse plugin selection env vars. Every name in each
     //    list must resolve at compile time (i.e. the corresponding
@@ -212,6 +223,7 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
         wallet_store,
         nonce_store,
         grant_store,
+        identity_link_store,
         #[cfg(feature = "auth-email-link")]
         email_link: built.email_link,
         #[cfg(feature = "auth-oauth2")]
@@ -279,6 +291,14 @@ fn grants_path(config: &BrokerConfig) -> std::path::PathBuf {
         .parent()
         .map(|p| p.join("grants.sqlite"))
         .unwrap_or_else(|| std::path::PathBuf::from("grants.sqlite"))
+}
+
+fn identity_links_path(config: &BrokerConfig) -> std::path::PathBuf {
+    config
+        .audit_db_path
+        .parent()
+        .map(|p| p.join("identity_links.sqlite"))
+        .unwrap_or_else(|| std::path::PathBuf::from("identity_links.sqlite"))
 }
 
 #[cfg(feature = "audit-sqlite")]

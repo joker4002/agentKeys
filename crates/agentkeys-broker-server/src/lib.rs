@@ -48,6 +48,19 @@ pub fn create_router(state: SharedState) -> Router {
             post(handlers::grant::revoke::grant_revoke),
         )
         .route("/v1/grant/list", get(handlers::grant::list::grant_list))
+        // Phase B wallet endpoints (US-028).
+        .route(
+            "/v1/wallet/link",
+            post(handlers::wallet::link::wallet_link),
+        )
+        .route(
+            "/v1/wallet/links",
+            get(handlers::wallet::links_list::wallet_links_list),
+        )
+        .route(
+            "/v1/wallet/recover/lookup",
+            post(handlers::wallet::recover_lookup::wallet_recover_lookup),
+        )
         .pipe(register_email_link_routes)
         .pipe(register_oauth2_routes)
         .with_state(state)

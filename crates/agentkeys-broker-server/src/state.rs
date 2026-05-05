@@ -6,7 +6,7 @@ use crate::jwt::SessionKeypair;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, GrantStore, WalletStore};
+use crate::storage::{AuthNonceStore, GrantStore, IdentityLinkStore, WalletStore};
 use crate::sts::StsClient;
 
 /// Tier-2 reachability state shared with the /readyz handler.
@@ -42,6 +42,11 @@ pub struct AppState {
     /// issued (Phase 0 grant-less mints continue to work via the
     /// implicit-grant fallback documented in mint.rs).
     pub grant_store: Arc<GrantStore>,
+    /// Identity links (Phase B, US-028). Maps verified identities
+    /// (email, oauth2 sub, secondary EVM wallet) to their owning master
+    /// OmniAccount. Recovery flow consults this to find which master
+    /// should sign the recovery grant.
+    pub identity_link_store: Arc<IdentityLinkStore>,
     pub tier2: Arc<Tier2State>,
     /// Concrete handle to the EmailLink plugin (Phase A.1, US-018).
     /// `None` when `auth-email-link` feature is disabled OR when

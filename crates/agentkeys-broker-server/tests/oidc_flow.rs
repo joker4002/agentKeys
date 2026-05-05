@@ -7,7 +7,7 @@
 //!   3. mint a JWT for a real session → verify ES256 signature with the JWKS
 
 use std::path::PathBuf;
-use agentkeys_broker_server::storage::GrantStore;
+use agentkeys_broker_server::storage::{GrantStore, IdentityLinkStore};
 use std::sync::Arc;
 
 use agentkeys_broker_server::audit::AuditLog;
@@ -110,6 +110,7 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
         wallet_store,
         nonce_store,
         grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
+        identity_link_store: Arc::new(IdentityLinkStore::open_in_memory().unwrap()),
         tier2: std::sync::Arc::new(agentkeys_broker_server::state::Tier2State::default()),
         #[cfg(feature = "auth-email-link")]
         email_link: None,

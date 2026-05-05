@@ -4,3 +4,4 @@ pub mod grant;
 pub mod health;
 pub mod mint;
 pub mod oidc;
+pub mod wallet;

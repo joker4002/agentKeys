@@ -25,7 +25,7 @@ use agentkeys_broker_server::{
     plugins::wallet::keystore::ClientSideKeystoreProvisioner,
     plugins::PluginRegistry,
     state::{AppState, Tier2State},
-    storage::{AuthNonceStore, GrantStore, WalletStore},
+    storage::{AuthNonceStore, GrantStore, IdentityLinkStore, WalletStore},
     sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use k256::ecdsa::SigningKey;
@@ -110,6 +110,7 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
         wallet_store,
         nonce_store,
         grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
+        identity_link_store: Arc::new(IdentityLinkStore::open_in_memory().unwrap()),
         tier2: Arc::new(Tier2State::default()),
         #[cfg(feature = "auth-email-link")]
         email_link: None,

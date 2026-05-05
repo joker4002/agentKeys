@@ -15,6 +15,7 @@ pub mod email_rate_limits;
 #[cfg(feature = "auth-email-link")]
 pub mod email_tokens;
 pub mod grants;
+pub mod identity_links;
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth_pending;
 pub mod wallets;
@@ -25,6 +26,7 @@ pub use email_rate_limits::{EmailRateLimitStore, RateLimitOutcome};
 #[cfg(feature = "auth-email-link")]
 pub use email_tokens::{EmailConsumeOutcome, EmailRequestStatus, EmailTokenStore};
 pub use grants::{Grant, GrantConsumeOutcome, GrantStore};
+pub use identity_links::{IdentityLink, IdentityLinkStore};
 #[cfg(feature = "auth-oauth2")]
 pub use oauth_pending::{OAuth2PendingConsume, OAuth2PendingStatus, OAuth2PendingStore};
 pub use wallets::WalletStore;
