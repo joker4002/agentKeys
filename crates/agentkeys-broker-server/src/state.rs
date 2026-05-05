@@ -47,6 +47,17 @@ pub struct AppState {
     /// call `consume_token` + `mark_verified` directly.
     #[cfg(feature = "auth-email-link")]
     pub email_link: Option<Arc<crate::plugins::auth::EmailLinkAuth>>,
+    /// Concrete handle to the OAuth2 plugin (Phase A.2, US-021).
+    /// Populated when `auth-oauth2-google` is compiled in AND
+    /// `BROKER_AUTH_METHODS` includes `oauth2_google`. The browser-
+    /// facing `/auth/oauth2/callback` handler needs the concrete
+    /// `OAuth2Auth` (not just the trait object) to call
+    /// `handle_callback` + `pending_store.mark_verified` directly.
+    /// Phase A.2 ships v0 with one provider; Phase B+ may carry a
+    /// `HashMap<String, Arc<OAuth2Auth>>` if multiple providers ever
+    /// land at the same time.
+    #[cfg(feature = "auth-oauth2")]
+    pub oauth2: Option<Arc<crate::plugins::auth::OAuth2Auth>>,
 }
 
 pub type SharedState = Arc<AppState>;

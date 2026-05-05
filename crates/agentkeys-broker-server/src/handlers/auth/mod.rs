@@ -14,6 +14,12 @@ pub mod email_request;
 pub mod email_status;
 #[cfg(feature = "auth-email-link")]
 pub mod email_verify;
+#[cfg(feature = "auth-oauth2")]
+pub mod oauth2_callback;
+#[cfg(feature = "auth-oauth2")]
+pub mod oauth2_start;
+#[cfg(feature = "auth-oauth2")]
+pub mod oauth2_status;
 pub mod wallet_start;
 pub mod wallet_verify;
 

@@ -112,6 +112,8 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
         tier2: Arc::new(Tier2State::default()),
         #[cfg(feature = "auth-email-link")]
         email_link: None,
+        #[cfg(feature = "auth-oauth2")]
+        oauth2: None,
     });
     let app = create_router(state.clone());
 

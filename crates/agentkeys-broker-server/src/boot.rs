@@ -48,6 +48,14 @@ pub struct BootArtifacts {
     /// `mark_verified` on the concrete type.
     #[cfg(feature = "auth-email-link")]
     pub email_link: Option<Arc<crate::plugins::auth::EmailLinkAuth>>,
+    /// Concrete OAuth2 plugin handle (Phase A.2, US-021). Populated when
+    /// `oauth2_google` is in `BROKER_AUTH_METHODS` AND `auth-oauth2-google`
+    /// is compiled in. Same trait-vs-concrete duality as `email_link`:
+    /// the browser callback handler needs the concrete `OAuth2Auth` so
+    /// it can call `handle_callback` + `pending_store.mark_verified`
+    /// without going through the trait verify().
+    #[cfg(feature = "auth-oauth2")]
+    pub oauth2: Option<Arc<crate::plugins::auth::OAuth2Auth>>,
 }
 
 /// Format and emit a `BOOT_FAIL: …` error to stderr-bound logs and return
@@ -194,16 +202,20 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
         nonce_store,
         #[cfg(feature = "auth-email-link")]
         email_link: built.email_link,
+        #[cfg(feature = "auth-oauth2")]
+        oauth2: built.oauth2,
     })
 }
 
 /// Internal struct returned by `build_registry` so we can carry both
-/// the trait-object PluginRegistry AND the concrete EmailLinkAuth
-/// handle out together.
+/// the trait-object PluginRegistry AND the concrete EmailLinkAuth /
+/// OAuth2Auth handles out together.
 struct BuiltRegistry {
     registry: PluginRegistry,
     #[cfg(feature = "auth-email-link")]
     email_link: Option<Arc<crate::plugins::auth::EmailLinkAuth>>,
+    #[cfg(feature = "auth-oauth2")]
+    oauth2: Option<Arc<crate::plugins::auth::OAuth2Auth>>,
 }
 
 /// Synchronous probe of which Tier-2 reachability checks are enabled.
@@ -281,6 +293,8 @@ fn build_registry(
         std::collections::HashMap::new();
     #[cfg(feature = "auth-email-link")]
     let mut email_link_concrete: Option<Arc<crate::plugins::auth::EmailLinkAuth>> = None;
+    #[cfg(feature = "auth-oauth2")]
+    let mut oauth2_concrete: Option<Arc<crate::plugins::auth::OAuth2Auth>> = None;
     for method in auth_methods_raw.split(',').map(str::trim) {
         match method {
             #[cfg(feature = "auth-wallet-sig")]
@@ -399,6 +413,145 @@ fn build_registry(
                 auth_map.insert("email_link".to_string(), plugin_arc.clone());
                 email_link_concrete = Some(plugin_arc);
             }
+            #[cfg(feature = "auth-oauth2-google")]
+            "oauth2_google" => {
+                use crate::plugins::auth::oauth2::google::GoogleOAuth2Provider;
+                use crate::plugins::auth::OAuth2Auth;
+                use crate::plugins::auth::OAuth2Provider;
+                use crate::storage::{EmailRateLimitStore, OAuth2PendingStore};
+
+                // Required env vars per plan §3.5.4.
+                let client_id =
+                    std::env::var(env::BROKER_OAUTH2_GOOGLE_CLIENT_ID).map_err(|_| {
+                        boot_fail(
+                            env::BROKER_OAUTH2_GOOGLE_CLIENT_ID,
+                            "(unset)",
+                            "required when oauth2_google is in BROKER_AUTH_METHODS",
+                            "oauth2-google-client-id",
+                        )
+                    })?;
+                let client_secret_path = std::env::var(
+                    env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
+                )
+                .map_err(|_| {
+                    boot_fail(
+                        env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
+                        "(unset)",
+                        "required when oauth2_google is in BROKER_AUTH_METHODS",
+                        "oauth2-google-client-secret-file",
+                    )
+                })?;
+                let client_secret = std::fs::read_to_string(&client_secret_path)
+                    .map_err(|e| {
+                        boot_fail(
+                            env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
+                            &client_secret_path,
+                            format!("read failed: {}", e),
+                            "oauth2-google-client-secret-file",
+                        )
+                    })?
+                    .trim()
+                    .to_string();
+                if client_secret.is_empty() {
+                    return Err(boot_fail(
+                        env::BROKER_OAUTH2_GOOGLE_CLIENT_SECRET_FILE,
+                        &client_secret_path,
+                        "client secret file is empty after trim",
+                        "oauth2-google-client-secret-file",
+                    ));
+                }
+                let state_hmac_path = std::env::var(env::BROKER_OAUTH2_STATE_HMAC_KEY_PATH)
+                    .map_err(|_| {
+                        boot_fail(
+                            env::BROKER_OAUTH2_STATE_HMAC_KEY_PATH,
+                            "(unset)",
+                            "required when OAuth2 is enabled",
+                            "oauth2-state-hmac-key",
+                        )
+                    })?;
+                let state_hmac_key = std::fs::read(&state_hmac_path).map_err(|e| {
+                    boot_fail(
+                        env::BROKER_OAUTH2_STATE_HMAC_KEY_PATH,
+                        &state_hmac_path,
+                        format!("read failed: {}", e),
+                        "oauth2-state-hmac-key",
+                    )
+                })?;
+                let redirect_uri =
+                    std::env::var(env::BROKER_OAUTH2_REDIRECT_URI).map_err(|_| {
+                        boot_fail(
+                            env::BROKER_OAUTH2_REDIRECT_URI,
+                            "(unset)",
+                            "required when OAuth2 is enabled",
+                            "oauth2-redirect-uri",
+                        )
+                    })?;
+                let start_rate_limit = std::env::var(
+                    env::BROKER_OAUTH2_START_RATE_LIMIT_PER_IP_MINUTELY,
+                )
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(30);
+                let jwks_ttl = std::env::var(env::BROKER_OAUTH2_JWKS_TTL_SECONDS)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(3600);
+
+                let parent = config
+                    .audit_db_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let pending_store = Arc::new(
+                    OAuth2PendingStore::open(&parent.join("oauth2_pending.sqlite")).map_err(
+                        |e| {
+                            boot_fail(
+                                env::BROKER_AUDIT_DB_PATH,
+                                &parent.display().to_string(),
+                                format!("OAuth2PendingStore: {}", e),
+                                "oauth2-pending-db",
+                            )
+                        },
+                    )?,
+                );
+                // Reuse the rate-limit store schema for OAuth2 buckets.
+                // Phase A.1's email_rate_limits.sqlite is generic-by-bucket-id;
+                // we use a separate file to keep operator visibility clean.
+                let rl_store = Arc::new(
+                    EmailRateLimitStore::open(&parent.join("oauth2_rate_limits.sqlite"))
+                        .map_err(|e| {
+                            boot_fail(
+                                env::BROKER_AUDIT_DB_PATH,
+                                &parent.display().to_string(),
+                                format!("OAuth2 rate-limit store: {}", e),
+                                "oauth2-rate-limits-db",
+                            )
+                        })?,
+                );
+
+                let provider =
+                    GoogleOAuth2Provider::new(client_id, client_secret).with_jwks_ttl(jwks_ttl);
+                let provider_arc: Arc<dyn OAuth2Provider> = Arc::new(provider);
+                let plugin = OAuth2Auth::new(
+                    provider_arc,
+                    pending_store,
+                    rl_store,
+                    state_hmac_key,
+                    redirect_uri,
+                    start_rate_limit,
+                )
+                .map_err(|e| {
+                    boot_fail(
+                        env::BROKER_OAUTH2_STATE_HMAC_KEY_PATH,
+                        &state_hmac_path,
+                        format!("OAuth2Auth::new: {}", e),
+                        "oauth2-construct",
+                    )
+                })?;
+                let plugin_arc = Arc::new(plugin);
+                auth_map.insert("oauth2_google".to_string(), plugin_arc.clone());
+                oauth2_concrete = Some(plugin_arc);
+            }
             "" => {
                 // Empty entry from `BROKER_AUTH_METHODS=""` or trailing comma.
                 continue;
@@ -475,6 +628,8 @@ fn build_registry(
         },
         #[cfg(feature = "auth-email-link")]
         email_link: email_link_concrete,
+        #[cfg(feature = "auth-oauth2")]
+        oauth2: oauth2_concrete,
     })
 }
 

@@ -240,6 +240,8 @@ async fn spawn_broker(
         tier2: Arc::new(Tier2State::default()),
         #[cfg(feature = "auth-email-link")]
         email_link: None,
+        #[cfg(feature = "auth-oauth2")]
+        oauth2: None,
     });
     state
         .tier2

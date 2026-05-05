@@ -123,6 +123,8 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         nonce_store,
         tier2: Arc::new(Tier2State::default()),
         email_link: Some(plugin.clone()),
+        #[cfg(feature = "auth-oauth2")]
+        oauth2: None,
     });
     state.tier2.backend_reachable.store(true, Ordering::Relaxed);
 

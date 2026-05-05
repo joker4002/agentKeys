@@ -39,6 +39,7 @@ pub fn create_router(state: SharedState) -> Router {
         )
         .route("/v1/auth/exchange", post(handlers::auth::exchange::exchange))
         .pipe(register_email_link_routes)
+        .pipe(register_oauth2_routes)
         .with_state(state)
 }
 
@@ -69,6 +70,30 @@ fn register_email_link_routes(router: Router<state::SharedState>) -> Router<stat
 
 #[cfg(not(feature = "auth-email-link"))]
 fn register_email_link_routes(router: Router<state::SharedState>) -> Router<state::SharedState> {
+    router
+}
+
+/// OAuth2 routes — feature-gated via `auth-oauth2`. Same `pipe` pattern
+/// as email-link so the no-feature build is a no-op.
+#[cfg(feature = "auth-oauth2")]
+fn register_oauth2_routes(router: Router<state::SharedState>) -> Router<state::SharedState> {
+    router
+        .route(
+            "/v1/auth/oauth2/start",
+            post(handlers::auth::oauth2_start::oauth2_start),
+        )
+        .route(
+            "/auth/oauth2/callback",
+            get(handlers::auth::oauth2_callback::oauth2_callback),
+        )
+        .route(
+            "/v1/auth/oauth2/status/:request_id",
+            get(handlers::auth::oauth2_status::oauth2_status),
+        )
+}
+
+#[cfg(not(feature = "auth-oauth2"))]
+fn register_oauth2_routes(router: Router<state::SharedState>) -> Router<state::SharedState> {
     router
 }
 

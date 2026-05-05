@@ -103,6 +103,8 @@ async fn main() -> anyhow::Result<()> {
         tier2: Arc::clone(&tier2),
         #[cfg(feature = "auth-email-link")]
         email_link: boot_artifacts.email_link,
+        #[cfg(feature = "auth-oauth2")]
+        oauth2: boot_artifacts.oauth2,
     });
 
     // Spawn Tier-2 reachability probes asynchronously. /readyz returns
