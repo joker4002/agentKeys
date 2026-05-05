@@ -6,7 +6,10 @@ use crate::jwt::SessionKeypair;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, GrantStore, IdentityLinkStore, WalletStore};
+use crate::metrics::Metrics;
+use crate::storage::{
+    AuthNonceStore, GrantStore, IdempotencyStore, IdentityLinkStore, WalletStore,
+};
 use crate::sts::StsClient;
 
 /// Tier-2 reachability state shared with the /readyz handler.
@@ -47,6 +50,12 @@ pub struct AppState {
     /// OmniAccount. Recovery flow consults this to find which master
     /// should sign the recovery grant.
     pub identity_link_store: Arc<IdentityLinkStore>,
+    /// Idempotency-Key dedup (Phase D-rest, US-037). Mint endpoint
+    /// consults this on every request that carries an Idempotency-Key
+    /// header.
+    pub idempotency_store: Arc<IdempotencyStore>,
+    /// Atomic counters surfaced via /metrics (Phase D-rest, US-036).
+    pub metrics: Arc<Metrics>,
     pub tier2: Arc<Tier2State>,
     /// Concrete handle to the EmailLink plugin (Phase A.1, US-018).
     /// `None` when `auth-email-link` feature is disabled OR when

@@ -7,20 +7,35 @@ pub mod error;
 pub mod handlers;
 pub mod identity;
 pub mod jwt;
+pub mod metrics;
 pub mod oidc;
 pub mod plugins;
 pub mod state;
 pub mod storage;
 pub mod sts;
 
-use axum::{routing::{get, post}, Router};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{get, post},
+    Router,
+};
 
 use state::SharedState;
 
+/// Default request-body size limit when `BROKER_REQUEST_BODY_LIMIT_BYTES`
+/// is unset. 1 MiB matches the existing env-var doc default and is large
+/// enough for any plausible mint payload.
+const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+
 pub fn create_router(state: SharedState) -> Router {
+    let body_limit = std::env::var(env::BROKER_REQUEST_BODY_LIMIT_BYTES)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
     Router::new()
         .route("/healthz", get(handlers::broker_status::healthz))
         .route("/readyz", get(handlers::broker_status::readyz))
+        .route("/metrics", get(handlers::metrics::metrics_handler))
         .route("/v1/mint-aws-creds", post(handlers::mint::mint_aws_creds))
         .route(
             "/.well-known/openid-configuration",
@@ -63,6 +78,9 @@ pub fn create_router(state: SharedState) -> Router {
         )
         .pipe(register_email_link_routes)
         .pipe(register_oauth2_routes)
+        // Phase D-rest US-037: enforce request body size limit per
+        // BROKER_REQUEST_BODY_LIMIT_BYTES (Codex P2 R2-F18).
+        .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
 
