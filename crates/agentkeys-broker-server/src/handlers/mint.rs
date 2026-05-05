@@ -190,17 +190,19 @@ async fn mint_v2(
             String::new()
         }
         Ok(crate::storage::GrantConsumeOutcome::Revoked) => {
-            return Err(BrokerError::Unauthorized(
+            // Plan §3.5.5: grant failures map to 403 (caller authenticated
+            // but lacks permission). Codex Phase A.2 round-3 Vector 4 P2.
+            return Err(BrokerError::Forbidden(
                 "grant has been revoked".into(),
             ));
         }
         Ok(crate::storage::GrantConsumeOutcome::Expired) => {
-            return Err(BrokerError::Unauthorized(
+            return Err(BrokerError::Forbidden(
                 "grant is expired".into(),
             ));
         }
         Ok(crate::storage::GrantConsumeOutcome::Exhausted) => {
-            return Err(BrokerError::Unauthorized(
+            return Err(BrokerError::Forbidden(
                 "grant exhausted (used_count >= max_uses)".into(),
             ));
         }
