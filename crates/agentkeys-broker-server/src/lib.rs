@@ -38,6 +38,16 @@ pub fn create_router(state: SharedState) -> Router {
             post(handlers::auth::wallet_verify::wallet_verify),
         )
         .route("/v1/auth/exchange", post(handlers::auth::exchange::exchange))
+        // Phase B grant endpoints (US-026).
+        .route(
+            "/v1/grant/create",
+            post(handlers::grant::create::grant_create),
+        )
+        .route(
+            "/v1/grant/revoke",
+            post(handlers::grant::revoke::grant_revoke),
+        )
+        .route("/v1/grant/list", get(handlers::grant::list::grant_list))
         .pipe(register_email_link_routes)
         .pipe(register_oauth2_routes)
         .with_state(state)

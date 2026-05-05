@@ -62,6 +62,54 @@ pub fn mint_session_jwt(
     keypair.sign_jwt(&claims)
 }
 
+/// Mint an `audit_proof` JWT for a capability grant (Phase B, US-025).
+///
+/// Per plan §3.5.5: the audit_proof is the broker's ES256 signature
+/// over canonical grant content. Tampering with the SQLite row breaks
+/// JWT verification — DB exfiltration cannot produce a verified-but-
+/// tampered grant.
+///
+/// Phase E will swap the canonical-JSON-via-jsonwebtoken approach for
+/// canonical CBOR per V0.1-FOLLOWUPS R1-F3. The compact-JWS wire shape
+/// stays the same.
+#[allow(clippy::too_many_arguments)]
+pub fn mint_grant_audit_proof(
+    keypair: &SessionKeypair,
+    issuer: &str,
+    grant_id: &str,
+    master_omni_account: &str,
+    daemon_address: &str,
+    service: &str,
+    scope_path: &str,
+    granted_at: i64,
+    expires_at: i64,
+    max_uses: i64,
+) -> BrokerResult<String> {
+    let claims = json!({
+        "iss":  issuer,
+        "sub":  format!("agentkeys:grant:{}", grant_id),
+        "aud":  "agentkeys:audit-proof",
+        "iat":  granted_at,
+        // exp is the grant's own expiration so the JWT becomes invalid
+        // exactly when the grant does — the verifier doesn't need to
+        // separately fetch the SQLite row's expires_at to know the
+        // grant is dead.
+        "exp":  expires_at,
+        "agentkeys": {
+            "kind":                 "grant",
+            "grant_id":             grant_id,
+            "master_omni_account":  master_omni_account,
+            "daemon_address":       daemon_address,
+            "service":              service,
+            "scope_path":           scope_path,
+            "granted_at":           granted_at,
+            "expires_at":           expires_at,
+            "max_uses":             max_uses,
+        }
+    });
+    keypair.sign_jwt(&claims)
+}
+
 /// Cheap monotonic-ish identifier; not a real ULID but unique enough for
 /// short-lived JWTs and small enough that we don't pull in a crate just
 /// for this. Format: `<unix_micros>-<rand_hex>`.

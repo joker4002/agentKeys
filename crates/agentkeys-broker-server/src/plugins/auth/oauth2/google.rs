@@ -192,16 +192,18 @@ impl GoogleOAuth2Provider {
     }
 }
 
-/// Codex round-1 Vector 13 P3 mitigation: tighten JWK lookup so an
-/// encryption-only key with the matching `kid` cannot be picked up for
-/// signature verification. Google JWKS only ever publishes signing keys
-/// today, but defense-in-depth: require `kty == "RSA"` and `use ==
-/// "sig"` (or empty/missing).
+/// Codex round-1 Vector 13 P3 + round-2 Vector 3 P2 mitigation: tighten
+/// JWK lookup so an encryption-only key with the matching `kid` cannot
+/// be picked up for signature verification. Round 2 escalated the
+/// fail-closed bar: `kty` MUST be exactly `"RSA"` (no empty fallback);
+/// `use` may be empty OR `"sig"` (Google has historically published
+/// keys without `use` fields). Round 1 originally accepted empty `kty`;
+/// round 2 found that to be too permissive.
 fn jwk_matches(jwk: &GoogleJwk, kid: &str) -> bool {
     if jwk.kid != kid {
         return false;
     }
-    let kty_ok = jwk.kty.is_empty() || jwk.kty == "RSA";
+    let kty_ok = jwk.kty == "RSA";
     let use_ok = jwk.usage.is_empty() || jwk.usage == "sig";
     kty_ok && use_ok
 }

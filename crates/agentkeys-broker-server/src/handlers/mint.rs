@@ -157,6 +157,61 @@ async fn mint_v2(
         )));
     }
 
+    // 4b. Phase B (US-027) — grant resolution. The broker consults the
+    //     grant store atomically (ONE SQL UPDATE … RETURNING) for an
+    //     active grant matching (master_omni_account, daemon_address,
+    //     service). Failure modes:
+    //       - NoGrant: legacy implicit-grant fallback (Phase 0 mints
+    //         continue to work). Phase E US-039 will flip this default
+    //         to fail-closed once all daemons are grant-aware.
+    //       - Revoked / Expired / Exhausted: HTTP 403, no STS call.
+    //     A successful Consumed result both increments used_count + 1
+    //     atomically AND returns the grant_id + audit_proof for the
+    //     audit row.
+    let now_for_grant = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let resolved_grant_id = match state.grant_store.try_consume(
+        &claims.agentkeys.omni_account,
+        &body.auth.address.to_lowercase(),
+        &body.intent.service,
+        now_for_grant,
+    ) {
+        Ok(crate::storage::GrantConsumeOutcome::Consumed { grant_id, .. }) => grant_id,
+        Ok(crate::storage::GrantConsumeOutcome::NoGrant) => {
+            // Phase 0 implicit-grant fallback. Logged but not rejected.
+            tracing::debug!(
+                "mint_v2: no explicit grant for ({}, {}, {}) — Phase 0 implicit-grant path",
+                claims.agentkeys.omni_account,
+                body.auth.address,
+                body.intent.service
+            );
+            String::new()
+        }
+        Ok(crate::storage::GrantConsumeOutcome::Revoked) => {
+            return Err(BrokerError::Unauthorized(
+                "grant has been revoked".into(),
+            ));
+        }
+        Ok(crate::storage::GrantConsumeOutcome::Expired) => {
+            return Err(BrokerError::Unauthorized(
+                "grant is expired".into(),
+            ));
+        }
+        Ok(crate::storage::GrantConsumeOutcome::Exhausted) => {
+            return Err(BrokerError::Unauthorized(
+                "grant exhausted (used_count >= max_uses)".into(),
+            ));
+        }
+        Err(e) => {
+            return Err(BrokerError::Internal(format!(
+                "grant_store.try_consume: {}",
+                e
+            )));
+        }
+    };
+
     // 5. Build the AuditRecord. record_hash is `SHA256(canonical_signing_input)`
     //    so a row mismatch is detectable by re-running the canonicalization.
     let mut hasher = Sha256::new();
@@ -212,7 +267,9 @@ async fn mint_v2(
         wallet: body.auth.address.to_lowercase(),
         agent_id: body.intent.agent_id.clone(),
         service: body.intent.service.clone(),
-        grant_id: String::new(), // Phase B+ populates this.
+        // Phase B (US-027): grant_id from resolved grant; empty when
+        // legacy implicit-grant fallback fired.
+        grant_id: resolved_grant_id.clone(),
         outcome: "ok".into(),
         outcome_detail: None,
     };

@@ -31,7 +31,7 @@ use agentkeys_broker_server::{
         PluginRegistry,
     },
     state::{AppState, Tier2State},
-    storage::{AuthNonceStore, EmailRateLimitStore, EmailTokenStore, WalletStore},
+    storage::{AuthNonceStore, EmailRateLimitStore, EmailTokenStore, GrantStore, WalletStore},
     sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use serde_json::Value;
@@ -121,6 +121,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubEmailSender>) {
         audit_policy: AuditPolicy::SqlitePrimary,
         wallet_store,
         nonce_store,
+        grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
         tier2: Arc::new(Tier2State::default()),
         email_link: Some(plugin.clone()),
         #[cfg(feature = "auth-oauth2")]

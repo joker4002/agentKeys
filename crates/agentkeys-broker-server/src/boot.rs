@@ -29,7 +29,7 @@ use crate::jwt::SessionKeypair;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::{AuditAnchor, AuditPolicy};
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, WalletStore};
+use crate::storage::{AuthNonceStore, GrantStore, WalletStore};
 
 /// Outcome of the synchronous Tier-1 boot phase.
 pub struct BootArtifacts {
@@ -39,6 +39,7 @@ pub struct BootArtifacts {
     pub audit_policy: AuditPolicy,
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
+    pub grant_store: Arc<GrantStore>,
     /// Concrete EmailLink plugin handle (Phase A.1, US-018). Populated
     /// when `email_link` is in `BROKER_AUTH_METHODS` AND the
     /// `auth-email-link` feature is compiled in. The registry's auth
@@ -160,6 +161,16 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
             )
         })?,
     );
+    let grant_store = Arc::new(
+        GrantStore::open(&grants_path(config)).map_err(|e| {
+            boot_fail(
+                env::BROKER_AUDIT_DB_PATH,
+                &config.audit_db_path.display().to_string(),
+                format!("GrantStore: {}", e),
+                "grants-db",
+            )
+        })?,
+    );
 
     // 5. Validate + parse plugin selection env vars. Every name in each
     //    list must resolve at compile time (i.e. the corresponding
@@ -200,6 +211,7 @@ pub fn run_tier1(config: &BrokerConfig) -> anyhow::Result<BootArtifacts> {
         audit_policy,
         wallet_store,
         nonce_store,
+        grant_store,
         #[cfg(feature = "auth-email-link")]
         email_link: built.email_link,
         #[cfg(feature = "auth-oauth2")]
@@ -259,6 +271,14 @@ fn wallets_path(config: &BrokerConfig) -> std::path::PathBuf {
         .parent()
         .map(|p| p.join("wallets.sqlite"))
         .unwrap_or_else(|| std::path::PathBuf::from("wallets.sqlite"))
+}
+
+fn grants_path(config: &BrokerConfig) -> std::path::PathBuf {
+    config
+        .audit_db_path
+        .parent()
+        .map(|p| p.join("grants.sqlite"))
+        .unwrap_or_else(|| std::path::PathBuf::from("grants.sqlite"))
 }
 
 #[cfg(feature = "audit-sqlite")]

@@ -5,6 +5,7 @@
 //! client is replaced with a stub so no test ever hits AWS.
 
 use std::path::PathBuf;
+use agentkeys_broker_server::storage::GrantStore;
 use std::sync::Arc;
 
 use agentkeys_broker_server::audit::{hash_token, AuditLog};
@@ -107,6 +108,7 @@ async fn spawn_broker_with_sts(
         audit_policy: agentkeys_broker_server::plugins::audit::AuditPolicy::SqlitePrimary,
         wallet_store,
         nonce_store,
+        grant_store: Arc::new(GrantStore::open_in_memory().unwrap()),
         tier2: std::sync::Arc::new(agentkeys_broker_server::state::Tier2State::default()),
         #[cfg(feature = "auth-email-link")]
         email_link: None,

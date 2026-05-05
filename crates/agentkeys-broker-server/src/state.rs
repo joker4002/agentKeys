@@ -6,7 +6,7 @@ use crate::jwt::SessionKeypair;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
-use crate::storage::{AuthNonceStore, WalletStore};
+use crate::storage::{AuthNonceStore, GrantStore, WalletStore};
 use crate::sts::StsClient;
 
 /// Tier-2 reachability state shared with the /readyz handler.
@@ -37,6 +37,11 @@ pub struct AppState {
     pub audit_policy: AuditPolicy,
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
+    /// Capability grants (Phase B, US-025/026/027). Always compiled in;
+    /// the mint endpoint consults this even if no grant has yet been
+    /// issued (Phase 0 grant-less mints continue to work via the
+    /// implicit-grant fallback documented in mint.rs).
+    pub grant_store: Arc<GrantStore>,
     pub tier2: Arc<Tier2State>,
     /// Concrete handle to the EmailLink plugin (Phase A.1, US-018).
     /// `None` when `auth-email-link` feature is disabled OR when
