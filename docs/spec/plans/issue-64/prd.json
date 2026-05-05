@@ -24,7 +24,8 @@
         {
           "id": "US-001",
           "title": "src/env.rs — single source of truth for BROKER_* names",
-          "passes": false,
+          "passes": true,
+          "commit": "32d3dd3",
           "acceptanceCriteria": [
             "crates/agentkeys-broker-server/src/env.rs exists with const &str declarations for every BROKER_* var listed in plan §5",
             "Group enum exists with variants: Core, Oidc, SessionJwt, Audit, AuditEvm, Auth, AuthEmail, AuthOAuth2, Limits, Legacy",
@@ -36,7 +37,8 @@
         {
           "id": "US-002",
           "title": "Plugin trait scaffolding (UserAuthMethod, WalletProvisioner, AuditAnchor, Readiness)",
-          "passes": false,
+          "passes": true,
+          "commit": "d6e5bba",
           "acceptanceCriteria": [
             "src/plugins/mod.rs defines Readiness enum: Ready{detail}, Degraded{reason}, Unready{reason}",
             "src/plugins/auth.rs defines UserAuthMethod trait with name(), ready(), challenge(), verify()",
@@ -67,7 +69,8 @@
         {
           "id": "US-004",
           "title": "OmniAccount derivation + AgentIdentity extension for OAuth2",
-          "passes": false,
+          "passes": true,
+          "commit": "80c01f6",
           "acceptanceCriteria": [
             "src/identity/omni_account.rs exposes derive(client_id: &str, identity_type: &str, identity_value: &str) -> OmniAccount returning SHA256 hash",
             "client_id constant is `\"agentkeys\"` (distinct from dexs-backend's wildmeta)",
@@ -79,7 +82,8 @@
         {
           "id": "US-005",
           "title": "Two ES256 keypairs (oidc + session) with purpose tagging (§3.5.6)",
-          "passes": false,
+          "passes": true,
+          "commit": "130f684",
           "acceptanceCriteria": [
             "src/jwt/mod.rs defines JwtKeypair with on-disk format including \"purpose\": \"oidc\" | \"session\" field",
             "load(path) refuses to read keypair where purpose tag does not match the slot it's being loaded into",
@@ -108,7 +112,8 @@
         {
           "id": "US-007",
           "title": "ClientSideKeystore wallet provisioner",
-          "passes": false,
+          "passes": true,
+          "commit": "61a737b",
           "acceptanceCriteria": [
             "src/plugins/wallet/keystore.rs implements WalletProvisioner",
             "Storage table wallets(omni_account TEXT, wallet_address TEXT, role TEXT NOT NULL CHECK(role IN ('master','daemon')), parent_address TEXT, created_at INTEGER, PRIMARY KEY(omni_account, wallet_address))",
@@ -122,7 +127,8 @@
         {
           "id": "US-008",
           "title": "SqliteAnchor — port existing audit.rs to AuditAnchor trait",
-          "passes": false,
+          "passes": true,
+          "commit": "80c01f6",
           "acceptanceCriteria": [
             "src/plugins/audit/sqlite.rs implements AuditAnchor",
             "anchor(record) inserts a row into mint_log with columns: id ULID, omni_account, wallet, agent_id, service, status (pending/confirmed/quarantined), record_hash (sha256 of canonical CBOR), created_at, anchor_receipts JSONB",
