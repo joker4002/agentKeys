@@ -12,11 +12,18 @@ use super::Readiness;
 
 #[cfg(feature = "auth-email-link")]
 pub mod email_link;
+#[cfg(feature = "auth-oauth2")]
+pub mod oauth2;
 #[cfg(feature = "auth-wallet-sig")]
 pub mod wallet_sig;
 
 #[cfg(feature = "auth-email-link")]
 pub use email_link::{EmailLinkAuth, EmailSendError, EmailSender, SesVerifyCache, StubEmailSender};
+#[cfg(feature = "auth-oauth2")]
+pub use oauth2::{
+    OAuth2Auth, OAuth2Error, OAuth2Provider, StubOAuth2Provider, TokenExchangeOutcome,
+    VerifiedIdToken,
+};
 #[cfg(feature = "auth-wallet-sig")]
 pub use wallet_sig::SiweWalletAuth;
 

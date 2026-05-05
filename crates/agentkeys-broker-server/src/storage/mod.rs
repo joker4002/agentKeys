@@ -6,15 +6,23 @@
 //! A.2, grants + identity_links in Phase B.
 
 pub mod auth_nonces;
-#[cfg(feature = "auth-email-link")]
+// `email_rate_limits` is bucket-id-generic — reused by both EmailLink
+// (Phase A.1) and OAuth2 (Phase A.2). Compiled in when either feature
+// is enabled. V0.1-FOLLOWUPS: rename to `rate_limits` to drop the
+// historical email-only association.
+#[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
 pub mod email_rate_limits;
 #[cfg(feature = "auth-email-link")]
 pub mod email_tokens;
+#[cfg(feature = "auth-oauth2")]
+pub mod oauth_pending;
 pub mod wallets;
 
 pub use auth_nonces::{AuthNonceStore, ConsumeOutcome};
-#[cfg(feature = "auth-email-link")]
+#[cfg(any(feature = "auth-email-link", feature = "auth-oauth2"))]
 pub use email_rate_limits::{EmailRateLimitStore, RateLimitOutcome};
 #[cfg(feature = "auth-email-link")]
 pub use email_tokens::{EmailConsumeOutcome, EmailRequestStatus, EmailTokenStore};
+#[cfg(feature = "auth-oauth2")]
+pub use oauth_pending::{OAuth2PendingConsume, OAuth2PendingStatus, OAuth2PendingStore};
 pub use wallets::WalletStore;

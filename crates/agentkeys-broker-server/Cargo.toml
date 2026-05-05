@@ -41,6 +41,11 @@ getrandom = "0.2"
 # enables `auth-wallet-sig`, so these compile in by default.
 k256 = { version = "0.13", features = ["ecdsa", "sha2"], optional = true }
 sha3 = { version = "0.10", optional = true }
+# OAuth2 (Phase A.2 / US-020) — state HMAC + URL building. Optional, gated
+# via `auth-oauth2`. `url` is also a transitive dep of `reqwest` so the
+# dep-graph cost is zero; declaring directly keeps the API stable.
+hmac = { version = "0.12", optional = true }
+url = { version = "2", optional = true }
 
 [features]
 # Plan §3 / §3.5 — pluggable trait surface, feature-gated per layer.
@@ -54,7 +59,7 @@ default              = ["auth-wallet-sig", "wallet-keystore", "audit-sqlite"]
 # to auth-email-link; Phase A.2's OAuth2 reuses unconditional jsonwebtoken+reqwest.
 auth-wallet-sig      = ["dep:k256", "dep:sha3"]
 auth-email-link      = []
-auth-oauth2          = []
+auth-oauth2          = ["dep:hmac", "dep:url"]
 auth-oauth2-google   = ["auth-oauth2"]
 auth-oauth2-github   = ["auth-oauth2"]            # v1+
 auth-oauth2-apple    = ["auth-oauth2"]            # v1+
