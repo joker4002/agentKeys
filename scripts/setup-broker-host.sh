@@ -22,7 +22,7 @@
 #     [--yes]
 #
 #   bash scripts/setup-broker-host.sh --upgrade              # upgrade mode
-#     [--ref main]                  # git ref to deploy (default: main)
+#     [--ref <branch-or-tag>]       # git ref to deploy (default: CURRENT branch)
 #     [--skip-pull]                 # skip git fetch/checkout/pull
 #     [--yes]
 #
@@ -74,7 +74,7 @@ WITH_NGINX="auto"            # auto | yes | no
 WITH_CERTBOT="auto"          # auto | yes | no
 ASSUME_YES=false
 UPGRADE_MODE=false           # --upgrade switches the script into redeploy flow
-UPGRADE_REF="main"           # git ref to checkout in --upgrade mode
+UPGRADE_REF=""               # git ref to checkout; empty = current branch
 UPGRADE_SKIP_PULL=false      # --skip-pull: build whatever is checked out
 
 # Interactive when stdin is a TTY and the operator hasn't opted out.
@@ -213,18 +213,41 @@ if $UPGRADE_MODE; then
     die "/usr/local/bin/agentkeys-broker-server missing — first-time bootstrap not complete; run without --upgrade"
 
   CURRENT_REV="$( cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown )"
+  CURRENT_BRANCH="$( cd "$REPO_ROOT" && git symbolic-ref --short HEAD 2>/dev/null || true )"
+
+  # Resolve --ref default: keep the operator on whatever branch they're
+  # already deploying. Hardcoding "main" here used to silently switch
+  # branches mid-upgrade — operators on a feature branch (e.g. evm) would
+  # build main's binary instead of theirs.
+  if [[ -z "$UPGRADE_REF" ]]; then
+    if [[ -n "$CURRENT_BRANCH" ]]; then
+      UPGRADE_REF="$CURRENT_BRANCH"
+    else
+      die "current HEAD is detached (no branch). Pass --ref <branch-or-tag> explicitly to choose what to deploy."
+    fi
+  fi
+
+  # Loud warning if the operator's --ref will switch them off their
+  # current branch. Common case where this matters: deploying from a
+  # feature branch like 'evm' that has commits not yet on main.
+  BRANCH_SWITCH_NOTE=""
+  if [[ -n "$CURRENT_BRANCH" && "$CURRENT_BRANCH" != "$UPGRADE_REF" ]]; then
+    BRANCH_SWITCH_NOTE="  !! BRANCH SWITCH: $CURRENT_BRANCH → $UPGRADE_REF (commits unique to $CURRENT_BRANCH will not be deployed)"
+  fi
+
   cat <<EOF
 
 ── Upgrade plan ──
-  Repo        : $REPO_ROOT
-  Current HEAD: $CURRENT_REV
-  Target ref  : $UPGRADE_REF
-  Pull        : $($UPGRADE_SKIP_PULL && echo skip || echo "git fetch + checkout + pull")
-  Build       : sudo cargo build --release -p agentkeys-broker-server
-  Stop        : sudo systemctl stop agentkeys-broker
-  Backup      : /usr/local/bin/agentkeys-broker-server → .bak
-  Install     : /usr/local/bin/agentkeys-broker-server (mode 0755)
-  Start       : sudo systemctl start agentkeys-broker
+  Repo          : $REPO_ROOT
+  Current HEAD  : $CURRENT_REV ${CURRENT_BRANCH:+(on $CURRENT_BRANCH)}
+  Target ref    : $UPGRADE_REF
+$([[ -n "$BRANCH_SWITCH_NOTE" ]] && echo "$BRANCH_SWITCH_NOTE")
+  Pull          : $($UPGRADE_SKIP_PULL && echo skip || echo "git fetch + checkout + pull")
+  Build         : sudo cargo build --release -p agentkeys-broker-server
+  Stop          : sudo systemctl stop agentkeys-broker
+  Backup        : /usr/local/bin/agentkeys-broker-server → .bak
+  Install       : /usr/local/bin/agentkeys-broker-server (mode 0755)
+  Start         : sudo systemctl start agentkeys-broker
 
 EOF
 
