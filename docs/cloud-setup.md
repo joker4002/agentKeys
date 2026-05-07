@@ -365,15 +365,19 @@ aws iam update-assume-role-policy --role-name agentkeys-data-role \
         Action: ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
         Condition: {
           StringEquals: {($aud_key): "sts.amazonaws.com"},
-          StringNotEquals: {"aws:RequestTag/agentkeys_user_wallet": ""}
+          Null: {"aws:RequestTag/agentkeys_user_wallet": "false"}
         }
       }]
     }')"
 ```
 
+`Null: "false"` enforces tag presence ("the key MUST exist"). Do **not** use `StringNotEquals: {"aws:RequestTag/agentkeys_user_wallet": ""}` — AWS evaluates negated string operators on missing context keys as TRUE ("the missing key is not equal to anything"), so a JWT carrying no AWS tags claim would silently bypass the check. The `Null` operator rejects sessions where the tag isn't set at all, which is the only enforcement the trust policy can give you.
+
 ### 4.4 Upgrade bucket policy to PrincipalTag-scoped
 
 Replaces `AllowDaemonRead` from §3.5. The cloud now enforces "the assumed session can only touch the prefix matching its PrincipalTag" — even if app code has a bug.
+
+The daemon's read perms split into two statements because `s3:prefix` is a request-time condition that **only applies to `s3:ListBucket`** (the prefix filter on listings) — `s3:GetObject` doesn't carry a prefix parameter, so combining the two actions under one `s3:prefix` condition triggers `MalformedPolicy: Conditions do not apply to combination of actions and resources in statement`. For `GetObject` the resource ARN itself enforces the prefix via `${aws:PrincipalTag/...}` expansion.
 
 ```bash
 aws s3api put-bucket-policy --bucket "$BUCKET" \
@@ -388,37 +392,123 @@ aws s3api put-bucket-policy --bucket "$BUCKET" \
         Condition: {StringEquals: {"aws:Referer": $acct}}
       },
       {
-        Sid: "AllowDaemonReadOwnPrefix", Effect: "Allow",
+        Sid: "AllowDaemonListOwnPrefix", Effect: "Allow",
         Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
-        Action: ["s3:GetObject", "s3:ListBucket"],
-        Resource: [
-          "arn:aws:s3:::\($bucket)",
-          "arn:aws:s3:::\($bucket)/${aws:PrincipalTag/agentkeys_user_wallet}/*"
-        ],
+        Action: "s3:ListBucket",
+        Resource: "arn:aws:s3:::\($bucket)",
         Condition: {
-          StringEquals: {"s3:prefix": "${aws:PrincipalTag/agentkeys_user_wallet}/"}
+          StringLike: {"s3:prefix": "${aws:PrincipalTag/agentkeys_user_wallet}/*"}
         }
+      },
+      {
+        Sid: "AllowDaemonGetOwnObjects", Effect: "Allow",
+        Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
+        Action: "s3:GetObject",
+        Resource: "arn:aws:s3:::\($bucket)/${aws:PrincipalTag/agentkeys_user_wallet}/*"
       }
     ]
   }')"
 ```
 
-### 4.5 End-to-end proof
+`StringLike "${tag}/*"` (not `StringEquals "${tag}/"`) lets the daemon list sub-prefixes like `<wallet>/inbox/` and `<wallet>/sent/2026-05/`, not just the exact root `<wallet>/`. Matches the shape in [`docs/spec/ses-email-architecture.md` §10.4](spec/ses-email-architecture.md) and [`wiki/tag-based-access`](../wiki/tag-based-access.md).
 
-Mint a JWT, assume the role with it, prove that wallet A can read its own prefix but **not** wallet B's:
+### 4.4.1 Strip the §3 broad-bucket grant from the role's inline policy
+
+**Critical for §4.5 to actually demonstrate isolation.** §3.2's `agentkeys-data-role-inline` grants the role broad `s3:GetObject` + `s3:ListBucket` on the entire bucket — necessary in the static-IAM path (no PrincipalTag to scope on) but **fatal** here: IAM evaluates as union-of-allows, so this identity-based grant overrides §4.4's bucket-policy isolation. Without this step, §4.5's 4b test will silently succeed instead of correctly returning `AccessDenied` — federation appears to work while the cloud is enforcing nothing.
+
+Inspect what's currently attached:
 
 ```bash
-# 1. Mint a session bearer against the backend (mock-server in dev, chain in v0.2+)
+aws iam get-role-policy --profile agentkeys-admin \
+  --role-name agentkeys-data-role \
+  --policy-name agentkeys-data-role-inline \
+  --query 'PolicyDocument'
+```
+
+Re-apply, omitting the S3 statement. Keep any non-S3 statements (the daemon needs the `ses:SendRawEmail` grant for outbound mail in §3):
+
+```bash
+aws iam put-role-policy --profile agentkeys-admin \
+  --role-name agentkeys-data-role \
+  --policy-name agentkeys-data-role-inline \
+  --policy-document "$(jq -n --arg ses_domain "${MAIL_DOMAIN:-bots.litentry.org}" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Action: "ses:SendRawEmail",
+      Resource: "*",
+      Condition: {
+        StringLike: {"ses:FromAddress": "*@\($ses_domain)"}
+      }
+    }]
+  }')"
+```
+
+If your inline policy had additional non-S3 statements, include them here too.
+
+Verify the S3 actions are gone:
+
+```bash
+aws iam get-role-policy --profile agentkeys-admin \
+  --role-name agentkeys-data-role \
+  --policy-name agentkeys-data-role-inline \
+  --query 'PolicyDocument.Statement[*].Action'
+# → [["ses:SendRawEmail"]]
+```
+
+If the daemon doesn't need any non-S3 grants, delete the inline policy entirely instead:
+
+```bash
+aws iam delete-role-policy --profile agentkeys-admin \
+  --role-name agentkeys-data-role \
+  --policy-name agentkeys-data-role-inline
+```
+
+### 4.5 End-to-end proof
+
+Mint a JWT, assume the role with it, prove that wallet A can read its own prefix but **not** wallet B's. The minting half must run **on the broker host** (the prod broker validates session bearers against its *own* local backend on `127.0.0.1:8090`, not against any backend reachable from your operator workstation). The AWS-side half runs on your operator workstation where your admin AWS profile lives.
+
+**Env-var scope** — `$ACCOUNT_ID`, `$BROKER_HOST`, `$OIDC_ISSUER`, `$OIDC_PROVIDER_ARN`, `$BUCKET` only exist on your operator workstation (set up in [§0](#0-identities--mental-model)). The broker host has none of them. Part A below references `$BROKER_HOST` once — in the SSH command itself, where it's expanded by your local shell *before* SSH connects — and otherwise uses **only** literal `127.0.0.1` URLs inside the SSH session. Don't try to re-export the §0 vars on the broker host; none of them are needed there.
+
+#### Part A — on the broker host (mint the JWT)
+
+```bash
+# === Run on your operator workstation ===
+# ($BROKER_HOST is expanded locally before ssh runs — the broker host
+# never sees this var. If $BROKER_HOST isn't set, replace with the
+# literal hostname, e.g. broker.litentry.org.)
+ssh agentkey@$BROKER_HOST    # or via: aws ec2-instance-connect ssh --instance-id <id>
+
+# === The rest runs inside the SSH session, on the broker host ===
+# No workstation env vars are visible here. Both URLs are literals.
 SESSION=$(curl -sf -X POST http://127.0.0.1:8090/session/create \
   -H 'content-type: application/json' \
   -d '{"auth_token":"federation-proof"}' | jq -r .session)
 
-# 2. Mint an OIDC JWT via the broker (bearer → JWT)
-JWT=$(curl -sf -X POST "$OIDC_ISSUER/v1/mint-oidc-jwt" \
+JWT=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION" | jq -r .jwt)
-WALLET=$(jq -R 'split(".") | .[1] | @base64d | fromjson | .agentkeys_user_wallet' <<<"$JWT" -r)
 
-# 3. Exchange JWT for AWS temp creds
+echo "$JWT"
+# Copy the entire string. JWT TTL is ~5 min; copy and proceed promptly.
+exit
+```
+
+#### Part B — on your operator workstation (assume role + verify isolation)
+
+All env vars below (`$ACCOUNT_ID`, `$BUCKET`) are workstation-side from §0. Run after `exit`-ing the SSH session.
+
+```bash
+JWT="<paste the JWT from Part A>"
+
+# Decode the wallet from the payload. JWT segments are base64url-encoded
+# (RFC 7515) — jq's @base64d is strict base64, so we url→std + add padding
+# before decoding. Skipping this works on most JWTs by accident; when the
+# payload base64 happens to contain - or _, it fails with a "Malformed BOM"
+# error.
+WALLET=$(jq -R 'split(".") | .[1] | gsub("-";"+") | gsub("_";"/") |
+  . + ("=" * ((4 - length % 4) % 4)) | @base64d | fromjson | .agentkeys_user_wallet' <<<"$JWT" -r)
+echo "WALLET=$WALLET"
+
 CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role" \
   --role-session-name "fed-proof-$(date +%s)" \
@@ -426,6 +516,10 @@ CREDS=$(aws sts assume-role-with-web-identity \
 export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
 export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .Credentials.SecretAccessKey)
 export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .Credentials.SessionToken)
+
+# Confirm you're the assumed role, not your admin profile
+aws sts get-caller-identity
+# → Arn: arn:aws:sts::...:assumed-role/agentkeys-data-role/fed-proof-...
 
 # 4a. Own prefix — should succeed (empty list is fine, no AccessDenied)
 aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$WALLET/"
@@ -436,6 +530,19 @@ aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "0xdeadbeef/"
 ```
 
 Step 4b is the property the static-IAM path (§3) cannot prove: cloud-enforced isolation, zero app-side trust required.
+
+#### Diagnosing intermediate states
+
+If both 4a and 4b succeed, §4.4.1 wasn't applied — the inline-policy `s3:*` grant is still masking the bucket policy. Re-run §4.4.1 and verify `Statement[*].Action` returns only `ses:SendRawEmail`.
+
+If both 4a and 4b deny (including 4a, your *own* prefix), the broker's JWT isn't carrying the `https://aws.amazon.com/tags` claim, so STS sets no PrincipalTag on the assumed session, so `${aws:PrincipalTag/agentkeys_user_wallet}` in the bucket policy expands to empty and matches nothing. Decode the JWT to confirm:
+
+```bash
+jq -R 'split(".") | .[1] | gsub("-";"+") | gsub("_";"/") |
+  . + ("=" * ((4 - length % 4) % 4)) | @base64d | fromjson' <<<"$JWT"
+```
+
+Look for a top-level `https://aws.amazon.com/tags` key with `principal_tags.agentkeys_user_wallet` populated. If it's missing, the broker version doesn't yet emit the AWS tags claim and needs to be redeployed.
 
 ### 4.6 (Future) TEE-derived signer swap
 

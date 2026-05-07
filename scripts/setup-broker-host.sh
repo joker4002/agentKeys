@@ -492,7 +492,9 @@ Environment=BROKER_BACKEND_URL=http://127.0.0.1:8090
 Environment=BROKER_OIDC_ISSUER=$ISSUER_URL
 $CRED_LINE
 ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1
-Restart=on-failure
+# Broker self-exits cleanly (status=0) after 24h max-uptime, so on-failure
+# would leave it dead. Use always so systemd restarts it on every exit.
+Restart=always
 RestartSec=5s
 User=agentkeys
 Group=agentkeys
