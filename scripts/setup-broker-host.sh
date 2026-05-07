@@ -189,6 +189,32 @@ prompt_choice() {
   done
 }
 
+# Ensure both ES256 keypairs (oidc + session) exist under the broker's
+# data dir. Stage 7 added the session keypair (Plan §3.5.6) — pre-Stage-7
+# hosts have only the OIDC one and a Stage-7 binary's Tier-1 boot then
+# refuse-to-boots with `BOOT_FAIL: BROKER_SESSION_KEYPAIR_PATH=…`. We mint
+# anything missing here, idempotently, before the broker is asked to start.
+#
+# Args: $1 = absolute path to the agentkeys-broker-server binary used for keygen.
+# Runs keygen as the `agentkeys` system user so the resulting files end up
+# owned by that user with mode 0600 (the binary chmods them itself).
+ensure_broker_keypairs() {
+  local bin="$1"
+  local kp_dir="/var/lib/agentkeys/.agentkeys/broker"
+  [[ -x "$bin" ]] || die "ensure_broker_keypairs: binary $bin not found or not executable"
+  id -u agentkeys >/dev/null 2>&1 || die "ensure_broker_keypairs: agentkeys system user does not exist yet"
+  sudo install -d -m 0700 -o agentkeys -g agentkeys "$kp_dir"
+  for purpose in oidc session; do
+    local kp_path="$kp_dir/${purpose}-keypair.json"
+    if sudo test -f "$kp_path"; then
+      log "${purpose} keypair already present at ${kp_path} — leaving in place"
+    else
+      log "Minting ${purpose} keypair at ${kp_path} (as agentkeys user)"
+      sudo -u agentkeys "$bin" keygen --purpose "$purpose" --out "$kp_path"
+    fi
+  done
+}
+
 # ─── Pre-flight ───────────────────────────────────────────────────────────────
 log "Pre-flight"
 [[ "$(uname -s)" == "Linux" ]] || die "broker host setup is Linux-only (got $(uname -s)). Run scripts/setup-dev-env.sh on a developer machine instead."
@@ -297,6 +323,10 @@ EOF
 
   log "Installing new binary"
   sudo install -m 0755 "$NEW_BIN" /usr/local/bin/agentkeys-broker-server
+
+  # Mint any keypairs the new binary requires but the host doesn't have yet.
+  # Pre-Stage-7 → Stage-7 upgrades commonly hit this on the session keypair.
+  ensure_broker_keypairs /usr/local/bin/agentkeys-broker-server
 
   log "Starting agentkeys-broker"
   sudo systemctl start agentkeys-broker
@@ -752,7 +782,13 @@ if [[ "$WITH_CERTBOT" == "yes" ]]; then
   fi
 fi
 
-# ─── 8. Enable + start ────────────────────────────────────────────────────────
+# ─── 8. Mint missing broker keypairs ──────────────────────────────────────────
+# Tier-1 boot refuses to start without both ES256 keypairs (Plan §6 disables
+# silent generation). Doing this BEFORE systemctl start avoids the otherwise-
+# guaranteed first-boot crash loop on a fresh host.
+ensure_broker_keypairs /usr/local/bin/agentkeys-broker-server
+
+# ─── 9. Enable + start ────────────────────────────────────────────────────────
 log "Enabling + starting agentkeys-backend, agentkeys-broker"
 sudo systemctl daemon-reload
 sudo systemctl enable --now agentkeys-backend agentkeys-broker
