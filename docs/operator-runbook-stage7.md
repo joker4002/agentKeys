@@ -20,51 +20,98 @@ build. The pre-Stage-7 broker (PR #60 + PR #61) continues to use
 
 ## Quickstart
 
-This block reuses the env vars set by [`docs/cloud-setup.md`](./cloud-setup.md)
-§0 (`REGION`, `BROKER_HOST`, `ACCOUNT_ID`) and the role ARN created by
-§3.2. **Run cloud-setup.md §0 + §3 + §4 first** — the broker has no
-useful state without those resources.
+This Quickstart brings up the broker in the foreground for a sanity
+check. **For systemd-managed production deployment, use
+[`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh)
+instead** — it does steps 1–3 below as a `agentkeys` system service
+under `/var/lib/agentkeys/`, plus nginx + certbot wiring. The
+foreground form below is intended for first-boot verification and
+local dev (`BROKER_DEV_MODE=true`).
+
+**Two machines are involved.** Follow the inline `=== ON … ===`
+markers in the block below — no command runs on both.
+
+| | Operator workstation | Broker host (EC2 / VM resolved by `BROKER_HOST` DNS) |
+|---|---|---|
+| **Role** | Has your `agentkeys-admin` AWS profile + the `$ACCOUNT_ID` / `$BROKER_HOST` shell vars from `cloud-setup.md §0`. Used to mint resources in AWS and to look up the account ID. | Public-facing host AWS IAM reaches at `https://$BROKER_HOST` to fetch `/.well-known/jwks.json`. Where the `agentkeys-broker-server` process actually runs and where the ES256 private keys live. |
+| **Has the binary?** | Optional (only if you `cargo build`). Not used in this Quickstart. | **Yes — required.** Install via `scripts/setup-broker-host.sh` (puts it in `/usr/local/bin`) or `cargo install --path crates/agentkeys-broker-server` on the host. |
+| **Holds private keys?** | No. | Yes — `~/.agentkeys/broker/{oidc,session}-keypair.json`. The keys NEVER leave the host; AWS only sees the public half via the broker's public JWKS endpoint. |
+| **Quickstart steps** | Step 0 only. | Steps 1, 2, 3. |
+
+**Run cloud-setup.md §0 + §3 + §4 first** — the broker has no useful
+state without those AWS-side resources (IAM role, OIDC provider, DNS).
 
 ```bash
-# (Source the same shell vars cloud-setup.md §0 sets. If you've already
-#  run cloud-setup.md in this shell they are already exported.)
+# ════════════════════════════════════════════════════════════════════
+#  STEP 0 — ON OPERATOR WORKSTATION
+# ════════════════════════════════════════════════════════════════════
+# These vars come from cloud-setup.md §0; if you've already sourced
+# them in this shell, they're already exported. They live on your
+# workstation only — the broker host has no awsp + no admin profile.
 awsp agentkeys-admin
 export REGION=us-east-1
 export BROKER_HOST=broker.litentry.org
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
+# Echo the account ID — you'll paste it into step 2 on the broker host
+# (the SSH session inherits no workstation env vars).
+echo "ACCOUNT_ID=$ACCOUNT_ID    # ← copy for step 2"
+
+# Hop to the broker host. $BROKER_HOST is expanded by your local shell
+# *before* ssh runs; the broker host itself never sees the var.
+ssh agentkey@$BROKER_HOST    # or: aws ec2-instance-connect ssh --instance-id <id>
+
+# ════════════════════════════════════════════════════════════════════
+#  STEPS 1–3 — ON BROKER HOST (inside the SSH session)
+# ════════════════════════════════════════════════════════════════════
+# No workstation env vars are visible here. The agentkeys-broker-server
+# binary must already be installed on this host (scripts/setup-broker-host.sh
+# puts it at /usr/local/bin/agentkeys-broker-server).
+
 # 1. Generate both ES256 keypairs (Plan §3.5.6 — purpose-tagged).
-agentkeys-broker-server keygen --purpose oidc    --out  ~/.agentkeys/broker/oidc-keypair.json
-agentkeys-broker-server keygen --purpose session --out  ~/.agentkeys/broker/session-keypair.json
+#    Generated HERE because the broker process running on this host is
+#    the only thing that ever reads the private halves. AWS sees only
+#    the public keys, fetched from the broker's public JWKS URL.
+mkdir -p ~/.agentkeys/broker
+agentkeys-broker-server keygen --purpose oidc    --out ~/.agentkeys/broker/oidc-keypair.json
+agentkeys-broker-server keygen --purpose session --out ~/.agentkeys/broker/session-keypair.json
 chmod 600 ~/.agentkeys/broker/{oidc,session}-keypair.json
 
-# 2. Set the load-bearing env vars.
+# 2. Set the load-bearing env vars (broker-host-side).
 #    BROKER_BACKEND_URL: the legacy session-validation backend (mock-server
 #      in v0.1, real chain backend in v0.2+). `scripts/setup-broker-host.sh`
-#      installs the mock-server as a systemd unit on the broker host's
-#      loopback, so the value is `http://127.0.0.1:8090`. See "What is the
-#      backend?" below.
+#      installs the mock-server as a systemd unit on this host's loopback,
+#      so the value is `http://127.0.0.1:8090`. See "What is the backend?"
+#      below.
 #    BROKER_DATA_ROLE_ARN: the role created by cloud-setup.md §3.2 —
-#      derived from ACCOUNT_ID, not invented.
+#      derived from ACCOUNT_ID; paste the value you echoed on the
+#      workstation in step 0 (12-digit string).
 #    BROKER_OIDC_ISSUER: the public hostname the broker advertises to AWS
 #      as its JWT issuer; AWS reads JWKS from <issuer>/.well-known/jwks.json.
-#      Per cloud-setup.md §4.1 this MUST be `https://$BROKER_HOST` exactly.
+#      Per cloud-setup.md §4.1 this MUST be `https://<your-broker-host>` exactly,
+#      with no trailing slash and no path.
+ACCOUNT_ID=<paste-12-digits-from-step-0>
+BROKER_HOST=broker.litentry.org   # same hostname AWS will reach
 export BROKER_BACKEND_URL=http://127.0.0.1:8090
 export BROKER_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
-export BROKER_AWS_REGION=$REGION
+export BROKER_AWS_REGION=us-east-1
 export BROKER_OIDC_ISSUER=https://$BROKER_HOST
-export BROKER_OIDC_KEYPAIR_PATH=~/.agentkeys/broker/oidc-keypair.json
-export BROKER_SESSION_KEYPAIR_PATH=~/.agentkeys/broker/session-keypair.json
+export BROKER_OIDC_KEYPAIR_PATH=$HOME/.agentkeys/broker/oidc-keypair.json
+export BROKER_SESSION_KEYPAIR_PATH=$HOME/.agentkeys/broker/session-keypair.json
 export BROKER_AUTH_METHODS=wallet_sig
 export BROKER_AUDIT_ANCHORS=sqlite
 
 # 3. Boot. Tier-1 refuse-to-boot is synchronous; if anything is wrong
 #    the process exits with a `BOOT_FAIL: …; see runbook §<anchor>` line.
+#    Bind to 127.0.0.1 — nginx/ALB in front terminates TLS and proxies
+#    to this loopback port.
 agentkeys-broker-server --bind 127.0.0.1 --port 8091
 ```
 
 For a curl-driven sanity test of the SIWE → mint-session-JWT flow, see
-[§Smoke Validation](#smoke-validation) below.
+[§Smoke Validation](#smoke-validation) below — those `curl` commands run
+**on the broker host** (against `localhost:8091`) until you've put TLS
+in front, after which they can run from anywhere against `$BROKER_HOST`.
 
 ### What is the backend? What is the OIDC issuer? Why two URLs?
 
