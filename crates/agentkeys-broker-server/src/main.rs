@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentkeys_broker_server::{
@@ -6,14 +7,19 @@ use agentkeys_broker_server::{
     boot::{run_tier1, Tier2Profile},
     config::BrokerConfig,
     create_router,
+    jwt::session::SessionKeypair,
+    oidc::OidcKeypair,
     state::{AppState, Tier2State},
     sts::{AwsStsClient, StsClient},
 };
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "agentkeys-broker-server", about = "AgentKeys credential broker")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(long, default_value = "8091")]
     port: u16,
 
@@ -24,6 +30,30 @@ struct Args {
     /// In production, leave this off so misconfigured creds fail fast.
     #[arg(long)]
     skip_startup_check: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Generate an ES256 keypair and persist it at --out (mode 0600).
+    /// Required before first boot — Plan §6 disables silent generation.
+    Keygen {
+        /// Which slot the keypair will fill. Determines the persisted
+        /// `purpose` tag; mismatched slots are rejected at boot.
+        #[arg(long, value_enum)]
+        purpose: KeygenPurpose,
+
+        /// Destination path. Parent dirs are created. Existing files are
+        /// not overwritten (refuses with an error so a re-run can't
+        /// silently rotate keys out from under a running broker).
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum KeygenPurpose {
+    Oidc,
+    Session,
 }
 
 #[tokio::main]
@@ -37,6 +67,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    if let Some(Command::Keygen { purpose, out }) = args.command {
+        return run_keygen(purpose, out);
+    }
+
     let config = BrokerConfig::from_env()?;
 
     warn_if_non_loopback_without_tls(&args.bind);
@@ -204,6 +239,36 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("shutdown signal received; draining in-flight requests");
+}
+
+fn run_keygen(purpose: KeygenPurpose, out: PathBuf) -> anyhow::Result<()> {
+    if out.exists() {
+        anyhow::bail!(
+            "{} already exists; refusing to overwrite. Move/remove the existing file first if rotation is intended.",
+            out.display()
+        );
+    }
+    match purpose {
+        KeygenPurpose::Oidc => {
+            let kp = OidcKeypair::generate_and_persist(&out)
+                .map_err(|e| anyhow::anyhow!("oidc keygen failed: {e}"))?;
+            eprintln!(
+                "wrote oidc keypair (kid={}) to {} (mode 0600)",
+                kp.kid,
+                out.display()
+            );
+        }
+        KeygenPurpose::Session => {
+            let kp = SessionKeypair::generate_and_persist(&out)
+                .map_err(|e| anyhow::anyhow!("session keygen failed: {e}"))?;
+            eprintln!(
+                "wrote session keypair (kid={}) to {} (mode 0600)",
+                kp.kid,
+                out.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn warn_if_non_loopback_without_tls(bind: &str) {
