@@ -10,8 +10,8 @@
 # each decision before it's made. Pass flags / --non-interactive for CI.
 #
 # Usage:
-#   bash scripts/setup-broker-host.sh                        # interactive
-#   bash scripts/setup-broker-host.sh --non-interactive \    # CI
+#   bash scripts/setup-broker-host.sh                        # interactive bootstrap
+#   bash scripts/setup-broker-host.sh --non-interactive \    # CI bootstrap
 #     --issuer-url https://broker.litentry.org \
 #     --account-id 429071895007 \
 #     [--region us-east-1] \
@@ -20,6 +20,24 @@
 #     [--with-nginx | --without-nginx] \
 #     [--with-certbot | --without-certbot] \
 #     [--yes]
+#
+#   bash scripts/setup-broker-host.sh --upgrade              # upgrade mode
+#     [--ref main]                  # git ref to deploy (default: main)
+#     [--skip-pull]                 # skip git fetch/checkout/pull
+#     [--yes]
+#
+# Upgrade mode (--upgrade): on a host already bootstrapped, this skips the
+# bootstrap phases (user, systemd, nginx, certbot, IAM walk-through) and
+# instead runs the post-merge redeploy flow:
+#   1. git fetch + checkout + pull on $REF
+#   2. sudo cargo build --release -p agentkeys-broker-server (broker only)
+#   3. sudo systemctl stop agentkeys-broker            (clean swap window)
+#   4. backup current binary → /usr/local/bin/agentkeys-broker-server.bak
+#   5. install -m 0755 the freshly-built binary
+#   6. sudo systemctl start agentkeys-broker
+#   7. journalctl -u agentkeys-broker -n 20 (verify "broker listening on …")
+# Rollback: cp the .bak file back and restart. The mock-server is left alone
+# in upgrade mode; pass the bootstrap form if you need to redeploy it too.
 #
 # Order of operations:
 #   1. Pre-flight checks (Linux, sudo, repo checkout)
@@ -55,6 +73,9 @@ PROFILE_NAME="agentkeys-daemon"
 WITH_NGINX="auto"            # auto | yes | no
 WITH_CERTBOT="auto"          # auto | yes | no
 ASSUME_YES=false
+UPGRADE_MODE=false           # --upgrade switches the script into redeploy flow
+UPGRADE_REF="main"           # git ref to checkout in --upgrade mode
+UPGRADE_SKIP_PULL=false      # --skip-pull: build whatever is checked out
 
 # Interactive when stdin is a TTY and the operator hasn't opted out.
 if [[ -t 0 ]]; then
@@ -78,6 +99,9 @@ while (( $# > 0 )); do
     --non-interactive)    INTERACTIVE=false; shift ;;
     --interactive)        INTERACTIVE=true; shift ;;
     --yes|-y)             ASSUME_YES=true; shift ;;
+    --upgrade)            UPGRADE_MODE=true; shift ;;
+    --ref)                UPGRADE_REF="$2"; shift 2 ;;
+    --skip-pull)          UPGRADE_SKIP_PULL=true; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -171,6 +195,112 @@ log "Pre-flight"
 have sudo                      || die "sudo not found — run as a user with sudo access"
 [[ -d "$REPO_ROOT/crates/agentkeys-broker-server" ]] || \
   die "expected agentkeys checkout at $REPO_ROOT — run from inside a clone"
+
+# ─── Upgrade mode ─────────────────────────────────────────────────────────────
+# When --upgrade is set, take a completely separate code path: pull, rebuild
+# only the broker, stop the running broker, swap the binary, restart.
+# Bootstrap-phase prompts and system-mutation steps are skipped.
+if $UPGRADE_MODE; then
+  have git   || die "git not found — install git on this host first"
+  have cargo || die "cargo not found — first-time bootstrap not complete; run without --upgrade"
+  # Resolve cargo to its absolute path so the sudo build below doesn't depend
+  # on sudoers preserving the operator's PATH. The bootstrap installs rustup
+  # into the operator's ~/.cargo/bin, which secure_path strips by default.
+  CARGO_BIN="$(command -v cargo)"
+  [[ -f /etc/systemd/system/agentkeys-broker.service ]] || \
+    die "agentkeys-broker.service not found — first-time bootstrap not complete; run without --upgrade"
+  [[ -x /usr/local/bin/agentkeys-broker-server ]] || \
+    die "/usr/local/bin/agentkeys-broker-server missing — first-time bootstrap not complete; run without --upgrade"
+
+  CURRENT_REV="$( cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown )"
+  cat <<EOF
+
+── Upgrade plan ──
+  Repo        : $REPO_ROOT
+  Current HEAD: $CURRENT_REV
+  Target ref  : $UPGRADE_REF
+  Pull        : $($UPGRADE_SKIP_PULL && echo skip || echo "git fetch + checkout + pull")
+  Build       : sudo cargo build --release -p agentkeys-broker-server
+  Stop        : sudo systemctl stop agentkeys-broker
+  Backup      : /usr/local/bin/agentkeys-broker-server → .bak
+  Install     : /usr/local/bin/agentkeys-broker-server (mode 0755)
+  Start       : sudo systemctl start agentkeys-broker
+
+EOF
+
+  if ! $ASSUME_YES; then
+    if [[ -t 0 ]]; then
+      read -r -p "Proceed? [Y/n]: " __answer || true
+      case "${__answer:-y}" in
+        y|Y|yes|YES) ;;
+        *) die "aborted by operator" ;;
+      esac
+    fi
+  fi
+
+  if ! $UPGRADE_SKIP_PULL; then
+    log "Fetching origin"
+    ( cd "$REPO_ROOT" && git fetch origin )
+    log "Checking out $UPGRADE_REF"
+    ( cd "$REPO_ROOT" && git checkout "$UPGRADE_REF" )
+    log "Pulling fast-forward"
+    ( cd "$REPO_ROOT" && git pull --ff-only )
+  else
+    log "Skipping pull — building whatever is checked out at $CURRENT_REV"
+  fi
+
+  # sudo with the cargo absolute path (resolved above) and CARGO_HOME /
+  # RUSTUP_HOME preserved so the toolchain installed under the operator's
+  # ~/.cargo + ~/.rustup is reachable. Using the absolute path avoids any
+  # sudoers secure_path interaction.
+  log "Building agentkeys-broker-server (release) — ~5-10 min on small instances"
+  ( cd "$REPO_ROOT" && sudo --preserve-env=CARGO_HOME,RUSTUP_HOME \
+      "$CARGO_BIN" build --release -p agentkeys-broker-server )
+
+  NEW_BIN="$REPO_ROOT/target/release/agentkeys-broker-server"
+  [[ -x "$NEW_BIN" ]] || die "build did not produce $NEW_BIN"
+
+  # Stop before swap so the kernel isn't holding the old inode while a new
+  # one is installed in its place. Restart-only would also work on Linux
+  # (binaries are swappable while mapped), but stop→swap→start makes the
+  # failure mode unambiguous: if the new binary doesn't start, the broker
+  # stays cleanly stopped instead of entering a Restart=always crash loop.
+  log "Stopping agentkeys-broker"
+  sudo systemctl stop agentkeys-broker
+
+  log "Backing up current binary → /usr/local/bin/agentkeys-broker-server.bak"
+  sudo cp -p /usr/local/bin/agentkeys-broker-server \
+             /usr/local/bin/agentkeys-broker-server.bak
+
+  log "Installing new binary"
+  sudo install -m 0755 "$NEW_BIN" /usr/local/bin/agentkeys-broker-server
+
+  log "Starting agentkeys-broker"
+  sudo systemctl start agentkeys-broker
+
+  sleep 2
+  log "Recent broker logs (look for fresh 'broker listening on 127.0.0.1:8091'):"
+  sudo journalctl -u agentkeys-broker -n 20 --no-pager
+
+  cat <<EOF
+
+================================================================================
+  Upgrade complete.
+================================================================================
+Verify:
+  sudo systemctl --no-pager status agentkeys-broker
+  curl -sf http://127.0.0.1:8091/healthz
+
+Rollback (if logs above show a crash loop or missing 'broker listening' line):
+  sudo systemctl stop agentkeys-broker
+  sudo cp /usr/local/bin/agentkeys-broker-server.bak \\
+          /usr/local/bin/agentkeys-broker-server
+  sudo systemctl start agentkeys-broker
+
+================================================================================
+EOF
+  exit 0
+fi
 
 # ─── Interactive walk-through ─────────────────────────────────────────────────
 if $INTERACTIVE; then

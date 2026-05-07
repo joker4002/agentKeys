@@ -26,6 +26,7 @@ For v0.1: run on a host you trust, rotate the daemon key on a schedule (§3), wa
 |---|---|
 | AWS account provisioning (IAM, SES, S3, OIDC federation) | [`cloud-setup.md`](./cloud-setup.md) |
 | Broker-host bootstrap (binaries, systemd, nginx, certbot) | [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) + [`stage7-wip.md` §"Remote deployment"](./stage7-wip.md#remote-deployment) |
+| Broker-host upgrade (pull + rebuild broker + stop/swap/start, with one-step rollback) | `bash scripts/setup-broker-host.sh --upgrade` |
 | Stage 7 design + acceptance test | [`stage7-wip.md`](./stage7-wip.md) |
 | Three-role mental model (operator vs developer vs end-user) | [`dev-setup.md`](./dev-setup.md) |
 
