@@ -78,8 +78,7 @@ impl BrokerConfig {
             30u64,
         )?;
 
-        let oidc_issuer = std::env::var(env::BROKER_OIDC_ISSUER)
-            .unwrap_or_else(|_| "https://oidc.agentkeys.dev".to_string());
+        let oidc_issuer = required_env(env::BROKER_OIDC_ISSUER)?;
         let oidc_keypair_path = std::env::var(env::BROKER_OIDC_KEYPAIR_PATH)
             .ok()
             .map(PathBuf::from)
