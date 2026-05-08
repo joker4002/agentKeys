@@ -79,27 +79,27 @@ export ACCOUNT_ID=000000000000                    # offline path tolerates a stu
 #         "broker listening on 0.0.0.0:8091"
 
 # Terminal C — checks
-curl -sf http://127.0.0.1:8091/healthz                                                # → "ok"
-curl -sf http://127.0.0.1:8091/.well-known/openid-configuration | jq .
-curl -sf http://127.0.0.1:8091/.well-known/jwks.json | jq '.keys[0] | {kty, crv, alg, kid}'
+curl -sS --fail-with-body http://127.0.0.1:8091/healthz                                                # → "ok"
+curl -sS --fail-with-body http://127.0.0.1:8091/.well-known/openid-configuration | jq .
+curl -sS --fail-with-body http://127.0.0.1:8091/.well-known/jwks.json | jq '.keys[0] | {kty, crv, alg, kid}'
 
 # 1. Mint a session bearer against the backend.
 #    `auth_token` is the developer-facing handle; the mock-server resolves
 #    it to a wallet on first use. In production this comes from the chain.
-SESSION=$(curl -sf -X POST http://127.0.0.1:8090/session/create \
+SESSION=$(curl -sS --fail-with-body -X POST http://127.0.0.1:8090/session/create \
   -H 'content-type: application/json' \
   -d '{"auth_token":"phase2-e2e"}' | jq -r .session)
 echo "SESSION=$SESSION"
 
 # 2a. Mint an OIDC JWT (decode the claims to verify shape)
-JWT=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
+JWT=$(curl -sS --fail-with-body -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION" | jq -r .jwt)
 echo "$JWT" | awk -F. '{print $2}' | base64 --decode 2>/dev/null | jq .
 # expect: claims with iss, sub=agentkeys:agent:<wallet>, aud=sts.amazonaws.com,
 #         agentkeys_user_wallet, iat, exp.
 
 # 2b. AWS-creds mint (LIVE path — needs real daemon creds; skip offline)
-CREDS=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-aws-creds \
+CREDS=$(curl -sS --fail-with-body -X POST http://127.0.0.1:8091/v1/mint-aws-creds \
   -H "Authorization: Bearer $SESSION")
 printf '%s' "$CREDS" | jq '{access_key_id, expiration, wallet}'
 
@@ -128,14 +128,14 @@ sqlite3 ~/.agentkeys/broker/audit.sqlite \
 
 ```bash
 # Missing bearer → 401 + auth_failed audit row
-curl -sf -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt
+curl -sS --fail-with-body -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt
 
 # Bogus bearer → 401 + auth_failed audit row
-curl -sf -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
+curl -sS --fail-with-body -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
   -H 'Authorization: Bearer never-minted'
 
 # Backend down (kill terminal A first) → 502 + backend_error audit row
-curl -sf -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
+curl -sS --fail-with-body -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION"
 ```
 
@@ -214,26 +214,26 @@ From any machine with no AWS-shaped configuration:
 
 ```bash
 # 1. Discovery + JWKS reachable
-curl -sf https://broker.litentry.org/healthz                               # → "ok"
-curl -sf https://broker.litentry.org/.well-known/openid-configuration | \
+curl -sS --fail-with-body https://broker.litentry.org/healthz                               # → "ok"
+curl -sS --fail-with-body https://broker.litentry.org/.well-known/openid-configuration | \
   jq -e '.issuer == "https://broker.litentry.org"'                          # → true
-curl -sf https://broker.litentry.org/.well-known/jwks.json | jq '.keys[0].kid'
+curl -sS --fail-with-body https://broker.litentry.org/.well-known/jwks.json | jq '.keys[0].kid'
 
 # 2. Mint a session bearer against the backend.
 #    The backend is NOT public — SSH-tunnel to its loopback:
 #      ssh -i ~/.ssh/agentkey-broker.pem -L 8090:127.0.0.1:8090 \
 #          agentkey-broker@<broker-ec2-ip>
 #    then in another terminal on your laptop:
-SESSION=$(curl -sf -X POST http://127.0.0.1:8090/session/create \
+SESSION=$(curl -sS --fail-with-body -X POST http://127.0.0.1:8090/session/create \
   -H 'content-type: application/json' \
   -d '{"auth_token":"smoke"}' | jq -r .session)
 
 # 3. End-to-end JWT mint
-curl -sf -X POST https://broker.litentry.org/v1/mint-oidc-jwt \
+curl -sS --fail-with-body -X POST https://broker.litentry.org/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION" | jq '.expiration'
 
 # 4. End-to-end AWS-creds mint (skip if the broker is in offline mode)
-curl -sf -X POST https://broker.litentry.org/v1/mint-aws-creds \
+curl -sS --fail-with-body -X POST https://broker.litentry.org/v1/mint-aws-creds \
   -H "Authorization: Bearer $SESSION" | jq '{access_key_id, expiration, wallet}'
 ```
 

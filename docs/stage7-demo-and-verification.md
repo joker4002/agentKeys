@@ -172,7 +172,7 @@ checks array into the [operator runbook](operator-runbook-stage7.md)
 — every check has its own anchor with the recovery procedure.
 
 ```bash
-curl -sf $OIDC_ISSUER/.well-known/openid-configuration | jq
+curl -sS --fail-with-body $OIDC_ISSUER/.well-known/openid-configuration | jq
 # {
 #   "issuer": "https://broker.litentry.org",
 #   "jwks_uri": "https://broker.litentry.org/.well-known/jwks.json",
@@ -180,7 +180,7 @@ curl -sf $OIDC_ISSUER/.well-known/openid-configuration | jq
 #   ...
 # }
 
-curl -sf $OIDC_ISSUER/.well-known/jwks.json | jq '.keys[0]'
+curl -sS --fail-with-body $OIDC_ISSUER/.well-known/jwks.json | jq '.keys[0]'
 # {
 #   "kty": "EC",
 #   "crv": "P-256",
@@ -199,7 +199,7 @@ scheme, path all matter. If they don't match, every
 `AssumeRoleWithWebIdentity` will return `InvalidIdentityToken`.
 
 ```bash
-[[ "$(curl -sf $OIDC_ISSUER/.well-known/openid-configuration | jq -r .issuer)" \
+[[ "$(curl -sS --fail-with-body $OIDC_ISSUER/.well-known/openid-configuration | jq -r .issuer)" \
    == "$OIDC_ISSUER" ]] && echo "issuer match" || echo "ISSUER MISMATCH — see runbook §oidc-issuer"
 ```
 
@@ -224,7 +224,7 @@ aws iam get-open-id-connect-provider \
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-START=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/start \
+START=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg a "$ADDR_A" '{address:$a, chain_id:84532}')")
 
@@ -263,7 +263,7 @@ echo "SIG_A=$SIG_A"
 ### 2.3 Submit the signature, get back a session JWT
 
 ```bash
-VERIFY=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
+VERIFY=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg r "$REQ_ID" --arg s "$SIG_A" \
         '{request_id:$r, signature:$s}')")
@@ -299,7 +299,7 @@ a `kid` in the header pointing at the session keypair.
 ### 2.4 Repeat for wallet B
 
 ```bash
-START_B=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/start \
+START_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg a "$ADDR_B" '{address:$a, chain_id:84532}')")
 
@@ -307,7 +307,7 @@ REQ_ID_B=$(printf '%s' "$START_B" | jq -r .request_id)
 SIWE_MSG_B=$(printf '%s' "$START_B" | jq -r .siwe_message)
 SIG_B=$(cast wallet sign --private-key $PK_B "$SIWE_MSG_B")
 
-VERIFY_B=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
+VERIFY_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg r "$REQ_ID_B" --arg s "$SIG_B" \
         '{request_id:$r, signature:$s}')")
@@ -329,7 +329,7 @@ separate OIDC JWT signed by the OIDC keypair, with claims AWS knows how
 to consume.
 
 ```bash
-JWT_A=$(curl -sf -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
+JWT_A=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
 
 echo "$JWT_A"
@@ -482,7 +482,7 @@ the production auto-provision path no longer hits it.
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
 # 1. Ask the broker for an OIDC JWT (lightweight call — broker just signs).
-JWT=$(curl -sf -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
+JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
 
 # 2. Exchange it for AWS creds CLIENT-SIDE. No broker creds participate.
@@ -512,7 +512,7 @@ shape.
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-curl -sf -X POST $OIDC_ISSUER/v1/mint-aws-creds \
+curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-aws-creds \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg w "$ADDR_A" '{
@@ -570,7 +570,7 @@ fail-closed-by-default story.
 ### 6.1 Master creates a grant
 
 ```bash
-GRANT=$(curl -sf -X POST $OIDC_ISSUER/v1/grant/create \
+GRANT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/grant/create \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg d "$ADDR_A" '{
@@ -598,7 +598,7 @@ verified-but-tampered grant — the proof's signature won't validate.
 ### 6.2 Master lists grants
 
 ```bash
-curl -sf $OIDC_ISSUER/v1/grant/list \
+curl -sS --fail-with-body $OIDC_ISSUER/v1/grant/list \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq '.grants[0]'
 ```
 
@@ -606,7 +606,7 @@ curl -sf $OIDC_ISSUER/v1/grant/list \
 
 ```bash
 GRANT_ID=$(printf '%s' "$GRANT" | jq -r .grant_id)
-curl -sf -X POST $OIDC_ISSUER/v1/grant/revoke \
+curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/grant/revoke \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg id "$GRANT_ID" '{grant_id:$id}')"
@@ -631,7 +631,7 @@ on the broker host once every daemon has a grant.
 ### 7.1 Master links a secondary identity (e.g. email)
 
 ```bash
-curl -sf -X POST $OIDC_ISSUER/v1/wallet/link \
+curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/wallet/link \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
   -d "$(jq -n '{identity_type:"email", identity_value:"hanwen@example.com"}')"
@@ -640,14 +640,14 @@ curl -sf -X POST $OIDC_ISSUER/v1/wallet/link \
 ### 7.2 List linked identities
 
 ```bash
-curl -sf $OIDC_ISSUER/v1/wallet/links \
+curl -sS --fail-with-body $OIDC_ISSUER/v1/wallet/links \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq
 ```
 
 ### 7.3 Recover lookup (intentionally unauthenticated)
 
 ```bash
-curl -sf -X POST $OIDC_ISSUER/v1/wallet/recover/lookup \
+curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/wallet/recover/lookup \
   -H 'content-type: application/json' \
   -d '{"identity_type":"email","identity_value":"hanwen@example.com"}' | jq
 # {"omni_account": "<64 hex>"}
@@ -668,7 +668,7 @@ vars set (see runbook). SES sender identity must be verified.
 
 ```bash
 # 1. Request a magic link.
-curl -sf -X POST $OIDC_ISSUER/v1/auth/email/request \
+curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/email/request \
   -H 'content-type: application/json' \
   -d '{"email":"hanwen@example.com"}'
 # {"request_id":"em_…","status":"sent"}
@@ -677,7 +677,7 @@ curl -sf -X POST $OIDC_ISSUER/v1/auth/email/request \
 #    page completes the verify; the CLI poll surfaces the session JWT.
 
 # 3. Poll for the result.
-curl -sf $OIDC_ISSUER/v1/auth/email/status/em_… | jq
+curl -sS --fail-with-body $OIDC_ISSUER/v1/auth/email/status/em_… | jq
 # {
 #   "status": "verified",
 #   "session_jwt": "eyJ…",
@@ -726,7 +726,7 @@ client, and the broker's redirect URI registered exactly. See
 
 ```bash
 # 1. Initiate.
-curl -sf -X POST $OIDC_ISSUER/v1/auth/oauth2/start \
+curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/oauth2/start \
   -H 'content-type: application/json' \
   -d '{"provider":"google"}' | jq
 # {
@@ -739,7 +739,7 @@ curl -sf -X POST $OIDC_ISSUER/v1/auth/oauth2/start \
 #    to /auth/oauth2/callback on the broker.
 
 # 3. Poll.
-curl -sf $OIDC_ISSUER/v1/auth/oauth2/status/oa2-… | jq
+curl -sS --fail-with-body $OIDC_ISSUER/v1/auth/oauth2/status/oa2-… | jq
 # {"status":"verified", "session_jwt":"eyJ…", "omni_account":"…",
 #  "identity_type":"oauth2_google", "identity_value":"<google-sub>"}
 ```
@@ -798,7 +798,7 @@ sudo systemctl edit agentkeys-broker
 # Environment=BROKER_EVM_FEE_PAYER_PASSWORD_FILE=/etc/agentkeys/fee-payer.pw
 
 sudo systemctl restart agentkeys-broker
-curl -sf https://broker.litentry.org/readyz | jq
+curl -sS --fail-with-body https://broker.litentry.org/readyz | jq
 # .checks[] for evm_testnet appears; status=Ready or Unready depending
 # on whether the stub's ChainId probe succeeded.
 ```
@@ -818,7 +818,7 @@ sudo systemctl edit agentkeys-broker
 # Environment=BROKER_METRICS_ENABLED=true
 sudo systemctl restart agentkeys-broker
 
-curl -sf https://broker.litentry.org/metrics | head -30
+curl -sS --fail-with-body https://broker.litentry.org/metrics | head -30
 # # HELP agentkeys_broker_mints_total …
 # # TYPE agentkeys_broker_mints_total counter
 # agentkeys_broker_mints_total 14
@@ -1016,10 +1016,10 @@ curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://broker.litentry.org/healt
 curl -sS https://broker.litentry.org/readyz | jq -r .status
 # ready             ← anything else: `curl -s …/readyz | jq` for the full body
 
-curl -sf https://broker.litentry.org/.well-known/openid-configuration | jq -r .issuer
+curl -sS --fail-with-body https://broker.litentry.org/.well-known/openid-configuration | jq -r .issuer
 # https://broker.litentry.org
 
-curl -sf https://broker.litentry.org/.well-known/jwks.json | jq '.keys[0] | {kty, crv, alg, kid}'
+curl -sS --fail-with-body https://broker.litentry.org/.well-known/jwks.json | jq '.keys[0] | {kty, crv, alg, kid}'
 # {"kty":"EC","crv":"P-256","alg":"ES256","kid":"v1-…"}
 ```
 
@@ -1038,7 +1038,7 @@ want to demo the isolation property in §16.6.
 awsp agentkeys-admin
 
 # Get the OIDC JWT.
-JWT=$(curl -sf -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
+JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
 echo "JWT prefix: ${JWT:0:40}…"
 

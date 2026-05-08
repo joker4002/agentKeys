@@ -138,8 +138,8 @@ cargo run --release -p agentkeys-broker-server -- --port 8091
 Verify it came up:
 
 ```bash
-curl -sf http://127.0.0.1:8091/healthz       # → "ok"
-curl -sf http://127.0.0.1:8091/readyz        # → 200 if backend + STS reachable, 503 otherwise
+curl -sS --fail-with-body http://127.0.0.1:8091/healthz       # → "ok"
+curl -sS --fail-with-body http://127.0.0.1:8091/readyz        # → 200 if backend + STS reachable, 503 otherwise
 ```
 
 `/readyz` checks that `BROKER_BACKEND_URL` is reachable and that the broker's daemon credentials can call `sts:GetCallerIdentity`. Use this as your supervisor probe.
