@@ -13,6 +13,8 @@ use std::sync::Arc;
 use agentkeys_broker_server::audit::AuditLog;
 use agentkeys_broker_server::config::BrokerConfig;
 use agentkeys_broker_server::create_router;
+use agentkeys_broker_server::identity::derive_omni_account;
+use agentkeys_broker_server::jwt::issue::mint_session_jwt;
 use agentkeys_broker_server::oidc::OidcKeypair;
 use agentkeys_broker_server::state::AppState;
 use agentkeys_broker_server::sts::{AssumedCredentials, StsClient, StubStsClient};
@@ -127,22 +129,6 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
     (format!("http://{}", addr), state)
 }
 
-async fn mint_session_against_backend(backend_url: &str) -> (String, String) {
-    let client = reqwest::Client::new();
-    let resp: Value = client
-        .post(format!("{}/session/create", backend_url))
-        .json(&serde_json::json!({ "auth_token": "oidc-test-bearer" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let session = resp["session"].as_str().unwrap().to_string();
-    let wallet = resp["wallet"].as_str().unwrap().to_string();
-    (session, wallet)
-}
-
 #[tokio::test]
 async fn discovery_returns_aws_compatible_shape() {
     let backend_url = spawn_mock_backend().await;
@@ -206,8 +192,25 @@ async fn jwks_returns_p256_es256_with_kid() {
 #[tokio::test]
 async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
     let backend_url = spawn_mock_backend().await;
-    let (session_token, wallet) = mint_session_against_backend(&backend_url).await;
     let (broker_url, state) = spawn_broker(backend_url).await;
+
+    // Mint a session JWT against the broker's own session keypair — the
+    // same path the SIWE wallet/email/oauth2 verify handlers take. Replaces
+    // the legacy `mint_session_against_backend` flow now that
+    // /v1/mint-oidc-jwt verifies session JWTs locally instead of round-
+    // tripping to /session/validate (parity with /v1/mint-aws-creds).
+    let wallet = "0xabcdef0123456789abcdef0123456789abcdef01".to_string();
+    let omni = derive_omni_account("evm", &wallet);
+    let session_token = mint_session_jwt(
+        &state.session_keypair,
+        TEST_ISSUER,
+        omni.as_str(),
+        &wallet,
+        "evm",
+        &wallet,
+        300,
+    )
+    .unwrap();
 
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/mint-oidc-jwt", broker_url))
