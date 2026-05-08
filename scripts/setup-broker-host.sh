@@ -249,16 +249,22 @@ if [[ -f "$EXISTING_UNIT" ]]; then
     REGION="$EXISTING_REGION"
   fi
 
-  # Cred mode inference. After issue #71 we have three options:
-  #   - profile: Environment=AWS_PROFILE=<name> present
-  #   - none / instance-profile: no AWS_* env (the unit's CRED_LINE is a
-  #     comment so we can't tell them apart from the unit alone).
+  # Cred mode inference. After issue #71 the recommended default is "none"
+  # (broker mints via AssumeRoleWithWebIdentity which is JWT-authenticated;
+  # no AWS principal needed at runtime). The only signal we can read from
+  # the unit is whether AWS_PROFILE is set. So:
+  #   - profile mode: Environment=AWS_PROFILE=<name> present
+  #   - everything else: default to "none"
   EXISTING_PROFILE="$(read_unit_env AWS_PROFILE)"
-  if [[ -n "$EXISTING_PROFILE" && -z "$CRED_MODE" ]]; then
-    CRED_MODE="profile"
-    PROFILE_NAME="$EXISTING_PROFILE"
+  if [[ -z "$CRED_MODE" ]]; then
+    if [[ -n "$EXISTING_PROFILE" ]]; then
+      CRED_MODE="profile"
+      PROFILE_NAME="$EXISTING_PROFILE"
+    else
+      CRED_MODE="none"
+    fi
   fi
-  log "  detected: ISSUER_URL=${ISSUER_URL:-(unset)}  ACCOUNT_ID=${ACCOUNT_ID:-(unset)}  REGION=$REGION  CRED_MODE=${CRED_MODE:-(default to none)}"
+  log "  detected: ISSUER_URL=${ISSUER_URL:-(unset)}  ACCOUNT_ID=${ACCOUNT_ID:-(unset)}  REGION=$REGION  CRED_MODE=$CRED_MODE"
 fi
 
 # ─── Optional git pull (--ref, opt-in) ────────────────────────────────────────
@@ -319,87 +325,16 @@ EOF
     prompt_required ACCOUNT_ID "Account ID"
   fi
 
-  explain "AWS region" \
-    "Region the broker calls STS in. Use the region your agentkeys-data-role" \
-    "role and the operator's S3 bucket already live in."
-  prompt_default REGION "Region" "$REGION"
-
-  if [[ -z "$CRED_MODE" ]]; then
-    explain "How does the broker get its AWS credentials?" \
-      "Post-issue-#71 the broker mint flow is JWT-authenticated and needs" \
-      "NO AWS credentials at runtime. The optional GetCallerIdentity" \
-      "startup probe still consults whatever the SDK default chain finds:" \
-      "" \
-      "  1) none              (recommended post-migration)" \
-      "       Broker runs creds-free. The startup probe soft-warns once" \
-      "       and then falls silent. Smallest blast radius — broker host" \
-      "       has zero AWS principals." \
-      "" \
-      "  2) instance-profile  (recommended if you also run unrelated AWS" \
-      "                        tooling on the same EC2 host)" \
-      "       SDK pulls creds from the EC2 instance profile via IMDS." \
-      "       Broker only uses them for the startup probe." \
-      "" \
-      "  3) profile           (non-EC2 hosts)" \
-      "       Creates ~/.aws/credentials under the agentkeys system user." \
-      "       You fill in the access key + secret by hand. AWS_PROFILE is" \
-      "       set in the systemd unit so the SDK default chain picks it up." \
-      "" \
-      "Static IAM-user mode (DAEMON_ACCESS_KEY_ID env vars) was REMOVED in" \
-      "the OIDC-only migration — the broker no longer reads those vars."
-    prompt_choice CRED_MODE "Credential mode" 1 \
-      "none" \
-      "instance-profile" \
-      "profile"
-  fi
-
-  if [[ "$CRED_MODE" == "profile" ]]; then
-    explain "Named-profile name" \
-      "The profile-name section that goes into ~/.aws/credentials and" \
-      "~/.aws/config under the agentkeys user, and into AWS_PROFILE= in" \
-      "the broker's systemd unit. Match this to the profile you use" \
-      "elsewhere if you want awsp / shared tooling to keep working."
-    prompt_default PROFILE_NAME "Profile name" "$PROFILE_NAME"
-  fi
-
-  if [[ "$WITH_NGINX" == "auto" ]]; then
-    ISSUER_HOST_FOR_PROMPT="${ISSUER_URL#https://}"
-    ISSUER_HOST_FOR_PROMPT="${ISSUER_HOST_FOR_PROMPT#http://}"
-    ISSUER_HOST_FOR_PROMPT="${ISSUER_HOST_FOR_PROMPT%%/*}"
-    explain "Install + configure nginx?" \
-      "If yes:" \
-      "  • installs nginx via the system package manager" \
-      "  • drops a site config at /etc/nginx/sites-available/agentkeys-broker" \
-      "  • the site routes $ISSUER_HOST_FOR_PROMPT → 127.0.0.1:8091 and" \
-      "    redirects :80 → :443" \
-      "  • the cert paths point at /etc/letsencrypt/live/$ISSUER_HOST_FOR_PROMPT/" \
-      "    (you run certbot separately to actually issue the cert)" \
-      "" \
-      "Skip if you're using AWS ALB+ACM, Cloudflare tunnel, Caddy, or an" \
-      "existing nginx instance you'll edit yourself. The broker stays bound" \
-      "to 127.0.0.1:8091 either way — it's the operator's job to put a" \
-      "TLS-terminating proxy in front of it."
-    prompt_yn WITH_NGINX "Install nginx now?" "yes"
-  fi
-
-  if [[ "$WITH_CERTBOT" == "auto" ]]; then
-    explain "Install certbot for Let's Encrypt cert issuance?" \
-      "This script INSTALLS the certbot package. It does NOT issue a cert." \
-      "Cert issuance requires:" \
-      "  • DNS A record for the issuer host already pointing at this host" \
-      "  • port 80 reachable from the public internet" \
-      "  • you running 'sudo certbot --nginx -d <host>' interactively" \
-      "" \
-      "Skip if you're using AWS ACM, Cloudflare-managed TLS, or a different" \
-      "ACME client."
-    if [[ "$WITH_NGINX" == "yes" ]]; then
-      prompt_yn WITH_CERTBOT "Install certbot now?" "yes"
-    else
-      # Without nginx, certbot has nothing to talk to via the --nginx plugin.
-      # Default-no but still ask in case the operator plans to run certonly.
-      prompt_yn WITH_CERTBOT "Install certbot now?" "no"
-    fi
-  fi
+  # Region / cred-mode / nginx / certbot are NOT prompted on a remote-host
+  # re-deploy. They have sensible silent defaults:
+  #   region      = us-east-1 (or whatever was in the unit / --region flag)
+  #   cred-mode   = none      (post-issue-#71 broker is creds-free; --cred-mode
+  #                            instance-profile|profile to opt out)
+  #   nginx       = no        (existing nginx / ALB / Cloudflare stays as-is;
+  #                            --with-nginx to install + configure)
+  #   certbot     = no        (--with-certbot to opt in)
+  # Operators bringing up a brand-new host with no existing infra should pass
+  # --with-nginx --with-certbot --cred-mode <choice> at the CLI.
 fi
 
 # ─── Validate inputs ─────────────────────────────────────────────────────────
@@ -413,14 +348,16 @@ esac
 # byte-for-byte, and AWS rejects mismatches at AssumeRoleWithWebIdentity time.
 ISSUER_URL="${ISSUER_URL%/}"
 [[ -n "$ACCOUNT_ID" ]] || die "--account-id is required. Drop --non-interactive for an interactive walk-through."
-[[ -n "$CRED_MODE" ]]  || CRED_MODE="instance-profile"
+[[ -n "$CRED_MODE" ]]  || CRED_MODE="none"
 case "$CRED_MODE" in
   none|instance-profile|profile) ;;
   *) die "--cred-mode must be one of: none, instance-profile, profile (got $CRED_MODE)";;
 esac
 # Resolve auto → no for the non-interactive path (preserves prior default).
-[[ "$WITH_NGINX"   == "auto" ]] && WITH_NGINX="no"
-[[ "$WITH_CERTBOT" == "auto" ]] && WITH_CERTBOT="no"
+# `if`/`fi` instead of `[[ ]] && cmd` to dodge the set-e silent-exit gotcha
+# when the test is false.
+if [[ "$WITH_NGINX"   == "auto" ]]; then WITH_NGINX="no"; fi
+if [[ "$WITH_CERTBOT" == "auto" ]]; then WITH_CERTBOT="no"; fi
 
 ISSUER_HOST="${ISSUER_URL#https://}"
 ISSUER_HOST="${ISSUER_HOST#http://}"
