@@ -119,16 +119,46 @@ Tooling on the workstation:
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $OIDC_ISSUER/healthz
 # HTTP 200          ← anything else means the broker isn't fully up
 
+curl -s -o /dev/null -w 'HTTP %{http_code}\n' $OIDC_ISSUER/readyz
+# HTTP 200          ← every plug-in + Tier-2 check is Ready
+# HTTP 503          ← at least one check is Unready (body lists which)
+
 curl -s $OIDC_ISSUER/readyz | jq
-# {"status":"ready"}            ← all Tier-2 probes green
-# OR
-# {"status":"unready","checks":[{"name":"backend","status":"unready",
-#  "docs":"docs/operator-runbook-stage7.md#backend-reachability"}]}
+# All-green case:
+#   {
+#     "status":   "ready",
+#     "degraded": false,
+#     "checks":   [],
+#     "ready":    ["tier2/backend", "audit/sqlite", …]
+#   }
+#
+# Degraded case (still serving, dependency impaired):
+#   {
+#     "status":   "degraded",
+#     "degraded": true,
+#     "checks":   [{"name":"…","status":"degraded","reason":"…","docs":"…"}],
+#     "ready":    ["tier2/backend", …]
+#   }
+#
+# Unready case (HTTP 503):
+#   {
+#     "status":   "unready",
+#     "degraded": false,
+#     "checks":   [{"name":"tier2/backend","status":"unready",
+#                   "reason":"BROKER_BACKEND_URL/healthz not yet reachable since boot",
+#                   "docs":"https://docs.agentkeys.dev/operator-runbook-stage7#backend-reachability"}],
+#     "ready":    []
+#   }
 ```
 
-If `/readyz` returns `unready`, paste the `docs:` URL into the
-[operator runbook](operator-runbook-stage7.md) — every check has its
-own anchor with the recovery procedure.
+The body is always self-describing — `status` is one of `ready`,
+`degraded`, `unready` — so `curl … | jq -r .status` is a single-shot
+verdict. The HTTP status code agrees: `200` for ready/degraded,
+`503` for unready.
+
+If `/readyz` returns `503` (unready), paste the `docs:` URL from the
+checks array into the [operator runbook](operator-runbook-stage7.md)
+— every check has its own anchor with the recovery procedure.
 
 ```bash
 curl -sf $OIDC_ISSUER/.well-known/openid-configuration | jq
@@ -967,11 +997,13 @@ sudo systemctl restart agentkeys-broker`.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-curl -sf https://broker.litentry.org/healthz
-# ok
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://broker.litentry.org/healthz
+# HTTP 200
 
-curl -sf https://broker.litentry.org/readyz | jq
-# {"status":"ready"}
+# `/readyz` is self-describing — body has `status: ready | degraded |
+# unready` and a `checks` array. HTTP 200 = ready/degraded, 503 = unready.
+curl -sS https://broker.litentry.org/readyz | jq -r .status
+# ready             ← anything else: `curl -s …/readyz | jq` for the full body
 
 curl -sf https://broker.litentry.org/.well-known/openid-configuration | jq -r .issuer
 # https://broker.litentry.org

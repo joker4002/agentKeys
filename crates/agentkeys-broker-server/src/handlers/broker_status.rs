@@ -2,12 +2,16 @@
 //! Tier-2 reachability state per plan §7.
 //!
 //! Responses:
-//! - 503 if any plug-in or Tier-2 check is `Unready` (or Tier-2 still-pending
+//! - 503 with `{"status":"unready", "degraded":false, "checks":[...], "ready":[...]}`
+//!   if any plug-in or Tier-2 check is `Unready` (or Tier-2 still-pending
 //!   for a feature-gated check that's enabled).
-//! - 200 with `{"status":"degraded", "checks":[...], "ready":[...]}` if
-//!   any check is `Degraded` (the broker is still serving but a dependency
-//!   is impaired).
-//! - 200 with empty body if every check is `Ready`.
+//! - 200 with `{"status":"degraded", "degraded":true, "checks":[...], "ready":[...]}`
+//!   if any check is `Degraded` (the broker is still serving but a
+//!   dependency is impaired).
+//! - 200 with `{"status":"ready", "degraded":false, "checks":[], "ready":[...]}`
+//!   if every check is `Ready`. The body is always self-describing —
+//!   never an empty `{}` — so an operator running `curl … | jq` sees an
+//!   explicit verdict instead of having to read the HTTP status code.
 //!
 //! Each check entry carries a `docs` URL anchor (Designer review #status-shape)
 //! so an operator paged at 2am can click straight to the runbook section
@@ -139,9 +143,17 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
         });
         (StatusCode::OK, Json(body)).into_response()
     } else {
-        // Empty body — Designer review #status-shape default for the
-        // all-clear case. Operators tailing curl output see no noise.
-        (StatusCode::OK, Json(json!({}))).into_response()
+        // Self-describing all-green body. Earlier versions returned `{}`
+        // (Designer review #status-shape) but operators piping the
+        // output through `jq` saw nothing and assumed the endpoint was
+        // broken — explicit `status: "ready"` removes that confusion.
+        let body = json!({
+            "status": "ready",
+            "degraded": false,
+            "checks": [],
+            "ready": ready_names,
+        });
+        (StatusCode::OK, Json(body)).into_response()
     }
 }
 
