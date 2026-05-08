@@ -92,25 +92,28 @@ async fn main() -> anyhow::Result<()> {
     // new plugin-trait-based audit anchors.
     let audit = AuditLog::open(&config.audit_db_path)?;
 
-    let sts = match (&config.daemon_access_key_id, &config.daemon_secret_access_key) {
-        (Some(akid), Some(secret)) => {
-            tracing::info!("AWS credentials: static IAM-user keys (DAEMON_ACCESS_KEY_ID env)");
-            AwsStsClient::from_keys(akid, secret, &config.aws_region).await
-        }
-        _ => {
-            tracing::info!("AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)");
-            AwsStsClient::with_default_chain(&config.aws_region).await
-        }
-    };
+    // Issue #71 OIDC-only migration: the broker mint flow uses
+    // AssumeRoleWithWebIdentity, which is JWT-authenticated. The broker no
+    // longer needs ANY AWS credentials at runtime for credential minting.
+    // The default-chain config below is consulted only by the optional
+    // `caller_identity_ok` startup probe; if no creds are configured (the
+    // post-migration recommended posture), the probe logs a soft warning
+    // instead of refusing to boot.
+    tracing::info!("STS client: SDK default chain (creds optional after issue #71 — only the GetCallerIdentity startup probe consults them)");
+    let sts = AwsStsClient::with_default_chain(&config.aws_region).await;
 
     if !args.skip_startup_check {
         match sts.caller_identity_ok().await {
             Ok(()) => tracing::info!("startup STS check passed"),
             Err(e) => {
-                tracing::error!(error = %e, "startup STS check failed — refusing to bind");
-                anyhow::bail!(
-                    "startup STS check failed: {}. Either set AWS_PROFILE (or attach an EC2 instance profile) so the SDK's default chain can resolve credentials, or set DAEMON_ACCESS_KEY_ID + DAEMON_SECRET_ACCESS_KEY for the legacy static-keys path. Verify BROKER_AWS_REGION too. Pass --skip-startup-check for offline dev.",
-                    e
+                // Soft-fail: the mint flow doesn't need broker creds.
+                // Operators running creds-free will see this warning at every
+                // boot — pass --skip-startup-check to silence it.
+                tracing::warn!(
+                    error = %e,
+                    "startup STS GetCallerIdentity probe failed — broker has no AWS credentials in its environment. \
+                    This is the expected post-migration posture (mint flow is JWT-authenticated, see issue #71). \
+                    Pass --skip-startup-check to silence this warning."
                 );
             }
         }

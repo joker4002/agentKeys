@@ -103,11 +103,9 @@ impl AuditAnchor for FailingAuditAnchor {
 
 /// Counts STS invocations so cases (b)/(c)/(d) can assert "zero STS
 /// calls". Wraps the existing `StubStsClient::ok` so the happy path
-/// still gets credentials. After issue #71 the production mint path
-/// uses `assume_role_with_web_identity`; the legacy `assume_role`
-/// method stays on the trait for the `caller_identity_ok` startup
-/// check companion + any future fall-back. Both methods bump the same
-/// counter so the "zero STS calls" assertion is path-agnostic.
+/// still gets credentials. After the OIDC-only migration, the trait
+/// has only `assume_role_with_web_identity` for credential mints
+/// (legacy `assume_role` was dropped).
 struct CountingStsClient {
     inner: StubStsClient,
     calls: Arc<AtomicUsize>,
@@ -117,18 +115,6 @@ struct CountingStsClient {
 impl StsClient for CountingStsClient {
     async fn caller_identity_ok(&self) -> Result<(), agentkeys_broker_server::error::BrokerError> {
         self.inner.caller_identity_ok().await
-    }
-
-    async fn assume_role(
-        &self,
-        role_arn: &str,
-        session_name: &str,
-        duration_seconds: i32,
-    ) -> Result<AssumedCredentials, agentkeys_broker_server::error::BrokerError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .assume_role(role_arn, session_name, duration_seconds)
-            .await
     }
 
     async fn assume_role_with_web_identity(
@@ -202,8 +188,6 @@ async fn spawn_broker(
     });
 
     let config = BrokerConfig {
-        daemon_access_key_id: None,
-        daemon_secret_access_key: None,
         data_role_arn: STUB_ROLE_ARN.into(),
         backend_url: "http://127.0.0.1:1".into(),
         audit_db_path: tmp.path().join("audit.sqlite"),

@@ -286,12 +286,15 @@ drift check in `harness/stage-7-issue-64-done.sh` does not warn.
 
 ### Legacy aliases (kept for one minor version, deprecation logged at boot)
 
+The static-IAM-user env vars (`DAEMON_ACCESS_KEY_ID`,
+`DAEMON_SECRET_ACCESS_KEY`, and their `BROKER_DAEMON_*` prefixed
+forms) were **removed** in the OIDC-only migration ([issue #71](https://github.com/litentry/agentKeys/issues/71)).
+The broker no longer reads them; setting them has no effect.
+`AssumeRoleWithWebIdentity` is JWT-authenticated, so the broker can
+run with no AWS credentials at all.
+
 | Env Var | Description |
 |---|---|
-| `DAEMON_ACCESS_KEY_ID` | Legacy static IAM-user access-key ID. |
-| `DAEMON_SECRET_ACCESS_KEY` | Legacy static IAM-user secret-access key. |
-| `BROKER_DAEMON_ACCESS_KEY_ID` | Legacy prefixed alias. |
-| `BROKER_DAEMON_SECRET_ACCESS_KEY` | Legacy prefixed alias. |
 | `BROKER_AGENT_ROLE_ARN` | Legacy alias of `BROKER_DATA_ROLE_ARN`. |
 | `ACCOUNT_ID` | Legacy AWS account ID; derives `BROKER_DATA_ROLE_ARN`. |
 | `REGION` | Legacy alias of `BROKER_AWS_REGION`. |
@@ -364,33 +367,61 @@ by `aud=sts.amazonaws.com` and a `sub` prefix.
 
 The broker's `BROKER_DATA_ROLE_ARN` must point at this role.
 
-### Mint-time STS path (issue #71)
+### Mint-time STS paths (issue #71)
 
-For every `POST /v1/mint-aws-creds` request, the broker:
+There are two endpoints that result in AWS credentials, with **different
+trust models** and **identical end-state security** (both go through
+`AssumeRoleWithWebIdentity`, both emit creds tagged with the user's
+`agentkeys_user_wallet` PrincipalTag):
 
-1. Authenticates the caller (session JWT or legacy bearer).
-2. Resolves any Phase B grant.
-3. **Mints an internal user-scoped OIDC JWT** (same shape as
-   `/v1/mint-oidc-jwt`, signed by `BROKER_OIDC_KEYPAIR_PATH`,
-   short TTL, carrying the `agentkeys_user_wallet` PrincipalTag claim).
-4. **Calls `sts:AssumeRoleWithWebIdentity`** with that JWT — the JWT
-   authenticates the call; **no AWS credentials on the broker side
-   participate in the assume**.
-5. Writes the audit anchor row.
-6. Returns the temporary credentials.
+#### `POST /v1/mint-oidc-jwt` — daemon-side STS (recommended)
 
-This means the broker **does not need** an IAM principal at runtime
-to mint user creds. The legacy paths (`agentkeys-daemon` IAM user
-keys, `AWS_PROFILE`, EC2 instance profile) are still consulted for
-the optional startup `caller_identity_ok` sanity probe and for
-`caller_identity_ok` heartbeats — pass `--skip-startup-check` if you
-want to run the broker with no AWS credentials at all.
+The broker signs a short-lived OIDC JWT with the user's wallet claim
+and returns it. The daemon exchanges that JWT for AWS creds **on its
+own machine** by calling `sts:AssumeRoleWithWebIdentity` directly. This
+is the path the provisioner / MCP / `agentkeys-daemon` use after the
+issue #71 Option A migration.
 
-After cutover (cloud-setup.md §4 done, all daemons hitting the new
-flow), you can remove the `agentkeys-daemon-assume-role` inline
-policy from the `agentkeys-daemon` IAM user — it grants
-`sts:AssumeRole` on a role whose trust policy no longer permits that
-action.
+- **Broker work**: validate bearer → sign JWT → return.
+- **Daemon work**: receive JWT → `AssumeRoleWithWebIdentity` → inject
+  `AWS_*` env vars into scraper subprocess.
+- **AWS principal on broker**: none required.
+- **AWS principal on daemon**: none required (the JWT authenticates).
+
+#### `POST /v1/mint-aws-creds` — server-side gated (kept for callers needing audit/grants/idempotency)
+
+Broker handles the full mint pipeline:
+
+1. Verifies the session JWT against the broker's session keypair.
+2. Verifies a per-call EIP-191 signature on the request body.
+3. Resolves any Phase B grant (consume → 403 if revoked/expired/exhausted).
+4. Mints an internal user-scoped OIDC JWT (same claim shape as
+   `/v1/mint-oidc-jwt`).
+5. Calls `sts:AssumeRoleWithWebIdentity` with that JWT (broker-side).
+6. Writes the audit anchor row(s) per `BROKER_AUDIT_POLICY` (single
+   `sqlite` or `dual_strict` for multi-anchor durability).
+7. Returns the temporary credentials.
+
+Use this endpoint when:
+- You want the broker to be the policy point (mandatory audit log,
+  Phase B grants, Idempotency-Key dedup, multi-anchor coordination).
+- You can't trust callers to self-audit.
+
+### Broker creds-free posture (post-migration)
+
+Both paths above use `AssumeRoleWithWebIdentity`, which is JWT-authenticated. The broker **does not need** an IAM principal at
+runtime for credential minting. After cutover you can:
+
+- Drop `AWS_PROFILE` from `agentkeys-broker.service`.
+- Remove the EC2 instance profile (or downgrade to one with no STS rights).
+- Pass `--skip-startup-check` to silence the soft-warn from the
+  `GetCallerIdentity` startup probe (the probe is informational — its
+  failure does not refuse to boot post-migration).
+
+After cutover (cloud-setup.md §4 done, all daemons on the new flow),
+you can remove the `agentkeys-daemon-assume-role` inline policy from
+the `agentkeys-daemon` IAM user — it grants `sts:AssumeRole` on a
+role whose trust policy no longer permits that action.
 
 ---
 

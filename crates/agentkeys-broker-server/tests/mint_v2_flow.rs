@@ -62,8 +62,6 @@ async fn spawn_broker() -> (
 
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
-        daemon_access_key_id: None,
-        daemon_secret_access_key: None,
         data_role_arn: STUB_ROLE_ARN.into(),
         backend_url: "http://127.0.0.1:1".into(), // unused on v2 path
         audit_db_path: tmp.path().join("audit.sqlite"),

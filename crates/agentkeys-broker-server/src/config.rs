@@ -4,14 +4,6 @@ use crate::env;
 
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
-    /// Optional. When *both* `daemon_access_key_id` and
-    /// `daemon_secret_access_key` are set, the broker uses static IAM-user
-    /// keys (legacy path). When either is unset, the broker falls back to
-    /// the AWS SDK's default credential chain — picking up `AWS_PROFILE`
-    /// from `~/.aws/credentials`, an EC2 instance profile via IMDS, etc.
-    /// The chain path is preferred for new deployments.
-    pub daemon_access_key_id: Option<String>,
-    pub daemon_secret_access_key: Option<String>,
     pub data_role_arn: String,
     pub backend_url: String,
     pub audit_db_path: PathBuf,
@@ -31,26 +23,12 @@ pub struct BrokerConfig {
 
 impl BrokerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        // DAEMON_ACCESS_KEY_ID / DAEMON_SECRET_ACCESS_KEY are optional and
-        // deprecated — when both are present, broker uses them directly
-        // (legacy path); when either is missing, broker delegates to the
-        // AWS SDK's default chain.
-        let daemon_access_key_id = first_env(&[
-            env::DAEMON_ACCESS_KEY_ID,
-            env::BROKER_DAEMON_ACCESS_KEY_ID,
-        ]);
-        let daemon_secret_access_key = first_env(&[
-            env::DAEMON_SECRET_ACCESS_KEY,
-            env::BROKER_DAEMON_SECRET_ACCESS_KEY,
-        ]);
-        if daemon_access_key_id.is_some() != daemon_secret_access_key.is_some() {
-            anyhow::bail!(
-                "{} and {} must be set together (or both unset to use the AWS SDK default credential chain via AWS_PROFILE).",
-                env::DAEMON_ACCESS_KEY_ID,
-                env::DAEMON_SECRET_ACCESS_KEY,
-            );
-        }
-
+        // Issue #71 OIDC-only migration: the broker no longer accepts static
+        // IAM-user credentials. AssumeRoleWithWebIdentity is JWT-authenticated
+        // and the `caller_identity_ok` startup probe (when enabled) reads
+        // creds from the SDK's default chain — same as before but without
+        // the DAEMON_ACCESS_KEY_ID escape hatch.
+        //
         // BROKER_DATA_ROLE_ARN can be derived from ACCOUNT_ID. Operator can
         // still override. BROKER_AGENT_ROLE_ARN is accepted as a legacy
         // alias for callers that haven't migrated.
@@ -120,8 +98,6 @@ impl BrokerConfig {
         }
 
         Ok(Self {
-            daemon_access_key_id,
-            daemon_secret_access_key,
             data_role_arn,
             backend_url,
             audit_db_path,

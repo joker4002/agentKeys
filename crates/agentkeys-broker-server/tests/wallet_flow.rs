@@ -70,8 +70,6 @@ async fn spawn_broker() -> Harness {
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
 
     let config = BrokerConfig {
-        daemon_access_key_id: None,
-        daemon_secret_access_key: None,
         data_role_arn: "arn:aws:iam::000:role/test".into(),
         backend_url: "http://127.0.0.1:1".into(),
         audit_db_path: tmp.path().join("audit.sqlite"),

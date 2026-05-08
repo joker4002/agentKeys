@@ -32,7 +32,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::audit::{MintOutcome, MintRecord};
-use crate::auth::{extract_bearer_token, validate_bearer_token};
+use crate::auth::extract_bearer_token;
 use crate::error::{BrokerError, BrokerResult};
 use crate::jwt::verify::verify_session_jwt;
 use crate::plugins::audit::{AnchorReceipt, AuditRecord};
@@ -81,7 +81,7 @@ pub struct MintAuth {
     pub signature: String,
 }
 
-#[tracing::instrument(skip_all, fields(wallet = tracing::field::Empty, outcome = tracing::field::Empty, path = tracing::field::Empty))]
+#[tracing::instrument(skip_all, fields(wallet = tracing::field::Empty, outcome = tracing::field::Empty))]
 pub async fn mint_aws_creds(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -93,23 +93,12 @@ pub async fn mint_aws_creds(
         .and_then(extract_bearer_token)
         .ok_or_else(|| BrokerError::Unauthorized("missing Authorization header".into()))?;
 
-    if looks_like_session_jwt(token) {
-        tracing::Span::current().record("path", "v2");
-        mint_v2(&state, token, &raw_body).await
-    } else {
-        tracing::Span::current().record("path", "legacy");
-        mint_legacy(&state, token).await
-    }
-}
-
-/// Heuristic: a session JWT starts with `eyJ` (base64url of `{"`). Two
-/// dots delimit header.payload.signature. Mid-token whitespace / newlines
-/// disqualify (a legacy opaque bearer does not need to satisfy this).
-fn looks_like_session_jwt(token: &str) -> bool {
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    parts.len() == 3
-        && token.starts_with("eyJ")
-        && !token.contains(char::is_whitespace)
+    // Issue #71 + legacy-removal pass: post-Stage-7-cutover, every caller
+    // sends a session JWT. The pre-Stage-7 backend-validated bearer path
+    // (mint_legacy / looks_like_session_jwt dispatcher) was removed; the
+    // provisioner / MCP / daemon now use /v1/mint-oidc-jwt + client-side
+    // AssumeRoleWithWebIdentity (issue #71 Option A).
+    mint_v2(&state, token, &raw_body).await
 }
 
 // ---------------------------------------------------------------------------
@@ -477,118 +466,9 @@ fn addresses_match(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
 
-// ---------------------------------------------------------------------------
-// Legacy path — bearer validated against backend /session/validate.
-// Preserved verbatim from pre-US-011 behavior so daemon/CLI binaries that
-// haven't yet bumped to /v1/auth/exchange continue to work.
-// ---------------------------------------------------------------------------
-
-async fn mint_legacy(state: &SharedState, token: &str) -> BrokerResult<Json<MintResponse>> {
-    let session = match validate_bearer_token(&state.http, &state.config.backend_url, token).await {
-        Ok(s) => s,
-        Err(e) => {
-            let outcome = match &e {
-                BrokerError::Unauthorized(_) => MintOutcome::AuthFailed,
-                BrokerError::BackendUnreachable(_) => MintOutcome::BackendError,
-                _ => MintOutcome::BackendError,
-            };
-            record_legacy_outcome(
-                state,
-                token,
-                "unknown",
-                "(unauthenticated)",
-                outcome,
-                Some(&e.to_string()),
-            );
-            tracing::Span::current().record(
-                "outcome",
-                if matches!(outcome, MintOutcome::AuthFailed) {
-                    "auth_failed"
-                } else {
-                    "backend_error"
-                },
-            );
-            return Err(e);
-        }
-    };
-
-    tracing::Span::current().record("wallet", session.wallet.as_str());
-    let session_name = build_session_name(&session.wallet);
-
-    // Same federated-STS pivot as mint_v2 (issue #71). Pre-Stage-7 daemons
-    // hitting the legacy bearer path still get federated creds, so cloud-
-    // setup.md §4-deployed accounts work for both bearer shapes.
-    let (oidc_claims, _now_oidc, _exp_oidc) = crate::handlers::oidc::build_oidc_jwt_claims(
-        &state.config.oidc_issuer,
-        &session.wallet,
-        state.config.oidc_jwt_ttl_seconds,
-    );
-    let internal_oidc_jwt = match state.oidc.sign_jwt(&oidc_claims) {
-        Ok(j) => j,
-        Err(e) => {
-            record_legacy_outcome(
-                state,
-                token,
-                &session.wallet,
-                &session_name,
-                MintOutcome::StsError,
-                Some(&format!("internal_oidc_jwt: {}", e)),
-            );
-            tracing::Span::current().record("outcome", "internal_oidc_jwt_failed");
-            return Err(BrokerError::Internal(format!(
-                "sign internal oidc jwt: {}",
-                e
-            )));
-        }
-    };
-
-    match state
-        .sts
-        .assume_role_with_web_identity(
-            &state.config.data_role_arn,
-            &session_name,
-            &internal_oidc_jwt,
-            state.config.session_duration_seconds,
-        )
-        .await
-    {
-        Ok(creds) => {
-            state.audit.record_mint(
-                MintRecord {
-                    requester_token: token,
-                    requester_wallet: &session.wallet,
-                    requested_role: &state.config.data_role_arn,
-                    session_duration_seconds: state.config.session_duration_seconds,
-                    sts_session_name: &session_name,
-                    outcome: MintOutcome::Ok,
-                },
-                None,
-            )?;
-            tracing::Span::current().record("outcome", "ok");
-            Ok(Json(MintResponse {
-                access_key_id: creds.access_key_id,
-                secret_access_key: creds.secret_access_key,
-                session_token: creds.session_token,
-                expiration: creds.expiration_unix,
-                wallet: session.wallet,
-                audit_record_id: None,
-                anchored: None,
-            }))
-        }
-        Err(e) => {
-            record_legacy_outcome(
-                state,
-                token,
-                &session.wallet,
-                &session_name,
-                MintOutcome::StsError,
-                Some(&e.to_string()),
-            );
-            tracing::Span::current().record("outcome", "sts_error");
-            Err(e)
-        }
-    }
-}
+// `mint_legacy` (pre-issue-#71 backend-validated-bearer path) was removed
+// in the OIDC-only migration. The provisioner / MCP / daemon now use
+// `/v1/mint-oidc-jwt` + client-side `AssumeRoleWithWebIdentity` directly.
 
 fn record_legacy_outcome(
     state: &SharedState,
@@ -666,21 +546,9 @@ mod tests {
         assert!(b.matches('-').count() >= 3);
     }
 
-    #[test]
-    fn looks_like_session_jwt_recognizes_3_segment_eyj() {
-        assert!(looks_like_session_jwt("eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.deadbeef"));
-        assert!(!looks_like_session_jwt("legacy-opaque-bearer"));
-        assert!(!looks_like_session_jwt("eyJonly-2-segments"));
-        assert!(!looks_like_session_jwt("eyJa.bC"));
-    }
-
-    #[test]
-    fn looks_like_session_jwt_rejects_whitespace() {
-        // A bearer with a newline is malformed; treat as legacy (which
-        // will then fail validation upstream — preserves the existing
-        // failure mode).
-        assert!(!looks_like_session_jwt("eyJ\n.payload.sig"));
-    }
+    // `looks_like_session_jwt` heuristic and its tests were removed in the
+    // OIDC-only migration — `mint_aws_creds` now always routes through
+    // `mint_v2` (session JWT path).
 
     #[test]
     fn canonicalize_json_sorts_object_keys() {

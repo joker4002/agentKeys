@@ -727,8 +727,6 @@ mod tests {
 
     fn config_with(audit_db: PathBuf, oidc_issuer: &str, oidc_kp_path: PathBuf) -> BrokerConfig {
         BrokerConfig {
-            daemon_access_key_id: None,
-            daemon_secret_access_key: None,
             data_role_arn: "arn:aws:iam::000:role/test".into(),
             backend_url: "http://localhost:8080".into(),
             audit_db_path: audit_db,

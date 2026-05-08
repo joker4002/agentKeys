@@ -416,29 +416,54 @@ contains only `ses:SendRawEmail`.
 
 ---
 
-## 5. Mint AWS creds via /v1/mint-aws-creds (the "real" daemon path)
+## 5. Mint AWS creds — two paths, post-issue-#71
 
-`/v1/mint-aws-creds` is what `agentkeys-daemon` calls in production —
-it's the **single endpoint** that returns ready-to-use STS creds, doing
-the OIDC JWT mint + `AssumeRoleWithWebIdentity` exchange + audit anchor
-write internally.
+After issue #71 Option A landed, the auto-provision pipeline mints AWS
+creds **client-side** by combining `/v1/mint-oidc-jwt` (broker call) +
+`AssumeRoleWithWebIdentity` (daemon-side STS call). The broker no longer
+needs an IAM principal at runtime.
 
-> **Issue #71 fix (commit landing this guide):** pre-fix, `/v1/mint-aws-creds`
-> called `sts:AssumeRole` with the broker's static IAM credentials, which
-> stopped working the moment `cloud-setup.md §4.2` swapped the role's
-> trust policy to the OIDC-federated form. The integrated path now mints
-> a per-call user-scoped OIDC JWT internally and uses
-> `sts:AssumeRoleWithWebIdentity` — same wire shape, same response, but
-> the assume goes through federation so it survives §4.
+`/v1/mint-aws-creds` (server-side aggregator) **still works** for callers
+who want server-side enforcement of audit + grants + idempotency — but
+the production auto-provision path no longer hits it.
+
+### 5.1 The new daemon-side flow (auto-provision uses this)
+
+```bash
+# === ON OPERATOR WORKSTATION === (or anywhere with the JWT)
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+# 1. Ask the broker for an OIDC JWT (lightweight call — broker just signs).
+JWT=$(curl -sf -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
+  -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
+
+# 2. Exchange it for AWS creds CLIENT-SIDE. No broker creds participate.
+CREDS=$(aws sts assume-role-with-web-identity \
+  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
+  --role-session-name "demo-A-$(date +%s)" \
+  --web-identity-token "$JWT")
+export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .Credentials.SessionToken)
+
+# 3. Use the temp creds. PrincipalTag-scoped per cloud-setup.md §4.4.
+aws s3 ls "s3://$BUCKET/bots/$(echo $ADDR_A | tr A-Z a-z)/"
+```
+
+Inside `agentkeys-provisioner`, the `fetch_via_broker_default_ttl()`
+helper does the same two-step internally and returns an `AwsTempCreds`
+struct ready for env-var injection into the scraper subprocess.
+
+### 5.2 The server-side aggregator (still available)
+
+If you want the broker to be the policy point — mandatory audit log,
+Phase B grant check, Idempotency-Key dedup, multi-anchor coordination —
+hit `/v1/mint-aws-creds` instead. It does steps 1+2 above internally
+plus the audit-anchor write, and returns the temp creds in the same
+shape.
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-
-# v2 path: session JWT + per-call EIP-191 signature on the canonical body.
-# In production your daemon SDK builds this for you. For demo we use the
-# session JWT directly with no per-call sig (legacy bearer compatibility
-# path during the migration window — Plan §3.5.7).
-
 curl -sf -X POST $OIDC_ISSUER/v1/mint-aws-creds \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
@@ -448,9 +473,7 @@ curl -sf -X POST $OIDC_ISSUER/v1/mint-aws-creds \
         intent:    {agent_id: $w, service: "s3", scope_path: "bots/"}
       }')" | jq
 # {
-#   "access_key_id": "ASIA…",
-#   "secret_access_key": "…",
-#   "session_token": "…",
+#   "access_key_id": "ASIA…",  "secret_access_key": "…",  "session_token": "…",
 #   "expiration": <unix+session_duration>,
 #   "wallet": "0x…",
 #   "audit_record_id": "aud_<ulid>",
@@ -458,9 +481,34 @@ curl -sf -X POST $OIDC_ISSUER/v1/mint-aws-creds \
 # }
 ```
 
-The returned creds are equivalent to those minted by the manual
-`assume-role-with-web-identity` in §4 — the broker is just a higher-
-level wrapper that also writes an audit row and runs grant checks.
+The two paths return functionally equivalent creds — both
+`AssumeRoleWithWebIdentity`, both PrincipalTag-scoped. Pick based on
+whether you want the broker or the caller to be the policy point.
+
+### 5.3 Auto-provision pipeline against live broker.litentry.org
+
+`agentkeys-daemon` / `agentkeys-mcp` invoke
+`agentkeys-provisioner::fetch_via_broker_default_ttl` under the hood
+when `AGENTKEYS_BROKER_URL` is set. End-to-end:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+export AGENTKEYS_BROKER_URL=https://broker.litentry.org
+export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
+export AWS_REGION=us-east-1
+
+# Daemon picks up the env vars; provisioner subprocess receives the AWS
+# temp creds the daemon mints by hitting /v1/mint-oidc-jwt + STS.
+agentkeys-daemon \
+  --backend $BACKEND_URL \
+  --broker-url $AGENTKEYS_BROKER_URL \
+  --session $YOUR_SESSION_TOKEN
+```
+
+Inside the daemon, the call site is
+[`crates/agentkeys-mcp/src/lib.rs`](../crates/agentkeys-mcp/src/lib.rs)::`broker_env_for_provision`
+→ `fetch_via_broker_default_ttl` → `/v1/mint-oidc-jwt` →
+`AssumeRoleWithWebIdentity` → env-var-injection into the scraper.
 
 ---
 
@@ -830,21 +878,173 @@ structural plumbing is in place but the live integration isn't wired:
   every daemon has been issued a grant.
 - **Histogram metrics + per-handler counter bumps.** Counter shapes
   ship; latency histograms land in V0.1-FOLLOWUPS.
-- **Daemon-side `AssumeRoleWithWebIdentity` migration ([issue #71](https://github.com/litentry/agentKeys/issues/71)
-  Option A).** Today `agentkeys-daemon` and `agentkeys-mcp` both
-  consume `/v1/mint-aws-creds` (now federated internally — the
-  endpoint works on §4-deployed accounts). The end-state is to
-  migrate them to call `/v1/mint-oidc-jwt` directly and do
-  `AssumeRoleWithWebIdentity` client-side, then retire
-  `/v1/mint-aws-creds`. After that the broker holds **zero AWS
-  principals** at runtime (only the OIDC signing key). Open work item.
+- **Retire `/v1/mint-aws-creds` entirely (issue #71 Option A
+  closing step).** Provisioner / MCP / daemon now use
+  `/v1/mint-oidc-jwt` + client-side `AssumeRoleWithWebIdentity`
+  (landed in this guide's commit set). The endpoint stays for callers
+  who want server-side gates (audit + grants + idempotency); once
+  every operator's pipeline confirms the new path works in
+  production, the route can be dropped.
 
 See [`docs/spec/plans/issue-64/V0.1-FOLLOWUPS.md`](spec/plans/issue-64/V0.1-FOLLOWUPS.md)
 for the prioritized backlog.
 
 ---
 
-## 16. Cleanup
+## 16. Live walkthrough on broker.litentry.org
+
+This section is the copy-paste runbook for verifying the migration
+end-to-end against the **live** broker at `https://broker.litentry.org`.
+Each block is tagged with where it runs.
+
+### 16.1 Pull + redeploy on the broker host
+
+```bash
+# === ON BROKER HOST (ip-172-31-29-135 via SSH) ===
+ssh agentkey@broker.litentry.org
+cd ~/agentKeys
+git fetch origin
+git checkout evm
+git pull --ff-only
+
+# Redeploy via the systemd-aware upgrade script. After the OIDC-only
+# migration the broker no longer needs DAEMON_ACCESS_KEY_ID env vars;
+# the systemd unit can run with no AWS creds.
+sudo bash scripts/setup-broker-host.sh --upgrade
+
+# Verify the broker is up.
+sudo systemctl --no-pager status agentkeys-broker
+sudo journalctl -u agentkeys-broker -n 50 --no-pager
+```
+
+### 16.2 Verify broker is creds-free
+
+```bash
+# === ON BROKER HOST ===
+sudo systemctl show agentkeys-broker | grep -E "^Environment=" | tr ' ' '\n' \
+  | grep -E "AWS_|DAEMON_|BROKER_DAEMON_" || echo "OK: no AWS_* / DAEMON_* env vars"
+```
+
+The expected output is `OK: no AWS_* / DAEMON_* env vars`. If the
+unit still has `Environment=AWS_PROFILE=...` from a pre-migration
+deployment, drop the line and `sudo systemctl daemon-reload &&
+sudo systemctl restart agentkeys-broker`.
+
+### 16.3 Public health checks (no creds needed)
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+curl -sf https://broker.litentry.org/healthz
+# ok
+
+curl -sf https://broker.litentry.org/readyz | jq
+# {"status":"ready"}
+
+curl -sf https://broker.litentry.org/.well-known/openid-configuration | jq -r .issuer
+# https://broker.litentry.org
+
+curl -sf https://broker.litentry.org/.well-known/jwks.json | jq '.keys[0] | {kty, crv, alg, kid}'
+# {"kty":"EC","crv":"P-256","alg":"ES256","kid":"v1-…"}
+```
+
+### 16.4 SIWE wallet auth → session JWT
+
+Generate two test wallets, sign in as wallet A, capture session JWT.
+Same as §2 above against the live broker. Repeat for wallet B if you
+want to demo the isolation property in §16.6.
+
+### 16.5 Mint OIDC JWT + AssumeRoleWithWebIdentity (the new auto-provision path)
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+awsp agentkeys-admin
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export OIDC_ISSUER=https://broker.litentry.org
+
+# Get the OIDC JWT.
+JWT=$(curl -sf -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
+  -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
+echo "JWT prefix: ${JWT:0:40}…"
+
+# Exchange it for AWS creds — UNAUTHENTICATED to AWS (the JWT authenticates).
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
+CREDS=$(aws sts assume-role-with-web-identity \
+  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
+  --role-session-name "live-demo-$(date +%s)" \
+  --web-identity-token "$JWT")
+export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .Credentials.SessionToken)
+
+# Confirm — the assumed role identity, NOT your admin profile.
+aws sts get-caller-identity
+# {
+#   "UserId": "AROA…<role-id>:live-demo-…",
+#   "Arn": "arn:aws:sts::ACCOUNT:assumed-role/agentkeys-data-role/live-demo-…"
+# }
+```
+
+### 16.6 S3 cloud-enforced isolation proof
+
+```bash
+# === ON OPERATOR WORKSTATION (still with assumed-role creds) ===
+WALLET_A_LC=$(echo "$ADDR_A" | tr '[:upper:]' '[:lower:]')
+WALLET_B_LC=$(echo "$ADDR_B" | tr '[:upper:]' '[:lower:]')
+
+# Wallet A's prefix — SUCCESS.
+aws s3api list-objects-v2 --bucket "$BUCKET" \
+  --prefix "bots/${WALLET_A_LC}/" --query 'Contents[*].Key'
+
+# Wallet B's prefix — AccessDenied (cloud-enforced).
+aws s3api get-object --bucket "$BUCKET" \
+  --key "bots/${WALLET_B_LC}/hello.txt" /tmp/got-B.txt
+# An error occurred (AccessDenied) when calling the GetObject operation
+```
+
+### 16.7 Auto-provision pipeline against live broker
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+# The daemon reads these env vars and threads them through to the
+# provisioner's fetch_via_broker_default_ttl().
+export AGENTKEYS_BROKER_URL=https://broker.litentry.org
+export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
+export AWS_REGION=us-east-1
+
+# Run the provisioner-driven scraper. The subprocess receives
+# AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN via env injection — those creds
+# are minted by the daemon calling /v1/mint-oidc-jwt + AssumeRoleWithWebIdentity.
+agentkeys-cli provision --service openrouter
+# … scraper runs, fetches the verification email from S3 using the
+# injected temp creds …
+```
+
+### 16.8 Audit log inspection
+
+```bash
+# === ON BROKER HOST ===
+sudo sqlite3 /var/lib/agentkeys/.agentkeys/broker/audit.sqlite \
+  'SELECT id, requested_role, sts_session_name, outcome, COUNT(*)
+     FROM mint_log
+     WHERE minted_at > unixepoch() - 3600
+     GROUP BY requested_role, outcome
+     ORDER BY id DESC;' \
+  -header -column
+```
+
+After the OIDC-only migration, the daemon-side path is invisible to
+the broker's audit log (the broker only sees `/v1/mint-oidc-jwt`
+calls). Use AWS CloudTrail's `AssumeRoleWithWebIdentity` events for
+the STS-side audit trail.
+
+If you need server-side audit row coverage of the actual mint, hit
+`/v1/mint-aws-creds` instead — it audits before returning creds.
+
+---
+
+## 17. Cleanup
 
 Reset to your admin profile after the demo:
 

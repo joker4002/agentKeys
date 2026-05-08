@@ -78,8 +78,6 @@ async fn spawn_broker_with_wallet_sig() -> (String, Arc<AppState>) {
 
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
-        daemon_access_key_id: Some("AKIA-fake".into()),
-        daemon_secret_access_key: Some("fake".into()),
         data_role_arn: "arn:aws:iam::000:role/test".into(),
         backend_url: "http://localhost:65535".into(), // never reached
         audit_db_path: PathBuf::from(":memory:"),

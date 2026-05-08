@@ -188,14 +188,6 @@ pub const BROKER_RECOVERY_GRANT_DELAY_SECONDS: &str = "BROKER_RECOVERY_GRANT_DEL
 // Legacy aliases (kept for one minor version, deprecation logged at boot)
 // ---------------------------------------------------------------------------
 
-/// Legacy. Static IAM-user access-key ID (alias of `BROKER_DAEMON_ACCESS_KEY_ID`).
-pub const DAEMON_ACCESS_KEY_ID: &str = "DAEMON_ACCESS_KEY_ID";
-/// Legacy. Static IAM-user secret-access key (alias of `BROKER_DAEMON_SECRET_ACCESS_KEY`).
-pub const DAEMON_SECRET_ACCESS_KEY: &str = "DAEMON_SECRET_ACCESS_KEY";
-/// Legacy. Prefixed alias of `DAEMON_ACCESS_KEY_ID`.
-pub const BROKER_DAEMON_ACCESS_KEY_ID: &str = "BROKER_DAEMON_ACCESS_KEY_ID";
-/// Legacy. Prefixed alias of `DAEMON_SECRET_ACCESS_KEY`.
-pub const BROKER_DAEMON_SECRET_ACCESS_KEY: &str = "BROKER_DAEMON_SECRET_ACCESS_KEY";
 /// Legacy. Pre-2026-04-28 alias of `BROKER_DATA_ROLE_ARN` (renamed to disambiguate from project "agent" terminology).
 pub const BROKER_AGENT_ROLE_ARN: &str = "BROKER_AGENT_ROLE_ARN";
 /// Legacy. AWS account ID; broker derives `BROKER_DATA_ROLE_ARN` if both are set and only this is provided.
@@ -270,10 +262,6 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
         // Recovery
         (BROKER_RECOVERY_GRANT_DELAY_SECONDS, "Time-lock seconds before recovery grant activates.", Group::Limits),
         // Legacy
-        (DAEMON_ACCESS_KEY_ID, "Legacy static IAM-user access-key ID.", Group::Legacy),
-        (DAEMON_SECRET_ACCESS_KEY, "Legacy static IAM-user secret-access key.", Group::Legacy),
-        (BROKER_DAEMON_ACCESS_KEY_ID, "Legacy prefixed alias.", Group::Legacy),
-        (BROKER_DAEMON_SECRET_ACCESS_KEY, "Legacy prefixed alias.", Group::Legacy),
         (BROKER_AGENT_ROLE_ARN, "Legacy alias of BROKER_DATA_ROLE_ARN.", Group::Legacy),
         (ACCOUNT_ID, "Legacy AWS account ID; derives BROKER_DATA_ROLE_ARN.", Group::Legacy),
         (REGION, "Legacy alias of BROKER_AWS_REGION.", Group::Legacy),

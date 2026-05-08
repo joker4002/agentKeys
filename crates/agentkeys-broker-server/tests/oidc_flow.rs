@@ -53,8 +53,6 @@ async fn spawn_broker(backend_url: String) -> (String, Arc<AppState>) {
 
     let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
-        daemon_access_key_id: Some("AKIA-fake".into()),
-        daemon_secret_access_key: Some("fake-secret".into()),
         data_role_arn: STUB_ROLE_ARN.into(),
         backend_url,
         audit_db_path: PathBuf::from(":memory:"),
