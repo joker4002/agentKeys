@@ -223,24 +223,37 @@ have sudo                      || die "sudo not found — run as a user with sud
 # Environment= lines from the existing broker unit. This is what makes
 # `bash scripts/setup-broker-host.sh --yes` a valid full re-deploy after
 # a `git pull` without re-typing every flag.
+#
+# Every conditional below uses `if`/`fi` (not `[[ ]] && cmd`) because under
+# `set -e` a top-level `[[ false ]] && cmd` exits the whole script — a
+# well-known bash gotcha that bit a previous iteration of this block.
 EXISTING_UNIT=/etc/systemd/system/agentkeys-broker.service
 if [[ -f "$EXISTING_UNIT" ]]; then
   log "Detected existing broker unit at $EXISTING_UNIT — reading config"
+  # `|| true` on every grep so a missing key returns empty under set -e+pipefail
+  # instead of killing the script.
   read_unit_env() {
     local key="$1"
-    sudo grep -E "^Environment=${key}=" "$EXISTING_UNIT" | head -1 \
-      | sed -E "s/^Environment=${key}=//"
+    { sudo grep -E "^Environment=${key}=" "$EXISTING_UNIT" 2>/dev/null \
+        | head -1 \
+        | sed -E "s/^Environment=${key}=//"; } || true
   }
-  [[ -z "$ISSUER_URL"  ]] && ISSUER_URL="$(read_unit_env BROKER_OIDC_ISSUER || true)"
-  [[ -z "$ACCOUNT_ID"  ]] && ACCOUNT_ID="$(read_unit_env ACCOUNT_ID         || true)"
-  EXISTING_REGION="$(read_unit_env REGION || true)"
-  [[ -n "$EXISTING_REGION" ]] && REGION="$EXISTING_REGION"
+  if [[ -z "$ISSUER_URL" ]]; then
+    ISSUER_URL="$(read_unit_env BROKER_OIDC_ISSUER)"
+  fi
+  if [[ -z "$ACCOUNT_ID" ]]; then
+    ACCOUNT_ID="$(read_unit_env ACCOUNT_ID)"
+  fi
+  EXISTING_REGION="$(read_unit_env REGION)"
+  if [[ -n "$EXISTING_REGION" ]]; then
+    REGION="$EXISTING_REGION"
+  fi
 
   # Cred mode inference. After issue #71 we have three options:
   #   - profile: Environment=AWS_PROFILE=<name> present
   #   - none / instance-profile: no AWS_* env (the unit's CRED_LINE is a
   #     comment so we can't tell them apart from the unit alone).
-  EXISTING_PROFILE="$(sudo grep -E '^Environment=AWS_PROFILE=' "$EXISTING_UNIT" | head -1 | sed -E 's/^Environment=AWS_PROFILE=//')"
+  EXISTING_PROFILE="$(read_unit_env AWS_PROFILE)"
   if [[ -n "$EXISTING_PROFILE" && -z "$CRED_MODE" ]]; then
     CRED_MODE="profile"
     PROFILE_NAME="$EXISTING_PROFILE"
