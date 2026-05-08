@@ -101,7 +101,7 @@ echo "$JWT" | awk -F. '{print $2}' | base64 --decode 2>/dev/null | jq .
 # 2b. AWS-creds mint (LIVE path — needs real daemon creds; skip offline)
 CREDS=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-aws-creds \
   -H "Authorization: Bearer $SESSION")
-echo "$CREDS" | jq '{access_key_id, expiration, wallet}'
+printf '%s' \"$CREDS\" | jq '{access_key_id, expiration, wallet}'
 
 # 3. Provisioner-scripts wiring (CLI side). With AGENTKEYS_BROKER_URL set,
 #    `agentkeys provision` fetches AWS creds via the broker before spawning
