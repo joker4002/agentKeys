@@ -10,6 +10,9 @@ Do not read folder `docs/archived`
 ## Version Control
 Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
 
+## Remote broker host (single entry point)
+All remote-host changes (binary upgrades, systemd edits, nginx/certbot, env tweaks, mock-server redeploys) MUST go through `bash scripts/setup-broker-host.sh` — it's idempotent and auto-detects bootstrap vs upgrade. No ad-hoc `systemctl` edits or hand-built `scp`.
+
 ## Development Workflow (Anthropic Harness Pattern)
 
 On every session start:

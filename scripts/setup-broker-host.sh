@@ -1,58 +1,55 @@
 #!/usr/bin/env bash
-# AgentKeys broker-host bootstrap.
+# AgentKeys broker-host setup — single idempotent entry point.
 #
-# Provisions a fresh Linux host into a running broker. Automates the manual
-# steps in docs/stage7-wip.md "Remote deployment". Idempotent — safe to
-# re-run after partial failures. Cloud-account setup (IAM, SES, S3, OIDC
-# federation) lives in docs/cloud-setup.md.
+# This script is THE place to bootstrap a fresh broker host AND to redeploy
+# changes onto an existing one. It auto-detects which case it is by looking
+# at the systemd unit's existing Environment= lines, so the same invocation
+# works in both states.
 #
-# Run with no flags on a TTY for an interactive walk-through that explains
-# each decision before it's made. Pass flags / --non-interactive for CI.
+# Per CLAUDE.md, all remote-host changes (binary upgrades, systemd unit
+# edits, env-var tweaks, nginx/certbot wiring, mock-server redeploys) MUST
+# go through this script — no ad-hoc systemctl edits, no hand-built scp.
 #
 # Usage:
-#   bash scripts/setup-broker-host.sh                        # interactive bootstrap
-#   bash scripts/setup-broker-host.sh --non-interactive \    # CI bootstrap
-#     --issuer-url https://broker.litentry.org \
-#     --account-id 429071895007 \
+#   bash scripts/setup-broker-host.sh                        # interactive
+#   bash scripts/setup-broker-host.sh --non-interactive \    # CI / re-deploy
+#     [--issuer-url https://broker.litentry.org] \           # required first time
+#     [--account-id 429071895007] \                          # required first time
 #     [--region us-east-1] \
-#     [--cred-mode instance-profile|profile|none] \
+#     [--cred-mode none|instance-profile|profile] \
 #     [--profile-name agentkeys-daemon] \
 #     [--with-nginx | --without-nginx] \
 #     [--with-certbot | --without-certbot] \
+#     [--ref <branch-or-tag>] \                              # opt-in git fetch+checkout+pull
+#     [--skip-pull] \                                        # alias for "no --ref"
+#     [--upgrade] \                                          # back-compat no-op
 #     [--yes]
 #
-#   bash scripts/setup-broker-host.sh --upgrade              # upgrade mode
-#     [--ref <branch-or-tag>]       # git ref to deploy (default: CURRENT branch)
-#     [--skip-pull]                 # skip git fetch/checkout/pull
-#     [--yes]
+# On re-runs, missing flags are filled in from the existing
+# /etc/systemd/system/agentkeys-broker.service Environment= lines, so
+# `bash scripts/setup-broker-host.sh --yes` is a valid full re-deploy.
 #
-# Upgrade mode (--upgrade): on a host already bootstrapped, this skips the
-# bootstrap phases (user, systemd, nginx, certbot, IAM walk-through) and
-# instead runs the post-merge redeploy flow:
-#   1. git fetch + checkout + pull on $REF
-#   2. sudo cargo build --release -p agentkeys-broker-server (broker only)
-#   3. sudo systemctl stop agentkeys-broker            (clean swap window)
-#   4. backup current binary → /usr/local/bin/agentkeys-broker-server.bak
-#   5. install -m 0755 the freshly-built binary
-#   6. sudo systemctl start agentkeys-broker
-#   7. journalctl -u agentkeys-broker -n 20 (verify "broker listening on …")
-# Rollback: cp the .bak file back and restart. The mock-server is left alone
-# in upgrade mode; pass the bootstrap form if you need to redeploy it too.
+# Pass --ref to opt into a git fetch+checkout+pull before building. Without
+# --ref, the script builds whatever is currently checked out — the operator
+# is expected to git-pull themselves if they want fresh code.
 #
-# Order of operations:
-#   1. Pre-flight checks (Linux, sudo, repo checkout)
-#   2. Interactive prompts (skipped in --non-interactive mode)
-#   3. Final summary + confirmation (skipped with --yes)
-#   4. Build agentkeys-mock-server + agentkeys-broker-server (release)
-#   5. Install binaries to /usr/local/bin
-#   6. Create agentkeys system user + /var/lib/agentkeys (mode 0700)
-#   7. Drop systemd units for backend + broker
-#   8. (Optional) install nginx with site config templating $ISSUER_URL host
-#   9. (Optional) install certbot
-#  10. Enable + start units
-#  11. Print remaining manual steps (DNS A record, certbot run, IAM role
-#      attach for instance-profile mode, populate ~/.aws/credentials for
-#      profile mode, none-mode broker runs creds-free)
+# Order of operations (all idempotent):
+#   1. Pre-flight (Linux, sudo, repo checkout, optional git pull on --ref)
+#   2. Detect existing config from systemd unit (issuer URL, account ID, etc.)
+#   3. Interactive prompts (only for values still missing after detection)
+#   4. Summary + confirmation
+#   5. Install build deps + Rust toolchain (skip if already present)
+#   6. Build agentkeys-mock-server + agentkeys-broker-server (incremental)
+#   7. Stop services if running (idempotent — safe on fresh host)
+#   8. Backup existing binaries → .bak (skip if no existing)
+#   9. Install fresh binaries to /usr/local/bin (mode 0755)
+#  10. Create agentkeys system user + /var/lib/agentkeys (mode 0700) if missing
+#  11. Write systemd units for backend + broker (always — same content most runs)
+#  12. (Optional) install nginx + write site config (always — idempotent)
+#  13. (Optional) install certbot package
+#  14. Mint missing ES256 keypairs as the agentkeys user (idempotent)
+#  15. systemctl daemon-reload + enable + restart agentkeys-backend + agentkeys-broker
+#  16. Tail recent logs + print remaining out-of-scope manual steps
 #
 # Out of scope (operator does these by hand):
 #   - DNS A record for $ISSUER_URL host
@@ -73,9 +70,8 @@ PROFILE_NAME="agentkeys-daemon"
 WITH_NGINX="auto"            # auto | yes | no
 WITH_CERTBOT="auto"          # auto | yes | no
 ASSUME_YES=false
-UPGRADE_MODE=false           # --upgrade switches the script into redeploy flow
-UPGRADE_REF=""               # git ref to checkout; empty = current branch
-UPGRADE_SKIP_PULL=false      # --skip-pull: build whatever is checked out
+PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
+PULL_SKIP=false              # --skip-pull: alias for "no --ref" (kept for back-compat)
 
 # Interactive when stdin is a TTY and the operator hasn't opted out.
 if [[ -t 0 ]]; then
@@ -99,9 +95,9 @@ while (( $# > 0 )); do
     --non-interactive)    INTERACTIVE=false; shift ;;
     --interactive)        INTERACTIVE=true; shift ;;
     --yes|-y)             ASSUME_YES=true; shift ;;
-    --upgrade)            UPGRADE_MODE=true; shift ;;
-    --ref)                UPGRADE_REF="$2"; shift 2 ;;
-    --skip-pull)          UPGRADE_SKIP_PULL=true; shift ;;
+    --upgrade)            shift ;;          # back-compat no-op (script is idempotent now)
+    --ref)                PULL_REF="$2"; shift 2 ;;
+    --skip-pull)          PULL_SKIP=true; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -222,137 +218,53 @@ have sudo                      || die "sudo not found — run as a user with sud
 [[ -d "$REPO_ROOT/crates/agentkeys-broker-server" ]] || \
   die "expected agentkeys checkout at $REPO_ROOT — run from inside a clone"
 
-# ─── Upgrade mode ─────────────────────────────────────────────────────────────
-# When --upgrade is set, take a completely separate code path: pull, rebuild
-# only the broker, stop the running broker, swap the binary, restart.
-# Bootstrap-phase prompts and system-mutation steps are skipped.
-if $UPGRADE_MODE; then
-  have git   || die "git not found — install git on this host first"
-  have cargo || die "cargo not found — first-time bootstrap not complete; run without --upgrade"
-  # Resolve cargo to its absolute path so the sudo build below doesn't depend
-  # on sudoers preserving the operator's PATH. The bootstrap installs rustup
-  # into the operator's ~/.cargo/bin, which secure_path strips by default.
-  CARGO_BIN="$(command -v cargo)"
-  [[ -f /etc/systemd/system/agentkeys-broker.service ]] || \
-    die "agentkeys-broker.service not found — first-time bootstrap not complete; run without --upgrade"
-  [[ -x /usr/local/bin/agentkeys-broker-server ]] || \
-    die "/usr/local/bin/agentkeys-broker-server missing — first-time bootstrap not complete; run without --upgrade"
+# ─── Detect existing config from systemd unit ────────────────────────────────
+# On re-runs, fill in any flags the operator didn't pass by reading the
+# Environment= lines from the existing broker unit. This is what makes
+# `bash scripts/setup-broker-host.sh --yes` a valid full re-deploy after
+# a `git pull` without re-typing every flag.
+EXISTING_UNIT=/etc/systemd/system/agentkeys-broker.service
+if [[ -f "$EXISTING_UNIT" ]]; then
+  log "Detected existing broker unit at $EXISTING_UNIT — reading config"
+  read_unit_env() {
+    local key="$1"
+    sudo grep -E "^Environment=${key}=" "$EXISTING_UNIT" | head -1 \
+      | sed -E "s/^Environment=${key}=//"
+  }
+  [[ -z "$ISSUER_URL"  ]] && ISSUER_URL="$(read_unit_env BROKER_OIDC_ISSUER || true)"
+  [[ -z "$ACCOUNT_ID"  ]] && ACCOUNT_ID="$(read_unit_env ACCOUNT_ID         || true)"
+  EXISTING_REGION="$(read_unit_env REGION || true)"
+  [[ -n "$EXISTING_REGION" ]] && REGION="$EXISTING_REGION"
 
-  CURRENT_REV="$( cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown )"
+  # Cred mode inference. After issue #71 we have three options:
+  #   - profile: Environment=AWS_PROFILE=<name> present
+  #   - none / instance-profile: no AWS_* env (the unit's CRED_LINE is a
+  #     comment so we can't tell them apart from the unit alone).
+  EXISTING_PROFILE="$(sudo grep -E '^Environment=AWS_PROFILE=' "$EXISTING_UNIT" | head -1 | sed -E 's/^Environment=AWS_PROFILE=//')"
+  if [[ -n "$EXISTING_PROFILE" && -z "$CRED_MODE" ]]; then
+    CRED_MODE="profile"
+    PROFILE_NAME="$EXISTING_PROFILE"
+  fi
+  log "  detected: ISSUER_URL=${ISSUER_URL:-(unset)}  ACCOUNT_ID=${ACCOUNT_ID:-(unset)}  REGION=$REGION  CRED_MODE=${CRED_MODE:-(default to none)}"
+fi
+
+# ─── Optional git pull (--ref, opt-in) ────────────────────────────────────────
+# Default behavior: build whatever is currently checked out. The operator is
+# expected to git-pull themselves before invoking the script if they want a
+# fresh tree. Pass --ref <branch-or-tag> to opt into an in-script pull —
+# useful for unattended CI redeploys. --skip-pull is a back-compat no-op.
+if [[ -n "$PULL_REF" ]] && ! $PULL_SKIP; then
+  have git || die "git not found — install git or drop --ref"
   CURRENT_BRANCH="$( cd "$REPO_ROOT" && git symbolic-ref --short HEAD 2>/dev/null || true )"
-
-  # Resolve --ref default: keep the operator on whatever branch they're
-  # already deploying. Hardcoding "main" here used to silently switch
-  # branches mid-upgrade — operators on a feature branch (e.g. evm) would
-  # build main's binary instead of theirs.
-  if [[ -z "$UPGRADE_REF" ]]; then
-    if [[ -n "$CURRENT_BRANCH" ]]; then
-      UPGRADE_REF="$CURRENT_BRANCH"
-    else
-      die "current HEAD is detached (no branch). Pass --ref <branch-or-tag> explicitly to choose what to deploy."
-    fi
+  if [[ -n "$CURRENT_BRANCH" && "$CURRENT_BRANCH" != "$PULL_REF" ]]; then
+    warn "BRANCH SWITCH: $CURRENT_BRANCH → $PULL_REF (commits unique to $CURRENT_BRANCH will not be deployed)"
   fi
-
-  # Loud warning if the operator's --ref will switch them off their
-  # current branch. Common case where this matters: deploying from a
-  # feature branch like 'evm' that has commits not yet on main.
-  BRANCH_SWITCH_NOTE=""
-  if [[ -n "$CURRENT_BRANCH" && "$CURRENT_BRANCH" != "$UPGRADE_REF" ]]; then
-    BRANCH_SWITCH_NOTE="  !! BRANCH SWITCH: $CURRENT_BRANCH → $UPGRADE_REF (commits unique to $CURRENT_BRANCH will not be deployed)"
-  fi
-
-  cat <<EOF
-
-── Upgrade plan ──
-  Repo          : $REPO_ROOT
-  Current HEAD  : $CURRENT_REV ${CURRENT_BRANCH:+(on $CURRENT_BRANCH)}
-  Target ref    : $UPGRADE_REF
-$([[ -n "$BRANCH_SWITCH_NOTE" ]] && echo "$BRANCH_SWITCH_NOTE")
-  Pull          : $($UPGRADE_SKIP_PULL && echo skip || echo "git fetch + checkout + pull")
-  Build         : sudo cargo build --release -p agentkeys-broker-server
-  Stop          : sudo systemctl stop agentkeys-broker
-  Backup        : /usr/local/bin/agentkeys-broker-server → .bak
-  Install       : /usr/local/bin/agentkeys-broker-server (mode 0755)
-  Start         : sudo systemctl start agentkeys-broker
-
-EOF
-
-  if ! $ASSUME_YES; then
-    if [[ -t 0 ]]; then
-      read -r -p "Proceed? [Y/n]: " __answer || true
-      case "${__answer:-y}" in
-        y|Y|yes|YES) ;;
-        *) die "aborted by operator" ;;
-      esac
-    fi
-  fi
-
-  if ! $UPGRADE_SKIP_PULL; then
-    log "Fetching origin"
-    ( cd "$REPO_ROOT" && git fetch origin )
-    log "Checking out $UPGRADE_REF"
-    ( cd "$REPO_ROOT" && git checkout "$UPGRADE_REF" )
-    log "Pulling fast-forward"
-    ( cd "$REPO_ROOT" && git pull --ff-only )
-  else
-    log "Skipping pull — building whatever is checked out at $CURRENT_REV"
-  fi
-
-  # sudo with the cargo absolute path (resolved above) and CARGO_HOME /
-  # RUSTUP_HOME preserved so the toolchain installed under the operator's
-  # ~/.cargo + ~/.rustup is reachable. Using the absolute path avoids any
-  # sudoers secure_path interaction.
-  log "Building agentkeys-broker-server (release) — ~5-10 min on small instances"
-  ( cd "$REPO_ROOT" && sudo --preserve-env=CARGO_HOME,RUSTUP_HOME \
-      "$CARGO_BIN" build --release -p agentkeys-broker-server )
-
-  NEW_BIN="$REPO_ROOT/target/release/agentkeys-broker-server"
-  [[ -x "$NEW_BIN" ]] || die "build did not produce $NEW_BIN"
-
-  # Stop before swap so the kernel isn't holding the old inode while a new
-  # one is installed in its place. Restart-only would also work on Linux
-  # (binaries are swappable while mapped), but stop→swap→start makes the
-  # failure mode unambiguous: if the new binary doesn't start, the broker
-  # stays cleanly stopped instead of entering a Restart=always crash loop.
-  log "Stopping agentkeys-broker"
-  sudo systemctl stop agentkeys-broker
-
-  log "Backing up current binary → /usr/local/bin/agentkeys-broker-server.bak"
-  sudo cp -p /usr/local/bin/agentkeys-broker-server \
-             /usr/local/bin/agentkeys-broker-server.bak
-
-  log "Installing new binary"
-  sudo install -m 0755 "$NEW_BIN" /usr/local/bin/agentkeys-broker-server
-
-  # Mint any keypairs the new binary requires but the host doesn't have yet.
-  # Pre-Stage-7 → Stage-7 upgrades commonly hit this on the session keypair.
-  ensure_broker_keypairs /usr/local/bin/agentkeys-broker-server
-
-  log "Starting agentkeys-broker"
-  sudo systemctl start agentkeys-broker
-
-  sleep 2
-  log "Recent broker logs (look for fresh 'broker listening on 127.0.0.1:8091'):"
-  sudo journalctl -u agentkeys-broker -n 20 --no-pager
-
-  cat <<EOF
-
-================================================================================
-  Upgrade complete.
-================================================================================
-Verify:
-  sudo systemctl --no-pager status agentkeys-broker
-  curl -sf http://127.0.0.1:8091/healthz
-
-Rollback (if logs above show a crash loop or missing 'broker listening' line):
-  sudo systemctl stop agentkeys-broker
-  sudo cp /usr/local/bin/agentkeys-broker-server.bak \\
-          /usr/local/bin/agentkeys-broker-server
-  sudo systemctl start agentkeys-broker
-
-================================================================================
-EOF
-  exit 0
+  log "git fetch origin"
+  ( cd "$REPO_ROOT" && git fetch origin )
+  log "git checkout $PULL_REF"
+  ( cd "$REPO_ROOT" && git checkout "$PULL_REF" )
+  log "git pull --ff-only"
+  ( cd "$REPO_ROOT" && git pull --ff-only )
 fi
 
 # ─── Interactive walk-through ─────────────────────────────────────────────────
@@ -578,7 +490,23 @@ log "Building agentkeys-mock-server + agentkeys-broker-server (release)"
     -p agentkeys-mock-server \
     -p agentkeys-broker-server )
 
-# ─── 3. Install binaries ──────────────────────────────────────────────────────
+# ─── 3. Install binaries (stop → backup → install → restart later) ──────────
+# Stop both services before swap so the kernel isn't holding old inodes
+# while we install new ones. Both stops are idempotent (no-op on fresh
+# hosts where nothing's running yet).
+log "Stopping agentkeys-backend + agentkeys-broker (idempotent)"
+sudo systemctl stop agentkeys-broker  2>/dev/null || true
+sudo systemctl stop agentkeys-backend 2>/dev/null || true
+
+# Backup existing binaries → .bak so a failed install can be rolled back.
+# Skip on fresh hosts where /usr/local/bin/agentkeys-* don't exist yet.
+for bin in agentkeys-mock-server agentkeys-broker-server; do
+  if [[ -x "/usr/local/bin/$bin" ]]; then
+    log "Backing up /usr/local/bin/$bin → /usr/local/bin/$bin.bak"
+    sudo cp -p "/usr/local/bin/$bin" "/usr/local/bin/$bin.bak"
+  fi
+done
+
 log "Installing binaries to /usr/local/bin"
 sudo install -m 0755 \
   "$REPO_ROOT/target/release/agentkeys-mock-server" \
@@ -787,13 +715,24 @@ fi
 # guaranteed first-boot crash loop on a fresh host.
 ensure_broker_keypairs /usr/local/bin/agentkeys-broker-server
 
-# ─── 9. Enable + start ────────────────────────────────────────────────────────
-log "Enabling + starting agentkeys-backend, agentkeys-broker"
+# ─── 9. Enable + (re)start ────────────────────────────────────────────────────
+# `enable` is idempotent. `restart` forces a refresh after binary swap +
+# unit-file rewrite — on fresh hosts where the units were just enabled,
+# this is equivalent to start; on re-runs it picks up the new binary +
+# any unit-file changes.
+log "daemon-reload + enable + restart agentkeys-backend, agentkeys-broker"
 sudo systemctl daemon-reload
-sudo systemctl enable --now agentkeys-backend agentkeys-broker
+sudo systemctl enable agentkeys-backend agentkeys-broker
+sudo systemctl restart agentkeys-backend agentkeys-broker
 
 sleep 2
 sudo systemctl --no-pager --full status agentkeys-backend agentkeys-broker || true
+
+log "Recent broker logs (look for 'broker listening on 127.0.0.1:8091'):"
+sudo journalctl -u agentkeys-broker -n 20 --no-pager || true
+log "Loopback /healthz probe:"
+curl -sf --max-time 5 http://127.0.0.1:8091/healthz && echo " (broker)" || warn "broker /healthz did not return 200"
+curl -sf --max-time 5 http://127.0.0.1:8090/healthz && echo " (backend)" || warn "backend /healthz did not return 200"
 
 # ─── 9. Print remaining manual steps ──────────────────────────────────────────
 cat <<EOF
