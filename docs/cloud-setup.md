@@ -304,7 +304,7 @@ Replaces the `agentkeys-daemon → AssumeRole` path in §3.2 with `OIDC-broker-J
 - The broker's discovery doc agrees with `$BROKER_HOST` byte-for-byte:
   ```bash
   export OIDC_ISSUER="https://$BROKER_HOST"
-  curl -sf "$OIDC_ISSUER/.well-known/openid-configuration" | jq -e ".issuer == \"$OIDC_ISSUER\""
+  curl -sS --fail-with-body "$OIDC_ISSUER/.well-known/openid-configuration" | jq -e ".issuer == \"$OIDC_ISSUER\""
   # → true
   ```
   If `false`, fix the broker's `BROKER_OIDC_ISSUER` env var before continuing — AWS validates the registered URL against the JWT `iss` claim byte-for-byte (no scheme, trailing slash, or hostname-only forms allowed):
@@ -481,11 +481,11 @@ ssh agentkey@$BROKER_HOST    # or via: aws ec2-instance-connect ssh --instance-i
 
 # === The rest runs inside the SSH session, on the broker host ===
 # No workstation env vars are visible here. Both URLs are literals.
-SESSION=$(curl -sf -X POST http://127.0.0.1:8090/session/create \
+SESSION=$(curl -sS --fail-with-body -X POST http://127.0.0.1:8090/session/create \
   -H 'content-type: application/json' \
   -d '{"auth_token":"federation-proof"}' | jq -r .session)
 
-JWT=$(curl -sf -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
+JWT=$(curl -sS --fail-with-body -X POST http://127.0.0.1:8091/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION" | jq -r .jwt)
 
 echo "$JWT"
@@ -513,9 +513,9 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role" \
   --role-session-name "fed-proof-$(date +%s)" \
   --web-identity-token "$JWT")
-export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .Credentials.SessionToken)
+export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
 # Confirm you're the assumed role, not your admin profile
 aws sts get-caller-identity
