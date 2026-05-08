@@ -13,7 +13,7 @@ use agentkeys_provisioner::{
 /// scoped AWS creds and return them as an env-var map ready to merge into the
 /// scraper subprocess. With no broker URL, returns an empty map and the
 /// subprocess inherits whatever the operator already has in its environment
-/// (legacy `stage6-demo-env.sh` path).
+/// (legacy pre-Stage-7 path: operator sources AWS_* manually).
 ///
 /// Issue #71 Option A: this helper does the JWT-fetch + AssumeRoleWithWebIdentity
 /// client-side. The broker holds zero AWS principals at runtime.
@@ -87,7 +87,7 @@ pub struct CommandContext {
     pub session_store_override: Option<SessionStore>,
     /// Stage-7 phase-2 wiring: when set, `agentkeys provision` fetches AWS
     /// temp creds from this broker URL and injects them into the scraper
-    /// subprocess env (replacing the `stage6-demo-env.sh` sourcing pattern).
+    /// subprocess env (no manual `AWS_*` env wiring required).
     pub broker_url: Option<String>,
 }
 

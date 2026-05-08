@@ -101,7 +101,7 @@ pub struct McpHandler {
     /// Stage-7 phase-2 wiring: when `Some`, the provision tool fetches AWS
     /// temp creds from this broker URL and injects them into the scraper
     /// subprocess env. When `None`, the subprocess inherits whatever `AWS_*`
-    /// vars the operator sourced manually (legacy `stage6-demo-env.sh` path).
+    /// vars the operator sourced manually (pre-Stage-7 fallback).
     broker_url: Option<String>,
     /// Federated role ARN — used by `fetch_via_broker` to do
     /// `AssumeRoleWithWebIdentity` client-side (issue #71 Option A). Read

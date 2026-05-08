@@ -45,22 +45,26 @@ workstation env vars).
 
 ## 0. Prerequisites checklist
 
-Run on your **operator workstation**:
+Run on your **operator workstation**. All workstation-side env vars
+that the rest of this guide references (`$ACCOUNT_ID`, `$REGION`,
+`$BROKER_HOST`, `$BUCKET`, `$OIDC_ISSUER`, `$OIDC_PROVIDER_ARN`,
+`$DATA_ROLE_ARN`) live in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env)
+— the workstation companion to [`scripts/broker.env`](../scripts/broker.env)
+(broker-host scope).
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
 awsp agentkeys-admin
-export REGION=us-east-1
-export BROKER_HOST=broker.litentry.org
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export BUCKET=agentkeys-mail-${ACCOUNT_ID}
-export OIDC_ISSUER=https://$BROKER_HOST
-export OIDC_PROVIDER_ARN=arn:aws:iam::${ACCOUNT_ID}:oidc-provider/$BROKER_HOST
+set -a; source scripts/operator-workstation.env; set +a
 
 # Sanity — every step below depends on these.
 test -n "$ACCOUNT_ID" && test -n "$BROKER_HOST" && test -n "$BUCKET" \
-  && echo "env ok" || echo "env MISSING — re-run cloud-setup.md §0"
+  && echo "env ok" || echo "env MISSING — check scripts/operator-workstation.env"
 ```
+
+The file is committed with public values (account ID, role/bucket
+names, hostname). If you fork the repo for a different deployment,
+edit it in place — there's no template version.
 
 Cloud-side state from `cloud-setup.md`:
 
@@ -639,6 +643,32 @@ curl -sf $OIDC_ISSUER/v1/auth/email/status/em_… | jq
 # }
 ```
 
+### 8.1 Debugging — inspecting the inbound email at S3
+
+If the magic-link click never completes verification, the email
+probably arrived but the link the broker rendered doesn't match the
+URL pattern the auth handler regex-matches. Use
+[`scripts/inspect-inbound-email.sh`](../scripts/inspect-inbound-email.sh)
+to dump the most-recent inbound email from `s3://$BUCKET/inbound/`
+with the same quoted-printable normalization the broker applies:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+awsp agentkeys-admin
+set -a; source scripts/operator-workstation.env; set +a   # if not done in §0
+
+./scripts/inspect-inbound-email.sh                # latest
+./scripts/inspect-inbound-email.sh --all          # list all keys + headers
+./scripts/inspect-inbound-email.sh inbound/<key>  # specific key
+```
+
+The script prints raw + normalized bodies, all `href`s, all
+`https://` URLs deduped, and specifically the URLs that match the
+auth handler's regex. If the last block returns `(NONE — regex would
+miss this email!)`, the broker's URL-extraction regex needs an
+update for the new sender format. (This script is the Stage 7
+replacement for the archived `stage6-inspect-email.sh`.)
+
 The session JWT NEVER appears in the browser-facing landing-page
 response — only on the CLI poll, per Plan §3.5.4 security posture.
 
@@ -957,9 +987,9 @@ want to demo the isolation property in §16.6.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
+# (Assumes operator-workstation.env was sourced in §0 — $OIDC_ISSUER,
+# $DATA_ROLE_ARN, $ACCOUNT_ID are already set.)
 awsp agentkeys-admin
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export OIDC_ISSUER=https://broker.litentry.org
 
 # Get the OIDC JWT.
 JWT=$(curl -sf -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
@@ -969,7 +999,7 @@ echo "JWT prefix: ${JWT:0:40}…"
 # Exchange it for AWS creds — UNAUTHENTICATED to AWS (the JWT authenticates).
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 CREDS=$(aws sts assume-role-with-web-identity \
-  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
+  --role-arn "$DATA_ROLE_ARN" \
   --role-session-name "live-demo-$(date +%s)" \
   --web-identity-token "$JWT")
 export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .Credentials.AccessKeyId)
