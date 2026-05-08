@@ -95,12 +95,13 @@ Tooling on the workstation:
 - A test EVM keypair. Generate two for the isolation proof:
 
   ```bash
+  # `cast wallet new --json` returns a JSON array (one element per wallet).
   cast wallet new --json | tee /tmp/wallet-A.json
   cast wallet new --json | tee /tmp/wallet-B.json
-  PK_A=$(jq -r .private_key /tmp/wallet-A.json)
-  PK_B=$(jq -r .private_key /tmp/wallet-B.json)
-  ADDR_A=$(jq -r .address    /tmp/wallet-A.json)
-  ADDR_B=$(jq -r .address    /tmp/wallet-B.json)
+  PK_A=$(jq -r '.[0].private_key' /tmp/wallet-A.json)
+  PK_B=$(jq -r '.[0].private_key' /tmp/wallet-B.json)
+  ADDR_A=$(jq -r '.[0].address'   /tmp/wallet-A.json)
+  ADDR_B=$(jq -r '.[0].address'   /tmp/wallet-B.json)
   echo "A=$ADDR_A  B=$ADDR_B"
   ```
 
