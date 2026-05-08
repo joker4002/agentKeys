@@ -12,10 +12,29 @@ pub struct AssumedCredentials {
 
 #[async_trait]
 pub trait StsClient: Send + Sync {
+    /// Legacy `sts:AssumeRole` path. Authenticates via the broker's own
+    /// IAM credentials (static keys or instance profile). Used pre-Stage-7
+    /// when `agentkeys-data-role`'s trust policy named `agentkeys-daemon`
+    /// as the principal. **Stops working** the moment `cloud-setup.md §4`
+    /// swaps the trust policy to OIDC-federated form (issue #71).
     async fn assume_role(
         &self,
         role_arn: &str,
         session_name: &str,
+        duration_seconds: i32,
+    ) -> BrokerResult<AssumedCredentials>;
+
+    /// Stage 7 federated path — `sts:AssumeRoleWithWebIdentity`. The JWT
+    /// authenticates the call (no AWS credentials required on the broker
+    /// side for the call itself), and AWS reads the
+    /// `https://aws.amazon.com/tags` claim to populate session
+    /// PrincipalTags. This is the path that survives — and requires —
+    /// `cloud-setup.md §4` federation. (issue #71 Option B)
+    async fn assume_role_with_web_identity(
+        &self,
+        role_arn: &str,
+        session_name: &str,
+        web_identity_token: &str,
         duration_seconds: i32,
     ) -> BrokerResult<AssumedCredentials>;
 
@@ -101,6 +120,38 @@ impl StsClient for AwsStsClient {
         })
     }
 
+    async fn assume_role_with_web_identity(
+        &self,
+        role_arn: &str,
+        session_name: &str,
+        web_identity_token: &str,
+        duration_seconds: i32,
+    ) -> BrokerResult<AssumedCredentials> {
+        let resp = self
+            .client
+            .assume_role_with_web_identity()
+            .role_arn(role_arn)
+            .role_session_name(session_name)
+            .web_identity_token(web_identity_token)
+            .duration_seconds(duration_seconds)
+            .send()
+            .await
+            .map_err(|e| {
+                BrokerError::StsError(format!("assume_role_with_web_identity: {}", e))
+            })?;
+
+        let creds = resp
+            .credentials
+            .ok_or_else(|| BrokerError::StsError("STS returned no credentials".into()))?;
+
+        Ok(AssumedCredentials {
+            access_key_id: creds.access_key_id,
+            secret_access_key: creds.secret_access_key,
+            session_token: creds.session_token,
+            expiration_unix: creds.expiration.secs(),
+        })
+    }
+
     async fn caller_identity_ok(&self) -> BrokerResult<()> {
         self.client
             .get_caller_identity()
@@ -159,6 +210,20 @@ impl StsClient for StubStsClient {
         _session_name: &str,
         _duration_seconds: i32,
     ) -> BrokerResult<AssumedCredentials> {
+        (self.assume)()
+    }
+
+    async fn assume_role_with_web_identity(
+        &self,
+        _role_arn: &str,
+        _session_name: &str,
+        _web_identity_token: &str,
+        _duration_seconds: i32,
+    ) -> BrokerResult<AssumedCredentials> {
+        // Same closure as `assume_role` so existing test fixtures (StubStsClient::ok,
+        // ::failing, ::assume_failing) work for both call paths without a separate
+        // setter. Tests that need to discriminate can wrap this with their own
+        // counting impl.
         (self.assume)()
     }
 

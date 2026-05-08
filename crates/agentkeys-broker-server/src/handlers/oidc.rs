@@ -98,33 +98,8 @@ pub async fn mint_oidc_jwt(
 
     tracing::Span::current().record("wallet", session.wallet.as_str());
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let exp = now + state.config.oidc_jwt_ttl_seconds as i64;
-
-    // The `https://aws.amazon.com/tags` claim is what AWS STS reads to populate
-    // session tags from the JWT. AWS does NOT auto-promote arbitrary OIDC claims
-    // — the bare `agentkeys_user_wallet` claim alone produces an untagged session,
-    // and `${aws:PrincipalTag/agentkeys_user_wallet}` in bucket policies expands
-    // to empty. `transitive_tag_keys` ensures the tag persists across role chains
-    // (e.g. assumed-role → assume-role).
-    // Spec: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html#oidc-session-tags
-    let claims = json!({
-        "iss": state.config.oidc_issuer,
-        "sub": format!("agentkeys:agent:{}", session.wallet),
-        "aud": "sts.amazonaws.com",
-        "iat": now,
-        "exp": exp,
-        "agentkeys_user_wallet": session.wallet,
-        "https://aws.amazon.com/tags": {
-            "principal_tags": {
-                "agentkeys_user_wallet": [session.wallet],
-            },
-            "transitive_tag_keys": ["agentkeys_user_wallet"],
-        },
-    });
+    let (claims, _now, exp) =
+        build_oidc_jwt_claims(&state.config.oidc_issuer, &session.wallet, state.config.oidc_jwt_ttl_seconds);
 
     let jwt = state.oidc.sign_jwt(&claims)?;
 
@@ -146,4 +121,57 @@ pub async fn mint_oidc_jwt(
         wallet: session.wallet,
         expiration: exp,
     }))
+}
+
+/// Build the OIDC JWT claim set the broker signs for AWS STS
+/// `AssumeRoleWithWebIdentity`. Returns `(claims, iat_unix, exp_unix)` so
+/// callers can also use the timestamps for audit rows / response shaping.
+///
+/// Used by:
+/// - `mint_oidc_jwt` (handler above) — public `/v1/mint-oidc-jwt` endpoint.
+/// - `crate::handlers::mint::mint_v2` / `mint_legacy` — internal JWT minted
+///   per-call so the broker can do `AssumeRoleWithWebIdentity` itself
+///   (issue #71 Option B).
+///
+/// The wallet is lowercased before being placed in the `principal_tags`
+/// claim so it matches the lowercase prefixes the bucket policy uses
+/// (`bots/${aws:PrincipalTag/agentkeys_user_wallet}/`); checksummed-mixed-
+/// case wallets going in here would never match a lowercase resource ARN.
+///
+/// The `https://aws.amazon.com/tags` claim is what AWS STS reads to
+/// populate session tags from the JWT. AWS does NOT auto-promote
+/// arbitrary OIDC claims — the bare `agentkeys_user_wallet` claim alone
+/// produces an untagged session, and
+/// `${aws:PrincipalTag/agentkeys_user_wallet}` in bucket policies expands
+/// to empty. `transitive_tag_keys` ensures the tag persists across role
+/// chains. Spec:
+/// <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html#oidc-session-tags>
+pub(crate) fn build_oidc_jwt_claims(
+    issuer: &str,
+    wallet: &str,
+    ttl_seconds: u64,
+) -> (serde_json::Value, i64, i64) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let exp = now + ttl_seconds as i64;
+    let wallet_lc = wallet.to_lowercase();
+
+    let claims = json!({
+        "iss": issuer,
+        "sub": format!("agentkeys:agent:{}", wallet_lc),
+        "aud": "sts.amazonaws.com",
+        "iat": now,
+        "exp": exp,
+        "agentkeys_user_wallet": wallet_lc,
+        "https://aws.amazon.com/tags": {
+            "principal_tags": {
+                "agentkeys_user_wallet": [wallet_lc],
+            },
+            "transitive_tag_keys": ["agentkeys_user_wallet"],
+        },
+    });
+
+    (claims, now, exp)
 }

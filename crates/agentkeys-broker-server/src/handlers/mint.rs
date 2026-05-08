@@ -235,11 +235,43 @@ async fn mint_v2(
     //    things simple: STS first, then anchor, then return creds. If
     //    anchor fails we still record the failure on the legacy log
     //    and return 500 without creds.
+    //
+    // STS path: post-cloud-setup.md §4 the role's trust policy is
+    // OIDC-federated, so the broker must use AssumeRoleWithWebIdentity
+    // (not AssumeRole — issue #71). We mint a per-call user-scoped
+    // OIDC JWT here, identical in shape to what `/v1/mint-oidc-jwt`
+    // returns, and pass it to STS. The JWT carries the
+    // `https://aws.amazon.com/tags` claim that drives PrincipalTag
+    // isolation in the bucket policy.
+    let (oidc_claims, _now_oidc, _exp_oidc) = crate::handlers::oidc::build_oidc_jwt_claims(
+        &state.config.oidc_issuer,
+        &body.auth.address,
+        state.config.oidc_jwt_ttl_seconds,
+    );
+    let internal_oidc_jwt = match state.oidc.sign_jwt(&oidc_claims) {
+        Ok(j) => j,
+        Err(e) => {
+            record_legacy_outcome(
+                state,
+                token,
+                &body.auth.address,
+                &session_name,
+                MintOutcome::StsError,
+                Some(&format!("internal_oidc_jwt: {}", e)),
+            );
+            tracing::Span::current().record("outcome", "internal_oidc_jwt_failed");
+            return Err(BrokerError::Internal(format!(
+                "sign internal oidc jwt: {}",
+                e
+            )));
+        }
+    };
     let creds_result = state
         .sts
-        .assume_role(
+        .assume_role_with_web_identity(
             &state.config.data_role_arn,
             &session_name,
+            &internal_oidc_jwt,
             state.config.session_duration_seconds,
         )
         .await;
@@ -483,11 +515,39 @@ async fn mint_legacy(state: &SharedState, token: &str) -> BrokerResult<Json<Mint
     tracing::Span::current().record("wallet", session.wallet.as_str());
     let session_name = build_session_name(&session.wallet);
 
+    // Same federated-STS pivot as mint_v2 (issue #71). Pre-Stage-7 daemons
+    // hitting the legacy bearer path still get federated creds, so cloud-
+    // setup.md §4-deployed accounts work for both bearer shapes.
+    let (oidc_claims, _now_oidc, _exp_oidc) = crate::handlers::oidc::build_oidc_jwt_claims(
+        &state.config.oidc_issuer,
+        &session.wallet,
+        state.config.oidc_jwt_ttl_seconds,
+    );
+    let internal_oidc_jwt = match state.oidc.sign_jwt(&oidc_claims) {
+        Ok(j) => j,
+        Err(e) => {
+            record_legacy_outcome(
+                state,
+                token,
+                &session.wallet,
+                &session_name,
+                MintOutcome::StsError,
+                Some(&format!("internal_oidc_jwt: {}", e)),
+            );
+            tracing::Span::current().record("outcome", "internal_oidc_jwt_failed");
+            return Err(BrokerError::Internal(format!(
+                "sign internal oidc jwt: {}",
+                e
+            )));
+        }
+    };
+
     match state
         .sts
-        .assume_role(
+        .assume_role_with_web_identity(
             &state.config.data_role_arn,
             &session_name,
+            &internal_oidc_jwt,
             state.config.session_duration_seconds,
         )
         .await

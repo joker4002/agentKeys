@@ -168,7 +168,11 @@ Collapsing the two into one URL would either expose the legacy session-validatio
 - TLS termination in front of the broker (nginx, ALB, Traefik). The
   broker logs a warning at startup if you bind to a non-loopback address
   without TLS.
-- An AWS IAM role with the trust policy described in §AWS IAM Trust.
+- An AWS IAM role with the OIDC-federated trust policy described in
+  §AWS IAM Trust. As of [issue #71](https://github.com/litentry/agentKeys/issues/71)
+  the broker calls `sts:AssumeRoleWithWebIdentity` for every mint —
+  the legacy `sts:AssumeRole` permission on `agentkeys-daemon` is no
+  longer load-bearing and can be removed once you've cut over.
 - A backend service that exposes `/healthz` and `/session/validate` per
   the legacy contract (used during the cutover until US-011 retires the
   legacy bearer path).
@@ -359,6 +363,34 @@ policy granting `sts:AssumeRoleWithWebIdentity` to that provider scoped
 by `aud=sts.amazonaws.com` and a `sub` prefix.
 
 The broker's `BROKER_DATA_ROLE_ARN` must point at this role.
+
+### Mint-time STS path (issue #71)
+
+For every `POST /v1/mint-aws-creds` request, the broker:
+
+1. Authenticates the caller (session JWT or legacy bearer).
+2. Resolves any Phase B grant.
+3. **Mints an internal user-scoped OIDC JWT** (same shape as
+   `/v1/mint-oidc-jwt`, signed by `BROKER_OIDC_KEYPAIR_PATH`,
+   short TTL, carrying the `agentkeys_user_wallet` PrincipalTag claim).
+4. **Calls `sts:AssumeRoleWithWebIdentity`** with that JWT — the JWT
+   authenticates the call; **no AWS credentials on the broker side
+   participate in the assume**.
+5. Writes the audit anchor row.
+6. Returns the temporary credentials.
+
+This means the broker **does not need** an IAM principal at runtime
+to mint user creds. The legacy paths (`agentkeys-daemon` IAM user
+keys, `AWS_PROFILE`, EC2 instance profile) are still consulted for
+the optional startup `caller_identity_ok` sanity probe and for
+`caller_identity_ok` heartbeats — pass `--skip-startup-check` if you
+want to run the broker with no AWS credentials at all.
+
+After cutover (cloud-setup.md §4 done, all daemons hitting the new
+flow), you can remove the `agentkeys-daemon-assume-role` inline
+policy from the `agentkeys-daemon` IAM user — it grants
+`sts:AssumeRole` on a role whose trust policy no longer permits that
+action.
 
 ---
 

@@ -101,9 +101,13 @@ impl AuditAnchor for FailingAuditAnchor {
     }
 }
 
-/// Counts STS `assume_role` invocations so cases (b)/(c)/(d) can assert
-/// "zero STS calls". Wraps the existing `StubStsClient::ok` so the happy
-/// path still gets credentials.
+/// Counts STS invocations so cases (b)/(c)/(d) can assert "zero STS
+/// calls". Wraps the existing `StubStsClient::ok` so the happy path
+/// still gets credentials. After issue #71 the production mint path
+/// uses `assume_role_with_web_identity`; the legacy `assume_role`
+/// method stays on the trait for the `caller_identity_ok` startup
+/// check companion + any future fall-back. Both methods bump the same
+/// counter so the "zero STS calls" assertion is path-agnostic.
 struct CountingStsClient {
     inner: StubStsClient,
     calls: Arc<AtomicUsize>,
@@ -124,6 +128,24 @@ impl StsClient for CountingStsClient {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.inner
             .assume_role(role_arn, session_name, duration_seconds)
+            .await
+    }
+
+    async fn assume_role_with_web_identity(
+        &self,
+        role_arn: &str,
+        session_name: &str,
+        web_identity_token: &str,
+        duration_seconds: i32,
+    ) -> Result<AssumedCredentials, agentkeys_broker_server::error::BrokerError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .assume_role_with_web_identity(
+                role_arn,
+                session_name,
+                web_identity_token,
+                duration_seconds,
+            )
             .await
     }
 }

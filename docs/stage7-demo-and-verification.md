@@ -420,7 +420,16 @@ contains only `ses:SendRawEmail`.
 
 `/v1/mint-aws-creds` is what `agentkeys-daemon` calls in production —
 it's the **single endpoint** that returns ready-to-use STS creds, doing
-the OIDC mint + STS exchange + audit anchor write internally.
+the OIDC JWT mint + `AssumeRoleWithWebIdentity` exchange + audit anchor
+write internally.
+
+> **Issue #71 fix (commit landing this guide):** pre-fix, `/v1/mint-aws-creds`
+> called `sts:AssumeRole` with the broker's static IAM credentials, which
+> stopped working the moment `cloud-setup.md §4.2` swapped the role's
+> trust policy to the OIDC-federated form. The integrated path now mints
+> a per-call user-scoped OIDC JWT internally and uses
+> `sts:AssumeRoleWithWebIdentity` — same wire shape, same response, but
+> the assume goes through federation so it survives §4.
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
@@ -821,6 +830,14 @@ structural plumbing is in place but the live integration isn't wired:
   every daemon has been issued a grant.
 - **Histogram metrics + per-handler counter bumps.** Counter shapes
   ship; latency histograms land in V0.1-FOLLOWUPS.
+- **Daemon-side `AssumeRoleWithWebIdentity` migration ([issue #71](https://github.com/litentry/agentKeys/issues/71)
+  Option A).** Today `agentkeys-daemon` and `agentkeys-mcp` both
+  consume `/v1/mint-aws-creds` (now federated internally — the
+  endpoint works on §4-deployed accounts). The end-state is to
+  migrate them to call `/v1/mint-oidc-jwt` directly and do
+  `AssumeRoleWithWebIdentity` client-side, then retire
+  `/v1/mint-aws-creds`. After that the broker holds **zero AWS
+  principals** at runtime (only the OIDC signing key). Open work item.
 
 See [`docs/spec/plans/issue-64/V0.1-FOLLOWUPS.md`](spec/plans/issue-64/V0.1-FOLLOWUPS.md)
 for the prioritized backlog.
