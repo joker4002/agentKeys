@@ -513,9 +513,9 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role" \
   --role-session-name "fed-proof-$(date +%s)" \
   --web-identity-token "$JWT")
-export AWS_ACCESS_KEY_ID=$(printf '%s' \"$CREDS\" | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SessionToken)
+export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
 # Confirm you're the assumed role, not your admin profile
 aws sts get-caller-identity

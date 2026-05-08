@@ -222,7 +222,7 @@ BODY=$(jq -n --arg w "$WALLET" '{
 # Compute canonical bytes + EIP-191 sign with your wallet → SIG
 # (omitted; see tests/mint_v2_flow.rs::eip191_sign for the algorithm)
 
-BODY_SIGNED=$(printf '%s' \"$BODY\" | jq --arg s "$SIG" '.auth.signature = $s')
+BODY_SIGNED=$(printf '%s' "$BODY" | jq --arg s "$SIG" '.auth.signature = $s')
 
 curl -s -X POST http://localhost:8091/v1/mint-aws-creds \
      -H "authorization: Bearer $SESSION_JWT" \

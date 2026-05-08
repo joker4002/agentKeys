@@ -92,15 +92,6 @@ Tooling on the workstation:
 - `jq` (JSON parsing).
 - `cast` from Foundry (signing SIWE messages with a private key).
   `curl https://foundry.paradigm.xyz | bash && foundryup`.
-
-> **Why every JSON pipe below uses `printf '%s'` instead of `echo`.**
-> zsh's builtin `echo` interprets `\n` (two ASCII chars `\` + `n`) as a
-> literal `0x0A` newline. The broker's SIWE response embeds `\n` inside
-> the `siwe_message` JSON string as a JSON escape, and an `echo …\| jq`
-> pipeline corrupts those escapes into raw newlines, breaking JSON
-> parsing with `Invalid string: control characters … must be escaped`.
-> `printf '%s'` is portable across bash and zsh and never re-interprets
-> escapes. Don't "fix" the doc back to `echo` — it's deliberate.
 - A test EVM keypair. Generate two for the isolation proof:
 
   ```bash
@@ -116,6 +107,17 @@ Tooling on the workstation:
 
 > The keys never need on-chain funds — Stage 7's SIWE auth is
 > off-chain signing only. They only need to be EIP-191-capable.
+
+> **Why every JSON pipe below uses `printf '%s' "$VAR" | jq` instead
+> of `echo "$VAR" | jq`.** zsh's builtin `echo` interprets `\n` (two
+> ASCII chars `\` + `n`) as a literal `0x0A` newline. The broker's
+> SIWE response embeds `\n` inside the `siwe_message` JSON string as
+> a JSON escape, and `echo` corrupts those escapes into raw newlines,
+> breaking jq with `Invalid string: control characters … must be
+> escaped`. `printf '%s'` is portable across bash and zsh and never
+> re-interprets escapes. Use plain double quotes around the variable
+> — `printf '%s' "$START" | jq` — not backslash-quotes (`\"$START\"`),
+> which add literal `"` chars around the JSON and break jq differently.
 
 ---
 
@@ -226,7 +228,7 @@ START=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg a "$ADDR_A" '{address:$a, chain_id:84532}')")
 
-printf '%s' \"$START\" | jq
+printf '%s' "$START" | jq
 # {
 #   "request_id": "siwe-<ulid>",
 #   "siwe_message": "broker.litentry.org wants you to sign in…",
@@ -235,8 +237,8 @@ printf '%s' \"$START\" | jq
 #   "expires_at_iso": "2026-05-08T15:22:11Z"
 # }
 
-REQ_ID=$(printf '%s' \"$START\" | jq -r .request_id)
-SIWE_MSG=$(printf '%s' \"$START\" | jq -r .siwe_message)
+REQ_ID=$(printf '%s' "$START" | jq -r .request_id)
+SIWE_MSG=$(printf '%s' "$START" | jq -r .siwe_message)
 ```
 
 The SIWE message is constructed per EIP-4361 with the broker's
@@ -266,7 +268,7 @@ VERIFY=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -d "$(jq -n --arg r "$REQ_ID" --arg s "$SIG_A" \
         '{request_id:$r, signature:$s}')")
 
-printf '%s' \"$VERIFY\" | jq
+printf '%s' "$VERIFY" | jq
 # {
 #   "session_jwt": "eyJ…",
 #   "session_jwt_kid": "ak-session-<unix>",
@@ -277,8 +279,8 @@ printf '%s' \"$VERIFY\" | jq
 #   "identity_value": "0x…"
 # }
 
-SESSION_JWT_A=$(printf '%s' \"$VERIFY\" | jq -r .session_jwt)
-OMNI_A=$(printf '%s' \"$VERIFY\" | jq -r .omni_account)
+SESSION_JWT_A=$(printf '%s' "$VERIFY" | jq -r .session_jwt)
+OMNI_A=$(printf '%s' "$VERIFY" | jq -r .omni_account)
 ```
 
 The `omni_account` is `SHA256("agentkeys" || "evm" || lower(wallet))`
@@ -301,8 +303,8 @@ START_B=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg a "$ADDR_B" '{address:$a, chain_id:84532}')")
 
-REQ_ID_B=$(printf '%s' \"$START_B\" | jq -r .request_id)
-SIWE_MSG_B=$(printf '%s' \"$START_B\" | jq -r .siwe_message)
+REQ_ID_B=$(printf '%s' "$START_B" | jq -r .request_id)
+SIWE_MSG_B=$(printf '%s' "$START_B" | jq -r .siwe_message)
 SIG_B=$(cast wallet sign --private-key $PK_B "$SIWE_MSG_B")
 
 VERIFY_B=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
@@ -310,8 +312,8 @@ VERIFY_B=$(curl -sf -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -d "$(jq -n --arg r "$REQ_ID_B" --arg s "$SIG_B" \
         '{request_id:$r, signature:$s}')")
 
-SESSION_JWT_B=$(printf '%s' \"$VERIFY_B\" | jq -r .session_jwt)
-OMNI_B=$(printf '%s' \"$VERIFY_B\" | jq -r .omni_account)
+SESSION_JWT_B=$(printf '%s' "$VERIFY_B" | jq -r .session_jwt)
+OMNI_B=$(printf '%s' "$VERIFY_B" | jq -r .omni_account)
 echo "OMNI_A=$OMNI_A"
 echo "OMNI_B=$OMNI_B"
 ```
@@ -377,11 +379,11 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-session-name "demo-A-$(date +%s)" \
   --web-identity-token "$JWT_A")
 
-printf '%s' \"$CREDS\" | jq '.Credentials | {AKID:.AccessKeyId, Exp:.Expiration}'
+printf '%s' "$CREDS" | jq '.Credentials | {AKID:.AccessKeyId, Exp:.Expiration}'
 
-export AWS_ACCESS_KEY_ID=$(printf '%s' \"$CREDS\" | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SessionToken)
+export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
 # Confirm: you are NOT your admin profile any more.
 aws sts get-caller-identity
@@ -412,9 +414,9 @@ aws s3api put-object --bucket "$BUCKET" \
 ### 4.3 Re-export the assumed-role creds and probe both prefixes
 
 ```bash
-export AWS_ACCESS_KEY_ID=$(printf '%s' \"$CREDS\" | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SessionToken)
+export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
 # 4a — your own prefix: SUCCESS
 aws s3api list-objects-v2 --bucket "$BUCKET" \
@@ -488,9 +490,9 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
   --role-session-name "demo-A-$(date +%s)" \
   --web-identity-token "$JWT")
-export AWS_ACCESS_KEY_ID=$(printf '%s' \"$CREDS\" | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SessionToken)
+export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
 # 3. Use the temp creds. PrincipalTag-scoped per cloud-setup.md §4.4.
 aws s3 ls "s3://$BUCKET/bots/$(echo $ADDR_A | tr A-Z a-z)/"
@@ -579,7 +581,7 @@ GRANT=$(curl -sf -X POST $OIDC_ISSUER/v1/grant/create \
         max_uses:       100
       }')")
 
-printf '%s' \"$GRANT\" | jq
+printf '%s' "$GRANT" | jq
 # {
 #   "grant_id": "grn-<ulid>",
 #   "audit_proof": "eyJ…",          ← broker-signed JWT over canonical content
@@ -603,7 +605,7 @@ curl -sf $OIDC_ISSUER/v1/grant/list \
 ### 6.3 Master revokes a grant
 
 ```bash
-GRANT_ID=$(printf '%s' \"$GRANT\" | jq -r .grant_id)
+GRANT_ID=$(printf '%s' "$GRANT" | jq -r .grant_id)
 curl -sf -X POST $OIDC_ISSUER/v1/grant/revoke \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
@@ -1046,9 +1048,9 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn "$DATA_ROLE_ARN" \
   --role-session-name "live-demo-$(date +%s)" \
   --web-identity-token "$JWT")
-export AWS_ACCESS_KEY_ID=$(printf '%s' \"$CREDS\" | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(printf '%s' \"$CREDS\" | jq -r .Credentials.SessionToken)
+export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
 # Confirm — the assumed role identity, NOT your admin profile.
 aws sts get-caller-identity
