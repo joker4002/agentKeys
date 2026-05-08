@@ -93,11 +93,9 @@ pub async fn mint_aws_creds(
         .and_then(extract_bearer_token)
         .ok_or_else(|| BrokerError::Unauthorized("missing Authorization header".into()))?;
 
-    // Issue #71 + legacy-removal pass: post-Stage-7-cutover, every caller
-    // sends a session JWT. The pre-Stage-7 backend-validated bearer path
-    // (mint_legacy / looks_like_session_jwt dispatcher) was removed; the
-    // provisioner / MCP / daemon now use /v1/mint-oidc-jwt + client-side
-    // AssumeRoleWithWebIdentity (issue #71 Option A).
+    // Single path: callers send a session JWT. Pre-Stage-7 backend-validated
+    // bearers and the dispatch heuristic were removed in the OIDC-only
+    // migration (issue #71).
     mint_v2(&state, token, &raw_body).await
 }
 
@@ -225,13 +223,9 @@ async fn mint_v2(
     //    anchor fails we still record the failure on the legacy log
     //    and return 500 without creds.
     //
-    // STS path: post-cloud-setup.md §4 the role's trust policy is
-    // OIDC-federated, so the broker must use AssumeRoleWithWebIdentity
-    // (not AssumeRole — issue #71). We mint a per-call user-scoped
-    // OIDC JWT here, identical in shape to what `/v1/mint-oidc-jwt`
-    // returns, and pass it to STS. The JWT carries the
-    // `https://aws.amazon.com/tags` claim that drives PrincipalTag
-    // isolation in the bucket policy.
+    // Mint a per-call user-scoped OIDC JWT here (same shape as
+    // /v1/mint-oidc-jwt) and pass it to AssumeRoleWithWebIdentity. The
+    // `https://aws.amazon.com/tags` claim drives PrincipalTag isolation.
     let (oidc_claims, _now_oidc, _exp_oidc) = crate::handlers::oidc::build_oidc_jwt_claims(
         &state.config.oidc_issuer,
         &body.auth.address,

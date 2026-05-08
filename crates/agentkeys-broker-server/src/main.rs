@@ -88,8 +88,8 @@ async fn main() -> anyhow::Result<()> {
         "Tier-1 boot complete; Tier-2 reachability checks deferred until after listener bind"
     );
 
-    // Legacy mint-log preserved through US-011. Open it alongside the
-    // new plugin-trait-based audit anchors.
+    // Legacy mint-log table opened alongside the plugin-trait audit anchors;
+    // mint_v2 mirrors success/failure rows here for monitoring continuity.
     let audit = AuditLog::open(&config.audit_db_path)?;
 
     // Issue #71 OIDC-only migration: the broker mint flow uses

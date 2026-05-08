@@ -1,30 +1,11 @@
-//! AWS-cred fetch helper for the Stage 7 broker (post-issue #71 Option A).
+//! AWS-cred fetch helper for the Stage 7 broker.
 //!
-//! When the daemon (or CLI) is run with `--broker-url`, the operator no longer
-//! has to source `scripts/stage6-demo-env.sh`. The provisioner asks the broker
-//! for an OIDC JWT, then does `AssumeRoleWithWebIdentity` **client-side** to
-//! exchange that JWT for short-lived AWS credentials. Those creds are injected
-//! into the scraper subprocess as `AWS_*` env vars.
+//! Two-step daemon-side mint: fetch OIDC JWT from the broker, then exchange
+//! it for short-lived AWS credentials via `AssumeRoleWithWebIdentity`
+//! client-side. The JWT authenticates the STS call, so neither the broker
+//! nor the daemon needs an IAM principal at runtime.
 //!
-//! Behavior is opt-in: pass `BrokerCreds::None` (the default when no broker URL
-//! is configured) and the subprocess inherits whatever `AWS_*` env the operator
-//! already exported manually.
-//!
-//! ## Why client-side STS?
-//!
-//! Pre-issue-#71, the broker exposed `/v1/mint-aws-creds` which did the OIDC
-//! mint + STS exchange + audit anchor write internally and returned ready-to-use
-//! creds. After cloud-setup.md §4 swaps the IAM role's trust policy from
-//! `Principal: {AWS: agentkeys-daemon}` to `Principal: {Federated: oidc-provider}`,
-//! the broker's own IAM principal can no longer call `sts:AssumeRole` on the
-//! role — only `AssumeRoleWithWebIdentity` works, and the JWT authenticates the
-//! call (no broker creds needed).
-//!
-//! Doing the STS call **client-side** has a side benefit: the broker holds zero
-//! AWS principals at runtime. Compromise blast radius drops to "OIDC signing
-//! key only" (which signs scoped JWTs, not arbitrary STS calls).
-//!
-//! Issue: <https://github.com/litentry/agentKeys/issues/71>
+//! Issue: <https://github.com/litentry/agentKeys/issues/71> (Option A).
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -175,16 +156,11 @@ async fn assume_role_with_jwt(
     region: &str,
     session_duration_seconds: i32,
 ) -> ProvisionResult<AwsTempCreds> {
-    // BehaviorVersion::latest() is required by aws-config 1.x; without it the
-    // SDK refuses to load defaults at runtime.
+    // Anonymous SDK config — the JWT authenticates AssumeRoleWithWebIdentity.
+    // TODO: replace `AnonymousCredentials` with `.no_credentials()` once we
+    // bump aws-config to 1.5+ (the helper isn't in 1.0–1.4).
     let config = aws_config::defaults(BehaviorVersion::latest())
         .region(Region::new(region.to_string()))
-        // No credential provider — AssumeRoleWithWebIdentity is unauthenticated
-        // (the JWT authenticates). aws-sdk-sts allows the call to go through
-        // without resolved credentials when only the federated operation is
-        // invoked. We don't call `.no_credentials()` because that constructor
-        // doesn't exist in aws-config 1.x; instead we install an anonymous
-        // provider that produces no creds.
         .credentials_provider(AnonymousCredentials)
         .load()
         .await;
@@ -243,12 +219,9 @@ fn build_session_name(wallet: &str) -> String {
     name
 }
 
-/// Anonymous credential provider for the STS client used in
-/// `assume_role_with_jwt`. `AssumeRoleWithWebIdentity` is unauthenticated
-/// (the JWT authenticates), so the SDK doesn't need credentials. aws-config
-/// 1.x has no built-in "no credentials" mode, but a provider that returns
-/// `Err(NoCredentials)` works because the federated STS operation never
-/// actually invokes the resolver.
+/// `ProvideCredentials` impl that always returns `Err(NoCredentials)`.
+/// Used by `assume_role_with_jwt` because `AssumeRoleWithWebIdentity` is
+/// JWT-authenticated and the SDK never invokes the resolver for it.
 #[derive(Debug)]
 struct AnonymousCredentials;
 
