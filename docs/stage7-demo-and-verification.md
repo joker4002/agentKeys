@@ -99,7 +99,9 @@ Tooling on the workstation:
   cast wallet new --json | tee /tmp/wallet-A.json
   cast wallet new --json | tee /tmp/wallet-B.json
   PK_A=$(jq -r '.[0].private_key' /tmp/wallet-A.json)
+  echo "PK_A=${PK_A:0:32}…  length=${#PK_A}"
   PK_B=$(jq -r '.[0].private_key' /tmp/wallet-B.json)
+  echo "PK_B=${PK_B:0:32}…  length=${#PK_B}"
   ADDR_A=$(jq -r '.[0].address'   /tmp/wallet-A.json)
   ADDR_B=$(jq -r '.[0].address'   /tmp/wallet-B.json)
   echo "A=$ADDR_A  B=$ADDR_B"
@@ -227,6 +229,7 @@ aws iam get-open-id-connect-provider \
 START=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg a "$ADDR_A" '{address:$a, chain_id:84532}')")
+echo "START=${START:0:32}…  length=${#START}"
 
 printf '%s' "$START" | jq
 # {
@@ -238,7 +241,9 @@ printf '%s' "$START" | jq
 # }
 
 REQ_ID=$(printf '%s' "$START" | jq -r .request_id)
+echo "REQ_ID=$REQ_ID"
 SIWE_MSG=$(printf '%s' "$START" | jq -r .siwe_message)
+echo "SIWE_MSG=${SIWE_MSG:0:32}…  length=${#SIWE_MSG}"
 ```
 
 The SIWE message is constructed per EIP-4361 with the broker's
@@ -256,7 +261,7 @@ want here.
 
 ```bash
 SIG_A=$(cast wallet sign --private-key $PK_A "$SIWE_MSG")
-echo "SIG_A=$SIG_A"
+echo "SIG_A=${SIG_A:0:32}…  length=${#SIG_A}"
 # SIG_A=0x<130-hex-chars>
 ```
 
@@ -267,6 +272,7 @@ VERIFY=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg r "$REQ_ID" --arg s "$SIG_A" \
         '{request_id:$r, signature:$s}')")
+echo "VERIFY=${VERIFY:0:32}…  length=${#VERIFY}"
 
 printf '%s' "$VERIFY" | jq
 # {
@@ -280,7 +286,9 @@ printf '%s' "$VERIFY" | jq
 # }
 
 SESSION_JWT_A=$(printf '%s' "$VERIFY" | jq -r .session_jwt)
+echo "SESSION_JWT_A=${SESSION_JWT_A:0:32}…  length=${#SESSION_JWT_A}"
 OMNI_A=$(printf '%s' "$VERIFY" | jq -r .omni_account)
+echo "OMNI_A=$OMNI_A"
 ```
 
 The `omni_account` is `SHA256("agentkeys" || "evm" || lower(wallet))`
@@ -302,18 +310,25 @@ a `kid` in the header pointing at the session keypair.
 START_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg a "$ADDR_B" '{address:$a, chain_id:84532}')")
+echo "START_B=${START_B:0:32}…  length=${#START_B}"
 
 REQ_ID_B=$(printf '%s' "$START_B" | jq -r .request_id)
+echo "REQ_ID_B=$REQ_ID_B"
 SIWE_MSG_B=$(printf '%s' "$START_B" | jq -r .siwe_message)
+echo "SIWE_MSG_B=${SIWE_MSG_B:0:32}…  length=${#SIWE_MSG_B}"
 SIG_B=$(cast wallet sign --private-key $PK_B "$SIWE_MSG_B")
+echo "SIG_B=${SIG_B:0:32}…  length=${#SIG_B}"
 
 VERIFY_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg r "$REQ_ID_B" --arg s "$SIG_B" \
         '{request_id:$r, signature:$s}')")
+echo "VERIFY_B=${VERIFY_B:0:32}…  length=${#VERIFY_B}"
 
 SESSION_JWT_B=$(printf '%s' "$VERIFY_B" | jq -r .session_jwt)
+echo "SESSION_JWT_B=${SESSION_JWT_B:0:32}…  length=${#SESSION_JWT_B}"
 OMNI_B=$(printf '%s' "$VERIFY_B" | jq -r .omni_account)
+echo "OMNI_B=$OMNI_B"
 echo "OMNI_A=$OMNI_A"
 echo "OMNI_B=$OMNI_B"
 ```
@@ -331,6 +346,7 @@ to consume.
 ```bash
 JWT_A=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
+echo "JWT_A=${JWT_A:0:32}…  length=${#JWT_A}"
 
 echo "$JWT_A"
 # eyJ… (header.payload.signature)
@@ -378,12 +394,16 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
   --role-session-name "demo-A-$(date +%s)" \
   --web-identity-token "$JWT_A")
+echo "CREDS=${CREDS:0:32}…  length=${#CREDS}"
 
 printf '%s' "$CREDS" | jq '.Credentials | {AKID:.AccessKeyId, Exp:.Expiration}'
 
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
+echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
 # Confirm: you are NOT your admin profile any more.
 aws sts get-caller-identity
@@ -404,7 +424,9 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 awsp agentkeys-admin
 
 WALLET_A_LC=$(echo "$ADDR_A" | tr '[:upper:]' '[:lower:]')
+echo "WALLET_A_LC=$WALLET_A_LC"
 WALLET_B_LC=$(echo "$ADDR_B" | tr '[:upper:]' '[:lower:]')
+echo "WALLET_B_LC=$WALLET_B_LC"
 aws s3api put-object --bucket "$BUCKET" \
   --key "bots/${WALLET_A_LC}/hello.txt" --body /dev/null
 aws s3api put-object --bucket "$BUCKET" \
@@ -415,8 +437,11 @@ aws s3api put-object --bucket "$BUCKET" \
 
 ```bash
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
+echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
 # 4a — your own prefix: SUCCESS
 aws s3api list-objects-v2 --bucket "$BUCKET" \
@@ -484,15 +509,20 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 # 1. Ask the broker for an OIDC JWT (lightweight call — broker just signs).
 JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
+echo "JWT=${JWT:0:32}…  length=${#JWT}"
 
 # 2. Exchange it for AWS creds CLIENT-SIDE. No broker creds participate.
 CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
   --role-session-name "demo-A-$(date +%s)" \
   --web-identity-token "$JWT")
+echo "CREDS=${CREDS:0:32}…  length=${#CREDS}"
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
+echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
 # 3. Use the temp creds. PrincipalTag-scoped per cloud-setup.md §4.4.
 aws s3 ls "s3://$BUCKET/bots/$(echo $ADDR_A | tr A-Z a-z)/"
@@ -580,6 +610,7 @@ GRANT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/grant/create \
         expires_at:     (now + 3600 | floor),
         max_uses:       100
       }')")
+echo "GRANT=${GRANT:0:32}…  length=${#GRANT}"
 
 printf '%s' "$GRANT" | jq
 # {
@@ -606,6 +637,7 @@ curl -sS --fail-with-body $OIDC_ISSUER/v1/grant/list \
 
 ```bash
 GRANT_ID=$(printf '%s' "$GRANT" | jq -r .grant_id)
+echo "GRANT_ID=$GRANT_ID"
 curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/grant/revoke \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
@@ -839,6 +871,7 @@ disabled to avoid leaking counter shapes to unauthenticated probers.
 
 ```bash
 KEY=$(uuidgen | tr '[:upper:]' '[:lower:]')
+echo "KEY=${KEY:0:32}…  length=${#KEY}"
 
 # First call — mints + caches.
 curl -i -X POST $OIDC_ISSUER/v1/mint-aws-creds \
@@ -1040,6 +1073,7 @@ awsp agentkeys-admin
 # Get the OIDC JWT.
 JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
+echo "JWT=${JWT:0:32}…  length=${#JWT}"
 echo "JWT prefix: ${JWT:0:40}…"
 
 # Exchange it for AWS creds — UNAUTHENTICATED to AWS (the JWT authenticates).
@@ -1048,9 +1082,13 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn "$DATA_ROLE_ARN" \
   --role-session-name "live-demo-$(date +%s)" \
   --web-identity-token "$JWT")
+echo "CREDS=${CREDS:0:32}…  length=${#CREDS}"
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
+echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
 # Confirm — the assumed role identity, NOT your admin profile.
 aws sts get-caller-identity
@@ -1065,7 +1103,9 @@ aws sts get-caller-identity
 ```bash
 # === ON OPERATOR WORKSTATION (still with assumed-role creds) ===
 WALLET_A_LC=$(echo "$ADDR_A" | tr '[:upper:]' '[:lower:]')
+echo "WALLET_A_LC=$WALLET_A_LC"
 WALLET_B_LC=$(echo "$ADDR_B" | tr '[:upper:]' '[:lower:]')
+echo "WALLET_B_LC=$WALLET_B_LC"
 
 # Wallet A's prefix — SUCCESS.
 aws s3api list-objects-v2 --bucket "$BUCKET" \
