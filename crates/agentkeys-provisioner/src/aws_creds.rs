@@ -27,7 +27,7 @@
 //! Issue: <https://github.com/litentry/agentKeys/issues/71>
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_config::BehaviorVersion;
 use aws_sdk_sts::config::Region;
@@ -220,14 +220,27 @@ async fn assume_role_with_jwt(
 }
 
 /// Wallet → STS session name (max 64 chars; alphanumeric + `=,.@-_`).
-/// Mirrors `crates/agentkeys-broker-server/src/handlers/mint.rs::build_session_name`
-/// so audit rows + CloudTrail events line up across broker mints (legacy /v1/mint-aws-creds)
-/// and daemon-side mints (this function).
+/// **Mirrors `crates/agentkeys-broker-server/src/handlers/mint.rs::build_session_name`
+/// byte-for-byte** so audit rows + CloudTrail events line up across broker
+/// mints (`/v1/mint-aws-creds` -> `mint_v2`) and daemon-side mints (this
+/// function). The trailing micro-second timestamp gives every call a unique
+/// session name even when the same wallet mints in rapid succession; without
+/// it AWS returns the same temp creds for repeated calls within the
+/// `DurationSeconds` window (subtle caching footgun called out in critic M1).
 fn build_session_name(wallet: &str) -> String {
-    let lc = wallet.to_lowercase();
-    let trimmed = lc.trim_start_matches("0x");
-    let suffix: String = trimmed.chars().take(40).collect();
-    format!("agentkey-{}", suffix)
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
+    let micros = now.subsec_micros();
+    let safe_wallet: String = wallet
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '-' | '_'))
+        .take(40)
+        .collect();
+    let mut name = format!("agentkeys-{}-{}-{:06}", safe_wallet, secs, micros);
+    if name.len() > 64 {
+        name.truncate(64);
+    }
+    name
 }
 
 /// Anonymous credential provider for the STS client used in
@@ -289,11 +302,27 @@ mod tests {
     }
 
     #[test]
-    fn build_session_name_lowercases_and_truncates() {
+    fn build_session_name_matches_broker_format() {
+        // Mirrors broker handlers/mint.rs build_session_name (critic M1).
         let name = build_session_name("0xAbCdEf0123456789ABCDEF0123456789AbCdEf0123456789");
-        assert!(name.starts_with("agentkey-"));
+        assert!(name.starts_with("agentkeys-"));
         assert!(name.len() <= 64, "STS rejects session names >64 chars");
-        assert!(!name.contains(|c: char| c.is_uppercase()));
+        // Includes the unix-secs + micros suffix so rapid same-wallet mints
+        // get distinct session names.
+        assert!(name.matches('-').count() >= 3, "expected at least 3 dashes, got {}", name);
+    }
+
+    #[test]
+    fn build_session_name_strips_unsafe_chars() {
+        let n = build_session_name("0xABC/123 weird");
+        assert!(!n.contains('/'));
+        assert!(!n.contains(' '));
+    }
+
+    #[test]
+    fn build_session_name_handles_empty_wallet() {
+        let n = build_session_name("");
+        assert!(n.starts_with("agentkeys--"));
     }
 
     // ---- HTTP-side tests for fetch_oidc_jwt against an axum stub ----

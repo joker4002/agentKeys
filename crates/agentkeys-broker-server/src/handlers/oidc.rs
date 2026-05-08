@@ -129,7 +129,7 @@ pub async fn mint_oidc_jwt(
 ///
 /// Used by:
 /// - `mint_oidc_jwt` (handler above) — public `/v1/mint-oidc-jwt` endpoint.
-/// - `crate::handlers::mint::mint_v2` / `mint_legacy` — internal JWT minted
+/// - `crate::handlers::mint::mint_v2` — internal JWT minted
 ///   per-call so the broker can do `AssumeRoleWithWebIdentity` itself
 ///   (issue #71 Option B).
 ///

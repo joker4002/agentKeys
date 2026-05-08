@@ -1,13 +1,25 @@
 # Operator runbook — AgentKeys broker
 
+> **⚠ Pre-Stage-7 document.** This file describes the pre-Stage-7
+> broker (PR #60 + PR #61). For the Stage 7 + post-issue-#71 broker
+> (the current build), read [`operator-runbook-stage7.md`](./operator-runbook-stage7.md).
+>
+> Key differences in the current build:
+> - `/v1/mint-aws-creds` uses `sts:AssumeRoleWithWebIdentity` internally
+>   (was `sts:AssumeRole` here).
+> - `DAEMON_ACCESS_KEY_ID` / `DAEMON_SECRET_ACCESS_KEY` were removed —
+>   the broker no longer reads them.
+> - The broker can run with no AWS credentials at all (mint flow is
+>   JWT-authenticated; the optional startup probe soft-warns on creds-free).
+
 **Audience:** the person running `agentkeys-broker-server` for a team. App developers using a broker someone else runs read [`dev-setup.md` §4](./dev-setup.md). End users of an agent read [`dev-setup.md` §6](./dev-setup.md).
 
-**What the broker is.** A long-running HTTP service that holds the operator's `agentkeys-daemon` AWS access key (or assumes a role via instance profile) and mints two kinds of short-lived credentials to authenticated daemons:
+**What the broker is.** A long-running HTTP service that mints two kinds of short-lived credentials to authenticated daemons:
 
 | Endpoint | Output |
 |---|---|
-| `POST /v1/mint-aws-creds` | 1 h scoped AWS temp creds via `sts:AssumeRole`. |
-| `POST /v1/mint-oidc-jwt`  | Short-lived ES256 JWT for `sts:AssumeRoleWithWebIdentity`. |
+| `POST /v1/mint-aws-creds` | 1 h scoped AWS temp creds via `sts:AssumeRoleWithWebIdentity` (server-side aggregator). |
+| `POST /v1/mint-oidc-jwt`  | Short-lived ES256 JWT for `sts:AssumeRoleWithWebIdentity` (daemon-side STS). |
 | `GET  /.well-known/openid-configuration` | OIDC discovery doc. |
 | `GET  /.well-known/jwks.json` | JWK Set with the broker's public key + `kid`. |
 | `GET  /healthz`, `/readyz` | Supervisor probes. |
@@ -83,11 +95,15 @@ region = us-east-1
 
 For local dev: `awsp agentkeys-daemon` (or `export AWS_PROFILE=agentkeys-daemon`) before `cargo run`.
 
-### 2.3 Static keys in env (legacy)
+### 2.3 Static keys in env (REMOVED)
 
-Set `DAEMON_ACCESS_KEY_ID` *and* `DAEMON_SECRET_ACCESS_KEY` (both required together; setting only one is rejected at startup). Prefer 2.1 or 2.2.
+`DAEMON_ACCESS_KEY_ID` / `DAEMON_SECRET_ACCESS_KEY` were removed in
+the OIDC-only migration ([issue #71](https://github.com/litentry/agentKeys/issues/71)).
+The broker no longer reads them.
 
-The broker logs which path it picked at startup: `AWS credentials: SDK default chain ...` or `AWS credentials: static IAM-user keys ...`. Always check this in the first second of the log.
+The broker logs `STS client: SDK default chain (creds optional after issue #71 …)` at
+startup. If the GetCallerIdentity probe fails (the post-migration normal posture
+when running creds-free), it logs a soft-warn and continues.
 
 ---
 
@@ -105,7 +121,6 @@ The broker logs which path it picked at startup: `AWS credentials: SDK default c
 | `BROKER_SESSION_DURATION_SECONDS` | no | TTL for AWS-cred mints. Default `3600`. Bounded `[900, 43200]`. |
 | `BROKER_BACKEND_TIMEOUT_SECONDS` | no | HTTP timeout to backend. Default `10`. |
 | `BROKER_SHUTDOWN_GRACE_SECONDS` | no | Graceful drain cap. Default `30`. |
-| `DAEMON_ACCESS_KEY_ID` / `DAEMON_SECRET_ACCESS_KEY` | legacy | Static IAM keys (§2.3). Both required if used. |
 
 ---
 

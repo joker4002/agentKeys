@@ -15,7 +15,7 @@
 #     --issuer-url https://broker.litentry.org \
 #     --account-id 429071895007 \
 #     [--region us-east-1] \
-#     [--cred-mode instance-profile|profile|static] \
+#     [--cred-mode instance-profile|profile|none] \
 #     [--profile-name agentkeys-daemon] \
 #     [--with-nginx | --without-nginx] \
 #     [--with-certbot | --without-certbot] \
@@ -52,7 +52,7 @@
 #  10. Enable + start units
 #  11. Print remaining manual steps (DNS A record, certbot run, IAM role
 #      attach for instance-profile mode, populate ~/.aws/credentials for
-#      profile mode, populate /etc/agentkeys/broker.env for static mode)
+#      profile mode, none-mode broker runs creds-free)
 #
 # Out of scope (operator does these by hand):
 #   - DNS A record for $ISSUER_URL host
@@ -401,25 +401,31 @@ EOF
 
   if [[ -z "$CRED_MODE" ]]; then
     explain "How does the broker get its AWS credentials?" \
-      "Three credential paths, ordered by preference:" \
+      "Post-issue-#71 the broker mint flow is JWT-authenticated and needs" \
+      "NO AWS credentials at runtime. The optional GetCallerIdentity" \
+      "startup probe still consults whatever the SDK default chain finds:" \
       "" \
-      "  1) instance-profile  (default, recommended for EC2)" \
-      "       Broker runs on EC2; SDK pulls creds from the instance profile" \
-      "       via IMDS. ZERO secrets on disk. You attach the role to the" \
-      "       instance manually after this script finishes." \
+      "  1) none              (recommended post-migration)" \
+      "       Broker runs creds-free. The startup probe soft-warns once" \
+      "       and then falls silent. Smallest blast radius — broker host" \
+      "       has zero AWS principals." \
       "" \
-      "  2) profile           (recommended for non-EC2 hosts)" \
+      "  2) instance-profile  (recommended if you also run unrelated AWS" \
+      "                        tooling on the same EC2 host)" \
+      "       SDK pulls creds from the EC2 instance profile via IMDS." \
+      "       Broker only uses them for the startup probe." \
+      "" \
+      "  3) profile           (non-EC2 hosts)" \
       "       Creates ~/.aws/credentials under the agentkeys system user." \
       "       You fill in the access key + secret by hand. AWS_PROFILE is" \
-      "       set in the systemd unit so the SDK picks it up." \
+      "       set in the systemd unit so the SDK default chain picks it up." \
       "" \
-      "  3) static            (legacy, only if neither of the above work)" \
-      "       Drops DAEMON_ACCESS_KEY_ID + DAEMON_SECRET_ACCESS_KEY into" \
-      "       /etc/agentkeys/broker.env. systemd EnvironmentFile= reads it."
+      "Static IAM-user mode (DAEMON_ACCESS_KEY_ID env vars) was REMOVED in" \
+      "the OIDC-only migration — the broker no longer reads those vars."
     prompt_choice CRED_MODE "Credential mode" 1 \
+      "none" \
       "instance-profile" \
-      "profile" \
-      "static"
+      "profile"
   fi
 
   if [[ "$CRED_MODE" == "profile" ]]; then
@@ -484,8 +490,8 @@ ISSUER_URL="${ISSUER_URL%/}"
 [[ -n "$ACCOUNT_ID" ]] || die "--account-id is required. Drop --non-interactive for an interactive walk-through."
 [[ -n "$CRED_MODE" ]]  || CRED_MODE="instance-profile"
 case "$CRED_MODE" in
-  instance-profile|profile|static) ;;
-  *) die "--cred-mode must be one of: instance-profile, profile, static (got $CRED_MODE)";;
+  none|instance-profile|profile) ;;
+  *) die "--cred-mode must be one of: none, instance-profile, profile (got $CRED_MODE)";;
 esac
 # Resolve auto → no for the non-interactive path (preserves prior default).
 [[ "$WITH_NGINX"   == "auto" ]] && WITH_NGINX="no"
@@ -593,8 +599,10 @@ if [[ "$CRED_MODE" == "profile" ]]; then
     sudo -u agentkeys tee /var/lib/agentkeys/.aws/credentials >/dev/null <<EOF
 [$PROFILE_NAME]
 # Fill these in by hand — this script does NOT write live AWS keys.
-aws_access_key_id = REPLACE_WITH_DAEMON_AKID
-aws_secret_access_key = REPLACE_WITH_DAEMON_SECRET
+# Any IAM user with read-only access works (used only by the broker's
+# GetCallerIdentity startup probe post-issue-#71).
+aws_access_key_id = REPLACE_WITH_ACCESS_KEY_ID
+aws_secret_access_key = REPLACE_WITH_SECRET_ACCESS_KEY
 EOF
     sudo chmod 600 /var/lib/agentkeys/.aws/credentials
   fi
@@ -607,19 +615,10 @@ EOF
   fi
 fi
 
-if [[ "$CRED_MODE" == "static" ]]; then
-  sudo install -d -m 0700 /etc/agentkeys
-  if [[ ! -f /etc/agentkeys/broker.env ]]; then
-    log "Creating placeholder /etc/agentkeys/broker.env"
-    sudo tee /etc/agentkeys/broker.env >/dev/null <<'EOF'
-# Static IAM-user keys — legacy path, only if instance-profile and
-# named-profile aren't options. Both must be set together.
-DAEMON_ACCESS_KEY_ID=REPLACE_WITH_DAEMON_AKID
-DAEMON_SECRET_ACCESS_KEY=REPLACE_WITH_DAEMON_SECRET
-EOF
-    sudo chmod 600 /etc/agentkeys/broker.env
-  fi
-fi
+# Issue #71 OIDC-only migration: the static-IAM-user mode that wrote
+# DAEMON_ACCESS_KEY_ID + DAEMON_SECRET_ACCESS_KEY to /etc/agentkeys/broker.env
+# was REMOVED. The broker no longer reads those env vars. If the file
+# already exists from a pre-migration deploy, it's harmless but dead.
 
 # ─── 5. systemd units ─────────────────────────────────────────────────────────
 log "Writing systemd units"
@@ -648,14 +647,14 @@ EOF
 
 # Build the broker unit with the right credential-source line.
 case "$CRED_MODE" in
+  none)
+    CRED_LINE="# Creds-free post-issue-#71 — broker mints via AssumeRoleWithWebIdentity (JWT-authenticated)."
+    ;;
   instance-profile)
-    CRED_LINE="# Credentials come from the EC2 instance profile via IMDS — no env."
+    CRED_LINE="# Credentials come from the EC2 instance profile via IMDS — only used by GetCallerIdentity startup probe."
     ;;
   profile)
     CRED_LINE="Environment=AWS_PROFILE=$PROFILE_NAME"
-    ;;
-  static)
-    CRED_LINE="EnvironmentFile=/etc/agentkeys/broker.env"
     ;;
 esac
 
@@ -817,12 +816,25 @@ EOF
 case "$CRED_MODE" in
   instance-profile)
     cat <<EOF
+  AWS credentials (none mode — recommended post-issue-#71):
+    1. Nothing to configure. Broker mints via AssumeRoleWithWebIdentity (JWT-authenticated).
+    2. Restart the broker if not already running: sudo systemctl restart agentkeys-broker
+    3. Tail logs. Expected: "STS client: SDK default chain (creds optional after issue #71 …)"
+       and (once) a soft-warn that the GetCallerIdentity startup probe didn't find creds —
+       this is the post-migration normal posture.
+
+EOF
+    ;;
+  instance-profile)
+    cat <<EOF
   AWS credentials (instance-profile mode):
     1. Create an IAM role with trust policy {ec2.amazonaws.com → sts:AssumeRole}.
-    2. Attach an inline policy granting sts:AssumeRole on the agentkeys-data-role role.
-    3. Wrap the role in an instance profile and associate it to this EC2 instance.
-    4. Restart the broker:  sudo systemctl restart agentkeys-broker
-    5. Tail logs and look for "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)".
+    2. Wrap the role in an instance profile and associate it to this EC2 instance.
+       The broker no longer needs sts:AssumeRole on the data role (mint flow uses
+       AssumeRoleWithWebIdentity which is JWT-authenticated). Any read-only role
+       is fine — used only by the GetCallerIdentity startup probe.
+    3. Restart the broker:  sudo systemctl restart agentkeys-broker
+    4. Tail logs and look for "STS client: SDK default chain" + "startup STS check passed".
 
 EOF
     ;;
@@ -830,20 +842,11 @@ EOF
     cat <<EOF
   AWS credentials (named-profile mode):
     1. Edit /var/lib/agentkeys/.aws/credentials and replace REPLACE_WITH_*
-       with the real \`agentkeys-daemon\` IAM user's access key + secret.
+       with the access key + secret of any IAM user (read-only is fine — the
+       broker only uses these for the GetCallerIdentity startup probe).
        (The systemd unit sets AWS_PROFILE=$PROFILE_NAME so the SDK picks it up.)
     2. Restart the broker:  sudo systemctl restart agentkeys-broker
-    3. Tail logs and look for "AWS credentials: SDK default chain (AWS_PROFILE / ~/.aws / IMDS)".
-
-EOF
-    ;;
-  static)
-    cat <<EOF
-  AWS credentials (legacy static-keys mode):
-    1. Edit /etc/agentkeys/broker.env and replace REPLACE_WITH_* with the real
-       \`agentkeys-daemon\` IAM user's access key + secret.
-    2. Restart the broker:  sudo systemctl restart agentkeys-broker
-    3. Tail logs and look for "AWS credentials: static IAM-user keys (DAEMON_ACCESS_KEY_ID env)".
+    3. Tail logs and look for "STS client: SDK default chain" + "startup STS check passed".
 
 EOF
     ;;
