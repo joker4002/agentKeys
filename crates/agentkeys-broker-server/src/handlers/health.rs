@@ -10,7 +10,7 @@ pub async fn healthz() -> impl IntoResponse {
 pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
     let backend_ok = state
         .http
-        .get(format!("{}/health", state.config.backend_url.trim_end_matches('/')))
+        .get(format!("{}/healthz", state.config.backend_url.trim_end_matches('/')))
         .send()
         .await
         .map(|r| r.status().is_success())

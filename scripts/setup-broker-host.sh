@@ -779,7 +779,7 @@ fi
 
 cat <<EOF
   Smoke test (from a client machine — NOT this host):
-    curl -sf $ISSUER_URL/healthz
+    curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $ISSUER_URL/healthz   # expect: HTTP 200
     curl -sf $ISSUER_URL/.well-known/openid-configuration | jq '.issuer == "$ISSUER_URL"'
     curl -sf $ISSUER_URL/.well-known/jwks.json | jq '.keys[0].kid'
 

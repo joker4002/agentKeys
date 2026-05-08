@@ -114,8 +114,10 @@ Tooling on the workstation:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-curl -sf $OIDC_ISSUER/healthz && echo
-# ok
+# Show the HTTP status explicitly so a 404 (e.g. wrong path) doesn't
+# print silently like `curl -sf … && echo` would.
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $OIDC_ISSUER/healthz
+# HTTP 200          ← anything else means the broker isn't fully up
 
 curl -s $OIDC_ISSUER/readyz | jq
 # {"status":"ready"}            ← all Tier-2 probes green
