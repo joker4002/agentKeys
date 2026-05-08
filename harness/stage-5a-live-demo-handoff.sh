@@ -59,8 +59,22 @@ if ! ls "${HOME}/Library/Caches/ms-playwright/chromium_headless_shell-"* >/dev/n
   fail "Playwright chromium not installed under \$HOME=$HOME. Run: npx playwright install chromium --with-deps"
 fi
 
-say "1. Initialize master session"
-$BIN --backend $BACKEND init --mock-token stage5-live-demo || fail "init"
+say "1. Initialize master session (issue #74 step 1: signer-flow bootstrap)"
+# --mock-token was hard-cut in issue #74 step 1. The new bootstrap chain is
+#   email/OAuth2 → identity-omni session JWT → /dev/derive-address →
+#   /v1/wallet/link → SIWE round-trip via dev_key_service → EVM session JWT.
+# AGENTKEYS_BROKER_URL must point at a broker that advertises email_link
+# auth (BROKER_AUTH_METHODS includes "email_link") and AGENTKEYS_SIGNER_URL
+# at the backend serving /dev/derive-address + /dev/sign-message
+# (defaults to --backend; the mock-server hosts both).
+: "${AGENTKEYS_BROKER_URL:?AGENTKEYS_BROKER_URL must be set for the new init flow (issue #74 step 1)}"
+$BIN --backend $BACKEND \
+  init \
+    --email "$AGENTKEYS_SIGNUP_EMAIL" \
+    --broker-url "$AGENTKEYS_BROKER_URL" \
+    --signer-url "${AGENTKEYS_SIGNER_URL:-$BACKEND}" \
+    --poll-timeout-seconds "${INIT_POLL_TIMEOUT_SECONDS:-300}" \
+  || fail "init (email-link → dev_key_service → SIWE)"
 
 say "2. Env snapshot (masking secrets)"
 env | grep -E 'AGENTKEYS_(EMAIL|SIGNUP)_' | sed 's/\(PASSWORD=\).*/\1***REDACTED***/'

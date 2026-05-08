@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod db;
+pub mod dev_key_service;
 pub mod error;
 pub mod handlers;
 pub mod state;
@@ -49,6 +50,11 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/mock/inbox/deliver", post(handlers::inbox::deliver_inbox))
         .route("/mock/inbox/messages", get(handlers::inbox::list_messages))
         .route("/mock/inbox/list", get(handlers::inbox::list_inboxes))
+        // Dev key service (signer edge — see docs/spec/signer-protocol.md).
+        // 503 `signer_disabled` when `DEV_KEY_SERVICE_MASTER_SECRET` is unset.
+        // Issue #74 step 2 replaces this with a TEE worker; wire shape stays.
+        .route("/dev/derive-address", post(handlers::dev_keys::derive_address))
+        .route("/dev/sign-message", post(handlers::dev_keys::sign_message))
         // `/healthz` (Kubernetes convention) — what the broker's Tier-2
         // reachability probe hits. Single endpoint, single name across the
         // codebase. Pre-Stage-7 `/health` alias was dropped; any caller that

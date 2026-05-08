@@ -4,26 +4,63 @@ This guide is the operator-facing companion to
 [`docs/spec/plans/issue-64/PHASE-0-CHECKPOINT.md`](spec/plans/issue-64/PHASE-0-CHECKPOINT.md).
 That checkpoint covered Phase 0 in isolation against `localhost`. **This
 guide is the end-to-end production demo** for the full Stage 7 pluggable
-broker (Phase 0 + A.1 + A.2 + B + C-structural + D-rest + E) running on
-a real EC2 broker host with the AWS account from
-[`cloud-setup.md`](cloud-setup.md).
+broker (Phase 0 + A.1 + A.2 + B + C-structural + D-rest + E) **and the
+new dev_key_service signer flow from issue #74 step 1** (the
+operator-holds-no-keys path), running on a real EC2 broker host with the
+AWS account from [`cloud-setup.md`](cloud-setup.md).
 
 When you finish this guide you will have:
 
 1. Confirmed the broker process boots cleanly past Tier-1 + Tier-2.
 2. Verified AWS IAM accepts the broker's OIDC discovery + JWKS.
-3. Walked the SIWE wallet auth flow end-to-end with a real EIP-191 wallet.
-4. Minted real AWS STS credentials via `/v1/mint-aws-creds`.
-5. **Proven cloud-enforced per-user isolation** — wallet A reads its own
-   prefix; wallet B's prefix returns `AccessDenied` from S3 itself, not
-   from app code.
+3. Walked the **managed-wallet** SIWE auth flow end-to-end without
+   ever holding a private key locally — the dev_key_service signs on
+   behalf of the operator's `omni_account`.
+4. Minted real AWS STS credentials via the post-issue-#71 daemon-side
+   flow (`/v1/mint-oidc-jwt` + client-side `AssumeRoleWithWebIdentity`).
+5. **Proven cloud-enforced per-user isolation** — `omni_A`'s derived
+   wallet reads its own prefix; `omni_B`'s derived wallet returns
+   `AccessDenied` from S3 itself, not from app code.
 6. Inspected the audit log + metrics + idempotency cache.
 7. Exercised capability grants and wallet recovery.
 
-The guide assumes Stage 7 is the build deployed (the broker's
-`/.well-known/openid-configuration` advertises the new auth endpoints).
-If you're on a pre-Stage-7 build, run
+The guide assumes the build deployed includes:
+
+- The Stage 7 pluggable broker (`/.well-known/openid-configuration`
+  advertises `wallet_sig` + `email_link` + `oauth2_*` auth methods).
+- Issue #74 step 1's signer protocol (the backend exposes
+  `POST /dev/derive-address` + `POST /dev/sign-message` per
+  [`docs/spec/signer-protocol.md`](spec/signer-protocol.md)).
+
+If you're on a pre-issue-#74 build, run
 `scripts/setup-broker-host.sh --upgrade` first and come back.
+
+---
+
+## Trust model (post-issue-#74 step 1)
+
+```
+Operator workstation                                  Broker host (EC2)
+┌────────────────────────────┐                        ┌──────────────────────────────┐
+│ agentkeys (CLI)            │   POST /dev/derive ─▶  │ agentkeys-backend            │
+│   • holds NO private key   │                        │   /dev/derive-address        │
+│   • holds session JWT only │  ◀── {address}    ───  │   /dev/sign-message          │
+│                            │                        │   master_secret in           │
+│                            │   POST /dev/sign  ─▶   │   DEV_KEY_SERVICE_MASTER_..  │
+│                            │                        │   (TEE-shaped, env-gated)    │
+│                            │  ◀── {signature}  ───  │                              │
+└──────┬─────────────────────┘                        └──────────────────────────────┘
+       │
+       │ POST /v1/auth/wallet/{start,verify}     (SIWE round-trip)
+       │ POST /v1/mint-oidc-jwt                  (OIDC JWT for AWS)
+       │ POST /v1/wallet/link                    (link omni_email ↔ derived wallet)
+       ▼
+   Broker (stateless minter — verifies session JWT cryptographically)
+```
+
+The signer is the trust boundary that owns the EVM keypair. **Issue #74
+step 2** swaps the HKDF dev_key_service for a TEE worker behind the
+same `/dev/*` wire shape — daemon and CLI code do not change.
 
 ---
 
@@ -34,12 +71,28 @@ inline `# === ON … ===` banner.
 
 | Machine | What it has | Used for |
 |---|---|---|
-| **Operator workstation** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `cast` (Foundry) / wallet, `aws` CLI | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, signing SIWE messages with a private key |
-| **Broker host (EC2)** | `agentkeys-broker-server` binary at `/usr/local/bin/`, both ES256 keypairs at `/var/lib/agentkeys/.agentkeys/broker/`, systemd service `agentkeys-broker.service`, mock backend at loopback `:8090`, nginx fronting `:8091` with TLS at `https://$BROKER_HOST` | Broker process, audit DB, JWT minting |
+| **Operator workstation** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS |
+| **Broker host (EC2)** | `agentkeys-broker-server` and `agentkeys-mock-server` binaries at `/usr/local/bin/`, both ES256 keypairs at `/var/lib/agentkeys/.agentkeys/broker/`, systemd services `agentkeys-broker.service` + `agentkeys-backend.service`, mock backend at loopback `:8090` (now serving `/dev/*` too), nginx fronting `:8091` with TLS at `https://$BROKER_HOST` | Broker process, audit DB, JWT minting, **dev_key_service signer** |
 
-Hop between them with `ssh agentkey@$BROKER_HOST` (the workstation
-expands `$BROKER_HOST` before `ssh` runs; the broker host has no
-workstation env vars).
+Hop between them with `ssh agentkey@$BROKER_HOST`.
+
+> **Where does the operator workstation reach `/dev/*`?** The signer
+> endpoints are on the backend (loopback `:8090` on the broker host).
+> Two production-shaped options:
+>
+> - **Co-locate the daemon** on the broker host. Both this guide's §16
+>   live walkthrough and `agentkeys-daemon` deployments do this — the
+>   daemon SSHes in (or runs as a sibling systemd unit) and talks to
+>   loopback. This matches the eventual TEE topology (daemon →
+>   attested channel → enclave on the same host or rack).
+> - **SSH-tunnel `:8090` to the workstation** for ad-hoc demo:
+>   `ssh -N -L 18090:127.0.0.1:8090 agentkey@$BROKER_HOST`, then point
+>   `$BACKEND_URL` at `http://127.0.0.1:18090`. The signer never sees
+>   public traffic; only the operator's SSH key gates access.
+>
+> Do NOT proxy `/dev/*` through the broker — it would put the broker
+> on the trust path between the daemon and the signer, defeating the
+> "broker holds no key material" property.
 
 ---
 
@@ -62,17 +115,13 @@ test -n "$ACCOUNT_ID" && test -n "$BROKER_HOST" && test -n "$BUCKET" \
   && echo "env ok" || echo "env MISSING — check scripts/operator-workstation.env"
 ```
 
-The file is committed with public values (account ID, role/bucket
-names, hostname). If you fork the repo for a different deployment,
-edit it in place — there's no template version.
+Cloud-side state from [`cloud-setup.md`](cloud-setup.md):
 
-Cloud-side state from `cloud-setup.md`:
-
-- `cloud-setup.md §0` — env vars, awsp profile.
-- `cloud-setup.md §1` — DNS A record for `$BROKER_HOST`.
-- `cloud-setup.md §3` — `agentkeys-{admin,broker,daemon}` IAM users +
+- `§0` — env vars, awsp profile.
+- `§1` — DNS A record for `$BROKER_HOST`.
+- `§3` — `agentkeys-{admin,broker,daemon}` IAM users +
   `agentkeys-data-role` + `agentkeys-mail-*` S3 bucket.
-- `cloud-setup.md §4` — OIDC provider registered for `$OIDC_ISSUER`,
+- `§4` — OIDC provider registered for `$OIDC_ISSUER`,
   `agentkeys-data-role` trust policy swapped to OIDC-federated form,
   S3 bucket policy upgraded to PrincipalTag-scoped.
 
@@ -81,8 +130,9 @@ Broker-host state (from
 
 - `agentkeys-broker.service` and `agentkeys-backend.service` enabled
   and active.
-- `/usr/local/bin/agentkeys-broker-server` matches the binary built
-  from this branch.
+- `/usr/local/bin/agentkeys-broker-server` and
+  `/usr/local/bin/agentkeys-mock-server` match the binaries built from
+  this branch (issue #74 step 1).
 - nginx (or ALB) fronting `:8091` at `https://$BROKER_HOST` with a
   valid TLS cert.
 
@@ -90,25 +140,19 @@ Tooling on the workstation:
 
 - `aws` CLI v2.
 - `jq` (JSON parsing).
-- `cast` from Foundry (signing SIWE messages with a private key).
-  `curl https://foundry.paradigm.xyz | bash && foundryup`.
-- A test EVM keypair. Generate two for the isolation proof:
+- `shasum` or `sha256sum` (for omni_account computation — present on
+  every macOS / Linux box).
+- `agentkeys` CLI built from this branch
+  (`cargo build --release -p agentkeys-cli`, then
+  `cp target/release/agentkeys ~/.local/bin/`).
 
-  ```bash
-  # `cast wallet new --json` returns a JSON array (one element per wallet).
-  cast wallet new --json | tee /tmp/wallet-A.json
-  cast wallet new --json | tee /tmp/wallet-B.json
-  PK_A=$(jq -r '.[0].private_key' /tmp/wallet-A.json)
-  echo "PK_A=${PK_A:0:32}…  length=${#PK_A}"
-  PK_B=$(jq -r '.[0].private_key' /tmp/wallet-B.json)
-  echo "PK_B=${PK_B:0:32}…  length=${#PK_B}"
-  ADDR_A=$(jq -r '.[0].address'   /tmp/wallet-A.json)
-  ADDR_B=$(jq -r '.[0].address'   /tmp/wallet-B.json)
-  echo "A=$ADDR_A  B=$ADDR_B"
-  ```
-
-> The keys never need on-chain funds — Stage 7's SIWE auth is
-> off-chain signing only. They only need to be EIP-191-capable.
+> **No `cast`, no Foundry, no local private keys.** The pre-issue-#74
+> path required `cast wallet new` to mint operator-held EVM keypairs
+> and `cast wallet sign` to produce SIWE signatures. **Both are gone
+> in this guide.** The operator picks an `(identity_type,
+> identity_value)` like `("email", "alice@demo.example")`; the
+> dev_key_service derives the wallet and signs SIWE messages on the
+> operator's behalf.
 
 > **Why every JSON pipe below uses `printf '%s' "$VAR" | jq` instead
 > of `echo "$VAR" | jq`.** zsh's builtin `echo` interprets `\n` (two
@@ -117,9 +161,142 @@ Tooling on the workstation:
 > a JSON escape, and `echo` corrupts those escapes into raw newlines,
 > breaking jq with `Invalid string: control characters … must be
 > escaped`. `printf '%s'` is portable across bash and zsh and never
-> re-interprets escapes. Use plain double quotes around the variable
-> — `printf '%s' "$START" | jq` — not backslash-quotes (`\"$START\"`),
-> which add literal `"` chars around the JSON and break jq differently.
+> re-interprets escapes.
+
+### 0.1 Confirm the dev_key_service is enabled on the broker host
+
+`scripts/setup-broker-host.sh` auto-generates `DEV_KEY_SERVICE_MASTER_SECRET`
+on first run, persists it to `/etc/agentkeys/dev-key-service.env` (mode
+0600, owner `agentkeys`), and wires the backend systemd unit to read it
+via `EnvironmentFile=`. The script is **idempotent** — re-running it
+preserves the existing secret, so an upgrade does not invalidate any
+previously-derived wallet. There is no separate `--upgrade` flag; one
+script handles both bootstrap and re-deploy.
+
+If you've never run the script on this host, do it once:
+
+```bash
+# === ON BROKER HOST ===
+ssh agentkey@$BROKER_HOST
+cd ~/agentKeys
+git fetch origin && git checkout evm && git pull --ff-only
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+Either way, confirm the backend is serving the signer endpoints:
+
+```bash
+# === ON BROKER HOST ===
+sudo journalctl -u agentkeys-backend -n 5 --no-pager
+# Expect: [mock-server] dev_key_service ENABLED (DEV ONLY — replace with TEE worker per issue #74 step 2)
+
+curl -sS -X POST http://127.0.0.1:8090/dev/derive-address \
+  -H 'content-type: application/json' \
+  -d "$(jq -n --arg o "$(printf 'a%.0s' {1..64})" '{omni_account:$o}')" | jq
+# {
+#   "address": "0x…",
+#   "key_version": 1
+# }
+```
+
+If you see HTTP 503 with `"error":"signer_disabled"`, the env file
+didn't load — check `sudo systemctl show agentkeys-backend |
+grep -E 'EnvironmentFile|DEV_KEY_SERVICE'` and confirm
+`/etc/agentkeys/dev-key-service.env` exists and has mode 0600.
+
+> **Do NOT regenerate `/etc/agentkeys/dev-key-service.env`** unless you
+> have already migrated every operator off the old derivation. The
+> file is intentionally pinned across re-runs of `setup-broker-host.sh`.
+> Issue #74 step 2 (TEE worker) defines the formal rotation runbook.
+
+### 0.2 Make the signer reachable from the workstation
+
+For the rest of this guide, `$BACKEND_URL` is the URL where `/dev/*`
+is reachable from the operator workstation. Pick one:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+
+# Option A — SSH tunnel (recommended for ad-hoc demo):
+ssh -N -L 18090:127.0.0.1:8090 agentkey@$BROKER_HOST &
+TUNNEL_PID=$!
+echo "TUNNEL_PID=$TUNNEL_PID"
+export BACKEND_URL=http://127.0.0.1:18090
+
+# Option B — co-located: run all the workstation commands below from
+# the broker host instead, with BACKEND_URL=http://127.0.0.1:8090.
+
+# Smoke-test the tunnel.
+curl -sS $BACKEND_URL/healthz
+# ok
+```
+
+Tear down the tunnel with `kill $TUNNEL_PID` at the end of the demo
+(see §17 Cleanup).
+
+### 0.3 Pick two demo identities and compute their `omni_account`
+
+The broker derives `omni_account = SHA256("agentkeys" || identity_type
+|| identity_value)`. The operator computes the same value locally so
+they can drive the dev_key_service with it.
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+omni() {
+  # Concatenates the broker's canonical inputs and hashes; matches
+  # crates/agentkeys-broker-server/src/identity/omni_account.rs.
+  local identity_type="$1" identity_value="$2"
+  printf '%s%s%s' "agentkeys" "$identity_type" "$identity_value" \
+    | shasum -a 256 \
+    | awk '{print $1}'
+}
+
+OMNI_A=$(omni email "alice@demo.example")
+echo "OMNI_A=$OMNI_A  length=${#OMNI_A}"
+OMNI_B=$(omni email "bob@demo.example")
+echo "OMNI_B=$OMNI_B  length=${#OMNI_B}"
+
+# These should NEVER collide — different identity_value → different omni.
+[[ "$OMNI_A" != "$OMNI_B" ]] && echo "omni split ok" || echo "OMNI COLLISION — bug?"
+```
+
+> **Why `email` as the identity_type for a demo with no real email?**
+> The choice is just a namespace label that the broker hashes into
+> `omni_account`. Using `email` keeps the demo identities distinct
+> from raw EVM identities (which the broker stamps post-SIWE-verify
+> as `("evm", lower(wallet))`). For a fully cleaned-up demo you can
+> use any nonempty `(type, value)` pair; the only invariant is that
+> A and B differ.
+
+### 0.4 Derive the managed wallets
+
+The dev_key_service derives a deterministic EVM wallet for each omni.
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+ADDR_A=$(agentkeys signer derive \
+           --signer-url $BACKEND_URL \
+           --omni-account $OMNI_A \
+           --json | jq -r .address)
+echo "ADDR_A=$ADDR_A"
+
+ADDR_B=$(agentkeys signer derive \
+           --signer-url $BACKEND_URL \
+           --omni-account $OMNI_B \
+           --json | jq -r .address)
+echo "ADDR_B=$ADDR_B"
+
+[[ "$ADDR_A" != "$ADDR_B" ]] && echo "wallet split ok" || echo "WALLET COLLISION — bug?"
+```
+
+`ADDR_A` and `ADDR_B` are 0x-prefixed 40-char lowercase hex EVM
+addresses. They're stable across daemon reinstalls as long as the
+master secret doesn't rotate; that's the property that makes the
+"recover-via-any-linked-identity" model work without ever moving a
+private key.
+
+The keys never need on-chain funds — Stage 7's SIWE auth is off-chain
+signing only.
 
 ---
 
@@ -144,34 +321,12 @@ curl -s $OIDC_ISSUER/readyz | jq
 #     "checks":   [],
 #     "ready":    ["tier2/backend", "audit/sqlite", …]
 #   }
-#
-# Degraded case (still serving, dependency impaired):
-#   {
-#     "status":   "degraded",
-#     "degraded": true,
-#     "checks":   [{"name":"…","status":"degraded","reason":"…","docs":"…"}],
-#     "ready":    ["tier2/backend", …]
-#   }
-#
-# Unready case (HTTP 503):
-#   {
-#     "status":   "unready",
-#     "degraded": false,
-#     "checks":   [{"name":"tier2/backend","status":"unready",
-#                   "reason":"BROKER_BACKEND_URL/healthz not yet reachable since boot",
-#                   "docs":"https://docs.agentkeys.dev/operator-runbook-stage7#backend-reachability"}],
-#     "ready":    []
-#   }
 ```
 
 The body is always self-describing — `status` is one of `ready`,
 `degraded`, `unready` — so `curl … | jq -r .status` is a single-shot
-verdict. The HTTP status code agrees: `200` for ready/degraded,
-`503` for unready.
-
-If `/readyz` returns `503` (unready), paste the `docs:` URL from the
-checks array into the [operator runbook](operator-runbook-stage7.md)
-— every check has its own anchor with the recovery procedure.
+verdict. If `/readyz` returns `503`, paste the `docs:` URL from the
+checks array into the [operator runbook](operator-runbook-stage7.md).
 
 ```bash
 curl -sS --fail-with-body $OIDC_ISSUER/.well-known/openid-configuration | jq
@@ -183,22 +338,12 @@ curl -sS --fail-with-body $OIDC_ISSUER/.well-known/openid-configuration | jq
 # }
 
 curl -sS --fail-with-body $OIDC_ISSUER/.well-known/jwks.json | jq '.keys[0]'
-# {
-#   "kty": "EC",
-#   "crv": "P-256",
-#   "x": "<43-char base64url>",
-#   "y": "<43-char base64url>",
-#   "kid": "v1-<unix-seconds>",
-#   "alg": "ES256",
-#   "use": "sig"
-# }
 ```
 
 **Critical invariant:** `issuer` in the discovery doc MUST equal
 `$OIDC_ISSUER` byte-for-byte. AWS IAM compares the JWT `iss` claim
-against the registered OIDC provider URL exactly — trailing slash, host,
-scheme, path all matter. If they don't match, every
-`AssumeRoleWithWebIdentity` will return `InvalidIdentityToken`.
+against the registered OIDC provider URL exactly. If they don't match,
+every `AssumeRoleWithWebIdentity` will return `InvalidIdentityToken`.
 
 ```bash
 [[ "$(curl -sS --fail-with-body $OIDC_ISSUER/.well-known/openid-configuration | jq -r .issuer)" \
@@ -211,18 +356,62 @@ Verify from AWS IAM's perspective:
 aws iam get-open-id-connect-provider \
   --open-id-connect-provider-arn $OIDC_PROVIDER_ARN \
   --query '{Url:Url, ClientIDList:ClientIDList, Thumbprints:ThumbprintList}'
-# {
-#   "Url": "broker.litentry.org",            ← AWS strips the https://
-#   "ClientIDList": ["sts.amazonaws.com"],
-#   "Thumbprints": ["<40 hex>"]
-# }
 ```
 
 ---
 
-## 2. SIWE wallet auth round-trip
+## 2. Managed-wallet SIWE auth via the dev_key_service
 
-### 2.1 Request a SIWE challenge
+This is the new flow that replaces the pre-issue-#74 `cast wallet
+sign` walkthrough. The operator provides only an identity (email or
+OAuth2/Google); the broker mints an identity-omni session JWT, the
+backend derives the wallet, signs the SIWE challenge on the operator's
+behalf, and the broker mints an EVM-omni session JWT. The broker sees
+a normal SIWE round-trip — it cannot tell whether the signer is
+HKDF-backed (today) or TEE-backed (issue #74 step 2).
+
+### 2.0 Recommended path: `agentkeys init --email`
+
+Issue #74 step 1 ships a single-command bootstrap that drives the
+entire chain. Use this for any real demo or production deployment:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+agentkeys init \
+  --email alice@demo.example \
+  --broker-url $OIDC_ISSUER \
+  --signer-url $BACKEND_URL
+# Magic link sent to alice@demo.example. Click the link in your inbox; the CLI is polling…
+# (operator clicks the magic link)
+# Initialized via email-link.
+#   identity omni: <64 hex>
+#   derived wallet: 0x…
+#   evm omni:      <64 hex>
+```
+
+For OAuth2/Google instead of email-link:
+
+```bash
+agentkeys init \
+  --oauth2-google \
+  --broker-url $OIDC_ISSUER \
+  --signer-url $BACKEND_URL
+# Open this URL in your browser to authenticate with Google:
+#   https://accounts.google.com/o/oauth2/v2/auth?…
+# (Polling for callback…)
+```
+
+The same flow is available on the daemon side via
+`agentkeys-daemon --init-email <addr>` and
+`agentkeys-daemon --init-oauth2-google` (see §16.7 for an end-to-end
+provision against a real broker).
+
+`§2.1`–`§2.5` below walk through the same chain manually, so you can
+inspect each wire frame without trusting the CLI to do the right
+thing. Use those sections for debugging or for explaining the trust
+model to a reviewer.
+
+### 2.1 Request a SIWE challenge for `ADDR_A`
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -250,19 +439,35 @@ The SIWE message is constructed per EIP-4361 with the broker's
 `$BROKER_HOST` as the domain field. The signature you produce next has
 the EIP-191 `\x19Ethereum Signed Message:\n<len>` prefix wrapped around
 this exact text — re-deriving any whitespace differently breaks
-verification.
+verification, so always pull `SIWE_MSG` straight from the response.
 
-### 2.2 Sign the SIWE message
+### 2.2 Sign the SIWE message via the dev_key_service
 
-`cast wallet sign` does the EIP-191 wrap automatically when called
-without `--no-hash`. The `--no-hash` flag means "the bytes ARE the
-EIP-191 envelope already, just sign them" — which is **not** what we
-want here.
+`agentkeys signer sign` calls `POST /dev/sign-message` with `OMNI_A`
+and the SIWE message bytes. The signer wraps them in EIP-191 and
+returns the canonical 65-byte signature. The CLI never sees the
+private key.
 
 ```bash
-SIG_A=$(cast wallet sign --private-key $PK_A "$SIWE_MSG")
+SIG_A=$(agentkeys signer sign \
+          --signer-url $BACKEND_URL \
+          --omni-account $OMNI_A \
+          --message "$SIWE_MSG" \
+          --json | jq -r .signature)
 echo "SIG_A=${SIG_A:0:32}…  length=${#SIG_A}"
-# SIG_A=0x<130-hex-chars>
+# SIG_A=0x<130 hex chars>
+```
+
+Sanity — the signer's `address` reply MUST match `ADDR_A`:
+
+```bash
+SIG_ADDR=$(agentkeys signer sign \
+             --signer-url $BACKEND_URL \
+             --omni-account $OMNI_A \
+             --message "$SIWE_MSG" \
+             --json | jq -r .address)
+[[ "$SIG_ADDR" == "$ADDR_A" ]] && echo "sign↔derive address match" \
+                              || echo "ADDRESS DRIFT — master secret rotated mid-session?"
 ```
 
 ### 2.3 Submit the signature, get back a session JWT
@@ -287,16 +492,21 @@ printf '%s' "$VERIFY" | jq
 
 SESSION_JWT_A=$(printf '%s' "$VERIFY" | jq -r .session_jwt)
 echo "SESSION_JWT_A=${SESSION_JWT_A:0:32}…  length=${#SESSION_JWT_A}"
-OMNI_A=$(printf '%s' "$VERIFY" | jq -r .omni_account)
-echo "OMNI_A=$OMNI_A"
+OMNI_EVM_A=$(printf '%s' "$VERIFY" | jq -r .omni_account)
+echo "OMNI_EVM_A=$OMNI_EVM_A"
+echo "OMNI_A    =$OMNI_A   (the omni you used to drive the signer)"
 ```
 
-The `omni_account` is `SHA256("agentkeys" || "evm" || lower(wallet))`
-— deterministic from the wallet address, namespace-isolated from any
-other identity provider, never reused across wallet rotations. If
-you decode `$SESSION_JWT_A` (`echo $SESSION_JWT_A | cut -d. -f2 | base64
--d`) you'll see `omni_account`, `wallet`, `iss`, `iat`, `exp` claims and
-a `kid` in the header pointing at the session keypair.
+> **Two omnis at play — both correct.**
+> - `$OMNI_A` is the operator's **identity omni** (the one you used to
+>   call the signer). The broker never sees this directly.
+> - `$OMNI_EVM_A` is the **wallet omni** the broker derives from the
+>   verified EVM address. The session JWT is bound to this one.
+>
+> They link 1:1 in this demo because the wallet is deterministically
+> derived from `OMNI_A`. In production, `agentkeys whoami` would
+> show both via the linked-identities table after the daemon calls
+> `/v1/wallet/link(OMNI_A → ADDR_A)`. See §7.1 below.
 
 > **Session JWT is broker-internal.** It is signed by the *session*
 > keypair (`purpose=session`), not the OIDC keypair. AWS IAM never
@@ -304,36 +514,50 @@ a `kid` in the header pointing at the session keypair.
 > session JWT can't impersonate the broker to AWS, and a stolen OIDC
 > JWT can't be replayed as a session token.
 
-### 2.4 Repeat for wallet B
+### 2.4 Repeat for `ADDR_B`
 
 ```bash
 START_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg a "$ADDR_B" '{address:$a, chain_id:84532}')")
-echo "START_B=${START_B:0:32}…  length=${#START_B}"
-
 REQ_ID_B=$(printf '%s' "$START_B" | jq -r .request_id)
-echo "REQ_ID_B=$REQ_ID_B"
 SIWE_MSG_B=$(printf '%s' "$START_B" | jq -r .siwe_message)
-echo "SIWE_MSG_B=${SIWE_MSG_B:0:32}…  length=${#SIWE_MSG_B}"
-SIG_B=$(cast wallet sign --private-key $PK_B "$SIWE_MSG_B")
+
+SIG_B=$(agentkeys signer sign \
+          --signer-url $BACKEND_URL \
+          --omni-account $OMNI_B \
+          --message "$SIWE_MSG_B" \
+          --json | jq -r .signature)
 echo "SIG_B=${SIG_B:0:32}…  length=${#SIG_B}"
 
 VERIFY_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg r "$REQ_ID_B" --arg s "$SIG_B" \
         '{request_id:$r, signature:$s}')")
-echo "VERIFY_B=${VERIFY_B:0:32}…  length=${#VERIFY_B}"
-
 SESSION_JWT_B=$(printf '%s' "$VERIFY_B" | jq -r .session_jwt)
-echo "SESSION_JWT_B=${SESSION_JWT_B:0:32}…  length=${#SESSION_JWT_B}"
-OMNI_B=$(printf '%s' "$VERIFY_B" | jq -r .omni_account)
-echo "OMNI_B=$OMNI_B"
-echo "OMNI_A=$OMNI_A"
-echo "OMNI_B=$OMNI_B"
+OMNI_EVM_B=$(printf '%s' "$VERIFY_B" | jq -r .omni_account)
+echo "OMNI_EVM_A=$OMNI_EVM_A"
+echo "OMNI_EVM_B=$OMNI_EVM_B"
 ```
 
-`OMNI_A` ≠ `OMNI_B` — confirmed by hash function.
+`OMNI_EVM_A` ≠ `OMNI_EVM_B` — confirmed by hash function.
+
+### 2.5 `agentkeys whoami` — sanity at-a-glance
+
+```bash
+agentkeys whoami \
+  --signer-url $BACKEND_URL \
+  --omni-account $OMNI_A
+# session_wallet: 0x… (legacy session if any)
+# signer_url: http://…
+# omni_account: <OMNI_A>
+# derived_address: <ADDR_A>
+# key_version: 1
+```
+
+This is the read-only operator-UX command that ships in this PR. It
+calls `/dev/derive-address` and surfaces the omni → address mapping
+without any side effects.
 
 ---
 
@@ -347,9 +571,6 @@ to consume.
 JWT_A=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
 echo "JWT_A=${JWT_A:0:32}…  length=${#JWT_A}"
-
-echo "$JWT_A"
-# eyJ… (header.payload.signature)
 
 # Decode and verify the claim shape AWS cares about:
 echo "$JWT_A" | cut -d. -f2 \
@@ -383,8 +604,8 @@ JWT TTL is 5 min. If you wait too long, rerun this step.
 ## 4. Cloud-enforced isolation proof
 
 This is the climax of the demo. We assume `agentkeys-data-role` with
-JWT_A, then attempt to read both wallet A's prefix (allowed) and wallet
-B's prefix (denied **by AWS, not by app code**).
+`JWT_A`, then attempt to read both `ADDR_A`'s prefix (allowed) and
+`ADDR_B`'s prefix (denied **by AWS, not by app code**).
 
 ### 4.1 Assume the role with JWT_A
 
@@ -394,16 +615,12 @@ CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
   --role-session-name "demo-A-$(date +%s)" \
   --web-identity-token "$JWT_A")
-echo "CREDS=${CREDS:0:32}…  length=${#CREDS}"
 
 printf '%s' "$CREDS" | jq '.Credentials | {AKID:.AccessKeyId, Exp:.Expiration}'
 
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
-echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
-echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
-echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
 # Confirm: you are NOT your admin profile any more.
 aws sts get-caller-identity
@@ -415,54 +632,48 @@ aws sts get-caller-identity
 
 ### 4.2 Seed test objects (one-shot, with admin creds)
 
-If wallet A's prefix is empty, the read in step 4.3 succeeds vacuously
-and proves nothing. Pop two objects in (one per wallet) using your
-admin profile — clear out the assumed-role env first.
+If `ADDR_A`'s prefix is empty, the read in step 4.3 succeeds vacuously
+and proves nothing. Pop two objects in (one per derived wallet) using
+your admin profile — clear out the assumed-role env first.
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 awsp agentkeys-admin
 
-WALLET_A_LC=$(echo "$ADDR_A" | tr '[:upper:]' '[:lower:]')
-echo "WALLET_A_LC=$WALLET_A_LC"
-WALLET_B_LC=$(echo "$ADDR_B" | tr '[:upper:]' '[:lower:]')
-echo "WALLET_B_LC=$WALLET_B_LC"
+# Derived addresses are already lowercase from the dev_key_service.
 aws s3api put-object --bucket "$BUCKET" \
-  --key "bots/${WALLET_A_LC}/hello.txt" --body /dev/null
+  --key "bots/${ADDR_A}/hello.txt" --body /dev/null
 aws s3api put-object --bucket "$BUCKET" \
-  --key "bots/${WALLET_B_LC}/hello.txt" --body /dev/null
+  --key "bots/${ADDR_B}/hello.txt" --body /dev/null
 ```
 
 ### 4.3 Re-export the assumed-role creds and probe both prefixes
 
 ```bash
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
-echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
-echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
-echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
 # 4a — your own prefix: SUCCESS
 aws s3api list-objects-v2 --bucket "$BUCKET" \
-  --prefix "bots/${WALLET_A_LC}/" --query 'Contents[*].Key'
+  --prefix "bots/${ADDR_A}/" --query 'Contents[*].Key'
 # [ "bots/0x…<A>/hello.txt" ]
 
 aws s3api get-object --bucket "$BUCKET" \
-  --key "bots/${WALLET_A_LC}/hello.txt" /tmp/got-A.txt
+  --key "bots/${ADDR_A}/hello.txt" /tmp/got-A.txt
 # { "ContentLength": 0, ... }
 
-# 4b — the OTHER wallet's prefix: AccessDenied (CLOUD-ENFORCED)
+# 4b — the OTHER derived wallet's prefix: AccessDenied (CLOUD-ENFORCED)
 aws s3api get-object --bucket "$BUCKET" \
-  --key "bots/${WALLET_B_LC}/hello.txt" /tmp/got-B.txt
+  --key "bots/${ADDR_B}/hello.txt" /tmp/got-B.txt
 # An error occurred (AccessDenied) when calling the GetObject operation:
 # Access Denied
 ```
 
 **Step 4b is the property the static-IAM path cannot prove.** No app
 code participated in the deny — S3's policy engine evaluated
-`${aws:PrincipalTag/agentkeys_user_wallet}` (which is `WALLET_A_LC`)
-against the resource ARN's `bots/${WALLET_B_LC}/` and refused.
+`${aws:PrincipalTag/agentkeys_user_wallet}` (which is `ADDR_A`)
+against the resource ARN's `bots/${ADDR_B}/` and refused.
 
 ### 4.4 Diagnosing intermediate states
 
@@ -509,23 +720,18 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 # 1. Ask the broker for an OIDC JWT (lightweight call — broker just signs).
 JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
-echo "JWT=${JWT:0:32}…  length=${#JWT}"
 
 # 2. Exchange it for AWS creds CLIENT-SIDE. No broker creds participate.
 CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
   --role-session-name "demo-A-$(date +%s)" \
   --web-identity-token "$JWT")
-echo "CREDS=${CREDS:0:32}…  length=${#CREDS}"
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
-echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
-echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
-echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
 # 3. Use the temp creds. PrincipalTag-scoped per cloud-setup.md §4.4.
-aws s3 ls "s3://$BUCKET/bots/$(echo $ADDR_A | tr A-Z a-z)/"
+aws s3 ls "s3://$BUCKET/bots/${ADDR_A}/"
 ```
 
 Inside `agentkeys-provisioner`, the `fetch_via_broker_default_ttl()`
@@ -580,7 +786,7 @@ export AWS_REGION=us-east-1
 agentkeys-daemon \
   --backend $BACKEND_URL \
   --broker-url $AGENTKEYS_BROKER_URL \
-  --session $YOUR_SESSION_TOKEN
+  --session $SESSION_JWT_A
 ```
 
 Inside the daemon, the call site is
@@ -610,7 +816,6 @@ GRANT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/grant/create \
         expires_at:     (now + 3600 | floor),
         max_uses:       100
       }')")
-echo "GRANT=${GRANT:0:32}…  length=${#GRANT}"
 
 printf '%s' "$GRANT" | jq
 # {
@@ -637,7 +842,6 @@ curl -sS --fail-with-body $OIDC_ISSUER/v1/grant/list \
 
 ```bash
 GRANT_ID=$(printf '%s' "$GRANT" | jq -r .grant_id)
-echo "GRANT_ID=$GRANT_ID"
 curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/grant/revoke \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
@@ -660,14 +864,22 @@ on the broker host once every daemon has a grant.
 
 ## 7. Wallet linking + recovery (Phase B)
 
-### 7.1 Master links a secondary identity (e.g. email)
+After issue #74 step 1 the canonical recovery model is "any linked
+identity unlocks the same derived wallet." The daemon links its
+identity-omni (e.g. `OMNI_A` from email) to the derived wallet so
+re-authenticating as that email recovers the same EVM address.
+
+### 7.1 Master links the identity-omni to the derived wallet
 
 ```bash
 curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/wallet/link \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
-  -d "$(jq -n '{identity_type:"email", identity_value:"hanwen@example.com"}')"
+  -d "$(jq -n '{identity_type:"email", identity_value:"alice@demo.example"}')"
 ```
+
+After this call the broker's `IdentityLinkStore` knows that
+`("email", "alice@demo.example")` ↔ `OMNI_EVM_A` ↔ `ADDR_A`.
 
 ### 7.2 List linked identities
 
@@ -681,19 +893,27 @@ curl -sS --fail-with-body $OIDC_ISSUER/v1/wallet/links \
 ```bash
 curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/wallet/recover/lookup \
   -H 'content-type: application/json' \
-  -d '{"identity_type":"email","identity_value":"hanwen@example.com"}' | jq
+  -d '{"identity_type":"email","identity_value":"alice@demo.example"}' | jq
 # {"omni_account": "<64 hex>"}
 ```
 
 The lookup is unauthenticated *by design* — `omni_account` is a
-SHA256 hash, discovery does not enable impersonation. Actual recovery
-still requires the master to sign in fresh and call `/v1/grant/create`
-on a new daemon address. See [operator-runbook-stage7.md → Recovery
+SHA256 hash, discovery does not enable impersonation. Recovery still
+requires the daemon to (a) re-authenticate as the linked identity,
+(b) get the same `omni_account` back, and (c) ask the dev_key_service
+to derive the wallet (the master secret has not rotated, so the
+derivation is stable). See [operator-runbook-stage7.md → Recovery
 flow](operator-runbook-stage7.md#recovery-flow).
 
 ---
 
-## 8. Email-link auth (Phase A.1)
+## 8. Email-link auth (Phase A.1) — alternative entry point
+
+Email-link is the canonical way to bootstrap `OMNI_A` in a real
+deployment instead of computing it offline like §0.3 does. After
+verification, the broker mints a session JWT bound to `omni_email`,
+and the daemon then derives the wallet via `/dev/derive-address`.
+Same dev_key_service flow from there on out.
 
 Requires `BROKER_AUTH_METHODS=…,email_link` and `BROKER_EMAIL_*` env
 vars set (see runbook). SES sender identity must be verified.
@@ -702,7 +922,7 @@ vars set (see runbook). SES sender identity must be verified.
 # 1. Request a magic link.
 curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/email/request \
   -H 'content-type: application/json' \
-  -d '{"email":"hanwen@example.com"}'
+  -d '{"email":"alice@demo.example"}'
 # {"request_id":"em_…","status":"sent"}
 
 # 2. Click the link in the email. The broker's /auth/email/landing
@@ -713,10 +933,17 @@ curl -sS --fail-with-body $OIDC_ISSUER/v1/auth/email/status/em_… | jq
 # {
 #   "status": "verified",
 #   "session_jwt": "eyJ…",
-#   "omni_account": "<64 hex>",
+#   "omni_account": "<64 hex of OMNI_A>",
 #   "identity_type": "email",
-#   "identity_value": "hanwen@example.com"
+#   "identity_value": "alice@demo.example"
 # }
+
+# 4. The session JWT is now an `omni_email` session. Derive the wallet:
+EMAIL_SESSION_JWT=...                # from step 3
+agentkeys signer derive \
+  --signer-url $BACKEND_URL \
+  --omni-account $(omni email "alice@demo.example")
+# 5. Then run §2.1 onwards using that derived address.
 ```
 
 ### 8.1 Debugging — inspecting the inbound email at S3
@@ -725,32 +952,26 @@ If the magic-link click never completes verification, the email
 probably arrived but the link the broker rendered doesn't match the
 URL pattern the auth handler regex-matches. Use
 [`scripts/inspect-inbound-email.sh`](../scripts/inspect-inbound-email.sh)
-to dump the most-recent inbound email from `s3://$BUCKET/inbound/`
-with the same quoted-printable normalization the broker applies:
+to dump the most-recent inbound email from `s3://$BUCKET/inbound/`.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
 awsp agentkeys-admin
-set -a; source scripts/operator-workstation.env; set +a   # if not done in §0
-
 ./scripts/inspect-inbound-email.sh                # latest
 ./scripts/inspect-inbound-email.sh --all          # list all keys + headers
 ./scripts/inspect-inbound-email.sh inbound/<key>  # specific key
 ```
-
-The script prints raw + normalized bodies, all `href`s, all
-`https://` URLs deduped, and specifically the URLs that match the
-auth handler's regex. If the last block returns `(NONE — regex would
-miss this email!)`, the broker's URL-extraction regex needs an
-update for the new sender format. (This script is the Stage 7
-replacement for the archived `stage6-inspect-email.sh`.)
 
 The session JWT NEVER appears in the browser-facing landing-page
 response — only on the CLI poll, per Plan §3.5.4 security posture.
 
 ---
 
-## 9. OAuth2/Google auth (Phase A.2)
+## 9. OAuth2/Google auth (Phase A.2) — alternative entry point
+
+Same shape as §8 but the bootstrap is a Google OAuth2 round-trip
+instead of email. Once the omni_oauth2 session JWT lands, the daemon
+derives the same EVM wallet via the dev_key_service.
 
 Requires `BROKER_OAUTH2_*` env vars, a Google Cloud Console OAuth web
 client, and the broker's redirect URI registered exactly. See
@@ -761,11 +982,6 @@ client, and the broker's redirect URI registered exactly. See
 curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/oauth2/start \
   -H 'content-type: application/json' \
   -d '{"provider":"google"}' | jq
-# {
-#   "request_id":"oa2-…",
-#   "authorization_url":"https://accounts.google.com/o/oauth2/v2/auth?…",
-#   "poll_url":"/v1/auth/oauth2/status/oa2-…"
-# }
 
 # 2. Open authorization_url in a browser, sign in. Google redirects
 #    to /auth/oauth2/callback on the broker.
@@ -774,6 +990,11 @@ curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/oauth2/start \
 curl -sS --fail-with-body $OIDC_ISSUER/v1/auth/oauth2/status/oa2-… | jq
 # {"status":"verified", "session_jwt":"eyJ…", "omni_account":"…",
 #  "identity_type":"oauth2_google", "identity_value":"<google-sub>"}
+
+# 4. Derive the wallet:
+agentkeys signer derive \
+  --signer-url $BACKEND_URL \
+  --omni-account $(omni oauth2_google "<google-sub>")
 ```
 
 `prompt=select_account` is hardcoded into the auth URL so Google
@@ -795,6 +1016,9 @@ sudo sqlite3 /var/lib/agentkeys/.agentkeys/broker/audit.sqlite \
 ```
 
 Columns of interest:
+- `omni_account` — `OMNI_EVM_A` for derived-wallet mints (post issue
+  #74 the wallet is the public side; the identity omni stays on the
+  daemon).
 - `status` — `confirmed` after `sqlite_primary` or `sqlite`-only
   policy completes; `pending` → `confirmed | quarantined` for
   `dual_strict` policy (Phase C).
@@ -802,6 +1026,11 @@ Columns of interest:
   failures (still audited).
 - `grant_id` — non-empty when the mint was authorized by an explicit
   grant; empty during the Phase-0→B migration window.
+
+The dev_key_service itself has **no audit log** in v0 — it is
+single-process, every `/dev/sign-message` call is the daemon's own.
+Issue #74 step 2 (TEE worker) adds enclave-side per-omni signing
+counters.
 
 ---
 
@@ -818,7 +1047,6 @@ To exercise the structural layer:
 
 ```bash
 # === ON BROKER HOST ===
-# Set Phase C env vars (see runbook §EVM Audit Anchor).
 sudo systemctl edit agentkeys-broker
 # [Service]
 # Environment=BROKER_AUDIT_ANCHORS=sqlite,evm_testnet
@@ -845,7 +1073,7 @@ exercise this end-to-end against the stub.
 ### 12.1 Prometheus metrics
 
 ```bash
-# === ON BROKER HOST (or curl from anywhere if exposed) ===
+# === ON BROKER HOST ===
 sudo systemctl edit agentkeys-broker
 # Environment=BROKER_METRICS_ENABLED=true
 sudo systemctl restart agentkeys-broker
@@ -856,9 +1084,7 @@ curl -sS --fail-with-body https://broker.litentry.org/metrics | head -30
 # agentkeys_broker_mints_total 14
 # agentkeys_broker_mints_failed_total 0
 # agentkeys_broker_audit_writes_total 14
-# agentkeys_broker_audit_writes_failed_total 0
 # agentkeys_broker_auth_attempts_total 23
-# agentkeys_broker_auth_failed_unauthorized_total 1
 # agentkeys_broker_idempotency_hits_total 3
 # …
 ```
@@ -871,7 +1097,6 @@ disabled to avoid leaking counter shapes to unauthenticated probers.
 
 ```bash
 KEY=$(uuidgen | tr '[:upper:]' '[:lower:]')
-echo "KEY=${KEY:0:32}…  length=${#KEY}"
 
 # First call — mints + caches.
 curl -i -X POST $OIDC_ISSUER/v1/mint-aws-creds \
@@ -916,9 +1141,19 @@ bash harness/stage-7-issue-64-done.sh
 
 This composes every per-phase smoke + the load-bearing invariant test
 + the env-var-table drift check + both build matrices (v0-default and
-v0-testnet feature combos). Exits 0 if Stage 7 is shippable. Any
-failure prints the failing phase name and points at the relevant
-sub-script.
+v0-testnet feature combos). Exits 0 if Stage 7 is shippable.
+
+Issue #74's signer-protocol conformance test runs as part of the
+default `cargo test` path:
+
+```bash
+cargo test -p agentkeys-mock-server --test dev_key_service_routes
+cargo test -p agentkeys-core        --test signer_conformance
+```
+
+The conformance test exercises both the HKDF-backed dev_key_service
+and an in-memory TEE-stub that implements the same wire shape — the
+swap-point invariant is now a tested CI gate.
 
 ---
 
@@ -927,20 +1162,49 @@ sub-script.
 ### 14.1 BOOT_FAIL on first start
 
 Tier-1 refuse-to-boot prints a single-line `BOOT_FAIL: <var>=<value>:
-<reason>; see runbook §<anchor>` to stderr. The anchor is a Markdown
-heading slug in [`docs/operator-runbook-stage7.md`](operator-runbook-stage7.md).
-Common ones:
+<reason>; see runbook §<anchor>` to stderr. Common ones:
 
 | Anchor | Cause | Fix |
 |---|---|---|
 | `oidc-issuer` | `BROKER_OIDC_ISSUER` is `http://` and `BROKER_DEV_MODE` is unset | Set TLS in front of the broker, point issuer at the public HTTPS URL. |
-| `oidc-keypair` / `session-keypair` | Keypair file missing | `agentkeys-broker-server keygen --purpose <oidc\|session> --out PATH` (commit `d9bf541`); or rerun `setup-broker-host.sh --upgrade` which auto-mints (commit `765ea9b`). |
+| `oidc-keypair` / `session-keypair` | Keypair file missing | `agentkeys-broker-server keygen --purpose <oidc\|session> --out PATH`; or rerun `setup-broker-host.sh --upgrade` which auto-mints. |
 | `audit-policy` | Bad `BROKER_AUDIT_POLICY` value | Must be `dual_strict` / `sqlite_primary` / `evm_primary`. |
-| `auth-method-not-compiled` | Plugin name in env var not registered | Rebuild with the matching `--features` flag (e.g. `auth-email-link`) or remove the name. |
+| `auth-method-not-compiled` | Plugin name in env var not registered | Rebuild with the matching `--features` flag. |
 | `auth-method-empty` / `audit-anchor-empty` | Empty list | Defaults: `wallet_sig` / `sqlite`. |
-| `backend-reachability` | Tier-2 backend `/healthz` not yet probed | Auto-clears once mock-server is up. With `BROKER_REFUSE_TO_BOOT_STRICT=true`, this is a hard fail instead. |
+| `backend-reachability` | Tier-2 backend `/healthz` not yet probed | Auto-clears once mock-server is up. |
 
-### 14.2 `AssumeRoleWithWebIdentity` returns InvalidIdentityToken
+### 14.2 `/dev/derive-address` returns HTTP 503 `signer_disabled`
+
+The backend's `DEV_KEY_SERVICE_MASTER_SECRET` env var is unset or
+empty. From the broker host:
+
+```bash
+sudo systemctl show agentkeys-backend | grep DEV_KEY_SERVICE
+# Should print: Environment=DEV_KEY_SERVICE_MASTER_SECRET=…
+# If blank, redo §0.1 of this guide.
+```
+
+### 14.3 `agentkeys signer sign` returns `Error: SIGNER_UNREACHABLE`
+
+The CLI cannot reach `--signer-url`. Re-establish the SSH tunnel
+(§0.2 Option A) or switch to running the CLI on the broker host
+(Option B).
+
+### 14.4 SIWE verify returns `signature does not recover to claimed address`
+
+Possible causes:
+- The SIWE message bytes were mutated between `/v1/auth/wallet/start`
+  and `/dev/sign-message`. Always pass `$SIWE_MSG` straight from
+  `printf '%s' "$START" | jq -r .siwe_message` — never re-render or
+  re-quote.
+- The `omni_account` you signed with is NOT the one that derived
+  `$ADDR_A`. Re-derive: `agentkeys signer derive --omni-account
+  $OMNI_A` and confirm the address matches what you sent to
+  `/v1/auth/wallet/start`.
+- `DEV_KEY_SERVICE_MASTER_SECRET` rotated mid-flow. Re-derive
+  everything; previously-issued addresses are invalidated.
+
+### 14.5 `AssumeRoleWithWebIdentity` returns InvalidIdentityToken
 
 - **Issuer mismatch.** Confirm `discovery.issuer == $OIDC_ISSUER`
   byte-for-byte.
@@ -949,18 +1213,17 @@ Common ones:
 - **Audience mismatch.** AWS expects `aud=sts.amazonaws.com`. Decode
   the JWT and confirm.
 - **Stale OIDC provider.** If the broker's `kid` rotated and AWS
-  cached the old JWKS, re-register the provider:
-  `aws iam delete-open-id-connect-provider …` then re-create per
+  cached the old JWKS, re-register the provider per
   `cloud-setup.md §4.2`.
 
-### 14.3 S3 GetObject returns AccessDenied for own prefix
+### 14.6 S3 GetObject returns AccessDenied for own prefix
 
 The JWT isn't carrying the `https://aws.amazon.com/tags` claim. Decode
 and check (per §4.4 above). If the claim is present, confirm the role's
 trust policy has `sts:TagSession` and the `aws:RequestTag/...`
 condition (per `cloud-setup.md §4.3`).
 
-### 14.4 Broker exits 0 cleanly after ~24h
+### 14.7 Broker exits 0 cleanly after ~24h
 
 Designed behavior — the broker has a 24h max-uptime serve loop. The
 systemd unit ships with `Restart=always` (commit
@@ -975,34 +1238,55 @@ systemd restarts it automatically. Verify with
 These ship behind their own user-stories or hardening passes; the
 structural plumbing is in place but the live integration isn't wired:
 
+- **TEE-backed signer (issue #74 step 2).** Today's
+  `dev_key_service` keeps the master secret in a plain env var — fine
+  for dev / demo / single-operator deployments, **not** for any
+  environment where compromise of the host shell would be a security
+  incident. Step 2 swaps it for a TEE worker behind the same wire
+  shape. Daemon and CLI code do not change. See
+  [`docs/spec/signer-protocol.md`](spec/signer-protocol.md) for the
+  attestation handshake the TEE backend will add (`GET /dev/attestation`).
 - **Live EVM audit anchor.** The `EvmStubAnchor` round-trips without
   network. Real transaction submission + receipt polling lands in
   Phase E hardening (V0.1-FOLLOWUPS).
 - **TEE-derived OIDC signer.** The on-disk ES256 keypair is the v0.1
-  signer. Plan §8 (TEE) replaces it without changing JWKS/JWT/STS shape.
+  signer for the broker's OIDC keypair (separate from the
+  dev_key_service master secret). Plan §8 (TEE) replaces it without
+  changing JWKS/JWT/STS shape.
 - **`BROKER_REQUIRE_EXPLICIT_GRANT=true` default-on.** Today the
   Phase-0 NoGrant migration window is open; flip the default once
   every daemon has been issued a grant.
 - **Histogram metrics + per-handler counter bumps.** Counter shapes
   ship; latency histograms land in V0.1-FOLLOWUPS.
-- **Retire `/v1/mint-aws-creds` entirely (issue #71 Option A
-  closing step).** Provisioner / MCP / daemon now use
-  `/v1/mint-oidc-jwt` + client-side `AssumeRoleWithWebIdentity`
-  (landed in this guide's commit set). The endpoint stays for callers
-  who want server-side gates (audit + grants + idempotency); once
-  every operator's pipeline confirms the new path works in
-  production, the route can be dropped.
+- **Retire `/v1/mint-aws-creds` entirely.** The provisioner / MCP /
+  daemon use `/v1/mint-oidc-jwt` + client-side
+  `AssumeRoleWithWebIdentity` (issue #71 Option A). The route stays
+  for callers who want server-side gates; once every operator's
+  pipeline confirms the new path works in production, the route can
+  be dropped.
+- **Retire `/v1/auth/exchange` and backend `/session/validate`.**
+  Issue #74 step 1's CLI/daemon rewrite (this PR) removed every
+  in-tree caller of the legacy `/session/create` → bearer →
+  `/v1/auth/exchange` chain — production code now goes through
+  email/OAuth2 → omni → derive → SIWE → session-JWT. The shim itself
+  still exists for backward-compat with any out-of-tree caller; a
+  cleanup PR will delete the route, the validator
+  (`broker-server/src/auth.rs::validate_bearer_token`), and the env
+  vars (`BROKER_BACKEND_URL`, `BROKER_BACKEND_TIMEOUT_SECONDS`) once
+  external callers have migrated.
 
 See [`docs/spec/plans/issue-64/V0.1-FOLLOWUPS.md`](spec/plans/issue-64/V0.1-FOLLOWUPS.md)
-for the prioritized backlog.
+for the prioritized backlog and
+[`docs/spec/plans/issue-74-dev-key-service-plan.md`](spec/plans/issue-74-dev-key-service-plan.md)
+for the post-issue-#74 roadmap.
 
 ---
 
 ## 16. Live walkthrough on broker.litentry.org
 
-This section is the copy-paste runbook for verifying the migration
-end-to-end against the **live** broker at `https://broker.litentry.org`.
-Each block is tagged with where it runs.
+Copy-paste runbook for verifying the migration end-to-end against the
+**live** broker at `https://broker.litentry.org`. Each block is
+tagged with where it runs.
 
 ### 16.1 Pull + redeploy on the broker host
 
@@ -1014,14 +1298,18 @@ git fetch origin
 git checkout evm
 git pull --ff-only
 
-# Redeploy via the systemd-aware upgrade script. After the OIDC-only
-# migration the broker no longer needs DAEMON_ACCESS_KEY_ID env vars;
-# the systemd unit can run with no AWS creds.
-sudo bash scripts/setup-broker-host.sh --upgrade
+# Idempotent re-deploy. Same script handles bootstrap and upgrade —
+# no `--upgrade` flag needed. Issue #74 step 1 made the script
+# auto-generate /etc/agentkeys/dev-key-service.env on first run and
+# preserve it on subsequent runs (rotating it would invalidate every
+# previously-derived wallet).
+sudo bash scripts/setup-broker-host.sh --yes
 
-# Verify the broker is up.
-sudo systemctl --no-pager status agentkeys-broker
-sudo journalctl -u agentkeys-broker -n 50 --no-pager
+# Verify the broker + backend are up.
+sudo systemctl --no-pager status agentkeys-broker agentkeys-backend
+sudo journalctl -u agentkeys-broker  -n 50 --no-pager
+sudo journalctl -u agentkeys-backend -n 10 --no-pager
+# Look for: [mock-server] dev_key_service ENABLED (DEV ONLY — replace with TEE worker per issue #74 step 2)
 ```
 
 ### 16.2 Verify broker is creds-free
@@ -1032,10 +1320,7 @@ sudo systemctl show agentkeys-broker | grep -E "^Environment=" | tr ' ' '\n' \
   | grep -E "AWS_|DAEMON_|BROKER_DAEMON_" || echo "OK: no AWS_* / DAEMON_* env vars"
 ```
 
-The expected output is `OK: no AWS_* / DAEMON_* env vars`. If the
-unit still has `Environment=AWS_PROFILE=...` from a pre-migration
-deployment, drop the line and `sudo systemctl daemon-reload &&
-sudo systemctl restart agentkeys-broker`.
+The expected output is `OK: no AWS_* / DAEMON_* env vars`.
 
 ### 16.3 Public health checks (no creds needed)
 
@@ -1044,10 +1329,8 @@ sudo systemctl restart agentkeys-broker`.
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://broker.litentry.org/healthz
 # HTTP 200
 
-# `/readyz` is self-describing — body has `status: ready | degraded |
-# unready` and a `checks` array. HTTP 200 = ready/degraded, 503 = unready.
 curl -sS https://broker.litentry.org/readyz | jq -r .status
-# ready             ← anything else: `curl -s …/readyz | jq` for the full body
+# ready
 
 curl -sS --fail-with-body https://broker.litentry.org/.well-known/openid-configuration | jq -r .issuer
 # https://broker.litentry.org
@@ -1056,41 +1339,67 @@ curl -sS --fail-with-body https://broker.litentry.org/.well-known/jwks.json | jq
 # {"kty":"EC","crv":"P-256","alg":"ES256","kid":"v1-…"}
 ```
 
-### 16.4 SIWE wallet auth → session JWT
+### 16.4 Managed-wallet SIWE auth via the dev_key_service
 
-Generate two test wallets, sign in as wallet A, capture session JWT.
-Same as §2 above against the live broker. Repeat for wallet B if you
-want to demo the isolation property in §16.6.
+Bring up the SSH tunnel for the signer (§0.2 Option A):
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+ssh -N -L 18090:127.0.0.1:8090 agentkey@broker.litentry.org &
+TUNNEL_PID=$!
+export BACKEND_URL=http://127.0.0.1:18090
+curl -sS $BACKEND_URL/healthz   # ok
+```
+
+Compute omnis + derive wallets + run SIWE round-trip — exactly §0.3
+through §2.4 above, just with `$OIDC_ISSUER=https://broker.litentry.org`
+and `$BACKEND_URL=http://127.0.0.1:18090`.
+
+```bash
+omni() { printf '%s%s%s' "agentkeys" "$1" "$2" | shasum -a 256 | awk '{print $1}'; }
+OMNI_A=$(omni email "alice@demo.example")
+OMNI_B=$(omni email "bob@demo.example")
+
+ADDR_A=$(agentkeys signer derive --signer-url $BACKEND_URL --omni-account $OMNI_A --json | jq -r .address)
+ADDR_B=$(agentkeys signer derive --signer-url $BACKEND_URL --omni-account $OMNI_B --json | jq -r .address)
+
+# SIWE round-trip for A.
+START=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
+  -H 'content-type: application/json' \
+  -d "$(jq -n --arg a "$ADDR_A" '{address:$a, chain_id:84532}')")
+REQ_ID=$(printf '%s' "$START"  | jq -r .request_id)
+SIWE_MSG=$(printf '%s' "$START" | jq -r .siwe_message)
+SIG_A=$(agentkeys signer sign --signer-url $BACKEND_URL --omni-account $OMNI_A --message "$SIWE_MSG" --json | jq -r .signature)
+VERIFY=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
+  -H 'content-type: application/json' \
+  -d "$(jq -n --arg r "$REQ_ID" --arg s "$SIG_A" '{request_id:$r, signature:$s}')")
+SESSION_JWT_A=$(printf '%s' "$VERIFY" | jq -r .session_jwt)
+echo "SESSION_JWT_A=${SESSION_JWT_A:0:32}…"
+```
+
+Repeat for B. Or, for the demo's purposes, only A is needed for the
+mint paths in §16.5, and the seed objects + isolation proof in §16.6
+exercise both prefixes.
 
 ### 16.5 Mint OIDC JWT + AssumeRoleWithWebIdentity (the new auto-provision path)
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# (Assumes operator-workstation.env was sourced in §0 — $OIDC_ISSUER,
-# $DATA_ROLE_ARN, $ACCOUNT_ID are already set.)
 awsp agentkeys-admin
 
-# Get the OIDC JWT.
 JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
-echo "JWT=${JWT:0:32}…  length=${#JWT}"
 echo "JWT prefix: ${JWT:0:40}…"
 
-# Exchange it for AWS creds — UNAUTHENTICATED to AWS (the JWT authenticates).
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn "$DATA_ROLE_ARN" \
   --role-session-name "live-demo-$(date +%s)" \
   --web-identity-token "$JWT")
-echo "CREDS=${CREDS:0:32}…  length=${#CREDS}"
 export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
-echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:32}…  length=${#AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
-echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:0:32}…  length=${#AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
-echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:0:32}…  length=${#AWS_SESSION_TOKEN}"
 
-# Confirm — the assumed role identity, NOT your admin profile.
 aws sts get-caller-identity
 # {
 #   "UserId": "AROA…<role-id>:live-demo-…",
@@ -1102,18 +1411,14 @@ aws sts get-caller-identity
 
 ```bash
 # === ON OPERATOR WORKSTATION (still with assumed-role creds) ===
-WALLET_A_LC=$(echo "$ADDR_A" | tr '[:upper:]' '[:lower:]')
-echo "WALLET_A_LC=$WALLET_A_LC"
-WALLET_B_LC=$(echo "$ADDR_B" | tr '[:upper:]' '[:lower:]')
-echo "WALLET_B_LC=$WALLET_B_LC"
 
 # Wallet A's prefix — SUCCESS.
 aws s3api list-objects-v2 --bucket "$BUCKET" \
-  --prefix "bots/${WALLET_A_LC}/" --query 'Contents[*].Key'
+  --prefix "bots/${ADDR_A}/" --query 'Contents[*].Key'
 
 # Wallet B's prefix — AccessDenied (cloud-enforced).
 aws s3api get-object --bucket "$BUCKET" \
-  --key "bots/${WALLET_B_LC}/hello.txt" /tmp/got-B.txt
+  --key "bots/${ADDR_B}/hello.txt" /tmp/got-B.txt
 # An error occurred (AccessDenied) when calling the GetObject operation
 ```
 
@@ -1123,18 +1428,41 @@ aws s3api get-object --bucket "$BUCKET" \
 # === ON OPERATOR WORKSTATION ===
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
-# The daemon reads these env vars and threads them through to the
-# provisioner's fetch_via_broker_default_ttl().
 export AGENTKEYS_BROKER_URL=https://broker.litentry.org
 export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
+export AGENTKEYS_SIGNER_URL=$BACKEND_URL          # SSH-tunnel from §0.2
 export AWS_REGION=us-east-1
 
-# Run the provisioner-driven scraper. The subprocess receives
-# AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN via env injection — those creds
-# are minted by the daemon calling /v1/mint-oidc-jwt + AssumeRoleWithWebIdentity.
-agentkeys-cli provision --service openrouter
+# Bootstrap the master session via the new flow. The CLI prompts you
+# to click the magic link; once verified, it derives + links + SIWEs
+# and saves the EVM session JWT to the OS keychain.
+agentkeys init \
+  --email alice@demo.example \
+  --broker-url $AGENTKEYS_BROKER_URL \
+  --signer-url $AGENTKEYS_SIGNER_URL
+
+# Now run the provisioner. AWS temp creds get minted via
+# /v1/mint-oidc-jwt + AssumeRoleWithWebIdentity using the saved
+# EVM session JWT.
+agentkeys provision openrouter
 # … scraper runs, fetches the verification email from S3 using the
 # injected temp creds …
+```
+
+For a long-lived headless daemon (e.g. on a server), use
+`agentkeys-daemon --init-email <addr>` instead — same flow, but the
+daemon stays running afterward to serve MCP via stdio:
+
+```bash
+agentkeys-daemon \
+  --backend $BACKEND_URL \
+  --broker-url $AGENTKEYS_BROKER_URL \
+  --signer-url $AGENTKEYS_SIGNER_URL \
+  --init-email alice@demo.example \
+  --stdio
+# agentkeys-daemon: bootstrapping via email-link for alice@demo.example; click the magic link in your inbox
+# (operator clicks the magic link in their inbox)
+# (daemon then enters MCP-stdio loop)
 ```
 
 ### 16.8 Audit log inspection
@@ -1153,10 +1481,9 @@ sudo sqlite3 /var/lib/agentkeys/.agentkeys/broker/audit.sqlite \
 After the OIDC-only migration, the daemon-side path is invisible to
 the broker's audit log (the broker only sees `/v1/mint-oidc-jwt`
 calls). Use AWS CloudTrail's `AssumeRoleWithWebIdentity` events for
-the STS-side audit trail.
-
-If you need server-side audit row coverage of the actual mint, hit
-`/v1/mint-aws-creds` instead — it audits before returning creds.
+the STS-side audit trail. If you need server-side audit row coverage
+of the actual mint, hit `/v1/mint-aws-creds` instead — it audits before
+returning creds.
 
 ---
 
@@ -1168,15 +1495,29 @@ Reset to your admin profile after the demo:
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 awsp agentkeys-admin
 aws sts get-caller-identity        # confirm: back to admin
+
+# Tear down the SSH tunnel from §0.2.
+kill $TUNNEL_PID 2>/dev/null || true
 ```
 
 The broker keeps running. To tear down the cloud-side state
 (provider, role, bucket policy), follow `cloud-setup.md §6`.
 
+> **Do NOT casually rotate `DEV_KEY_SERVICE_MASTER_SECRET`** —
+> rotating invalidates every previously-derived wallet for every
+> linked identity. The TEE worker (issue #74 step 2) will define a
+> formal rotation runbook with key-version bumps; the dev backend
+> intentionally has none.
+
 ---
 
 ## Cross-references
 
+- [`docs/spec/signer-protocol.md`](spec/signer-protocol.md) — v0
+  wire contract for the signer edge (`/dev/derive-address`,
+  `/dev/sign-message`, error envelope, future attestation handshake).
+- [`docs/spec/plans/issue-74-dev-key-service-plan.md`](spec/plans/issue-74-dev-key-service-plan.md)
+  — the canonical issue #74 plan.
 - [`docs/operator-runbook-stage7.md`](operator-runbook-stage7.md) —
   authoritative env-var inventory, BOOT_FAIL anchors, recovery
   procedures, OAuth2/email setup details.
@@ -1186,8 +1527,5 @@ The broker keeps running. To tear down the cloud-side state
   the canonical Stage 7 plan (§6 Refuse-to-boot tiers; §3.5 plugin
   trait surface; §3.5.4 OAuth2 security posture; §3.5.6 dual-keypair
   rationale).
-- [`docs/spec/plans/issue-64/PHASE-0-CHECKPOINT.md`](spec/plans/issue-64/PHASE-0-CHECKPOINT.md)
-  — Phase-0-isolated localhost checkpoint that this guide
-  generalizes to a real cloud deployment.
 - [`harness/stage-7-issue-64-done.sh`](../harness/stage-7-issue-64-done.sh)
   — programmatic equivalent of §13 above (the gate CI runs).

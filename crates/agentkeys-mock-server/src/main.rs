@@ -1,4 +1,4 @@
-use agentkeys_mock_server::{create_router, db, state::AppState};
+use agentkeys_mock_server::{create_router, db, dev_key_service::DevKeyService, state::AppState};
 use clap::Parser;
 use std::sync::Arc;
 
@@ -15,7 +15,29 @@ async fn main() {
 
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
-    let state = Arc::new(AppState::new(conn));
+
+    // Load the dev signer from `DEV_KEY_SERVICE_MASTER_SECRET`. Unset →
+    // `/dev/*` returns 503; malformed → fail boot loud (operator error).
+    let dev_signer = match DevKeyService::from_env() {
+        Ok(opt) => {
+            if opt.is_some() {
+                eprintln!(
+                    "[mock-server] dev_key_service ENABLED (DEV ONLY — replace with TEE worker per issue #74 step 2)"
+                );
+            } else {
+                eprintln!(
+                    "[mock-server] dev_key_service disabled (set DEV_KEY_SERVICE_MASTER_SECRET to enable)"
+                );
+            }
+            opt
+        }
+        Err(e) => {
+            eprintln!("[mock-server] FATAL: invalid DEV_KEY_SERVICE_MASTER_SECRET: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let state = Arc::new(AppState::new(conn).with_dev_signer(dev_signer));
 
     let app = create_router(state);
 
