@@ -138,7 +138,10 @@ identity_proof)`.
 
 ### `evm` (wallet-sig)
 
-The user signs a SIWE-shaped binding payload with their EVM key:
+The user signs a SIWE-shaped binding payload with their EVM key. The
+device pubkey is part of the signed payload itself, so the EVM
+signature simultaneously proves identity ownership AND commits to
+the device pubkey.
 
 ```
 agentkeys.example wants you to authorize a device key for omni X:
@@ -156,14 +159,28 @@ Issued At: <iso8601>
 Expiration Time: <iso8601>
 ```
 
+Daemon:
+1. Computes `pop_sig = sign(D_priv, canonical(siwe_payload))` — proof
+   that the daemon actually holds `D_priv` for the `D_pub` written
+   into the SIWE payload.
+2. Submits `{siwe_payload, evm_sig, device_pop_sig: pop_sig}` to the
+   broker.
+
 Broker:
-1. Verifies EIP-191 ecrecover yields the wallet address claimed by the
-   payload.
+1. Verifies EIP-191 ecrecover on `evm_sig` yields the wallet address
+   claimed by the payload.
 2. Verifies `SHA256("agentkeys" || "evm" || lower(wallet_address)) == omni`.
-3. Stores `(omni, device_pubkey, exp)` and mints session JWT with
+3. Verifies `pop_sig` against `D_pub` over the canonicalized SIWE
+   payload — proves device-key possession (closes the same Q7 gap as
+   the email flow).
+4. Stores `(omni, device_pubkey, exp)` and mints session JWT with
    `agentkeys_device_pubkey` claim.
 
-This is `EvmSiweSigned` extended with the device-pubkey commit.
+This is `EvmSiweSigned` extended with both (a) the device-pubkey
+commit inside the SIWE payload and (b) the device-pubkey
+proof-of-possession. The two signatures together prove "this user
+owns the EVM identity AND this daemon controls the device key" —
+neither alone is sufficient.
 
 ### `email`
 
@@ -204,16 +221,31 @@ much higher bar than today's bearer-only model.
 
 ### `oauth2_google`
 
-The OAuth2 `state` parameter carries a hash of the device pubkey:
+The OAuth2 `state` parameter carries a hash of the device pubkey
+(binds D_pub through Google's redirect), AND the start request
+itself carries a `pop_sig` so the broker verifies device-key
+possession before issuing any state value (closes the same Q7 gap
+as the email flow).
 
-1. Daemon generates `D_pub`, computes `state = SHA256(D_pub || nonce)`.
-2. Daemon calls `POST /v1/auth/oauth2/start` with body
-   `{provider: "google", device_pubkey: D_pub, state_nonce: nonce}`.
-3. Broker stores `(request_id, D_pub, nonce, expected_state)`,
+1. Daemon generates `(D_priv, D_pub)` and a fresh `state_nonce`.
+2. Daemon computes:
+   - `expected_state = SHA256(D_pub || state_nonce)`
+   - `pop_sig = sign(D_priv, canonical("oauth2_google" || D_pub || state_nonce))`
+3. Daemon calls `POST /v1/auth/oauth2/start` with body
+   `{provider: "google", device_pubkey: D_pub, state_nonce, pop_sig}`.
+4. Broker verifies `pop_sig` against `D_pub`; rejects with HTTP 400
+   `bad_pop` on mismatch.
+5. Broker stores `(request_id, D_pub, state_nonce, expected_state)`;
    returns the Google authorization URL with `state=expected_state`.
-4. Operator completes Google sign-in.
-5. Broker's OAuth2 callback verifies the `state` matches the stored
-   value, then mints session JWT with `agentkeys_device_pubkey = D_pub`.
+6. Operator completes Google sign-in.
+7. Broker's OAuth2 callback verifies `state == expected_state`
+   (proves the same `D_pub` flowed through the OAuth2 round-trip),
+   then mints session JWT with `agentkeys_device_pubkey = D_pub`.
+
+Defense composes three layers: PoP at start time (prevents D_pub
+substitution by an attacker who only observed it), `state` binding
+(prevents callback hijack to a different D_pub), and Google's own
+identity verification.
 
 ### `passkey`
 

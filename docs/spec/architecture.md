@@ -645,7 +645,7 @@ boundary (stdin/stdout JSON), never in-process FFI.
 
 ---
 
-## 9. Component inventory (preserved from prior architecture revision)
+## 9. Component inventory
 
 | # | Component | Where it runs | Primary job |
 |---|---|---|---|
@@ -666,7 +666,7 @@ boundary (stdin/stdout JSON), never in-process FFI.
 
 ---
 
-## 10. Language choices (preserved)
+## 10. Language choices
 
 **Rust for everything in the trust boundary.** Browser automation
 (#8) is the one TypeScript exception — anti-bot tooling

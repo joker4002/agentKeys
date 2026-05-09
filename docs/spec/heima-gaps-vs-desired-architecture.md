@@ -34,16 +34,16 @@ The table below is the at-a-glance answer to "where do we stand?" Per-gap detail
 | § | Gap | Status | Resolution path |
 |---|---|---|---|
 | 2 | HDKD master-seed key derivation | **PARTIAL — in-tree equivalent shipped** | AgentKeys' `dev_key_service` ships HKDF-from-master-secret derivation for the per-user wallet key (outside the TEE, dev-stage). Heima upstream is unchanged; full resolution waits on issue #74 step 2 (TEE worker). |
-| 3 | TEE exposes an OIDC provider | **RESOLVED IN-TREE (operator-hosted)** | The Stage 7 Rust broker (PR #61, deployed in PR #73) ships `/.well-known/openid-configuration` + JWKS + bearer-gated `mint-oidc-jwt`. The trust anchor is the on-disk ES256 keypair, not a TEE — see [`architecture.md` §3 K2 + §11 row "Audit destination is pluggable"](architecture.md). Heima TEE-derived issuer remains the v0.2 hardening target. |
+| 3 | TEE exposes an OIDC provider | **RESOLVED IN-TREE (operator-hosted)** | The Stage 7 Rust broker (PR #61, deployed in PR #73) ships `/.well-known/openid-configuration` + JWKS + bearer-gated `mint-oidc-jwt`. The trust anchor is the on-disk ES256 keypair, not a TEE — see [`architecture.md` §3 K2 + §7 "Pluggable surfaces"](architecture.md). Heima TEE-derived issuer remains the v0.2 hardening target. |
 | 4 | BYODKIM (TEE-held DKIM keys) | **GAP — unchanged** | Stage 6 ships per-domain DKIM signing; today it's TEE-only design with no implementation. Plan unchanged. |
 | 5 | On-chain email pallets | **GAP — unchanged** | `pallet-email-grants` + `pallet-email-audit` still don't exist upstream. Stage 6 blocker per original plan. |
 | 6 | Session-tag JWT claims for AWS PrincipalTag | **RESOLVED IN-TREE** | The broker mints OIDC JWTs with `agentkeys_user_wallet` claim + `https://aws.amazon.com/tags` block; AWS STS exchanges for tagged sessions; S3 PrincipalTag policies enforce per-user isolation. Verified end-to-end in [`stage7-demo-and-verification.md` §4](../stage7-demo-and-verification.md). |
 | 7 | Attested publication of issuer pubkey | **GAP — unchanged** | Stage 7 hardening follow-up; out of scope for v0.1. |
 | 8 | `pallet-oidc-pubkeys` (URL-hijack defense) | **GAP — unchanged** | Stage 7b; depends on §3 having TEE-attested rather than on-disk keypair. |
 | 9 | `pallet-enclave-successors` (MRSIGNER governance) | **GAP — unchanged** | Required only when MRSIGNER rotation lands; not a v0.1 blocker. |
-| 10 | (tracking metadata) | unchanged | — |
-| 11 | **(NEW)** Signer-edge contract for the per-user wallet key | **PARTIAL — wire shape pinned, dev-stage backend** | `signer-protocol.md` v0.1 ships the wire contract; `dev_key_service` is the dev-stage HKDF backend; issue #74 step 2 (TEE worker) closes the trust gap. |
-| 12 | **(NEW)** Per-request crypto auth on the signer edge | **PLANNED** | Heima's `ClientAuth::EvmSiweSigned` / `BackendSigned` tier model is the prior art. Issue #74 step 1c (device-key auth) is a strict superset — see [`plans/issue-74-step-1c-device-key-auth.md`](plans/issue-74-step-1c-device-key-auth.md). |
+| 10 | **(NEW)** Signer-edge contract for the per-user wallet key | **PARTIAL — wire shape pinned, dev-stage backend** | `signer-protocol.md` v0.1 ships the wire contract; `dev_key_service` is the dev-stage HKDF backend; issue #74 step 2 (TEE worker) closes the trust gap. |
+| 11 | **(NEW)** Per-request crypto auth on the signer edge | **PLANNED** | Heima's `ClientAuth::EvmSiweSigned` / `BackendSigned` tier model is the prior art. Issue #74 step 1c (device-key auth) is a strict superset — see [`plans/issue-74-step-1c-device-key-auth.md`](plans/issue-74-step-1c-device-key-auth.md). |
+| 12 | (tracking metadata) | n/a | Resolution log lives in §12 below. |
 
 ---
 
@@ -358,7 +358,7 @@ Depends on §2 (HDKD) landing first, because the rotation is only cheap under HD
 
 ---
 
-## 11. Gap (NEW): signer-edge contract for the per-user wallet key
+## 10. Gap (NEW): signer-edge contract for the per-user wallet key
 
 **Status:** PARTIAL — wire shape pinned, dev-stage backend deployed (PR #75); TEE-backed implementation tracked under issue #74 step 2.
 
@@ -421,7 +421,7 @@ as a normal config value.
 
 ---
 
-## 12. Gap (NEW): per-request crypto auth on the signer edge
+## 11. Gap (NEW): per-request crypto auth on the signer edge
 
 **Status:** PLANNED — design in [`plans/issue-74-step-1c-device-key-auth.md`](plans/issue-74-step-1c-device-key-auth.md); CEO review pending.
 
@@ -487,7 +487,7 @@ fall back to `JwtBearer`.
 - **Closes the broker-as-SPOF risk on the signer call surface.**
   Broker can be fully owned and the attacker cannot sign as any
   user.
-- **TEE swap-ready** (gap §11). The TEE worker (issue #74 step 2)
+- **TEE swap-ready** (gap §10). The TEE worker (issue #74 step 2)
   inherits the device-key auth scheme without changes — the TEE
   doesn't need to call out to the broker on every sign request.
 - **Aligned with web3 prior art:** WebAuthn / passkey, EIP-7702
@@ -513,15 +513,15 @@ implementation stages laid out in the plan doc:
 11. Live broker host redeploy + smoke walkthrough
 
 Rough total: ~1200 LOC + protocol-doc revision + 11 stage-gated test
-waves. Blocks the TEE worker (gap §11) because step 2's threat
+waves. Blocks the TEE worker (gap §10) because step 2's threat
 model assumes the signer can't be tricked by a compromised broker
 — exactly what step 1c delivers.
 
 ---
 
-## 10. Tracking
+## 12. Tracking
 
-- Each gap is owned as a separate issue in the `litentry/agentKeys` repo. PR #75 / issue #76 close §11 and queue §12 respectively.
+- Each gap is owned as a separate issue in the `litentry/agentKeys` repo. PR #75 / issue #76 close §10 and queue §11 respectively.
 - When a gap closes, mark the section **RESOLVED** with the merge commit(s) and the resolution path (A/B/C from §2).
 - When a new delta is discovered, append a new section here before revising the wiki, so the wiki stays "desired" and this doc stays "gap".
 
@@ -531,5 +531,5 @@ model assumes the signer can't be tricked by a compromised broker
 |---|---|---|---|
 | §3 OIDC provider | 2026-04-28 | GAP → RESOLVED IN-TREE | PR #61 (broker phase 2 OIDC issuer) |
 | §6 PrincipalTag JWT claim | 2026-04-28 | GAP → RESOLVED IN-TREE | PR #61 + cloud-setup §4.4 |
-| §11 signer-edge contract | 2026-05-08 | (NEW) → PARTIAL | PR #75 (issue #74 step 1) |
-| §12 device-key auth | 2026-05-09 | (NEW) → PLANNED | issue [#76](https://github.com/litentry/agentKeys/issues/76) |
+| §10 signer-edge contract | 2026-05-08 | (NEW) → PARTIAL | PR #75 (issue #74 step 1) |
+| §11 device-key auth | 2026-05-09 | (NEW) → PLANNED | issue [#76](https://github.com/litentry/agentKeys/issues/76) |
