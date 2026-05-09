@@ -86,9 +86,14 @@ process boundary and (at production deployment) by separate listener
 
 ```mermaid
 flowchart TB
-  subgraph TB1["Trust boundary 1 — Operator workstation"]
-    OS_KC["OS keychain<br/>session JWT<br/>device privkey (post-step-1c)"]
+  subgraph TB1["Trust boundary 1 — Master workstation"]
+    OS_KC["OS keychain<br/>session JWT (K6)<br/>device privkey K10 (post-step-1c)"]
+    PA["Platform authenticator<br/>(Secure Enclave / TPM / StrongBox)<br/>K11 — sealed in hardware"]
     EVM_W["MetaMask / hardware wallet<br/>(only if identity_type = evm)"]
+  end
+
+  subgraph TB1A["Trust boundary 1A — Agent machine"]
+    AGENT_KC["OS keychain OR file backend<br/>session JWT (K6) +<br/>device privkey K10<br/>NO K11"]
   end
 
   subgraph TB2["Trust boundary 2 — Broker process"]
@@ -112,7 +117,11 @@ flowchart TB
 
   OS_KC -. session_jwt .-> SESS_KP
   OS_KC -. derive_address(omni) .-> SIGNER_KP
+  PA -. WebAuthn enroll/get (binding only) .-> SESS_KP
   EVM_W -. SIWE signature .-> SESS_KP
+  AGENT_KC -. session_jwt .-> SESS_KP
+  AGENT_KC -. /dev/sign-message .-> SIGNER_KP
+  OS_KC -. mint link-code .-> AGENT_KC
   OIDC_KP -. OIDC JWT .-> AWS_KMS
 ```
 
@@ -120,8 +129,10 @@ flowchart TB
 
 | Boundary breached | What attacker gains | What they CANNOT do |
 |---|---|---|
-| Operator workstation | Stolen session JWT (replay until exp); stolen device key (post-step-1c, sign on operator's behalf until rotation) | Cannot derive wallets for other operators; cannot mint session JWTs for new identities |
-| Broker process | Mint session JWTs for any omni; mint OIDC JWTs (gated by JWT auth, defeated by full broker compromise) | Cannot derive wallets; cannot sign EIP-191 messages; cannot AssumeRole (no AWS principal at broker) |
+| **Master workstation** (host root, but no hardware presence) | Stolen session JWT (replay until exp); stolen K10 device key (sign on operator's behalf until rotation) | **Cannot complete WebAuthn ceremony** to bind a new device or rotate K10 — K11 sealed in Secure Enclave/TPM requires biometric/PIN. Cannot derive wallets for other operators; cannot mint session JWTs for new identities. |
+| **Master workstation** (full compromise WITH hardware presence — e.g. attacker physically at machine and unlocks biometric) | Above, plus: rebind K10 to attacker-controlled pubkey, rotate device key, mint link codes for new agents | Same as above — bounded to this operator's omni; cannot reach other operators' material |
+| **Agent machine** (sandbox VM, host root) | Stolen K10; stolen session JWT (replay until session-JWT TTL expires) | Cannot rebind without master-issued link code; master link-code issuance is gated by master J1 (which is gated by master K11). Cannot escalate to master compromise. |
+| Broker process | Mint session JWTs for any omni; mint OIDC JWTs (gated by JWT auth, defeated by full broker compromise) | Cannot derive wallets; cannot sign EIP-191 messages; cannot AssumeRole (no AWS principal at broker). **Post-step-1c: cannot forge device signatures** because per-request K10 signature is verified at signer — broker compromise alone cannot make the signer accept an attacker request. |
 | Signer process (current step-1) | Derive any wallet from any omni; sign any EIP-191 message for any omni | Cannot mint session JWTs; cannot mint OIDC JWTs; cannot reach AWS |
 | Signer process (post-step-1c) | Above, AND can verify (but not forge) device-signed requests | Same as above; per-request device signatures still gate the call surface |
 | Backend (mock-server) | Stale legacy session bearer; credential ciphertext (today's mock storage) | Cannot affect Stage 7 mint paths (broker verifies session JWTs locally post-issue-#71) |
@@ -153,9 +164,10 @@ as the source-of-truth when designing the Figma trust-flow diagram.
 | K7 | OIDC JWT | JWT (ES256 by K2) | Daemon memory only (transient — fetched per mint) | Web-identity token for `AssumeRoleWithWebIdentity` against AWS STS | TTL = `BROKER_OIDC_JWT_TTL_SECONDS` (bounded `[60, 3600]`, default 300s) |
 | K8 | AWS temp credentials | STS access key + secret + session token | Daemon memory only (transient — refetched per provision/mint) | Direct AWS API access scoped by PrincipalTag = wallet | 1-hour TTL (STS default); short by design |
 | K9 | DKIM keypair (per outbound domain) | Ed25519 | Stage 6 design — currently TEE-only, not yet implemented | **DKIM = DomainKeys Identified Mail (RFC 6376).** A per-domain signing key used to sign outbound email headers; the matching public key is published as a DNS TXT record at `<selector>._domainkey.<domain>`. Receiving mail servers fetch the pubkey via DNS, verify the signature, and use the result to decide whether the message originated from a server authorized for that domain — input to spam filtering, deliverability, and brand-impersonation defense. AgentKeys needs K9 because Stage 6 sends mail FROM operator-controlled sub-domains (e.g. for OpenRouter signups via plus-aliased addresses) and we hold the signing key ourselves rather than delegating to SES (so AWS never sees the plaintext content) — see [`heima-gaps §4`](heima-gaps-vs-desired-architecture.md). | TBD per Stage 6 spec ([`heima-gaps §4`](heima-gaps-vs-desired-architecture.md)) |
-| K10 | Device key (planned, step-1c) | secp256k1 | Operator's OS keychain (per workstation, not per identity); pubkey registered at the broker as a session JWT claim | Per-request signature on `/dev/sign-message` calls — eliminates broker-as-SPOF for signer auth | Generated at `agentkeys init`; bound to a session JWT; rotated by re-init; TTL = session JWT TTL |
+| K10 | Device key (planned, step-1c) | secp256k1 | **Master**: OS keychain (TouchID-backed on macOS, etc.) on the operator's workstation. **Agent**: OS keychain when available, else file backend at `~/.agentkeys/daemon-<wallet>/session.json` (mode 0600) — see §5a.4. Pubkey registered at the broker as a session JWT claim. | Per-request signature on `/dev/sign-message` calls — eliminates broker-as-SPOF for signer auth | Generated at init (master: WebAuthn-bound per §5a.1.M; agent: link-code-bound per §5a.1.A); bound to a session JWT; rotated by `agentkeys device rotate` per §5a.3 or by re-init; TTL = session JWT TTL |
+| K11 | WebAuthn platform-authenticator credential (planned v0.2, master only) | Per-RP credential (typically EC P-256 on macOS Secure Enclave / Windows TPM / Android StrongBox) | **Master only.** Sealed inside the platform authenticator's hardware boundary (Secure Enclave / TPM / StrongBox); cannot be exfiltrated even by host-OS root. Credential ID published at the broker as a session JWT claim (`agentkeys_webauthn_cred`). | Hardware-attested **user-presence proof at the binding ceremony** (init per §5a.1.M, device-switch per §5a.2.M, intentional rotation per §5a.3.M). NOT used per-request — K10 covers per-request signing without biometric. | Created at master init; survives K10 rotations; revoked by removing the credential from the broker's bound list or by destroying the platform authenticator (factory reset, hardware destruction) |
 
-**Notation throughout the rest of this doc:** the K1–K10 indices
+**Notation throughout the rest of this doc:** the K1–K11 indices
 above are referenced directly so any flow can be unambiguously
 mapped back to which key signed/verified/wrapped what.
 
@@ -212,6 +224,13 @@ mints the long-lived EVM-omni session JWT). Step 1c (planned) puts
 device-key generation **before** the identity ceremony so the
 ceremony can bind the device pubkey atomically — same trust shape
 as a WebAuthn credential creation ceremony.
+
+> **Status:** the sequence below shows the **v1c-interim email
+> flow** with bespoke `pop_sig` field. For the v0.2 target
+> (uniform WebAuthn binding for masters, link-code binding for
+> agents), see [§5a.1](#5a1-first-time-init-binding) — that is
+> the canonical reference. §5 here is preserved for the
+> implementation actually shipping in step-1c.
 
 ```mermaid
 sequenceDiagram
@@ -291,251 +310,346 @@ sandbox-link-code) and the device-rotation flows, see §5a below.
 ## 5a. Per-identity-type init + device-rotation processes
 
 This section is the canonical reference for **how the device-key
-binding works for each identity type**, including new-device
-binding and intentional rotation. The step-1c plan defers to this
-table; if the two ever diverge, this doc is authoritative.
+binding works** across identity types and machine classes. The
+step-1c plan defers to this section; if the two ever diverge, this
+doc is authoritative.
 
-The four steps in §5 (generate D, identity ceremony, derive wallet,
-SIWE) are **identity-type-uniform** at the wallet-binding +
-SIWE layers. Only **step 1 (the identity ceremony)** differs per
-type — that is what proves the operator owns the authenticator,
-and that is where D_pub gets bound.
+### Two machine classes, two binding ceremonies
 
-### 5a.1 First-time init binding (per identity type)
+The init flow has two halves: an **identity ceremony** (proves the
+operator owns the authenticator: email / OAuth2 sub / EVM wallet)
+and a **device-key binding ceremony** (proves the machine
+requesting the binding holds the device private key D_priv). Identity
+ceremonies are identity-source-specific and cannot be normalized
+— they are what proves the human. The binding ceremony branches
+on machine class:
 
-**email-link** (canonical flow per §5; reproduced here for
-completeness)
+| Machine class | Binding ceremony | Why |
+|---|---|---|
+| **Master machine** — laptop / desktop with platform authenticator (Touch ID / Windows Hello / Android biometric) | **WebAuthn enrollment** (K11). Hardware-attested, phishing-resistant, identity-type-agnostic. | One ceremony shape regardless of identity type; D_pub is committed atomically inside the WebAuthn challenge so no separate `pop_sig` field is needed. |
+| **Agent machine** — VM / Linux box without platform authenticator / CI runner / `agent-infra/sandbox` container | **Link-code** redeemed against the master's authenticated session. | Agent has no human present and no hardware authenticator to attest to. Master's WebAuthn-attested J1 vouches; agent only proves possession of D_priv via PoP over the link code. |
 
-```
-0. CLI: generate (D_priv, D_pub); store D_priv in OS keychain.
-1. CLI → broker:  POST /v1/auth/email/request
-                   {email, device_pubkey: D_pub, pop_sig}
-2. Broker:        verify pop_sig (proves CLI holds D_priv);
-                   store (request_id, email, D_pub, expiry);
-                   email magic link with ?device=D_pub.
-3. Operator:      clicks link in inbox → broker confirms ?device
-                   matches stored D_pub.
-4. CLI → broker:  poll status → receive J0 with claim D_pub.
-5. CLI → signer:  derive address; SIWE round-trip → J1 (bound to D_pub).
-```
+**YubiKey-on-Linux as a master tier** (roaming authenticator binding ceremony, lets a Linux box act as a master without a built-in platform authenticator) is deferred — see [issue #79](https://github.com/litentry/agentKeys/issues/79).
 
-**oauth2_google**
+### Status of the WebAuthn-uniform binding (v1c → v0.2)
 
-```
-0. CLI: generate (D_priv, D_pub); store D_priv in OS keychain.
-1. CLI: compute state_nonce = random; expected_state = SHA256(D_pub || state_nonce).
-2. CLI → broker:  POST /v1/auth/oauth2/start
-                   {provider: "google", device_pubkey: D_pub,
-                    state_nonce, pop_sig}
-3. Broker:        verify pop_sig; store (request_id, D_pub,
-                   state_nonce, expected_state); return Google
-                   authorization URL with state=expected_state.
-4. Operator:      opens URL in browser; completes Google sign-in.
-5. Google:        redirects to broker with ?code, ?state.
-6. Broker:        verify state == expected_state (proves the same
-                   D_pub flowed through the OAuth2 round-trip);
-                   exchange ?code for Google ID token; mint J0.
-7. CLI → broker:  poll status → receive J0 with claim D_pub.
-8. (steps 5-onwards from email flow: derive + link + SIWE)
-```
+The four bespoke per-identity PoP shapes documented in earlier
+revisions (`pop_sig` field for `email_request` and `oauth2_start`,
+dual-sign-SIWE for `evm`, separate WebAuthn for `passkey`) are
+**superseded** by the uniform WebAuthn enrollment described in
+§5a.1 below. v1c may ship the bespoke shapes as an interim; v0.2
+collapses them into the WebAuthn-uniform ceremony. The
+identity-source ceremonies (email click, OAuth callback, EVM SIWE
+to prove identity) remain per-type because they are inherent to
+the identity source.
 
-The `state` parameter is what binds D_pub through Google's
-out-of-band redirect. An attacker who substitutes a different
-`state` at any step gets `state_mismatch` and the OAuth2 callback
-fails.
+### 5a.1 First-time init binding
 
-**evm (operator's local EVM wallet — MetaMask / hardware wallet)**
+The flow is a two-stage pipeline:
 
-The user has a real EVM keypair (E_user). They sign a binding
-payload with E_user; broker verifies via EIP-191 ecrecover and
-binds D_pub.
+1. **Identity ceremony** — verify the operator's authenticator. One of `email-link`, `oauth2_google`, `evm`, `passkey-as-identity` (see below). Returns `(verified_identity, request_id, binding_nonce, expiry)` to the broker; broker does NOT mint a session JWT yet.
+2. **Binding ceremony** — bind the device pubkey D_pub atomically with the JWT mint. Branches on machine class (master → WebAuthn; agent → link-code). See `5a.1.M` and `5a.1.A` below.
+
+Both halves must succeed before the broker mints J0. D_pub is a claim in J0; subsequent `/dev/*` calls verify per-request signatures against that claim per [step-1c plan](plans/issue-74-step-1c-device-key-auth.md).
+
+#### Identity ceremonies (verify the human)
+
+Identity verification is identity-source-specific — these prove "the human owns the authenticator," nothing more. Each ceremony hands the broker a `binding_nonce` to feed into the binding ceremony.
+
+| Identity type | Ceremony shape | Output |
+|---|---|---|
+| `email-link` | Broker emails magic link to claimed address; operator clicks; broker confirms link consumption single-use within TTL | `(email, binding_nonce)` |
+| `oauth2_google` | Broker redirects browser to Google; OAuth2 callback returns `code`; broker exchanges `code` for ID token; verifies issuer, audience, signature | `(google_sub, binding_nonce)` |
+| `evm` | Broker generates SIWE-shaped identity-only payload (NO `Device Pubkey` field — that lives in the binding ceremony); operator signs with EVM key (MetaMask / hardware wallet); broker verifies via EIP-191 ecrecover | `(evm_address, binding_nonce)` |
+| `passkey-as-identity` | WebAuthn assertion against an existing platform-authenticator credential the broker already knows about (i.e., this is for re-auth, not first-time enrollment) | `(webauthn_user_handle, binding_nonce)` |
+
+The `binding_nonce` is a 32-byte CSPRNG value the broker stores alongside the verified-identity row. It is consumed by exactly one binding ceremony within the row's TTL (default 5 minutes); reuse rejected.
+
+#### 5a.1.M Master binding ceremony — WebAuthn (uniform, v0.2 target)
 
 ```
-0. CLI: generate (D_priv, D_pub); store D_priv in OS keychain.
-1. CLI → broker:  POST /v1/auth/wallet/start
-                   {address: E_user_address, chain_id,
-                    purpose: "device_bind", device_pubkey: D_pub}
-2. Broker:        return SIWE-shaped binding payload that includes:
-                     "Authorize device_pubkey D_pub for omni X"
-                     "Wallet: E_user_address"
-                     "Device Pubkey: D_pub"
-                     "Nonce: ..."
-                     "Issued At: ..."
-                     "Expiration Time: ..."
-3. CLI:           prompt user to sign the payload with E_user
-                   (ONE MetaMask/hardware-wallet popup at init).
-4. CLI → broker:  POST /v1/auth/wallet/verify {request_id, signature}
-5. Broker:        ecrecover → E_user_address; bind D_pub to
-                   omni = SHA256("agentkeys" || "evm" || lower(E_user_address));
-                   mint J1 with claims (evm_omni, wallet=E_user_address,
-                   agentkeys_device_pubkey=D_pub).
-6. (no separate dev_key_service derive call — the user's own wallet IS the wallet)
+ON MASTER (after identity ceremony returns binding_nonce):
+1. CLI: generate (D_priv, D_pub); persist D_priv in OS keychain.    (K10)
+2. CLI: open browser to https://broker/v1/auth/bind/<request_id>
+3. Browser: navigator.credentials.create({
+     challenge: SHA256(binding_nonce || D_pub),
+     rp.id:     broker.litentry.org,
+     authenticatorSelection: { authenticatorAttachment: "platform",
+                                 userVerification: "required" },
+     attestation: "direct"
+   })
+   → user does Touch ID / Hello / biometric
+   → returns hardware-attested signature + WebAuthn credential
+4. Browser → broker: POST /v1/auth/bind/<request_id>
+                       { webauthn_attestation, device_pubkey: D_pub }
+5. Broker: verify WebAuthn attestation chain;
+            verify challenge equals SHA256(binding_nonce || D_pub);
+            bind (omni, device_pubkey: D_pub,
+                   webauthn_credential_id: K11_id, exp);
+            mint session JWT with claims:
+              agentkeys_device_pubkey = D_pub      (K10 — used per-request)
+              agentkeys_webauthn_cred = K11_id     (used at re-bind / rotate)
+6. CLI: poll status → receive J0 with both claims.
+7. CLI: persist J0 + D_priv in OS keychain.
 ```
 
-For evm-identity users, there is **no signer call at init** —
-their EVM wallet is already the wallet they want bound. The
-device key still gets bound for per-request `/dev/*` calls
-(if the daemon ever needs the signer to sign anything else under
-their omni). One MetaMask popup at init; zero per-request popups.
+The WebAuthn signature serves double duty: hardware-attested **user presence** + atomic **commitment to D_pub** (because D_pub is folded into the WebAuthn challenge). No separate `pop_sig` field needed — the WebAuthn signature IS the PoP.
 
-**passkey (WebAuthn — planned, not yet implemented)**
+Key property: **email-account compromise alone cannot rebind**. An attacker who phished the email account can complete the email-link identity ceremony but cannot complete the WebAuthn ceremony on the legitimate user's hardware (TouchID/Hello requires the physical device). This is the Q7 fix.
 
-WebAuthn supports key-attestation in the assertion. The device
-keypair is generated as the WebAuthn credential itself; D_priv
-lives in the platform authenticator (Secure Enclave, Windows
-Hello, YubiKey). D_pub is part of the attestation.
+#### 5a.1.A Agent binding ceremony — link-code (uniform)
+
+The agent machine has no human present and no platform authenticator. The master vouches by issuing a one-time link code from its already-authenticated session.
 
 ```
-0. CLI: invoke WebAuthn.create() → platform authenticator generates
-        D_priv (sealed in Secure Enclave / TPM / YubiKey) and
-        returns the attestation containing D_pub.
-1. CLI → broker:  POST /v1/auth/passkey/register
-                   {attestation, device_pubkey: D_pub}
-2. Broker:        verify attestation chain; bind D_pub.
-3. CLI → broker:  WebAuthn assertion challenge → CLI invokes
-                   WebAuthn.get() → return signed challenge.
-4. Broker:        verify assertion; mint J0 with claim D_pub.
-5. (derive + link + SIWE as in email flow)
+ON MASTER (already initialized per 5a.1.M; holds J1_master):
+1. CLI: agentkeys link-code mint --omni O_evm
+2. CLI → broker: POST /v1/auth/link-code/mint
+                  { omni_account: O_evm, ttl_seconds: 600 }
+                  Authorization: Bearer J1_master
+3. Broker: verify J1_master (binds back to master's K11 via the
+            agentkeys_webauthn_cred claim);
+            mint one-time link code "AGK-A8F3-92K1" bound to O_evm.
+4. CLI: print the link code for the operator (or auto-pipe to agent
+         provisioning).
+
+ON AGENT MACHINE:
+5. agentkeys-daemon --init-link-code AGK-A8F3-92K1 \
+                    --broker-url B --signer-url S
+6. Daemon: generate (D_priv, D_pub); persist D_priv per §5a.4
+            (OS keychain when available, else file backend
+             ~/.agentkeys/daemon-<wallet>/session.json mode 0600).
+7. Daemon → broker: POST /v1/auth/link-code/redeem
+                     { link_code: "AGK-A8F3-92K1",
+                       device_pubkey: D_pub,
+                       pop_sig: sign(D_priv, link_code || D_pub) }
+8. Broker: verify pop_sig (proves daemon holds D_priv for D_pub);
+            mark link code consumed (single-use);
+            bind (omni, device_pubkey: D_pub, exp) with attribution
+              "via link_code minted from master J1_master";
+            mint J1_vm with claim agentkeys_device_pubkey = D_pub.
+9. Daemon: persist J1_vm; enter MCP-stdio loop.
 ```
 
-The advantage: D_priv literally cannot leave the hardware
-authenticator. Compromise of the host OS does not leak D_priv.
-This is the strongest tier and the eventual recommendation for
-production daemons that have access to a TPM or platform
-authenticator.
+Trust chain: `master human → master platform authenticator (K11) → master J1 → link code → agent J1_vm`. The agent never holds a user-presence credential; the master's WebAuthn-attested authority chains through the link code.
 
-**sandbox link-code (agent-infra/sandbox VM bootstrap)**
+The link code is a bearer credential bounded by (single-use, 600s TTL, scoped to one omni). Per `agent-infra/sandbox`'s pattern (see [`docs/spec/1-step-analysis.md`](1-step-analysis.md)), this is the right shape because the agent is a credential CONSUMER, not a credential HOLDER — short-TTL bearer in, short-TTL JWT out.
 
-The sandbox VM cannot drive an interactive identity ceremony.
-Instead, the master CLI on the operator's workstation generates
-a one-time link code that authorizes the VM's first device-key
-binding.
+#### v1c interim — bespoke per-identity PoP shapes
 
-```
-ON OPERATOR WORKSTATION:
-0. CLI: agentkeys link-code mint --omni O_evm
-1. CLI → broker:  POST /v1/auth/link-code/mint
-                   {omni_account: O_evm, ttl_seconds: 600}
-                   Authorization: Bearer J1_workstation
-2. Broker:        verify J1_workstation; mint a one-time link code
-                   bound to O_evm (e.g., "AGK-A8F3-92K1") with TTL.
-3. CLI:           print the link code for the operator.
+For v1c (pre-WebAuthn-binding), the master flow uses bespoke per-identity PoP shapes inline with each identity ceremony rather than the uniform WebAuthn ceremony in 5a.1.M:
 
-ON SANDBOX VM:
-4. agentkeys-daemon --init-link-code AGK-A8F3-92K1 --broker-url B --signer-url S
-5. Daemon:        generate (D_priv, D_pub); persist D_priv (see Q8 / §5a.4).
-6. Daemon → broker: POST /v1/auth/link-code/redeem
-                     {link_code: "AGK-A8F3-92K1", device_pubkey: D_pub, pop_sig}
-7. Broker:        verify pop_sig; mark link code consumed; bind D_pub
-                   to O_evm; mint J1_vm with claims
-                   (evm_omni=O_evm, agentkeys_device_pubkey=D_pub).
-8. Daemon:        persist J1_vm; enter MCP-stdio loop.
-```
+- `email` — `pop_sig` field over `canonical(email || D_pub || nonce)` in `POST /v1/auth/email/request`
+- `oauth2_google` — `pop_sig` field over `canonical("oauth2_google" || D_pub || state_nonce)` in `POST /v1/auth/oauth2/start`; `state = SHA256(D_pub || state_nonce)` carries D_pub through Google's redirect
+- `evm` — SIWE-shaped binding payload includes `Device Pubkey: D_pub`; one MetaMask / hardware-wallet popup at init signs both identity AND device-pubkey commit
 
-The link code is a **bearer credential issued by the
-workstation's authenticated session** — the VM proves nothing
-about its own identity, only that it possesses the link code at
-the right time. This is the same model as `agent-infra/sandbox`'s
-existing token-handoff pattern, plus the device-pubkey binding
-on top.
+Wire shapes pinned in [step-1c plan §"Per-identity-type init binding"](plans/issue-74-step-1c-device-key-auth.md). The agent (link-code) ceremony in 5a.1.A is unchanged between v1c and v0.2.
 
-### 5a.2 Switch to a new device (e.g. operator gets a new laptop)
+### 5a.2 Switch to a new device
 
-The new device generates its own (D_priv', D_pub') and re-runs
-the identity ceremony. The broker binds D_pub' alongside the
-existing D_pub (or replaces it — operator choice).
+#### 5a.2.M New master (e.g. operator gets a new laptop)
+
+The new master re-runs an identity ceremony AND a fresh WebAuthn
+enrollment on the new device. The broker binds D_pub' atomically
+with the new K11' credential. The old D_pub is either retained
+(multi-device, v0.2) or replaced (single-device, default).
 
 ```
-ON NEW DEVICE:
-1. agentkeys init --email alice@x.com (or whichever identity)
-   → repeats the §5a.1 flow for the same email, generating D_pub'.
-2. Broker: identity ceremony succeeds; broker observes a
-   pre-existing binding (D_pub_old) for the same omni and
-   either:
-     (a) ADDS D_pub' as an additional authorized device-pubkey
-         (multi-device authorization, planned for v0.2), OR
-     (b) REPLACES D_pub_old with D_pub' (single-device default
-         per step 1c plan §"Non-goals").
-3. Broker: mint J1' bound to (omni, D_pub').
-4. New device: persist D_priv' + J1' in its OS keychain.
+ON NEW MASTER:
+1. CLI: agentkeys init --email alice@x.com (or any identity type)
+2. Run identity ceremony per §5a.1.
+3. Run master binding ceremony per §5a.1.M:
+   - Generates new (D_priv', D_pub') = K10'
+   - WebAuthn ceremony enrolls a NEW platform-authenticator
+     credential = K11' on the new device (TouchID/Hello/StrongBox
+     on the new hardware).
+4. Broker observes pre-existing binding (D_pub_old, K11_old)
+   for the same omni and either:
+     (a) ADDS (D_pub', K11') alongside (multi-device, v0.2), OR
+     (b) REPLACES old binding (single-device default, v1c).
+5. Broker mints J1' bound to (omni, D_pub', K11').
+6. New master persists D_priv' + J1' in OS keychain.
 
-OLD DEVICE (if (b) was chosen):
-5. Next /dev/sign-message call: signer rejects D_pub_old's
-   signature (no longer matches the binding) → CLI prints
+OLD MASTER (if (b) was chosen):
+7. Next /dev/sign-message call: signer rejects D_pub_old's
+   signature (no longer matches binding) → CLI prints
    "device key superseded — re-init required".
 ```
 
-For the v0.2 multi-device case, each device's J1 carries its own
-D_pub claim; both signatures are valid until one is revoked.
+**Security note (Q7).** First-time enrollment on the new master
+relies on the identity ceremony alone — an attacker who phished
+the email account and has their own platform authenticator can
+complete this flow. To defeat that, the v0.2 target adds a
+**cross-device confirmation** step: when the broker observes a
+pre-existing K11_old binding, it requires a WebAuthn `get()`
+against K11_old (push-notification to the existing master) before
+binding K11'. With cross-device confirmation, email-only attackers
+fail because they don't possess the legitimate user's existing
+hardware authenticator. v1c ships without cross-device
+confirmation; v0.2 adds it.
+
+#### 5a.2.A New agent (e.g. fresh sandbox VM)
+
+The agent's old binding becomes orphaned; the master mints a
+fresh link code and the new agent runs §5a.1.A.
+
+```
+ON MASTER:
+1. CLI: agentkeys link-code mint --omni O_evm
+2. Broker: mints fresh link code (consumes nothing — old agent's
+   D_pub_vm_old binding is unaffected; an explicit revocation is
+   a separate operator step).
+
+ON NEW AGENT:
+3. agentkeys-daemon --init-link-code <new-code>
+   → runs §5a.1.A to bind D_pub_vm_new under the same omni.
+4. Broker: ADDS the new binding alongside the old (agents are
+   multi-device by default — many concurrent VMs are typical).
+
+ON OPERATOR (optional):
+5. CLI: agentkeys device revoke --pubkey D_pub_vm_old
+   → broker removes the orphaned agent binding (defensive
+   cleanup; not required for security).
+```
+
+For the v0.2 multi-device master case, each master's J1 carries
+its own D_pub + K11 claims; signatures from any bound master are
+valid until that specific binding is revoked.
 
 ### 5a.3 Intentional device-key swap (rotation without identity re-auth)
 
 The operator wants to rotate D_priv without re-doing the
-email-link / OAuth2 / SIWE ceremony. Useful when the device key
-is suspected of compromise but the operator's identity hasn't
-been compromised.
+identity ceremony. Useful when the device key is suspected of
+compromise but the operator's identity hasn't been compromised.
+
+#### 5a.3.M Master rotation
 
 ```
-ON OPERATOR WORKSTATION (still has valid J1 + D_priv_old):
+ON MASTER (still has valid J1 + D_priv_old + K11):
 1. CLI: agentkeys device rotate
 2. CLI: generate (D_priv_new, D_pub_new); persist D_priv_new.
-3. CLI: sign rotation request with D_priv_old AND D_priv_new
-        (proves possession of both — chain of custody).
-4. CLI → broker: POST /v1/wallet/device/rotate
-                  {old_device_pubkey: D_pub_old,
-                   new_device_pubkey: D_pub_new,
-                   sig_old, sig_new}
-                  Authorization: Bearer J1
-5. Broker: verify J1; verify sig_old against D_pub_old (claim in J1);
-           verify sig_new against D_pub_new (proves CLI holds new key);
-           replace binding (omni, D_pub_old) → (omni, D_pub_new);
-           mint J1_new with claim D_pub_new; revoke J1.
+3. CLI: open browser → navigator.credentials.get({
+     challenge: SHA256(D_pub_old || D_pub_new || rotation_nonce),
+     rp.id: broker.litentry.org,
+     allowCredentials: [{ type: "public-key", id: K11_id }],
+     userVerification: "required"
+   })
+   → user does Touch ID / Hello → hardware-attested signature
+4. Browser → broker: POST /v1/wallet/device/rotate
+                       { old_device_pubkey: D_pub_old,
+                         new_device_pubkey: D_pub_new,
+                         webauthn_assertion,
+                         sig_new: sign(D_priv_new, rotation_nonce) }
+                     Authorization: Bearer J1
+5. Broker: verify J1; verify WebAuthn assertion against K11
+            (proves user-presence at the master device);
+            verify sig_new against D_pub_new
+            (proves CLI holds new device key);
+            replace binding (omni, D_pub_old) → (omni, D_pub_new);
+            mint J1_new with claim D_pub_new (K11 unchanged);
+            revoke J1.
 6. CLI: persist J1_new; clear D_priv_old.
 ```
 
-Rotation requires a **valid J1 + holding both old and new D_priv**.
-If the operator has already lost D_priv_old (e.g. laptop stolen,
-keychain wiped), they fall back to §5a.2 — re-do the identity
-ceremony from a new device.
+Rotation requires **a valid J1 + Touch ID/Hello + holding D_priv_new**.
+If the operator has lost D_priv_old (laptop stolen, keychain wiped)
+but still has K11 (the platform authenticator survived), the
+WebAuthn assertion alone is sufficient — the broker drops the
+`sig_old` requirement when K11 attests to user-presence. If both
+D_priv_old AND K11 are lost (laptop physically destroyed), fall
+back to §5a.2.M — re-do the identity ceremony from a new device.
 
-### 5a.4 Sandbox VM device-key persistence (Q8)
+**v1c interim**: rotation uses dual-D_priv-signature
+(`sig_old + sig_new`) without WebAuthn. Same flow shape; K11
+attestation replaces `sig_old` in v0.2.
 
-`agent-infra/sandbox`'s default container does not expose the
-host's OS keychain — `keyring-rs` falls back to the file backend
-under `~/.agentkeys/daemon-<wallet>/session.json` (mode 0600).
-That file lives on the sandbox's writable layer and survives
-container restarts as long as the sandbox itself persists.
+#### 5a.3.A Agent rotation
 
-Three operational realities:
+Agents do not rotate independently — the master mints a fresh
+link code and the new agent runs §5a.1.A. The old agent's
+binding can optionally be revoked via `agentkeys device revoke`
+from the master per §5a.2.A.
 
-| Sandbox lifecycle | Device-key behavior | Operator action |
+### 5a.4 Agent machine device-key persistence
+
+This section answers two questions for agent machines (VM / Linux
+without platform authenticator / CI runner / `agent-infra/sandbox`
+container) that bound their device key via §5a.1.A.
+
+#### 1. Where does D_priv live on an agent machine?
+
+OS keychain when available (Linux GNOME Keyring, Windows
+Credential Locker). When no keychain is available — `agent-infra/
+sandbox`'s default Docker container exposes none —
+[`keyring-rs`](https://crates.io/crates/keyring) falls back to a
+file backend at `~/.agentkeys/daemon-<wallet>/session.json` (mode
+0600, owner-only).
+
+Reference: [`docs/spec/1-step-analysis.md`](1-step-analysis.md)
+analyzed `agent-infra/sandbox`'s identity model and confirmed
+the file backend is both available and idiomatic; the sandbox
+itself is explicitly designed as a credential PASS-THROUGH
+(short-TTL JWTs in, short-TTL JWTs out), not a credential VAULT.
+
+#### 2. Does D_priv survive container/VM restart?
+
+Depends on whether the file (or keychain) persists across the
+restart, which depends on the agent's lifecycle:
+
+| Agent lifecycle | D_priv behavior | Operator action |
 |---|---|---|
-| Long-lived sandbox (e.g. cloud LLM session that lasts hours) | D_priv survives across daemon restarts (file persists) | None — same daemon-* session resumes |
-| Ephemeral sandbox (container destroyed between sessions) | D_priv vanishes with the container | Re-run `agentkeys-daemon --init-link-code <new-code>` from the workstation each new session — same pattern as today's pair-flow |
-| Hardened sandbox with TPM/Secure-Enclave passthrough | D_priv pinned to hardware authenticator (passkey path, §5a.1) | Survives even container destruction; the strongest tier |
+| **Long-lived** (sandbox running for hours/days within one container instance, e.g. an `agent-infra/sandbox` session for a multi-hour LLM task) | File persists across daemon restarts within the container | None — daemon re-reads on startup |
+| **Ephemeral** (container destroyed between sessions, e.g. nightly CI job) | D_priv vanishes with the container | Master mints a fresh link code per §5a.1.A; agent runs `agentkeys-daemon --init-link-code <new-code>`. **No human re-presence required** — the master's `agentkeysd` orchestrator does this autonomously |
+| **Hardened** (TPM / Secure Enclave passthrough, AWS Nitro Enclave, Azure Confidential VM) | D_priv pinned to hardware authenticator OR sealed to boot measurement | Survives container destruction; v0.2 enhancement |
 
-Recommendation per [step-1c open question](plans/issue-74-step-1c-device-key-auth.md):
-ship the file-backend default for v1c (works on stock
-`agent-infra/sandbox`); document the link-code-per-session reality
-for ephemeral sandboxes; treat hardware-backed device keys as a
-v0.2 enhancement.
+#### Why this is the right answer (not a workaround)
 
-### 5a.5 Trust shape across identity types
+Earlier drafts framed the ephemeral case as a friction problem
+requiring TEE attestation or KMS-wrapped secrets. The link-code
+pattern resolves it without TEE for the common case because:
 
-| Identity type | Identity ceremony cost | Per-request cost | Compromise blast radius (D_priv leak) | Notes |
+- The **master** holds the long-lived authority (K10 + K11).
+  Agents are short-lived consumers.
+- The master's `agentkeysd` (always-on or wake-on-demand) can
+  auto-mint a link code on agent-restart signal — no human
+  re-presence per restart.
+- This mirrors `agent-infra/sandbox`'s **two-tier pattern**: the
+  business-service orchestrator holds the long-lived signing key;
+  the sandbox holds only short-TTL bearer credentials. We get the
+  same architectural property: leaked sandbox env = at most one
+  link-code-TTL of access, scoped to that agent's permissions.
+- TEE / Nitro Enclave passthrough remains the v0.2 hardening for
+  adversary-resistant sandboxes (e.g. running untrusted user
+  code), not the default.
+
+The link-code-per-session model is the **default v1c ship state**
+for ephemeral agents and an explicit architectural choice, not a
+limitation.
+
+### 5a.5 Trust shape across machine classes
+
+The two binding ceremonies (master WebAuthn vs. agent link-code)
+have different security shapes. Per-request signing is identical
+across both — the asymmetry lives entirely at init / re-bind
+time.
+
+| Machine class | Init cost | Per-request cost | D_priv (K10) leak blast radius | Re-bind requires |
 |---|---|---|---|---|
-| email-link | One magic-link click at init | Zero (D_priv signs) | Forge until rotation; one operator | TLS + email custody assumed |
-| oauth2_google | One Google OAuth flow at init | Zero | Same | OAuth `state` binds D_pub through round-trip |
-| evm | One MetaMask/hardware-wallet popup at init | Zero | Same | Strongest non-hardware tier — user-controlled identity key |
-| passkey | One WebAuthn ceremony at init | Zero | **None for D_priv** (sealed in hardware); same forge-until-rotation if assertion creds leak | Strongest tier overall |
-| sandbox link-code | One link-code redeem at sandbox boot | Zero | Same as email/oauth2 | Master CLI is authoritative; link code is a bearer |
+| **Master** (platform authenticator) | One identity ceremony + one WebAuthn enrollment (Touch ID / Hello / biometric) | Zero — D_priv signs in background | Forge `/dev/*` calls until rotation; bounded to one operator's omni | Hardware presence (WebAuthn `get()` against K11). Email-account compromise alone is **insufficient** (v0.2 with cross-device confirmation). |
+| **Agent** (no platform authenticator) | One link-code redeem from master | Zero | Same as master | A fresh link code from a still-authorized master. Agent compromise alone cannot rebind (master J1 + master K11 required upstream). |
+| **Master with passkey-as-identity** (v0.2 — passkey IS the identity source) | One WebAuthn ceremony serves both identity AND binding | Zero | **None for K10** (sealed in hardware); forge-until-rotation if K10 file leaks | Same WebAuthn ceremony |
+| **Hardened agent** (TPM / Secure Enclave / Nitro Enclave) | Link-code redeem at first boot; subsequent boots restore D_priv from hardware seal | Zero | None — D_priv cannot be exfiltrated | Re-attestation if boot measurement changes |
 
-All five tiers converge on the same per-request signature shape;
-the distinction is at init only. Heima's `ClientAuth` enum
+Per-request signature shape converges across all classes;
+distinction is binding-time only. Heima's `ClientAuth` enum
 ([`heima-gaps §12`](heima-gaps-vs-desired-architecture.md))
-classifies operations by tier; AgentKeys flattens that — every
-operation gets the strong tier because the per-request UX cost
-collapses to zero post-init.
+classifies operations by per-call tier; AgentKeys flattens that
+— every operation gets the strong tier because per-request UX
+cost is zero regardless of binding-time shape.
+
+Identity-source-specific costs (one email click, one OAuth
+redirect, one MetaMask popup) live entirely inside the identity
+ceremony per §5a.1 and are independent of the master/agent split.
 
 ---
 

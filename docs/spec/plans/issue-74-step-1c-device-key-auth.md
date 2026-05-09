@@ -1,5 +1,33 @@
 # Plan — Issue #74 Step 1c: Device-Key Authentication for `/dev/*`
 
+## Status — v1c interim; v0.2 target = WebAuthn-uniform binding
+
+This plan documents the **v1c interim** wire shapes for device-key
+binding: bespoke per-identity PoP fields (`pop_sig` over canonical
+inputs in `email_request` / `oauth2_start`; SIWE-payload
+`Device Pubkey` commit + dual signature for `evm`). These ship in
+PR #75's successor work and unblock per-request device-signature
+auth on `/dev/*` immediately.
+
+The **v0.2 target** collapses the four bespoke shapes into a
+**uniform WebAuthn binding ceremony for masters** plus a
+**uniform link-code binding ceremony for agents** (VM / Linux /
+CI / no-platform-authenticator machines). This eliminates the
+per-identity-type PoP variation and closes the Q7
+email-account-compromise → device-takeover gap by requiring
+hardware-attested user presence at re-bind time.
+
+[`docs/spec/architecture.md`](../architecture.md) §5a.1 is the
+**single source of truth** for the v0.2 target shape. The
+per-identity-type sections in this plan are the v1c wire-shape
+reference; they will be marked superseded once the v0.2 binding
+endpoints land.
+
+YubiKey-on-Linux as a master tier (roaming-authenticator binding,
+lets a Linux box act as a master without a built-in platform
+authenticator) is deferred — see
+[issue #79](https://github.com/litentry/agentKeys/issues/79).
+
 ## Goal
 
 Replace the broker-issued bearer JWT as the sole authenticator on
@@ -130,7 +158,16 @@ listener / DNS / nginx work.
                                                                     → Sign and return.
 ```
 
-## Per-identity-type init binding
+## Per-identity-type init binding (v1c-interim wire shapes)
+
+> **v0.2 supersedes:** the four per-identity sections below
+> describe the **v1c-interim** bespoke PoP shapes. The v0.2 target
+> collapses these into a uniform WebAuthn binding ceremony for
+> masters plus a uniform link-code binding ceremony for agents —
+> see [`architecture.md` §5a.1](../architecture.md). The
+> identity-source half (email click / OAuth callback / EVM SIWE
+> identity verification) survives unchanged in v0.2; only the
+> device-pubkey-commit half collapses.
 
 The init-ceremony differs per identity type but always produces the
 same broker-side binding: `(omni_account, device_pubkey, expiry,

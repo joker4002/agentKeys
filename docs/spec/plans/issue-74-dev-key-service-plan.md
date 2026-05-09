@@ -27,6 +27,19 @@ its design as they land:
   broker-as-SPOF risk. Tracked in
   [`issue-74-step-1c-device-key-auth.md`](issue-74-step-1c-device-key-auth.md)
   and gh issue [#76](https://github.com/litentry/agentKeys/issues/76).
+  - **v1c-interim** ships bespoke per-identity PoP shapes (`pop_sig`
+    field for email/oauth2; SIWE-payload `Device Pubkey` commit for
+    evm).
+  - **v0.2 target** collapses these into a uniform WebAuthn binding
+    ceremony for **master machines** (workstation with platform
+    authenticator: Touch ID / Hello / Android biometric) and a
+    uniform link-code binding ceremony for **agent machines** (VM /
+    Linux / CI / `agent-infra/sandbox` containers). Single source
+    of truth: [`architecture.md` §5a.1](../architecture.md).
+    Hardware-attested user presence at re-bind closes the
+    email-account-compromise → device-takeover gap (Q7). YubiKey-on-
+    Linux as a master tier is deferred to
+    [issue #79](https://github.com/litentry/agentKeys/issues/79).
 
 The architecture.md doc ([`../architecture.md`](../architecture.md))
 is the canonical source of truth post-PR-#75; this plan documents
