@@ -168,21 +168,39 @@ This is `EvmSiweSigned` extended with the device-pubkey commit.
 ### `email`
 
 The magic-link click delivers the `device_pubkey` through the link
-itself. Specifically:
+itself, AND the request is signed with `device_priv` so the broker
+verifies the daemon actually possesses the matching private key
+(**proof of possession** — addresses the Q7 concern that "what if
+attacker substitutes their own pubkey" without proof of possession).
 
-1. Daemon calls `POST /v1/auth/email/request` with body
-   `{email, device_pubkey: D_pub}`.
-2. Broker stores `(request_id, email, D_pub, expiry)` and emails the
+1. Daemon computes `pop_sig = sign(D_priv, canonical(email || D_pub
+   || nonce))` where `nonce` is fresh CSPRNG.
+2. Daemon calls `POST /v1/auth/email/request` with body
+   `{email, device_pubkey: D_pub, pop_nonce: nonce, pop_sig}`.
+3. Broker verifies `pop_sig` against `D_pub` over the canonicalized
+   payload; rejects on mismatch with HTTP 400 `bad_pop`. This proves
+   the requester actually holds `D_priv` — an attacker who only
+   observed `D_pub` (e.g. via traffic inspection) cannot substitute
+   it.
+4. Broker stores `(request_id, email, D_pub, expiry)` and emails the
    operator a link of shape
    `https://broker.example/v1/auth/email/landing/<request_id>?device=<D_pub>`.
-3. Operator clicks; broker confirms `?device=<D_pub>` matches the
+5. Operator clicks; broker confirms `?device=<D_pub>` matches the
    stored value (defends against link-forwarding to swap the device
    pubkey).
-4. Broker mints session JWT with `agentkeys_device_pubkey = D_pub`.
+6. Broker mints session JWT with `agentkeys_device_pubkey = D_pub`.
 
-The defense against link-forwarding: an attacker who intercepts the
-link cannot substitute their own device key — the URL parameter is
-matched against the value the broker stored at request time.
+The defense composes two layers:
+- **PoP at request time** (step 3) prevents an attacker from
+  initiating an init flow with a pubkey they don't control.
+- **`?device=<D_pub>` at click time** (step 5) prevents the
+  magic-link URL itself from being repurposed to a different
+  device pubkey if the email is forwarded.
+
+An attacker would need to compromise BOTH the network path
+(to substitute the pubkey at request time, then forge `pop_sig`)
+AND the user's email inbox (to click the legitimate link) — a
+much higher bar than today's bearer-only model.
 
 ### `oauth2_google`
 
@@ -326,13 +344,19 @@ Step 1c is **strictly stronger** than all three Heima variants:
   oldest on overflow; nonce reuse after eviction is acceptable because
   timestamp window is ±60s.
 
-- **Device key persistence on a fresh sandbox VM.** When `agent-infra/sandbox`
-  spins up a fresh container, the device key must survive container
-  lifecycle (or be re-issued). Default proposal: **persist in the OS
-  keychain inside the sandbox**; on container restart, daemon detects
-  key absence and triggers `agentkeys init` re-binding (one-shot
-  re-auth from the operator). Sandbox-link-code identity type may
-  warrant a different lifecycle.
+- **Device key persistence on a fresh sandbox VM.** **RESOLVED** (Q8) —
+  decision recorded in [`architecture.md` §5a.4](../architecture.md).
+  Stock `agent-infra/sandbox` does not expose the host's OS keychain;
+  `keyring-rs` falls back to a file-backend at
+  `~/.agentkeys/daemon-<wallet>/session.json` (mode 0600), which
+  survives daemon restarts inside a long-lived container but vanishes
+  with the container itself. For ephemeral sandboxes (container
+  destroyed between sessions), the operator runs
+  `agentkeys-daemon --init-link-code <new-code>` from their
+  workstation each new session — same pattern as today's pair-flow
+  with the device-pubkey binding added on top. Hardware-backed
+  device keys (Secure Enclave / TPM passthrough — passkey path) is
+  a v0.2 enhancement.
 
 - **Device key compromise detection.** No automatic detection in v1c.
   Operator runs `agentkeys whoami` to inspect the active device

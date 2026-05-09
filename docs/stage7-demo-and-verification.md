@@ -39,6 +39,20 @@ If you're on a pre-issue-#74 build, run
 
 ## Trust model (post-issue-#74 step 1b)
 
+> **Heads up — step 1c is coming.** This guide currently exercises
+> the bearer-JWT auth on `/dev/*` (step 1b). Issue #74 step 1c
+> ([`docs/spec/plans/issue-74-step-1c-device-key-auth.md`](spec/plans/issue-74-step-1c-device-key-auth.md);
+> tracked in gh [#76](https://github.com/litentry/agentKeys/issues/76))
+> upgrades this to device-key per-request signatures: daemon
+> generates a device keypair locally at init, identity ceremony
+> binds the device pubkey atomically, every `/dev/*` call carries
+> a fresh signature signed by the device key. After 1c lands, the
+> bearer-JWT path documented below becomes the legacy fallback;
+> the canonical demo will exercise the device-key flow end-to-end.
+> The wire shape (`/dev/derive-address`, `/dev/sign-message`),
+> the auth flow at the broker, and the AWS isolation proof do
+> NOT change at the 1b → 1c swap.
+
 ```
 Operator workstation / daemon                         Broker host (EC2)
 ┌────────────────────────────┐                        ┌──────────────────────────────┐
