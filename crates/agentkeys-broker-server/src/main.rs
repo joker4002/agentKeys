@@ -30,6 +30,15 @@ struct Args {
     /// In production, leave this off so misconfigured creds fail fast.
     #[arg(long)]
     skip_startup_check: bool,
+
+    /// On boot, write the broker's session keypair **public key** (SPKI PEM,
+    /// mode 0644) to this path. The signer service (`--signer-only`) reads
+    /// it to verify bearer JWTs without holding the private key.
+    ///
+    /// Idempotent: re-runs overwrite the file (pubkey is stable unless the
+    /// broker keypair is regenerated via `keygen --purpose session`).
+    #[arg(long)]
+    export_session_pubkey_to: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -80,6 +89,31 @@ async fn main() -> anyhow::Result<()> {
     // validates plugin selection, opens stores, builds registry. Any
     // failure here exits with a single-line BOOT_FAIL message.
     let boot_artifacts = run_tier1(&config)?;
+
+    // Export session pubkey if requested (issue #74 step 1b). Must happen
+    // after Tier-1 so the session keypair is loaded. Overwrites on every
+    // boot (pubkey is stable unless keygen was re-run).
+    if let Some(ref pubkey_path) = args.export_session_pubkey_to {
+        let pem = boot_artifacts
+            .session_keypair
+            .public_key_pem()
+            .map_err(|e| anyhow::anyhow!("export session pubkey: {e}"))?;
+        if let Some(parent) = pubkey_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("create dirs for pubkey export: {e}"))?;
+        }
+        std::fs::write(pubkey_path, &pem)
+            .map_err(|e| anyhow::anyhow!("write session pubkey to {pubkey_path:?}: {e}"))?;
+        // mode 0644 so the agentkeys-signer service (same user) can read it
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(pubkey_path, std::fs::Permissions::from_mode(0o644))
+                .map_err(|e| anyhow::anyhow!("chmod 0644 {pubkey_path:?}: {e}"))?;
+        }
+        tracing::info!(path = %pubkey_path.display(), "wrote session pubkey PEM (signer can read it)");
+    }
+
     let tier2_profile = Tier2Profile::from_config(&config);
     tracing::info!(
         strict = tier2_profile.strict,

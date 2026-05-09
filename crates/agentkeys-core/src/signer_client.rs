@@ -32,6 +32,11 @@ pub enum SignerClientError {
     #[error("signer_disabled: {0}")]
     SignerDisabled(String),
 
+    /// 401 `unauthorized` — bearer JWT missing, expired, or omni_account mismatch.
+    /// Caller should re-init to obtain a fresh session JWT.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// 500 `internal` from the signer — bug; surface to operator.
     #[error("signer_internal: {0}")]
     Internal(String),
@@ -96,6 +101,10 @@ pub trait SignerClient: Send + Sync {
 pub struct HttpSignerClient {
     base_url: String,
     http: reqwest::Client,
+    /// When set, added as `Authorization: Bearer <jwt>` on every `/dev/*` request.
+    /// Required when the signer listener has JWT bearer auth enabled
+    /// (issue #74 step 1b: `--signer-only` mode).
+    session_jwt: Option<String>,
 }
 
 impl HttpSignerClient {
@@ -105,6 +114,7 @@ impl HttpSignerClient {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http: reqwest::Client::new(),
+            session_jwt: None,
         }
     }
 
@@ -114,7 +124,16 @@ impl HttpSignerClient {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http,
+            session_jwt: None,
         }
+    }
+
+    /// Attach a session JWT that will be sent as `Authorization: Bearer <jwt>`
+    /// on every `/dev/*` request. Required when the signer listener runs in
+    /// `--signer-only` mode (issue #74 step 1b).
+    pub fn with_session_jwt(mut self, jwt: String) -> Self {
+        self.session_jwt = Some(jwt);
+        self
     }
 }
 
@@ -122,10 +141,14 @@ impl HttpSignerClient {
 impl SignerClient for HttpSignerClient {
     async fn derive_address(&self, omni_account: &str) -> Result<DerivedAddress, SignerClientError> {
         let url = format!("{}/dev/derive-address", self.base_url);
-        let resp = self
+        let mut req = self
             .http
             .post(&url)
-            .json(&serde_json::json!({ "omni_account": omni_account }))
+            .json(&serde_json::json!({ "omni_account": omni_account }));
+        if let Some(jwt) = &self.session_jwt {
+            req = req.header("Authorization", format!("Bearer {jwt}"));
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
@@ -156,13 +179,17 @@ impl SignerClient for HttpSignerClient {
         message_bytes: &[u8],
     ) -> Result<SignedMessage, SignerClientError> {
         let url = format!("{}/dev/sign-message", self.base_url);
-        let resp = self
+        let mut req = self
             .http
             .post(&url)
             .json(&serde_json::json!({
                 "omni_account": omni_account,
                 "message_hex":  hex::encode(message_bytes),
-            }))
+            }));
+        if let Some(jwt) = &self.session_jwt {
+            req = req.header("Authorization", format!("Bearer {jwt}"));
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
@@ -204,6 +231,7 @@ fn map_error(status: u16, body: &serde_json::Value) -> SignerClientError {
     match (status, code) {
         (400, "invalid_omni_account") => SignerClientError::InvalidOmniAccount(message),
         (400, "invalid_message_hex") => SignerClientError::InvalidMessageHex(message),
+        (401, "unauthorized") => SignerClientError::Unauthorized(message),
         (503, "signer_disabled") => SignerClientError::SignerDisabled(message),
         (500, "internal") => SignerClientError::Internal(message),
         _ => SignerClientError::Unexpected {

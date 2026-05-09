@@ -72,6 +72,7 @@ WITH_CERTBOT="auto"          # auto | yes | no
 ASSUME_YES=false
 PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
 PULL_SKIP=false              # --skip-pull: alias for "no --ref" (kept for back-compat)
+SIGNER_HOST=""               # --signer-host: hostname for the dedicated signer listener
 
 # Interactive when stdin is a TTY and the operator hasn't opted out.
 if [[ -t 0 ]]; then
@@ -98,6 +99,7 @@ while (( $# > 0 )); do
     --upgrade)            shift ;;          # back-compat no-op (script is idempotent now)
     --ref)                PULL_REF="$2"; shift 2 ;;
     --skip-pull)          PULL_SKIP=true; shift ;;
+    --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -363,11 +365,27 @@ ISSUER_HOST="${ISSUER_URL#https://}"
 ISSUER_HOST="${ISSUER_HOST#http://}"
 ISSUER_HOST="${ISSUER_HOST%%/*}"
 
+# Derive SIGNER_HOST from ISSUER_HOST when not supplied explicitly.
+# Convention: if ISSUER_HOST is "broker.foo.com", signer host is "signer.foo.com".
+# If ISSUER_HOST has no dots (unlikely), fall back to "signer.${ISSUER_HOST}".
+# Pass --signer-host to override.
+if [[ -z "$SIGNER_HOST" ]]; then
+  ISSUER_ZONE="${ISSUER_HOST#*.}"   # everything after the first label
+  if [[ "$ISSUER_ZONE" == "$ISSUER_HOST" ]]; then
+    # No dot — single-label hostname (dev/localhost). Prefix with "signer.".
+    SIGNER_HOST="signer.${ISSUER_HOST}"
+  else
+    SIGNER_HOST="signer.${ISSUER_ZONE}"
+  fi
+  warn "Derived signer hostname: $SIGNER_HOST  (pass --signer-host to override)"
+fi
+
 # ─── Summary + confirmation ──────────────────────────────────────────────────
 cat <<EOF
 
 ── Summary ──
   Issuer URL  : $ISSUER_URL  (host: $ISSUER_HOST)
+  Signer host : $SIGNER_HOST  (dedicated signer listener — fronts :8092)
   Account ID  : $ACCOUNT_ID
   Region      : $REGION
   Cred mode   : $CRED_MODE
@@ -444,7 +462,8 @@ log "Building agentkeys-mock-server + agentkeys-broker-server (release)"
 # Stop both services before swap so the kernel isn't holding old inodes
 # while we install new ones. Both stops are idempotent (no-op on fresh
 # hosts where nothing's running yet).
-log "Stopping agentkeys-backend + agentkeys-broker (idempotent)"
+log "Stopping agentkeys-backend + agentkeys-broker + agentkeys-signer (idempotent)"
+sudo systemctl stop agentkeys-signer  2>/dev/null || true
 sudo systemctl stop agentkeys-broker  2>/dev/null || true
 sudo systemctl stop agentkeys-backend 2>/dev/null || true
 
@@ -598,10 +617,45 @@ Environment=REGION=$REGION
 Environment=BROKER_BACKEND_URL=http://127.0.0.1:8090
 Environment=BROKER_OIDC_ISSUER=$ISSUER_URL
 $CRED_LINE
-ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1
+ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1 \
+  --export-session-pubkey-to /var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem
 # Broker self-exits cleanly (status=0) after 24h max-uptime, so on-failure
 # would leave it dead. Use always so systemd restarts it on every exit.
 Restart=always
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentkeys
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ── agentkeys-signer (issue #74 step 1b) ─────────────────────────────────────
+# Dedicated signer listener (:8092, loopback only) — serves ONLY /dev/* and
+# /healthz. Fronted publicly by signer.$SIGNER_HOST via nginx (:443).
+# JWT bearer auth: verifies the broker's session JWT on every /dev/* request
+# using the pubkey written by the broker at boot.
+log "Writing agentkeys-signer.service"
+sudo tee /etc/systemd/system/agentkeys-signer.service >/dev/null <<EOF
+[Unit]
+Description=AgentKeys signer (dev_key_service — issue #74 step 1b)
+After=network-online.target agentkeys-broker.service
+Wants=network-online.target
+Requires=agentkeys-broker.service
+
+[Service]
+Type=simple
+# Same master secret as the backend — loaded from the same EnvironmentFile.
+# Issue #74 step 2 (TEE worker) will replace this.
+EnvironmentFile=$DEV_KEY_SERVICE_ENV_FILE
+ExecStart=/usr/local/bin/agentkeys-mock-server --signer-only --port 8092 \
+  --broker-session-pubkey-path /var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem
+Restart=on-failure
 RestartSec=5s
 User=agentkeys
 Group=agentkeys
@@ -628,6 +682,7 @@ EOF
 # Re-running this script after issuance flips A → B automatically.
 write_nginx_site() {
   local cert_path="/etc/letsencrypt/live/$ISSUER_HOST/fullchain.pem"
+  local signer_cert_path="/etc/letsencrypt/live/$SIGNER_HOST/fullchain.pem"
   if sudo test -f "$cert_path"; then
     log "Writing nginx site for $ISSUER_HOST (HTTPS — LE cert detected)"
     sudo tee /etc/nginx/sites-available/agentkeys-broker >/dev/null <<EOF
@@ -675,6 +730,71 @@ server {
 }
 EOF
   fi
+
+  # ── Signer nginx site (issue #74 step 1b) ────────────────────────────────
+  # Separate virtual host for signer.$SIGNER_HOST → :8092 (loopback).
+  # Only /dev/* and /healthz are proxied; everything else → 404 (defense-in-depth).
+  if sudo test -f "$signer_cert_path"; then
+    log "Writing nginx site for $SIGNER_HOST (HTTPS — LE cert detected)"
+    sudo tee /etc/nginx/sites-available/agentkeys-signer >/dev/null <<EOF
+server {
+    listen 80;
+    server_name $SIGNER_HOST;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $SIGNER_HOST;
+
+    ssl_certificate     /etc/letsencrypt/live/$SIGNER_HOST/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$SIGNER_HOST/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Pass Authorization header so the signer can verify the bearer JWT.
+    location /dev/ {
+        proxy_pass http://127.0.0.1:8092;
+        proxy_http_version 1.1;
+        proxy_set_header Host              \$host;
+        proxy_set_header Authorization     \$http_authorization;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-For   \$remote_addr;
+        proxy_read_timeout 30s;
+    }
+    location /healthz {
+        proxy_pass http://127.0.0.1:8092;
+    }
+    # Reject everything else — signer serves only /dev/* and /healthz.
+    location / {
+        return 404;
+    }
+}
+EOF
+    if [[ -d /etc/nginx/sites-enabled ]]; then
+      sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
+    fi
+  else
+    log "Writing nginx site for $SIGNER_HOST (HTTP-only — no LE cert yet)"
+    log "After issuing the cert (see manual steps below), re-run this script."
+    sudo tee /etc/nginx/sites-available/agentkeys-signer >/dev/null <<EOF
+# HTTP-only initial config for the signer. To issue the cert:
+#   sudo certbot --nginx -d $SIGNER_HOST
+# then re-run scripts/setup-broker-host.sh to flip on the :443 block.
+server {
+    listen 80;
+    server_name $SIGNER_HOST;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / {
+        return 503 "TLS cert not yet issued for signer — see setup-broker-host.sh\n";
+        default_type text/plain;
+    }
+}
+EOF
+    if [[ -d /etc/nginx/sites-enabled ]]; then
+      sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
+    fi
+  fi
 }
 
 if [[ "$WITH_NGINX" == "yes" ]]; then
@@ -717,19 +837,24 @@ ensure_broker_keypairs /usr/local/bin/agentkeys-broker-server
 # unit-file rewrite — on fresh hosts where the units were just enabled,
 # this is equivalent to start; on re-runs it picks up the new binary +
 # any unit-file changes.
-log "daemon-reload + enable + restart agentkeys-backend, agentkeys-broker"
+log "daemon-reload + enable + restart agentkeys-backend, agentkeys-broker, agentkeys-signer"
 sudo systemctl daemon-reload
-sudo systemctl enable agentkeys-backend agentkeys-broker
+sudo systemctl enable agentkeys-backend agentkeys-broker agentkeys-signer
+# Start broker first so it writes the session pubkey PEM before the signer starts.
 sudo systemctl restart agentkeys-backend agentkeys-broker
+# Brief pause to let broker write the pubkey file before signer reads it.
+sleep 2
+sudo systemctl restart agentkeys-signer
 
 sleep 2
-sudo systemctl --no-pager --full status agentkeys-backend agentkeys-broker || true
+sudo systemctl --no-pager --full status agentkeys-backend agentkeys-broker agentkeys-signer || true
 
 log "Recent broker logs (look for 'broker listening on 127.0.0.1:8091'):"
 sudo journalctl -u agentkeys-broker -n 20 --no-pager || true
-log "Loopback /healthz probe:"
+log "Loopback /healthz probes:"
 curl -sf --max-time 5 http://127.0.0.1:8091/healthz && echo " (broker)" || warn "broker /healthz did not return 200"
 curl -sf --max-time 5 http://127.0.0.1:8090/healthz && echo " (backend)" || warn "backend /healthz did not return 200"
+curl -sf --max-time 5 http://127.0.0.1:8092/healthz && echo " (signer)" || warn "signer /healthz did not return 200"
 
 # ─── 9. Print remaining manual steps ──────────────────────────────────────────
 cat <<EOF
@@ -738,12 +863,15 @@ cat <<EOF
   AgentKeys broker host bootstrap complete.
 ================================================================================
 Status:
-  • backend systemd:           agentkeys-backend.service
-  • broker  systemd:           agentkeys-broker.service
+  • backend systemd:           agentkeys-backend.service   (:8090, loopback)
+  • broker  systemd:           agentkeys-broker.service    (:8091, loopback)
+  • signer  systemd:           agentkeys-signer.service    (:8092, loopback)
   • binaries:                  /usr/local/bin/agentkeys-{mock-server,broker-server}
   • state dir:                 /var/lib/agentkeys      (mode 0700, agentkeys:agentkeys)
   • audit DB will land at:     /var/lib/agentkeys/.agentkeys/broker/audit.sqlite
   • OIDC keypair will land at: /var/lib/agentkeys/.agentkeys/broker/oidc-keypair.json
+  • session pubkey (signer):   /var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem
+                               (written by broker at boot; read by signer for JWT auth)
 
 What you still need to do by hand:
 
@@ -790,9 +918,15 @@ esac
 
 cat <<EOF
   Public reachability:
-    1. Add a DNS A record:  $ISSUER_HOST → <this host's public IP>
+    1. Add DNS A records:
+         $ISSUER_HOST  → <this host's public IP>
+         $SIGNER_HOST  → <this host's public IP>  (same IP, separate vhost)
     2. Open port 443 on the host firewall (and 80 only for ACME challenges).
-       Drop all ingress to :8090 and :8091 except 127.0.0.1.
+       Drop all ingress to :8090, :8091, and :8092 except 127.0.0.1.
+    3. Issue the TLS cert for the signer hostname:
+         sudo certbot --nginx -d $SIGNER_HOST
+       Then re-run this script to flip nginx onto the :443 ssl block.
+    4. Verify: curl -sS https://$SIGNER_HOST/healthz   # → "ok"
 
 EOF
 
@@ -826,9 +960,10 @@ fi
 
 cat <<EOF
   Smoke test (from a client machine — NOT this host):
-    curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $ISSUER_URL/healthz   # expect: HTTP 200
+    curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $ISSUER_URL/healthz        # expect: HTTP 200
     curl -sf $ISSUER_URL/.well-known/openid-configuration | jq '.issuer == "$ISSUER_URL"'
     curl -sf $ISSUER_URL/.well-known/jwks.json | jq '.keys[0].kid'
+    curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://$SIGNER_HOST/healthz  # expect: HTTP 200 (after certbot)
 
   Then continue with docs/cloud-setup.md §4 "OIDC federation" to register
   the OIDC provider with AWS IAM and verify cloud-enforced isolation.

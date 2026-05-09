@@ -96,6 +96,66 @@ aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
 
 Done as part of [§5 EC2 broker host](#5-ec2-broker-host-optional), once you know the host's public IP. If the broker lives outside AWS (DigitalOcean, Hetzner, etc.), upsert the A record now using the host's static IP — the rest of the runbook is identical.
 
+### 1.3 Signer subdomain — A record + TLS cert (issue #74 step 1b)
+
+The dedicated signer listener (`agentkeys-signer.service`, `:8092` loopback)
+is fronted by nginx at a separate hostname — `signer.<zone>` derived from the
+broker hostname (e.g. if `$BROKER_HOST` is `broker.litentry.org`, the signer
+hostname is `signer.litentry.org`).
+
+**Step 1: DNS A record** (same IP as the broker host):
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+SIGNER_ZONE="${BROKER_HOST#*.}"   # e.g. litentry.org
+SIGNER_HOST="signer.${SIGNER_ZONE}"
+
+aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
+  --change-batch "$(jq -n --arg name "${SIGNER_HOST}." --arg ip "$EIP" '{
+    Changes: [{
+      Action: "UPSERT",
+      ResourceRecordSet: {Name: $name, Type: "A", TTL: 300, ResourceRecords: [{Value: $ip}]}
+    }]
+  }')"
+
+# Verify DNS resolves
+curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
+  -H 'accept: application/dns-json' | jq '.Answer[0].data'
+```
+
+**Step 2: Run `setup-broker-host.sh`** (creates the nginx HTTP-only config):
+
+```bash
+# === ON BROKER HOST ===
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+**Step 3: Issue the TLS cert** for the signer hostname:
+
+```bash
+# === ON BROKER HOST ===
+sudo certbot --nginx -d "$SIGNER_HOST"
+```
+
+**Step 4: Re-run `setup-broker-host.sh`** to flip nginx onto the `:443` ssl block:
+
+```bash
+# === ON BROKER HOST ===
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+**Step 5: Verify**:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+curl -sS "https://$SIGNER_HOST/healthz"
+# ok
+```
+
+The signer's nginx vhost rejects all paths except `/dev/*` and `/healthz`
+(returns 404) — defense-in-depth so the proxy layer enforces the same
+restriction as the signer process itself.
+
 ---
 
 ## 2. Inbound mail backend

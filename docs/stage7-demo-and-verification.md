@@ -37,30 +37,36 @@ If you're on a pre-issue-#74 build, run
 
 ---
 
-## Trust model (post-issue-#74 step 1)
+## Trust model (post-issue-#74 step 1b)
 
 ```
-Operator workstation                                  Broker host (EC2)
+Operator workstation / daemon                         Broker host (EC2)
 ┌────────────────────────────┐                        ┌──────────────────────────────┐
-│ agentkeys (CLI)            │   POST /dev/derive ─▶  │ agentkeys-backend            │
-│   • holds NO private key   │                        │   /dev/derive-address        │
-│   • holds session JWT only │  ◀── {address}    ───  │   /dev/sign-message          │
-│                            │                        │   master_secret in           │
-│                            │   POST /dev/sign  ─▶   │   DEV_KEY_SERVICE_MASTER_..  │
-│                            │                        │   (TEE-shaped, env-gated)    │
-│                            │  ◀── {signature}  ───  │                              │
-└──────┬─────────────────────┘                        └──────────────────────────────┘
-       │
-       │ POST /v1/auth/wallet/{start,verify}     (SIWE round-trip)
-       │ POST /v1/mint-oidc-jwt                  (OIDC JWT for AWS)
-       │ POST /v1/wallet/link                    (link omni_email ↔ derived wallet)
-       ▼
-   Broker (stateless minter — verifies session JWT cryptographically)
+│ agentkeys (CLI / daemon)   │                        │ agentkeys-signer             │
+│   • holds NO private key   │  HTTPS (TLS, JWT auth) │   signer.litentry.org:443    │
+│   • holds session JWT      │  POST /dev/derive ─▶   │   ──▶ :8092 (loopback)       │
+│                            │  ◀── {address}    ───  │   /dev/derive-address        │
+│                            │  POST /dev/sign   ─▶   │   /dev/sign-message          │
+│                            │  ◀── {signature}  ───  │   JWT bearer verified on     │
+│                            │                        │   every request              │
+└──────┬─────────────────────┘                        │                              │
+       │                                              │ agentkeys-backend (:8090)    │
+       │ POST /v1/auth/wallet/{start,verify}          │   loopback only (broker's    │
+       │ POST /v1/mint-oidc-jwt                       │   Tier-2 backend probe)      │
+       │ POST /v1/wallet/link                         │                              │
+       ▼                                              │ agentkeys-broker  (:8091)    │
+   broker.litentry.org:443                            │   broker.litentry.org:443    │
+   (stateless minter — verifies session JWT           └──────────────────────────────┘
+    cryptographically)
 ```
 
-The signer is the trust boundary that owns the EVM keypair. **Issue #74
-step 2** swaps the HKDF dev_key_service for a TEE worker behind the
-same `/dev/*` wire shape — daemon and CLI code do not change.
+The signer is the trust boundary that owns the EVM keypair. It is now an
+**independent backend listener** (`signer.litentry.org` → `:8092`) separate
+from the mock-server backend (`:8090`). JWT bearer auth on every `/dev/*`
+request means the signer never serves unauthenticated key operations.
+
+**Issue #74 step 2** swaps the HKDF dev_key_service for a TEE worker behind
+the same `/dev/*` wire shape — daemon and CLI code do not change.
 
 ---
 
@@ -72,27 +78,9 @@ inline `# === ON … ===` banner.
 | Machine | What it has | Used for |
 |---|---|---|
 | **Operator workstation** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS |
-| **Broker host (EC2)** | `agentkeys-broker-server` and `agentkeys-mock-server` binaries at `/usr/local/bin/`, both ES256 keypairs at `/var/lib/agentkeys/.agentkeys/broker/`, systemd services `agentkeys-broker.service` + `agentkeys-backend.service`, mock backend at loopback `:8090` (now serving `/dev/*` too), nginx fronting `:8091` with TLS at `https://$BROKER_HOST` | Broker process, audit DB, JWT minting, **dev_key_service signer** |
+| **Broker host (EC2)** | `agentkeys-broker-server` and `agentkeys-mock-server` binaries at `/usr/local/bin/`, both ES256 keypairs at `/var/lib/agentkeys/.agentkeys/broker/`, systemd services `agentkeys-broker.service` + `agentkeys-backend.service` + `agentkeys-signer.service`, nginx fronting broker on `:8091` at `https://$BROKER_HOST` and signer on `:8092` at `https://signer.<zone>` | Broker process, audit DB, JWT minting, **dev_key_service signer** |
 
 Hop between them with `ssh agentkey@$BROKER_HOST`.
-
-> **Where does the operator workstation reach `/dev/*`?** The signer
-> endpoints are on the backend (loopback `:8090` on the broker host).
-> Two production-shaped options:
->
-> - **Co-locate the daemon** on the broker host. Both this guide's §16
->   live walkthrough and `agentkeys-daemon` deployments do this — the
->   daemon SSHes in (or runs as a sibling systemd unit) and talks to
->   loopback. This matches the eventual TEE topology (daemon →
->   attested channel → enclave on the same host or rack).
-> - **SSH-tunnel `:8090` to the workstation** for ad-hoc demo:
->   `ssh -N -L 18090:127.0.0.1:8090 agentkey@$BROKER_HOST`, then point
->   `$BACKEND_URL` at `http://127.0.0.1:18090`. The signer never sees
->   public traffic; only the operator's SSH key gates access.
->
-> Do NOT proxy `/dev/*` through the broker — it would put the broker
-> on the trust path between the daemon and the signer, defeating the
-> "broker holds no key material" property.
 
 ---
 
@@ -128,13 +116,16 @@ Cloud-side state from [`cloud-setup.md`](cloud-setup.md):
 Broker-host state (from
 [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh)):
 
-- `agentkeys-broker.service` and `agentkeys-backend.service` enabled
-  and active.
+- `agentkeys-broker.service`, `agentkeys-backend.service`, and
+  `agentkeys-signer.service` enabled and active.
 - `/usr/local/bin/agentkeys-broker-server` and
   `/usr/local/bin/agentkeys-mock-server` match the binaries built from
-  this branch (issue #74 step 1).
-- nginx (or ALB) fronting `:8091` at `https://$BROKER_HOST` with a
-  valid TLS cert.
+  this branch (issue #74 step 1b).
+- nginx fronting `:8091` at `https://$BROKER_HOST` with a valid TLS cert.
+- nginx fronting `:8092` (signer-only) at `https://signer.<zone>` with a
+  valid TLS cert (issued via `sudo certbot --nginx -d signer.<zone>`).
+- `/var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem` exists
+  (written by the broker at boot; read by the signer for JWT auth).
 
 Tooling on the workstation:
 
@@ -167,11 +158,10 @@ Tooling on the workstation:
 
 `scripts/setup-broker-host.sh` auto-generates `DEV_KEY_SERVICE_MASTER_SECRET`
 on first run, persists it to `/etc/agentkeys/dev-key-service.env` (mode
-0600, owner `agentkeys`), and wires the backend systemd unit to read it
-via `EnvironmentFile=`. The script is **idempotent** — re-running it
-preserves the existing secret, so an upgrade does not invalidate any
-previously-derived wallet. There is no separate `--upgrade` flag; one
-script handles both bootstrap and re-deploy.
+0600, owner `agentkeys`), and wires both the backend and signer systemd
+units to read it via `EnvironmentFile=`. The script is **idempotent** —
+re-running it preserves the existing secret, so an upgrade does not
+invalidate any previously-derived wallet.
 
 If you've never run the script on this host, do it once:
 
@@ -183,56 +173,56 @@ git fetch origin && git checkout evm && git pull --ff-only
 sudo bash scripts/setup-broker-host.sh --yes
 ```
 
-Either way, confirm the backend is serving the signer endpoints:
+Either way, confirm all three services are active:
 
 ```bash
 # === ON BROKER HOST ===
-sudo journalctl -u agentkeys-backend -n 5 --no-pager
-# Expect: [mock-server] dev_key_service ENABLED (DEV ONLY — replace with TEE worker per issue #74 step 2)
+sudo systemctl is-active agentkeys-backend agentkeys-broker agentkeys-signer
+# active
+# active
+# active
 
-curl -sS -X POST http://127.0.0.1:8090/dev/derive-address \
-  -H 'content-type: application/json' \
-  -d "$(jq -n --arg o "$(printf 'a%.0s' {1..64})" '{omni_account:$o}')" | jq
-# {
-#   "address": "0x…",
-#   "key_version": 1
-# }
+# Confirm the signer-only listener is up (no legacy endpoints):
+curl -sS http://127.0.0.1:8092/healthz
+# ok
+
+# Confirm /session endpoints are absent on :8092 (defense-in-depth).
+curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8092/session/create
+# 404
 ```
 
-If you see HTTP 503 with `"error":"signer_disabled"`, the env file
-didn't load — check `sudo systemctl show agentkeys-backend |
-grep -E 'EnvironmentFile|DEV_KEY_SERVICE'` and confirm
-`/etc/agentkeys/dev-key-service.env` exists and has mode 0600.
+If you see HTTP 503 with `"error":"signer_disabled"` from `:8092`, the
+env file didn't load — check `sudo systemctl show agentkeys-signer |
+grep EnvironmentFile` and confirm `/etc/agentkeys/dev-key-service.env`
+exists with mode 0600.
 
 > **Do NOT regenerate `/etc/agentkeys/dev-key-service.env`** unless you
 > have already migrated every operator off the old derivation. The
 > file is intentionally pinned across re-runs of `setup-broker-host.sh`.
 > Issue #74 step 2 (TEE worker) defines the formal rotation runbook.
 
-### 0.2 Make the signer reachable from the workstation
+### 0.2 Set the signer URL
 
-For the rest of this guide, `$BACKEND_URL` is the URL where `/dev/*`
-is reachable from the operator workstation. Pick one:
+`$BACKEND_URL` is now the public HTTPS URL of the dedicated signer listener
+(`signer.<zone>`). No SSH tunnel required — the signer is fronted by nginx
+over TLS. Set it once and export it:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
+# Derive from $BROKER_HOST: broker.litentry.org → signer.litentry.org
+SIGNER_ZONE="${BROKER_HOST#*.}"
+export AGENTKEYS_SIGNER_URL="https://signer.${SIGNER_ZONE}"
+export BACKEND_URL="$AGENTKEYS_SIGNER_URL"
 
-# Option A — SSH tunnel (recommended for ad-hoc demo):
-ssh -N -L 18090:127.0.0.1:8090 agentkey@$BROKER_HOST &
-TUNNEL_PID=$!
-echo "TUNNEL_PID=$TUNNEL_PID"
-export BACKEND_URL=http://127.0.0.1:18090
-
-# Option B — co-located: run all the workstation commands below from
-# the broker host instead, with BACKEND_URL=http://127.0.0.1:8090.
-
-# Smoke-test the tunnel.
-curl -sS $BACKEND_URL/healthz
+# Smoke-test.
+curl -sS "$BACKEND_URL/healthz"
 # ok
 ```
 
-Tear down the tunnel with `kill $TUNNEL_PID` at the end of the demo
-(see §17 Cleanup).
+If the signer cert isn't issued yet (fresh host), the operator needs to
+run `sudo certbot --nginx -d signer.<zone>` on the broker host first and
+then re-run `setup-broker-host.sh` to flip nginx onto the :443 ssl block.
+See `docs/cloud-setup.md §1.3` for the signer DNS + cert steps.
 
 ### 0.3 Pick two demo identities and compute their `omni_account`
 
@@ -271,9 +261,14 @@ echo "OMNI_B=$OMNI_B  length=${#OMNI_B}"
 ### 0.4 Derive the managed wallets
 
 The dev_key_service derives a deterministic EVM wallet for each omni.
+The CLI automatically attaches the saved session JWT as a bearer token.
+Run `agentkeys init` first if you haven't already so a session is saved
+in the keychain.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
+# The CLI reads the saved session (from agentkeys init) and attaches it
+# as Authorization: Bearer <jwt> so the signer can verify the request.
 ADDR_A=$(agentkeys signer derive \
            --signer-url $BACKEND_URL \
            --omni-account $OMNI_A \
@@ -1186,9 +1181,21 @@ sudo systemctl show agentkeys-backend | grep DEV_KEY_SERVICE
 
 ### 14.3 `agentkeys signer sign` returns `Error: SIGNER_UNREACHABLE`
 
-The CLI cannot reach `--signer-url`. Re-establish the SSH tunnel
-(§0.2 Option A) or switch to running the CLI on the broker host
-(Option B).
+The CLI cannot reach `--signer-url`. Verify, in order:
+
+1. `curl -sS https://signer.<zone>/healthz` returns `ok` from the
+   workstation. If TLS errors, the cert hasn't been issued yet —
+   run `sudo certbot --nginx -d signer.<zone>` on the broker host
+   (per §0.2).
+2. `sudo systemctl status agentkeys-signer` on the broker host
+   shows `active (running)`. If `failed`, check
+   `journalctl -u agentkeys-signer -n 50` — most likely
+   `/var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem`
+   is missing (the broker writes it on boot via
+   `--export-session-pubkey-to`; restart `agentkeys-broker` then
+   `agentkeys-signer`).
+3. The DNS A record for `signer.<zone>` resolves to the broker host
+   IP — `dig +short signer.<zone>` should return the EC2 EIP.
 
 ### 14.4 SIWE verify returns `signature does not recover to claimed address`
 
@@ -1341,19 +1348,19 @@ curl -sS --fail-with-body https://broker.litentry.org/.well-known/jwks.json | jq
 
 ### 16.4 Managed-wallet SIWE auth via the dev_key_service
 
-Bring up the SSH tunnel for the signer (§0.2 Option A):
+Point the workstation at the public signer hostname (§0.2):
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-ssh -N -L 18090:127.0.0.1:8090 agentkey@broker.litentry.org &
-TUNNEL_PID=$!
-export BACKEND_URL=http://127.0.0.1:18090
-curl -sS $BACKEND_URL/healthz   # ok
+export AGENTKEYS_SIGNER_URL=https://signer.litentry.org
+export BACKEND_URL=$AGENTKEYS_SIGNER_URL
+curl -sS $BACKEND_URL/healthz   # → ok
 ```
 
 Compute omnis + derive wallets + run SIWE round-trip — exactly §0.3
 through §2.4 above, just with `$OIDC_ISSUER=https://broker.litentry.org`
-and `$BACKEND_URL=http://127.0.0.1:18090`.
+and `$BACKEND_URL=https://signer.litentry.org`. No tunnel; the signer
+listener is fronted by nginx with TLS (issued via certbot per §0.2).
 
 ```bash
 omni() { printf '%s%s%s' "agentkeys" "$1" "$2" | shasum -a 256 | awk '{print $1}'; }
@@ -1430,7 +1437,7 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
 export AGENTKEYS_BROKER_URL=https://broker.litentry.org
 export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
-export AGENTKEYS_SIGNER_URL=$BACKEND_URL          # SSH-tunnel from §0.2
+export AGENTKEYS_SIGNER_URL=$BACKEND_URL          # public signer URL from §0.2
 export AWS_REGION=us-east-1
 
 # Bootstrap the master session via the new flow. The CLI prompts you
@@ -1495,10 +1502,10 @@ Reset to your admin profile after the demo:
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 awsp agentkeys-admin
 aws sts get-caller-identity        # confirm: back to admin
-
-# Tear down the SSH tunnel from §0.2.
-kill $TUNNEL_PID 2>/dev/null || true
 ```
+
+(No tunnel to tear down post-step-1b — the signer is reached via
+its public hostname, not via SSH.)
 
 The broker keeps running. To tear down the cloud-side state
 (provider, role, bucket policy), follow `cloud-setup.md §6`.

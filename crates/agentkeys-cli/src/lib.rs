@@ -1154,12 +1154,19 @@ pub async fn cmd_inbox_list(ctx: &CommandContext, agent: Option<&str>) -> Result
 /// HKDF-vs-TEE; it only enforces the wire contract from
 /// `docs/spec/signer-protocol.md`. Issue #74 step 2 swaps the implementation
 /// behind `signer_url`; this command keeps working unchanged.
+///
+/// The saved session JWT is attached as a bearer token so the signer can
+/// verify the request. If no session is saved, the command fails with a
+/// clear message to run `agentkeys init` first.
 pub async fn cmd_signer_derive(
     ctx: &CommandContext,
     signer_url: &str,
     omni_account: &str,
 ) -> Result<String> {
-    let client = HttpSignerClient::new(signer_url);
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
     let derived = client
         .derive_address(omni_account)
         .await
@@ -1181,13 +1188,20 @@ pub async fn cmd_signer_derive(
 /// `agentkeys signer sign` — call `/dev/sign-message` on the configured
 /// signer for `omni_account || message_utf8`, returning the canonical
 /// 65-byte EIP-191 signature plus the derived address.
+///
+/// The saved session JWT is attached as a bearer token so the signer can
+/// verify the request. If no session is saved, the command fails with a
+/// clear message to run `agentkeys init` first.
 pub async fn cmd_signer_sign(
     ctx: &CommandContext,
     signer_url: &str,
     omni_account: &str,
     message: &str,
 ) -> Result<String> {
-    let client = HttpSignerClient::new(signer_url);
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session.token);
     let signed = client
         .sign_eip191(omni_account, message.as_bytes())
         .await
@@ -1242,7 +1256,7 @@ pub async fn cmd_whoami(
         let omni = omni_account.ok_or_else(|| {
             anyhow!("--signer-url requires --omni-account (will be derived from session in a later issue-74 step)")
         })?;
-        let client = HttpSignerClient::new(url);
+        let client = HttpSignerClient::new(url).with_session_jwt(session.token.clone());
         let derived = client
             .derive_address(omni)
             .await
@@ -1281,6 +1295,10 @@ fn format_signer_error(e: SignerClientError) -> anyhow::Error {
     match e {
         SignerClientError::SignerDisabled(m) => anyhow!(
             "Error: SIGNER_DISABLED\n  {}\n\n  Fix: set DEV_KEY_SERVICE_MASTER_SECRET on the mock-server (or attest the TEE worker once issue #74 step 2 ships).",
+            m
+        ),
+        SignerClientError::Unauthorized(m) => anyhow!(
+            "Error: SIGNER_UNAUTHORIZED\n  {}\n\n  Fix: run `agentkeys init` to obtain a fresh session JWT.",
             m
         ),
         SignerClientError::InvalidOmniAccount(m) => {
