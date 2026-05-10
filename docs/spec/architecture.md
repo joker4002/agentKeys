@@ -345,12 +345,15 @@ the identity source.
 
 ### 5a.1 First-time init binding
 
-The flow is a two-stage pipeline:
+The flow is a three-stage pipeline:
 
-1. **Identity ceremony** — verify the operator's authenticator. One of `email-link`, `oauth2_google`, `evm`, `passkey-as-identity` (see below). Returns `(verified_identity, request_id, binding_nonce, expiry)` to the broker; broker does NOT mint a session JWT yet.
-2. **Binding ceremony** — bind the device pubkey D_pub atomically with the JWT mint. Branches on machine class (master → WebAuthn; agent → link-code). See `5a.1.M` and `5a.1.A` below.
+0. **Device-key generation (stage 0, local-only)** — at daemon startup the CLI generates `(D_priv, D_pub) = K10` if not already persisted. D_priv goes to OS keychain (master) or file backend (agent — see §5a.4). **No network traffic.** D_pub is now available for both subsequent stages and survives daemon restarts unchanged. This matches the §5 sequenceDiagram's "Step 0 — generate device keypair LOCALLY".
+1. **Identity ceremony (stage 1)** — verify the operator's authenticator. One of `email-link`, `oauth2_google`, `evm`, `passkey-as-identity` (see below). Returns `(verified_identity, request_id, binding_nonce, expiry)` to the broker; broker does NOT mint a session JWT yet.
+2. **Binding ceremony (stage 2)** — bind the already-generated D_pub atomically with the JWT mint. Branches on machine class (master → WebAuthn; agent → link-code). See `5a.1.M` and `5a.1.A` below.
 
-Both halves must succeed before the broker mints J0. D_pub is a claim in J0; subsequent `/dev/*` calls verify per-request signatures against that claim per [step-1c plan](plans/issue-74-step-1c-device-key-auth.md).
+All three stages must succeed before the broker mints J0. D_pub is a claim in J0; subsequent `/dev/*` calls verify per-request signatures against that claim per [step-1c plan](plans/issue-74-step-1c-device-key-auth.md).
+
+Stage 0 happens **before** stage 1 in every flow (master, agent, v1c, v0.2). This is non-negotiable: D_pub must exist before the identity ceremony can include it (v1c `pop_sig` needs D_priv to sign; v0.2 WebAuthn challenge folds D_pub into `SHA256(binding_nonce || D_pub)`). Both versions land in the same place — D is generated first, then the ceremony binds it.
 
 #### Identity ceremonies (verify the human)
 
@@ -368,11 +371,13 @@ The `binding_nonce` is a 32-byte CSPRNG value the broker stores alongside the ve
 #### 5a.1.M Master binding ceremony — WebAuthn (uniform, v0.2 target)
 
 ```
-ON MASTER (after identity ceremony returns binding_nonce):
-1. CLI: generate (D_priv, D_pub); persist D_priv in OS keychain.    (K10)
-2. CLI: open browser to https://broker/v1/auth/bind/<request_id>
-3. Browser: navigator.credentials.create({
-     challenge: SHA256(binding_nonce || D_pub),
+ON MASTER:
+   PRECONDITION (from stage 0): D_priv/D_pub = K10 already exists in OS keychain.
+   PRECONDITION (from stage 1): identity ceremony returned binding_nonce.
+
+1. CLI: open browser to https://broker/v1/auth/bind/<request_id>
+2. Browser: navigator.credentials.create({
+     challenge: SHA256(binding_nonce || D_pub),     # D_pub from stage 0
      rp.id:     broker.litentry.org,
      authenticatorSelection: { authenticatorAttachment: "platform",
                                  userVerification: "required" },
@@ -380,17 +385,17 @@ ON MASTER (after identity ceremony returns binding_nonce):
    })
    → user does Touch ID / Hello / biometric
    → returns hardware-attested signature + WebAuthn credential
-4. Browser → broker: POST /v1/auth/bind/<request_id>
+3. Browser → broker: POST /v1/auth/bind/<request_id>
                        { webauthn_attestation, device_pubkey: D_pub }
-5. Broker: verify WebAuthn attestation chain;
+4. Broker: verify WebAuthn attestation chain;
             verify challenge equals SHA256(binding_nonce || D_pub);
             bind (omni, device_pubkey: D_pub,
                    webauthn_credential_id: K11_id, exp);
             mint session JWT with claims:
               agentkeys_device_pubkey = D_pub      (K10 — used per-request)
               agentkeys_webauthn_cred = K11_id     (used at re-bind / rotate)
-6. CLI: poll status → receive J0 with both claims.
-7. CLI: persist J0 + D_priv in OS keychain.
+5. CLI: poll status → receive J0 with both claims.
+6. CLI: persist J0 in OS keychain (D_priv was already persisted at stage 0).
 ```
 
 The WebAuthn signature serves double duty: hardware-attested **user presence** + atomic **commitment to D_pub** (because D_pub is folded into the WebAuthn challenge). No separate `pop_sig` field needed — the WebAuthn signature IS the PoP.
@@ -416,9 +421,10 @@ ON MASTER (already initialized per 5a.1.M; holds J1_master):
 ON AGENT MACHINE:
 5. agentkeys-daemon --init-link-code AGK-A8F3-92K1 \
                     --broker-url B --signer-url S
-6. Daemon: generate (D_priv, D_pub); persist D_priv per §5a.4
-            (OS keychain when available, else file backend
-             ~/.agentkeys/daemon-<wallet>/session.json mode 0600).
+6. Stage 0 (daemon startup, per §5a.1): generate (D_priv, D_pub) = K10;
+   persist D_priv per §5a.4 (OS keychain when available, else file backend
+   ~/.agentkeys/daemon-<wallet>/session.json mode 0600).
+   No identity ceremony precedes — the link code is the bootstrap.
 7. Daemon → broker: POST /v1/auth/link-code/redeem
                      { link_code: "AGK-A8F3-92K1",
                        device_pubkey: D_pub,
@@ -456,19 +462,20 @@ with the new K11' credential. The old D_pub is either retained
 
 ```
 ON NEW MASTER:
+0. Stage 0 (daemon startup, per §5a.1): generate fresh
+   (D_priv', D_pub') = K10'; persist D_priv' in OS keychain.
 1. CLI: agentkeys init --email alice@x.com (or any identity type)
-2. Run identity ceremony per §5a.1.
-3. Run master binding ceremony per §5a.1.M:
-   - Generates new (D_priv', D_pub') = K10'
-   - WebAuthn ceremony enrolls a NEW platform-authenticator
-     credential = K11' on the new device (TouchID/Hello/StrongBox
-     on the new hardware).
+2. Run identity ceremony per §5a.1 — broker returns binding_nonce.
+3. Run master binding ceremony per §5a.1.M — WebAuthn ceremony
+   enrolls a NEW platform-authenticator credential = K11' on the
+   new device's hardware (Touch ID / Hello / StrongBox); the
+   WebAuthn challenge folds in D_pub' from stage 0.
 4. Broker observes pre-existing binding (D_pub_old, K11_old)
    for the same omni and either:
      (a) ADDS (D_pub', K11') alongside (multi-device, v0.2), OR
      (b) REPLACES old binding (single-device default, v1c).
 5. Broker mints J1' bound to (omni, D_pub', K11').
-6. New master persists D_priv' + J1' in OS keychain.
+6. New master persists J1' (D_priv' was persisted at stage 0).
 
 OLD MASTER (if (b) was chosen):
 7. Next /dev/sign-message call: signer rejects D_pub_old's
