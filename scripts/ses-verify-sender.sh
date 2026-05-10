@@ -75,45 +75,71 @@ aws sesv2 create-email-identity \
   || warn "create-email-identity returned non-zero (likely already registered + pending) — continuing"
 
 # ─── Step 2: Poll S3 for the SES verification mail. ──────────────────────────
+#
+# Extraction strategy: SES verify URLs look like
+#   https://email-verification.<region>.amazonaws.com/?Context=...&Token=...
+# In multipart/alternative MIME bodies, SES uses quoted-printable: '=' is
+# '=3D' and lines may soft-wrap with '=\n'. We undo both, then grep for
+# the URL pattern directly. No prerequisite grep on $FROM (it'd be encoded
+# as 'noreply-test=40bots.litentry.org' in QP and never match).
+extract_verify_url() {
+  printf '%s' "$1" \
+    | sed 's/=$//' \
+    | tr -d '\n' \
+    | grep -oE 'https://email-verification\.[a-z0-9.-]+\.amazonaws\.com/[^[:space:]"<>'\''=]+' \
+    | head -1 \
+    | sed 's/=3D/=/g'
+}
+
 log "Polling s3://$MAIL_BUCKET/$INBOUND_PREFIX for the verification mail…"
 verify_url=""
+verify_key=""
 for attempt in $(seq 1 "$POLL_MAX_ATTEMPTS"); do
   keys=$(aws s3api list-objects-v2 \
            --bucket "$MAIL_BUCKET" \
            --prefix "$INBOUND_PREFIX" \
            --query 'Contents[*].Key' \
            --output text 2>/dev/null || true)
+  # Diagnostic: how many objects + sample keys (first 3) per attempt.
+  count=$(printf '%s\n' $keys | grep -c . || true)
+  log "  attempt $attempt/$POLL_MAX_ATTEMPTS — $count object(s) under $INBOUND_PREFIX"
+
   for key in $keys; do
     [[ -z "$key" ]] && continue
     body=$(aws s3 cp "s3://$MAIL_BUCKET/$key" - 2>/dev/null || true)
-    if grep -q "$FROM" <<<"$body" && grep -qE 'ses[._-]?verification|amazonaws\.com.*verify' <<<"$body"; then
-      # Verification URLs look like:
-      #   https://email-verification.<region>.amazonaws.com/?Context=...&Token=...
-      # Body is quoted-printable, so '=' may appear as '=3D' and lines may
-      # be soft-wrapped with '=\n'. Undo both before grepping.
-      url=$(printf '%s' "$body" \
-              | sed 's/=$//' \
-              | tr -d '\n' \
-              | grep -oE 'https://email-verification\.[a-z0-9.-]+\.amazonaws\.com/[^[:space:]"<>]+' \
-              | head -1 \
-              | sed 's/=3D/=/g')
-      if [[ -n "$url" ]]; then
-        verify_url="$url"
-        log "Verification URL found in s3://$MAIL_BUCKET/$key"
-        # Delete the verification mail so it doesn't pollute the inbox.
-        aws s3 rm "s3://$MAIL_BUCKET/$key" >/dev/null
-        break
-      fi
+    [[ -z "$body" ]] && continue
+    url=$(extract_verify_url "$body")
+    if [[ -n "$url" ]]; then
+      verify_url="$url"
+      verify_key="$key"
+      break
     fi
   done
-  [[ -n "$verify_url" ]] && break
-  log "  attempt $attempt/$POLL_MAX_ATTEMPTS — verification mail not yet in bucket, sleeping ${POLL_INTERVAL}s"
+
+  if [[ -n "$verify_url" ]]; then
+    log "Verification URL found in s3://$MAIL_BUCKET/$verify_key"
+    aws s3 rm "s3://$MAIL_BUCKET/$verify_key" >/dev/null
+    break
+  fi
+
   sleep "$POLL_INTERVAL"
 done
 
-[[ -z "$verify_url" ]] && die "verification mail did not arrive in $((POLL_INTERVAL * POLL_MAX_ATTEMPTS))s — \
-SES may be in a region without inbound receipt rules, or the receipt rule from \
-cloud-setup.md §2.1 is not active. Check: aws ses describe-active-receipt-rule-set --region $REGION"
+if [[ -z "$verify_url" ]]; then
+  warn "verification mail did not arrive (or did not contain a verify URL) in $((POLL_INTERVAL * POLL_MAX_ATTEMPTS))s"
+  warn "Diagnostic checks:"
+  warn "  1. Is the SES receipt rule active?"
+  warn "       aws ses describe-active-receipt-rule-set --region $REGION"
+  warn "       → expect rule-set-name: agentkeys (per cloud-setup.md §2.1)"
+  warn "  2. Did SES send the verification mail at all?"
+  warn "       aws sesv2 get-email-identity --region $REGION --email-identity $FROM \\"
+  warn "         --query '{status: VerifiedForSendingStatus, type: IdentityType}'"
+  warn "       → if status=False with no recent inbound, the verification mail"
+  warn "         may have bounced (e.g. SES sandbox + recipient unverified)."
+  warn "  3. Is anything landing in the bucket at all?"
+  warn "       aws s3 ls s3://$MAIL_BUCKET/$INBOUND_PREFIX --recursive | tail -10"
+  die "no verification URL — see diagnostic output above"
+fi
 
 # ─── Step 3: Click the verification URL. ─────────────────────────────────────
 log "Clicking verification URL…"
