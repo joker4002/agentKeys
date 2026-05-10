@@ -7,6 +7,9 @@ See `docs/spec/plans/development-stages.md` for the 8-stage build plan.
 See `docs/spec/plans/execution-plan.md` for the orchestration runbook (ralph, team, ultraqa).
 Do not read folder `docs/archived`
 
+## Architecture-as-source-of-truth policy
+[`docs/spec/architecture.md`](docs/spec/architecture.md) is the **single source of truth** for component inventory, key inventory (K1–K11), trust boundaries, identity model (HDKD actor tree), and per-actor binding ceremonies. **After editing any architectural doc** (broker plans, signer-protocol, demo doc, runbooks, plan files in `docs/spec/plans/`, heima-gaps), re-open `architecture.md` and verify it still matches; if it diverges, update arch.md in the same change. If the per-doc detail outgrows arch.md, link from arch.md outward — never duplicate. The wiki page at [`.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md) is a focused operator reference for the agent role; it defers to arch.md.
+
 ## Version Control
 Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
 

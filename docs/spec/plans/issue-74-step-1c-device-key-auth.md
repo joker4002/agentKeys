@@ -1,6 +1,6 @@
 # Plan — Issue #74 Step 1c: Device-Key Authentication for `/dev/*`
 
-## Status — v1c interim; v0.2 target = WebAuthn-uniform binding
+## Status — v1c interim; v0.2 target = HDKD per-agent omni + WebAuthn-uniform binding
 
 This plan documents the **v1c interim** wire shapes for device-key
 binding: bespoke per-identity PoP fields (`pop_sig` over canonical
@@ -9,16 +9,27 @@ inputs in `email_request` / `oauth2_start`; SIWE-payload
 PR #75's successor work and unblock per-request device-signature
 auth on `/dev/*` immediately.
 
-The **v0.2 target** collapses the four bespoke shapes into a
-**uniform WebAuthn binding ceremony for masters** plus a
-**uniform link-code binding ceremony for agents** (VM / Linux /
-CI / no-platform-authenticator machines). This eliminates the
-per-identity-type PoP variation and closes the Q7
-email-account-compromise → device-takeover gap by requiring
-hardware-attested user presence at re-bind time.
+The **v0.2 target** is a structural shift, not just a wire-shape
+collapse:
 
-[`docs/spec/architecture.md`](../architecture.md) §5a.1 is the
-**single source of truth** for the v0.2 target shape. The
+1. **HDKD per-agent omni.** Each agent is a first-class actor with
+   its own omni derived from the master via `HDKD(O_master,
+   "//<label>")`, its own wallet (`HKDF(K3, O_agent)`), its own
+   AWS PrincipalTag, and its own audit slot. The v1c "shared omni
+   with multiple device pubkeys" model becomes a degenerate v1.0
+   tree (no children).
+2. **Agent bootstrap = link-code only.** No identity ceremony for
+   agents, no shared bearer, no agent-side recovery. Single test
+   surface, single threat model.
+3. **Master binding via WebAuthn (uniform).** Collapses the four
+   bespoke per-identity PoP shapes into one ceremony — D_pub
+   committed atomically inside the WebAuthn challenge. Closes the
+   Q7 email-account-compromise → device-takeover gap by requiring
+   hardware-attested user presence at re-bind time.
+
+[`docs/spec/architecture.md`](../architecture.md) §4 (HDKD actor
+tree), §4a (mental model), and §5a (per-actor binding ceremonies)
+are the **single source of truth** for the v0.2 target. The
 per-identity-type sections in this plan are the v1c wire-shape
 reference; they will be marked superseded once the v0.2 binding
 endpoints land.
@@ -27,6 +38,8 @@ YubiKey-on-Linux as a master tier (roaming-authenticator binding,
 lets a Linux box act as a master without a built-in platform
 authenticator) is deferred — see
 [issue #79](https://github.com/litentry/agentKeys/issues/79).
+The agent-role/usage operator reference lives at
+[`.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md).
 
 ## Goal
 
