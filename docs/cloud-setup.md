@@ -13,7 +13,8 @@ The runbook is split by concern, not by stage:
 | [§3 IAM users + role](#3-iam-identities) | `agentkeys-{admin,broker,daemon}` + `agentkeys-data-role` | Once per account |
 | [§4 OIDC federation](#4-oidc-federation-stage-7) | Register the broker as an OIDC provider, swap to PrincipalTag-scoped trust | After §1–§3 + a publicly-reachable broker |
 | [§5 EC2 broker host](#5-ec2-broker-host-optional) | EIP, A record, security group | Only if you're hosting the broker on AWS |
-| [§6 Cleanup](#6-cleanup) | Tear-down recipe | When you want to delete it all |
+| [§6 Signer host](#6-signer-host) | DNS A record + TLS cert + nginx flip for `signer.<zone>` | After §5 — needs `$EIP` |
+| [§7 Cleanup](#7-cleanup) | Tear-down recipe | When you want to delete it all |
 
 **Cloud-portability:** §1 (DNS) and §2 (inbound mail) are the cloud-replaceable layers — Tencent Cloud SimpleDM + COS would slot in here unchanged at the §3+ boundary. See [§2.2](#22-future-tencent-cloud-simpledm--cos).
 
@@ -98,89 +99,17 @@ Done as part of [§5 EC2 broker host](#5-ec2-broker-host-optional), once you kno
 
 ### 1.3 Signer subdomain — A record + TLS cert (issue #74 step 1b)
 
-#### What the signer is + why it gets its own hostname
+The signer (`dev_key_service`) is the only process that touches `K3` (master
+secret) and derives `K4` (per-actor EVM wallets). It runs on a dedicated
+hostname `signer.<zone>` (e.g. `signer.litentry.org`) — co-located with the
+broker on the same EC2 host today, so a future move to a different machine
+(or TEE worker per issue #74 step 2) only changes the A record, not any
+client config. Wire shape pinned by [`docs/spec/signer-protocol.md`](spec/signer-protocol.md).
 
-The signer (`dev_key_service`) is the only process that touches `K3` (the
-master secret) and derives `K4` (per-actor EVM wallets). It exposes exactly
-two endpoints — `POST /dev/derive-address` and `POST /dev/sign-message` per
-[`docs/spec/signer-protocol.md`](spec/signer-protocol.md) — and authenticates
-every request with a broker-issued session JWT (the broker's session pubkey
-is read off-disk at boot). Nothing else is served on this hostname.
-
-| Concern | Today | Future |
-|---|---|---|
-| Process | `agentkeys-signer.service` (Rust, `agentkeys-mock-server --signer-only`, loopback `:8092`) | TEE worker (issue #74 step 2) |
-| Host | **Same EC2 box as the broker** — co-located behind the same nginx, provisioned by the same `setup-broker-host.sh` run | Separate machine (or enclave); only the A record moves |
-| Public hostname | `signer.<zone>` (e.g. `signer.litentry.org`) | `signer.<zone>` (unchanged) |
-| Master secret (K3) | `/etc/agentkeys/dev-key-service.env` (mode 0600, owner `agentkeys`) — auto-generated on first `setup-broker-host.sh` run, **never rotated** (rotation invalidates every previously-derived wallet) | TEE-sealed; same wire shape |
-
-**Why a dedicated hostname instead of a path on the broker:** decoupling the
-signer's public URL from the broker's lets us move the signer process to a
-different host (different VPC, different cloud, eventually a TEE worker)
-without changing any client config — daemon and CLI keep talking to
-`https://signer.<zone>`, only the A record + cert move. The split also gives
-us a clean trust boundary: a leaked broker keypair cannot impersonate the
-signer (different TLS cert, different process, different env file holding K3).
-
-The dedicated signer listener (`agentkeys-signer.service`, `:8092` loopback)
-is fronted by nginx at `signer.<zone>` derived from the broker hostname (e.g.
-if `$BROKER_HOST` is `broker.litentry.org`, the signer hostname is
-`signer.litentry.org`). The hostname is exported as `SIGNER_HOST` /
-`AGENTKEYS_SIGNER_URL` in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env)
-so the demo + CLI invocations pick it up automatically.
-
-**Step 1: DNS A record** (same IP as the broker host — co-located today):
-
-```bash
-# === ON OPERATOR WORKSTATION ===
-SIGNER_ZONE="${BROKER_HOST#*.}"   # e.g. litentry.org
-SIGNER_HOST="signer.${SIGNER_ZONE}"
-
-aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
-  --change-batch "$(jq -n --arg name "${SIGNER_HOST}." --arg ip "$EIP" '{
-    Changes: [{
-      Action: "UPSERT",
-      ResourceRecordSet: {Name: $name, Type: "A", TTL: 300, ResourceRecords: [{Value: $ip}]}
-    }]
-  }')"
-
-# Verify DNS resolves
-curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
-  -H 'accept: application/dns-json' | jq '.Answer[0].data'
-```
-
-**Step 2: Run `setup-broker-host.sh`** (creates the nginx HTTP-only config):
-
-```bash
-# === ON BROKER HOST ===
-sudo bash scripts/setup-broker-host.sh --yes
-```
-
-**Step 3: Issue the TLS cert** for the signer hostname:
-
-```bash
-# === ON BROKER HOST ===
-sudo certbot --nginx -d "$SIGNER_HOST"
-```
-
-**Step 4: Re-run `setup-broker-host.sh`** to flip nginx onto the `:443` ssl block:
-
-```bash
-# === ON BROKER HOST ===
-sudo bash scripts/setup-broker-host.sh --yes
-```
-
-**Step 5: Verify**:
-
-```bash
-# === ON OPERATOR WORKSTATION ===
-curl -sS "https://$SIGNER_HOST/healthz"
-# ok
-```
-
-The signer's nginx vhost rejects all paths except `/dev/*` and `/healthz`
-(returns 404) — defense-in-depth so the proxy layer enforces the same
-restriction as the signer process itself.
+Done as part of [§6 Signer host](#6-signer-host), once `$EIP` is known from
+[§5.1](#51-allocate--attach-an-elastic-ip). If the signer ever gets its own
+machine, swap that section's IP for the new host's static IP — the rest is
+identical.
 
 ---
 
@@ -698,7 +627,84 @@ The script writes systemd units, an HTTP-only nginx config, then prints the cert
 
 ---
 
-## 6. Cleanup
+## 6. Signer host
+
+The signer (`agentkeys-signer.service`, loopback `:8092`) is fronted by nginx
+at `signer.<zone>` and serves only `/dev/derive-address`, `/dev/sign-message`,
+and `/healthz` — every request authenticated with a broker-issued session
+JWT. Co-located with the broker on the same EC2 host today; the dedicated
+hostname is what lets it move later without changing client config.
+
+| Concern | Today | Future |
+|---|---|---|
+| Process | `agentkeys-signer.service` (Rust, `agentkeys-mock-server --signer-only`, loopback `:8092`) | TEE worker (issue #74 step 2) |
+| Host | **Same EC2 box as the broker** — co-located behind the same nginx, provisioned by the same `setup-broker-host.sh` run | Separate machine (or enclave); only the A record + cert move |
+| Public hostname | `signer.<zone>` (e.g. `signer.litentry.org`) | `signer.<zone>` (unchanged) |
+| Master secret (K3) | `/etc/agentkeys/dev-key-service.env` (mode 0600, owner `agentkeys`) — auto-generated on first `setup-broker-host.sh` run, **never rotated** (rotation invalidates every previously-derived wallet) | TEE-sealed; same wire shape |
+
+Hostname is exported as `SIGNER_HOST` / `AGENTKEYS_SIGNER_URL` in
+[`scripts/operator-workstation.env`](../scripts/operator-workstation.env);
+all CLI / demo invocations pick it up from there.
+
+### 6.1 DNS A record
+
+Same IP as the broker host (`$EIP` from [§5.1](#51-allocate--attach-an-elastic-ip)).
+If the signer is ever moved to its own host, swap `$EIP` for that host's
+static IP — the rest is identical.
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+SIGNER_ZONE="${BROKER_HOST#*.}"   # e.g. litentry.org
+SIGNER_HOST="signer.${SIGNER_ZONE}"
+
+aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
+  --change-batch "$(jq -n --arg name "${SIGNER_HOST}." --arg ip "$EIP" '{
+    Changes: [{
+      Action: "UPSERT",
+      ResourceRecordSet: {Name: $name, Type: "A", TTL: 300, ResourceRecords: [{Value: $ip}]}
+    }]
+  }')"
+
+# Verify DNS resolves
+curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
+  -H 'accept: application/dns-json' | jq '.Answer[0].data'
+```
+
+### 6.2 TLS cert + nginx flip
+
+Three host-side steps. `setup-broker-host.sh` is idempotent — first run
+writes an HTTP-only nginx config, certbot issues the cert, second run flips
+the vhost onto `:443` ssl. The script also auto-generates
+`/etc/agentkeys/dev-key-service.env` (mode 0600) and writes
+`agentkeys-signer.service`.
+
+```bash
+# === ON BROKER HOST ===
+# Step 1 — first pass writes HTTP-only nginx config
+sudo bash scripts/setup-broker-host.sh --yes
+
+# Step 2 — issue the LE cert for the signer hostname
+sudo certbot --nginx -d "$SIGNER_HOST"
+
+# Step 3 — re-run to flip nginx onto :443 ssl
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+### 6.3 Verify
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+curl -sS "https://$SIGNER_HOST/healthz"
+# ok
+
+# Defense-in-depth: signer vhost rejects everything except /dev/* + /healthz.
+curl -sS -o /dev/null -w '%{http_code}\n' "https://$SIGNER_HOST/session/create"
+# 404
+```
+
+---
+
+## 7. Cleanup
 
 ```bash
 # OIDC federation (if §4 ran)

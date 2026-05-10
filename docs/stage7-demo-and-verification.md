@@ -259,7 +259,7 @@ curl -sS "$BACKEND_URL/healthz"
 If the signer cert isn't issued yet (fresh host), the operator needs to
 run `sudo certbot --nginx -d signer.<zone>` on the broker host first and
 then re-run `setup-broker-host.sh` to flip nginx onto the :443 ssl block.
-See `docs/cloud-setup.md §1.3` for the signer DNS + cert steps.
+See `docs/cloud-setup.md §6` for the signer DNS + cert steps (§1.3 is the brief intro).
 
 ### 0.3 Pick two demo identities and compute their `omni_account`
 
@@ -1545,7 +1545,7 @@ aws sts get-caller-identity        # confirm: back to admin
 its public hostname, not via SSH.)
 
 The broker keeps running. To tear down the cloud-side state
-(provider, role, bucket policy), follow `cloud-setup.md §6`.
+(provider, role, bucket policy), follow `cloud-setup.md §7`.
 
 > **Do NOT casually rotate `DEV_KEY_SERVICE_MASTER_SECRET`** —
 > rotating invalidates every previously-derived wallet for every
