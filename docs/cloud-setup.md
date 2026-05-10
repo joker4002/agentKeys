@@ -688,7 +688,7 @@ second run flips the vhost onto `:443` ssl. The script also auto-generates
 ```bash
 # === ON BROKER HOST ===
 # Step 1 — first pass writes the HTTP-only nginx vhost for signer.<zone>
-sudo bash scripts/setup-broker-host.sh --yes
+sudo bash scripts/setup-broker-host.sh --yes --with-nginx
 
 # Sanity: the signer vhost must exist before certbot can pick it up
 ls /etc/nginx/sites-enabled/agentkeys-signer
@@ -701,7 +701,7 @@ echo "SIGNER_HOST=$SIGNER_HOST"   # → signer.<your-zone>, e.g. signer.litentry
 sudo certbot --nginx -d "$SIGNER_HOST"
 
 # Step 3 — re-run to flip nginx onto :443 ssl for signer.<zone>
-sudo bash scripts/setup-broker-host.sh --yes
+sudo bash scripts/setup-broker-host.sh --yes --with-nginx
 ```
 
 ### 6.3 Verify

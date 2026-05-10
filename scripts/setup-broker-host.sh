@@ -355,11 +355,18 @@ case "$CRED_MODE" in
   none|instance-profile|profile) ;;
   *) die "--cred-mode must be one of: none, instance-profile, profile (got $CRED_MODE)";;
 esac
-# Resolve auto → no for the non-interactive path (preserves prior default).
+# Resolve auto → yes for the non-interactive path. The runbook
+# (docs/cloud-setup.md §5 + §6) always wants nginx+certbot on a fresh
+# broker host — defaulting to "no" silently skipped both vhost writes
+# (broker AND signer), which made `sudo certbot --nginx -d signer.<zone>`
+# fall through to certbot's "pick from existing vhosts" prompt with only
+# the broker vhost listed. Pass --without-nginx / --without-certbot to
+# opt out (e.g. running behind a non-nginx reverse proxy or pre-provisioned
+# certs).
 # `if`/`fi` instead of `[[ ]] && cmd` to dodge the set-e silent-exit gotcha
 # when the test is false.
-if [[ "$WITH_NGINX"   == "auto" ]]; then WITH_NGINX="no"; fi
-if [[ "$WITH_CERTBOT" == "auto" ]]; then WITH_CERTBOT="no"; fi
+if [[ "$WITH_NGINX"   == "auto" ]]; then WITH_NGINX="yes"; fi
+if [[ "$WITH_CERTBOT" == "auto" ]]; then WITH_CERTBOT="yes"; fi
 
 ISSUER_HOST="${ISSUER_URL#https://}"
 ISSUER_HOST="${ISSUER_HOST#http://}"
