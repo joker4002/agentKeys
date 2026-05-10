@@ -179,9 +179,10 @@ async fn ses_send_and_receive_round_trip() {
     let from_address = env.from_address.clone();
     let landing_url = format!("https://test.example/landing?token={}", token);
 
-    println!("ses_email_flow: account={} region={}", env.account_id, env.region);
-    println!("ses_email_flow: bucket={}", env.bucket);
-    println!("ses_email_flow: from={} → to={}", from_address, recipient);
+    log("account={} region={}", &[&env.account_id, &env.region]);
+    log("bucket={}", &[&env.bucket]);
+    log("from={} → to={}", &[&from_address, &recipient]);
+    log("token={}", &[&token]);
 
     let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(env.region.clone()))
@@ -192,10 +193,12 @@ async fn ses_send_and_receive_round_trip() {
     assert_eq!(sender.from_address(), from_address);
 
     // Pre-flight: confirm the FROM identity is verified for sending.
+    log("verify_sender_ready: calling SES GetEmailIdentity({})", &[&from_address]);
     sender
         .verify_sender_ready()
         .await
-        .expect("FROM identity not verified for sending — cloud-setup.md §2.1 must be done");
+        .expect("FROM identity not verified for sending — run scripts/ses-verify-sender.sh");
+    log("verify_sender_ready: ok", &[]);
 
     let s3 = S3Client::new(&sdk_config);
     // Cleanup guard registered BEFORE send so a panic between send + assert
@@ -206,49 +209,114 @@ async fn ses_send_and_receive_round_trip() {
         token: token.clone(),
     };
 
+    log("send_magic_link: calling SES SendEmail…", &[]);
     sender
         .send_magic_link(&recipient, &landing_url)
         .await
         .expect("SES SendEmail failed");
+    log("send_magic_link: ok — polling for inbound delivery to S3", &[]);
 
     // Poll S3 for an inbound object whose body contains our unique token.
+    // To keep iteration fast even when the bucket has thousands of stale
+    // objects, sort by LastModified desc and examine only the most recent
+    // EXAMINE_PER_ATTEMPT objects each iteration.
+    const EXAMINE_PER_ATTEMPT: usize = 20;
     let mut found_body: Option<String> = None;
-    for attempt in 1..=POLL_MAX_ATTEMPTS {
-        let listed = s3
+    'poll: for attempt in 1..=POLL_MAX_ATTEMPTS {
+        log(
+            "attempt {}/{} — list_objects_v2 prefix={}",
+            &[&attempt.to_string(), &POLL_MAX_ATTEMPTS.to_string(), INBOUND_PREFIX],
+        );
+        let listed = match s3
             .list_objects_v2()
             .bucket(&env.bucket)
             .prefix(INBOUND_PREFIX)
             .send()
             .await
-            .expect("list_objects_v2 failed");
-        for obj in listed.contents() {
+        {
+            Ok(r) => r,
+            Err(e) => {
+                log("attempt {}: list_objects_v2 ERROR: {}", &[&attempt.to_string(), &format!("{e}")]);
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue 'poll;
+            }
+        };
+        let total = listed.contents().len();
+        // Newest first.
+        let mut objs: Vec<_> = listed.contents().to_vec();
+        objs.sort_by(|a, b| b.last_modified().cmp(&a.last_modified()));
+        let recent = &objs[..objs.len().min(EXAMINE_PER_ATTEMPT)];
+        log(
+            "attempt {}: bucket has {} object(s); examining {} most recent",
+            &[
+                &attempt.to_string(),
+                &total.to_string(),
+                &recent.len().to_string(),
+            ],
+        );
+
+        for (i, obj) in recent.iter().enumerate() {
             let Some(key) = obj.key() else { continue };
             let object = match s3.get_object().bucket(&env.bucket).key(key).send().await {
                 Ok(o) => o,
-                Err(_) => continue,
+                Err(e) => {
+                    log("  [{}/{}] {} get_object ERROR: {}",
+                        &[&(i+1).to_string(), &recent.len().to_string(), key, &format!("{e}")]);
+                    continue;
+                }
             };
             let bytes = match object.body.collect().await {
                 Ok(b) => b.to_vec(),
-                Err(_) => continue,
+                Err(e) => {
+                    log("  [{}/{}] {} body.collect ERROR: {}",
+                        &[&(i+1).to_string(), &recent.len().to_string(), key, &format!("{e}")]);
+                    continue;
+                }
             };
             let body_str = String::from_utf8_lossy(&bytes).to_string();
-            if body_str.contains(&token) {
-                println!("ses_email_flow: found inbound object key={key} (attempt {attempt})");
+            let hit = body_str.contains(&token);
+            log(
+                "  [{}/{}] {} size={}B contains_token={}",
+                &[
+                    &(i + 1).to_string(),
+                    &recent.len().to_string(),
+                    key,
+                    &bytes.len().to_string(),
+                    if hit { "YES" } else { "no" },
+                ],
+            );
+            if hit {
+                log("attempt {}: FOUND token in {}", &[&attempt.to_string(), key]);
                 found_body = Some(body_str);
                 break;
             }
         }
         if found_body.is_some() {
-            break;
+            break 'poll;
         }
-        println!(
-            "ses_email_flow: attempt {}/{} — token not yet in bucket, sleeping {:?}",
-            attempt, POLL_MAX_ATTEMPTS, POLL_INTERVAL
+        log(
+            "attempt {}: token not in {} most recent objects, sleeping {}s",
+            &[
+                &attempt.to_string(),
+                &recent.len().to_string(),
+                &POLL_INTERVAL.as_secs().to_string(),
+            ],
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
-    let body = found_body.expect("inbound MIME object containing test token did not arrive in 60s");
+    let body = found_body.unwrap_or_else(|| {
+        panic!(
+            "inbound MIME object containing test token {} did not arrive in {}s. \
+             Possible causes: SES in sandbox + recipient unverified; SES suppressed \
+             the address; SES receipt rule not active for {} (check: \
+             aws ses describe-active-receipt-rule-set --region {})",
+            token,
+            POLL_INTERVAL.as_secs() * POLL_MAX_ATTEMPTS as u64,
+            env.mail_domain,
+            env.region,
+        )
+    });
     assert!(
         body.contains(&token),
         "MIME body must contain unique token {token}"
@@ -258,5 +326,22 @@ async fn ses_send_and_receive_round_trip() {
         "MIME body must contain landing URL {landing_url} (allowing for quoted-printable encoding)"
     );
 
+    log("test ok — CleanupGuard will purge inbound objects on Drop", &[]);
     // CleanupGuard runs on Drop after this point.
+}
+
+/// Unbuffered logger used throughout this test. Stdout in `cargo test
+/// --nocapture` is piped (not a TTY) so println! is fully buffered and
+/// hides per-attempt progress until the test completes — eprintln! +
+/// explicit flush gives instant feedback.
+fn log(template: &str, args: &[&str]) {
+    use std::io::Write;
+    let mut out = template.to_string();
+    for arg in args {
+        if let Some(pos) = out.find("{}") {
+            out.replace_range(pos..pos + 2, arg);
+        }
+    }
+    eprintln!("ses_email_flow: {}", out);
+    let _ = std::io::stderr().flush();
 }
