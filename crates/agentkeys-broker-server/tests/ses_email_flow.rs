@@ -39,6 +39,7 @@ use aws_sdk_s3::Client as S3Client;
 const ENV_GATE: &str = "RUN_SES_INTEGRATION_TESTS";
 const DEFAULT_REGION: &str = "us-east-1";
 const DEFAULT_MAIL_DOMAIN: &str = "bots.litentry.org";
+const DEFAULT_FROM_LOCAL: &str = "noreply-test"; // → noreply-test@<MAIL_DOMAIN>
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const POLL_MAX_ATTEMPTS: usize = 12; // 60s total
 const INBOUND_PREFIX: &str = "inbound/";
@@ -48,6 +49,7 @@ struct TestEnv {
     account_id: String,
     mail_domain: String,
     bucket: String,
+    from_address: String,
 }
 
 impl TestEnv {
@@ -73,11 +75,18 @@ impl TestEnv {
             std::env::var("MAIL_DOMAIN").unwrap_or_else(|_| DEFAULT_MAIL_DOMAIN.to_string());
         let bucket = std::env::var("MAIL_BUCKET")
             .unwrap_or_else(|_| format!("agentkeys-mail-{}", account_id));
+        // BROKER_EMAIL_FROM_ADDRESS matches the env var the broker reads at
+        // runtime (per crates/agentkeys-broker-server/src/env.rs:143). Default
+        // to noreply-test@<MAIL_DOMAIN> — must be registered + verified per
+        // scripts/ses-verify-sender.sh before this test will pass.
+        let from_address = std::env::var("BROKER_EMAIL_FROM_ADDRESS")
+            .unwrap_or_else(|_| format!("{}@{}", DEFAULT_FROM_LOCAL, mail_domain));
         Some(Self {
             region,
             account_id,
             mail_domain,
             bucket,
+            from_address,
         })
     }
 }
@@ -158,7 +167,7 @@ async fn ses_send_and_receive_round_trip() {
 
     let token = uuid::Uuid::new_v4().to_string();
     let recipient = format!("magic-link-test-{}@{}", token, env.mail_domain);
-    let from_address = format!("noreply@{}", env.mail_domain);
+    let from_address = env.from_address.clone();
     let landing_url = format!("https://test.example/landing?token={}", token);
 
     println!("ses_email_flow: account={} region={}", env.account_id, env.region);
