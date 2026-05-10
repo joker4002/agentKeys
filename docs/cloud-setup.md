@@ -99,17 +99,7 @@ Done as part of [§5 EC2 broker host](#5-ec2-broker-host-optional), once you kno
 
 ### 1.3 Signer subdomain — A record + TLS cert (issue #74 step 1b)
 
-The signer (`dev_key_service`) is the only process that touches `K3` (master
-secret) and derives `K4` (per-actor EVM wallets). It runs on a dedicated
-hostname `signer.<zone>` (e.g. `signer.litentry.org`) — co-located with the
-broker on the same EC2 host today, so a future move to a different machine
-(or TEE worker per issue #74 step 2) only changes the A record, not any
-client config. Wire shape pinned by [`docs/spec/signer-protocol.md`](spec/signer-protocol.md).
-
-Done as part of [§6 Signer host](#6-signer-host), once `$EIP` is known from
-[§5.1](#51-allocate--attach-an-elastic-ip). If the signer ever gets its own
-machine, swap that section's IP for the new host's static IP — the rest is
-identical.
+Done as part of [§6 Signer host](#6-signer-host), once `$EIP` is known from [§5.1](#51-allocate--attach-an-elastic-ip).
 
 ---
 
@@ -629,97 +619,64 @@ The script writes systemd units, an HTTP-only nginx config, then prints the cert
 
 ## 6. Signer host
 
-The signer (`agentkeys-signer.service`, loopback `:8092`) is fronted by nginx
-at `signer.<zone>` and serves only `/dev/derive-address`, `/dev/sign-message`,
-and `/healthz` — every request authenticated with a broker-issued session
-JWT. Co-located with the broker on the same EC2 host today; the dedicated
-hostname is what lets it move later without changing client config.
-
 | Concern | Today | Future |
 |---|---|---|
 | Process | `agentkeys-signer.service` (Rust, `agentkeys-mock-server --signer-only`, loopback `:8092`) | TEE worker (issue #74 step 2) |
 | Host | **Same EC2 box as the broker** — co-located behind the same nginx, provisioned by the same `setup-broker-host.sh` run | Separate machine (or enclave); only the A record + cert move |
-| Public hostname | `signer.<zone>` (e.g. `signer.litentry.org`) | `signer.<zone>` (unchanged) |
+| Public hostname | `signer.<zone>` (e.g. `signer.litentry.org`) — exported as `SIGNER_HOST` / `AGENTKEYS_SIGNER_URL` in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env) | `signer.<zone>` (unchanged) |
+| Endpoints | `/dev/derive-address`, `/dev/sign-message`, `/healthz` only — every request bearer-JWT-authed against the broker session pubkey ([`signer-protocol.md`](spec/signer-protocol.md)) | unchanged |
 | Master secret (K3) | `/etc/agentkeys/dev-key-service.env` (mode 0600, owner `agentkeys`) — auto-generated on first `setup-broker-host.sh` run, **never rotated** (rotation invalidates every previously-derived wallet) | TEE-sealed; same wire shape |
-
-Hostname is exported as `SIGNER_HOST` / `AGENTKEYS_SIGNER_URL` in
-[`scripts/operator-workstation.env`](../scripts/operator-workstation.env);
-all CLI / demo invocations pick it up from there.
 
 ### 6.1 DNS A record
 
-Same IP as the broker host (`$EIP` from [§5.1](#51-allocate--attach-an-elastic-ip)).
-If the signer is ever moved to its own host, swap `$EIP` for that host's
-static IP — the rest is identical.
-
-> **If `$EIP` is unset** (returning to this section in a fresh shell, or
-> §5.1 was run on a different workstation), re-derive from AWS — never
-> from `dig +short broker.<zone>`. Local resolvers behind Cloudflare WARP
-> / Zscaler / Tailscale Magic DNS / corporate VPNs return RFC 2544
-> "TEST-NET-2" addresses (`198.18.0.0/15`) for proxied hostnames, which
-> will silently mis-route the A record to a private network and break
-> Let's Encrypt validation:
->
-> ```bash
-> # Authoritative — bypasses every local resolver
-> EIP=$(aws ec2 describe-addresses --region "$REGION" \
->         --query 'Addresses[?AssociationId!=`null`].PublicIp' --output text)
-> echo "EIP=$EIP"   # MUST be a routable public IP, not 198.18.x.x / 10.x.x.x / 100.64.x.x
-> ```
-
 ```bash
 # === ON OPERATOR WORKSTATION ===
-SIGNER_ZONE="${BROKER_HOST#*.}"   # e.g. litentry.org
-SIGNER_HOST="signer.${SIGNER_ZONE}"
+SIGNER_HOST="signer.${BROKER_HOST#*.}"
+
+# If $EIP isn't already set from §5.1, re-derive from AWS — NEVER from
+# `dig`. Local resolvers behind Cloudflare WARP / Zscaler / Tailscale /
+# corporate VPNs return RFC 2544 "TEST-NET-2" (198.18.0.0/15) for
+# proxied hostnames, which silently breaks Let's Encrypt validation.
+[ -z "$EIP" ] && EIP=$(aws ec2 describe-addresses --region "$REGION" \
+  --query 'Addresses[?AssociationId!=`null`].PublicIp' --output text)
+echo "EIP=$EIP"   # MUST be a routable public IP, not 198.18.x.x / 10.x.x.x / 100.64.x.x
 
 aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
   --change-batch "$(jq -n --arg name "${SIGNER_HOST}." --arg ip "$EIP" '{
-    Changes: [{
-      Action: "UPSERT",
-      ResourceRecordSet: {Name: $name, Type: "A", TTL: 300, ResourceRecords: [{Value: $ip}]}
-    }]
+    Changes: [{Action:"UPSERT", ResourceRecordSet:{Name:$name, Type:"A", TTL:300, ResourceRecords:[{Value:$ip}]}}]
   }')"
 
-# Verify DNS resolves to the EIP (Cloudflare DoH bypasses your local
-# resolver — important if you're behind WARP/Zscaler/Tailscale).
+# Verify via Cloudflare DoH (your local resolver will keep lying if proxied).
 until [ "$(curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
             -H 'accept: application/dns-json' | jq -r '.Answer[0].data')" = "$EIP" ]; do
-  echo "waiting for Route 53 propagation (TTL 300s, usually <60s)…"; sleep 5
+  echo "waiting for Route 53 propagation (TTL 300s)…"; sleep 5
 done
 echo "DNS ready: ${SIGNER_HOST} → ${EIP}"
 ```
 
 ### 6.2 TLS cert + nginx flip
 
-Three host-side steps. `setup-broker-host.sh` is idempotent — first run
-writes an HTTP-only nginx vhost for `signer.<zone>`, certbot issues the cert,
-second run flips the vhost onto `:443` ssl. The script also auto-generates
-`/etc/agentkeys/dev-key-service.env` (mode 0600) and writes
-`agentkeys-signer.service`.
-
-> **`$SIGNER_HOST` is NOT on the broker host.** It lives in
-> `scripts/operator-workstation.env` (your laptop). The broker host derives
-> its own `SIGNER_HOST` inside `setup-broker-host.sh` from `ISSUER_HOST`
-> and writes it into the nginx vhost. The certbot step below reads the
-> hostname back out of that vhost so the command works on a fresh host
-> with no shell vars set.
+> **`$SIGNER_HOST` is laptop-only** (lives in `operator-workstation.env`).
+> On the broker host, derive it from the nginx vhost that `setup-broker-host.sh`
+> just wrote — the snippet below does it inline so the commands work in a
+> fresh broker shell with no env vars set.
 
 ```bash
 # === ON BROKER HOST ===
-# Step 1 — first pass writes the HTTP-only nginx vhost for signer.<zone>
+# 1. First pass writes the HTTP-only nginx vhost for signer.<zone>.
 sudo bash scripts/setup-broker-host.sh --yes --with-nginx
 
-# Sanity: the signer vhost must exist before certbot can pick it up
+# Sanity-check + read the hostname back out of the vhost.
 ls /etc/nginx/sites-enabled/agentkeys-signer
 SIGNER_HOST=$(awk '/server_name/ && /signer\./ {gsub(";",""); print $2}' \
                 /etc/nginx/sites-available/agentkeys-signer | head -1)
-echo "SIGNER_HOST=$SIGNER_HOST"   # → signer.<your-zone>, e.g. signer.litentry.org
+echo "SIGNER_HOST=$SIGNER_HOST"
 
-# Step 2 — issue the LE cert. If the prompt only lists broker.<zone> and
-# NOT signer.<zone>, the vhost was not written — re-pull + re-run step 1.
+# 2. Issue the LE cert. If the prompt only lists broker.<zone>, the
+# signer vhost wasn't written — re-pull + re-run step 1.
 sudo certbot --nginx -d "$SIGNER_HOST"
 
-# Step 3 — re-run to flip nginx onto :443 ssl for signer.<zone>
+# 3. Re-run to flip the signer vhost onto :443 ssl.
 sudo bash scripts/setup-broker-host.sh --yes --with-nginx
 ```
 
