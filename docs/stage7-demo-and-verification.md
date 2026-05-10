@@ -313,10 +313,25 @@ Both vars are pre-set in [`scripts/operator-workstation.env`](../scripts/operato
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
+# Pin BACKEND_URL to AGENTKEYS_SIGNER_URL inline. operator-workstation.env
+# sets `BACKEND_URL=${AGENTKEYS_SIGNER_URL}` as a legacy alias, but a
+# stale shell export (e.g. `BACKEND_URL=http://127.0.0.1:18090` from a
+# prior local-dev session in ~/.zshenv) would silently shadow it. Pinning
+# inline makes the smoke-test self-contained.
+export BACKEND_URL="$AGENTKEYS_SIGNER_URL"
+
 echo "SIGNER_HOST=$SIGNER_HOST"
-echo "AGENTKEYS_SIGNER_URL=$AGENTKEYS_SIGNER_URL"
+echo "BACKEND_URL=$BACKEND_URL"
 # SIGNER_HOST=signer.litentry.org
-# AGENTKEYS_SIGNER_URL=https://signer.litentry.org
+# BACKEND_URL=https://signer.litentry.org   ← MUST be public https://, not loopback
+
+# Defensive: bail before curl if BACKEND_URL still looks like a local-dev value.
+case "$BACKEND_URL" in
+  https://signer.*) : ok ;;
+  *) echo "BACKEND_URL='$BACKEND_URL' looks wrong — expected https://signer.<zone>." >&2
+     echo "Likely cause: stale BACKEND_URL export in ~/.zshenv / ~/.zshrc." >&2
+     echo "Fix: grep -n BACKEND_URL ~/.zshenv ~/.zshrc ~/.zprofile && unset BACKEND_URL && re-source operator-workstation.env." >&2 ;;
+esac
 
 # Smoke-test — body MUST be exactly "ok". A successful HTTP 200 with a
 # different body (e.g. "TLS cert not yet issued for signer …") means
