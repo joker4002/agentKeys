@@ -169,30 +169,47 @@ Tooling on the workstation:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# 1. Build the binaries from this branch (NOT from a prior tag — the
-#    signer protocol moved post-issue-#74).
+# 1. Drop any conflicting aliases FIRST. zsh aliases beat $PATH lookups,
+#    so a stale `alias agentkeys=./target/release/agentkeys-cli` (note
+#    the wrong crate-name binary) shadows the install no matter how
+#    correctly you stage the binary in step 2.
+sed -i.bak '/^alias agentkeys[-= ]/d; /^alias agentkeys-daemon[-= ]/d; /^alias agentkeys-mock-server[-= ]/d' \
+  ~/.zshenv ~/.zshrc 2>/dev/null || true
+unalias agentkeys agentkeys-daemon agentkeys-mock-server 2>/dev/null || true
+
+# 2. Ensure ~/.local/bin is on $PATH (idempotent; appends only if missing).
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) : already on PATH ;;
+  *) echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv
+     export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
+# 3. Build from this branch (NOT a prior tag — signer protocol moved
+#    post-issue-#74). The crate is `agentkeys-cli`; the binary it
+#    produces is named `agentkeys` (NOT `agentkeys-cli`).
 cd /path/to/agentKeys     # repo root, NOT the parent dir
 cargo build --release -p agentkeys-cli -p agentkeys-daemon -p agentkeys-mock-server
 
-# 2. Install to a $PATH dir. The crate is `agentkeys-cli`; the binary
-#    it produces is named `agentkeys` (NOT `agentkeys-cli`).
+# 4. Install to ~/.local/bin (now on $PATH from step 2).
 mkdir -p ~/.local/bin
 cp target/release/agentkeys             ~/.local/bin/
 cp target/release/agentkeys-daemon      ~/.local/bin/
 cp target/release/agentkeys-mock-server ~/.local/bin/
 
-# 3. Verify the binary on $PATH is the one you just built.
-which agentkeys                            # → ~/.local/bin/agentkeys
+# 5. Verify with `command` (bypasses any remaining alias zsh hasn't
+#    re-hashed away yet). Output MUST be ~/.local/bin/agentkeys, NOT
+#    `agentkeys: aliased to …` and NOT `target/release/agentkeys-cli`.
+hash -r                                    # zsh: forget cached lookups
+command -v agentkeys                       # → /Users/<you>/.local/bin/agentkeys
 agentkeys --version
 agentkeys signer --help                    # confirms the signer subcommand exists
 ```
 
-> **Don't use path-relative aliases (`alias agentkeys="./target/release/agentkeys"`).**
-> They break the moment you `cd` out of the repo, and they shadow the
-> `~/.local/bin/` install when you happen to be in the repo root. If
-> `~/.zshenv` / `~/.zshrc` already has stale aliases pointing at the
-> old crate name `agentkeys-cli`, drop them — the binary is `agentkeys`,
-> the crate is `agentkeys-cli`.
+> **If `command -v agentkeys` still prints `agentkeys: aliased to …`,**
+> the alias is set in a config file step 1 didn't catch (e.g.
+> `~/.zprofile`, `~/.aliases`, or shell-specific include). Run
+> `grep -rn 'alias agentkeys' ~/.zshenv ~/.zshrc ~/.zprofile ~/.aliases 2>/dev/null`
+> to find it, delete it, then `exec zsh -l` to reload.
 
 After the build is on `$PATH`, run `agentkeys init` once to save a
 session JWT in the OS keychain (the CLI auto-attaches it as
