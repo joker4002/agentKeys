@@ -22,6 +22,20 @@ Before changing any file in response to a reported failure, **reproduce the fail
 ## Land-the-fix policy
 Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to `origin/evm`. Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/evm`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
 
+## Runbook-fix-fold-back policy
+When the user is walking through a runbook (`docs/cloud-setup.md`, `docs/stage7-demo-and-verification.md`, `docs/operator-runbook-stage7.md`, etc.) and hits a step that fails, **two things must land in the same turn**:
+
+1. The targeted fix to whatever broke (script default, env var, doc command, code).
+2. **A revision to the runbook itself** so the next operator running it top-to-bottom will not hit the same failure. The fix lives wherever the bug was; the runbook revision lives wherever the operator first encounters the broken step.
+
+Examples of revisions to land alongside the underlying fix:
+- A failing prerequisite check → upgrade the prereq sanity-check step to catch the same case (not just fix the missing prereq once).
+- A wrong env var on the wrong machine → call out the laptop-vs-broker-host scope explicitly in the runbook step that uses it.
+- A silent skipped action that downstream commands rely on → add a verify-and-fail-loud sanity check in the runbook between the action and its dependent.
+- A confusing diagnostic that took two rounds to resolve → fold the diagnosis steps inline into the runbook (one-shot lookup table, not 3 round-trips with the operator).
+
+The goal: every operator-encountered failure makes the runbook strictly more robust before we move on. Never leave the runbook in a state where the same operator (or the next one) will hit the same trap.
+
 ## Plan-completion policy
 When the user references a plan (e.g. `docs/spec/plans/issue-XX-*.md`), **complete every numbered step in the plan's implementation-order table — not a self-selected subset**. If you cannot complete a step (interactive flow needs human, scope explosion, prerequisites missing), say so up front before starting work and get explicit approval to defer. Never silently drop steps and ship a partial plan as "done."
 

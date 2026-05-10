@@ -164,9 +164,39 @@ Tooling on the workstation:
 - `jq` (JSON parsing).
 - `shasum` or `sha256sum` (for omni_account computation — present on
   every macOS / Linux box).
-- `agentkeys` CLI built from this branch
-  (`cargo build --release -p agentkeys-cli`, then
-  `cp target/release/agentkeys ~/.local/bin/`).
+- `agentkeys` CLI **built from this branch and on `$PATH`** — see the
+  ordered build steps below.
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# 1. Build the binaries from this branch (NOT from a prior tag — the
+#    signer protocol moved post-issue-#74).
+cd /path/to/agentKeys     # repo root, NOT the parent dir
+cargo build --release -p agentkeys-cli -p agentkeys-daemon -p agentkeys-mock-server
+
+# 2. Install to a $PATH dir. The crate is `agentkeys-cli`; the binary
+#    it produces is named `agentkeys` (NOT `agentkeys-cli`).
+mkdir -p ~/.local/bin
+cp target/release/agentkeys             ~/.local/bin/
+cp target/release/agentkeys-daemon      ~/.local/bin/
+cp target/release/agentkeys-mock-server ~/.local/bin/
+
+# 3. Verify the binary on $PATH is the one you just built.
+which agentkeys                            # → ~/.local/bin/agentkeys
+agentkeys --version
+agentkeys signer --help                    # confirms the signer subcommand exists
+```
+
+> **Don't use path-relative aliases (`alias agentkeys="./target/release/agentkeys"`).**
+> They break the moment you `cd` out of the repo, and they shadow the
+> `~/.local/bin/` install when you happen to be in the repo root. If
+> `~/.zshenv` / `~/.zshrc` already has stale aliases pointing at the
+> old crate name `agentkeys-cli`, drop them — the binary is `agentkeys`,
+> the crate is `agentkeys-cli`.
+
+After the build is on `$PATH`, run `agentkeys init` once to save a
+session JWT in the OS keychain (the CLI auto-attaches it as
+`Authorization: Bearer …` on every `/dev/*` call in §0.4).
 
 > **No `cast`, no Foundry, no local private keys.** The pre-issue-#74
 > path required `cast wallet new` to mint operator-held EVM keypairs
@@ -194,17 +224,25 @@ units to read it via `EnvironmentFile=`. The script is **idempotent** —
 re-running it preserves the existing secret, so an upgrade does not
 invalidate any previously-derived wallet.
 
-If you've never run the script on this host, do it once:
+If you've never run the script on this host, do it once. Stay on the
+branch you intend to deploy — `evm` for production, the PR branch
+(e.g. `claude/practical-noether-670bd8`) when validating a PR
+end-to-end. The script builds whatever's currently checked out.
 
 ```bash
 # === ON BROKER HOST ===
 ssh agentkey@$BROKER_HOST
 cd ~/agentKeys
-git fetch origin && git checkout evm && git pull --ff-only
+BRANCH="${BRANCH:-evm}"   # override on the SSH command line for PR branches
+git fetch origin && git checkout "$BRANCH" && git pull --ff-only
 sudo bash scripts/setup-broker-host.sh --yes
 ```
 
-Either way, confirm all three services are active:
+Either way, confirm all three services are active **and** that the
+signer's nginx vhost was actually written (the recurring failure mode
+is `setup-broker-host.sh` running but skipping the vhost write — every
+downstream cert / smoke-test command then dies with a confusing 503 or
+"only broker.<zone> in certbot list"):
 
 ```bash
 # === ON BROKER HOST ===
@@ -213,13 +251,25 @@ sudo systemctl is-active agentkeys-backend agentkeys-broker agentkeys-signer
 # active
 # active
 
-# Confirm the signer-only listener is up (no legacy endpoints):
+# Signer-only listener is up on loopback.
 curl -sS http://127.0.0.1:8092/healthz
 # ok
 
-# Confirm /session endpoints are absent on :8092 (defense-in-depth).
+# /session endpoints are absent on :8092 (defense-in-depth).
 curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8092/session/create
 # 404
+
+# nginx vhosts for BOTH hostnames exist + are enabled.
+ls /etc/nginx/sites-enabled/agentkeys-broker /etc/nginx/sites-enabled/agentkeys-signer
+# /etc/nginx/sites-enabled/agentkeys-broker
+# /etc/nginx/sites-enabled/agentkeys-signer
+#
+# If either is missing → re-pull + re-run setup-broker-host.sh. If
+# `agentkeys-signer` is a "TLS not yet issued" stub, jump to §6.2 of
+# cloud-setup.md (issue cert + re-run script to flip onto :443 ssl).
+grep -E 'proxy_pass|return 503' /etc/nginx/sites-available/agentkeys-signer
+# Expect: 2x proxy_pass http://127.0.0.1:8092 (for /dev/ and /healthz)
+# Reject: any `return 503` (means cert issued but script never re-ran)
 ```
 
 If you see HTTP 503 with `"error":"signer_disabled"` from `:8092`, the
@@ -251,15 +301,25 @@ echo "AGENTKEYS_SIGNER_URL=$AGENTKEYS_SIGNER_URL"
 # SIGNER_HOST=signer.litentry.org
 # AGENTKEYS_SIGNER_URL=https://signer.litentry.org
 
-# Smoke-test.
-curl -sS "$BACKEND_URL/healthz"
-# ok
+# Smoke-test — body MUST be exactly "ok". A successful HTTP 200 with a
+# different body (e.g. "TLS cert not yet issued for signer …") means
+# nginx is serving the pre-cert stub vhost — see the "Common failure
+# modes" table below.
+BODY=$(curl -sS "$BACKEND_URL/healthz")
+if [ "$BODY" = "ok" ]; then
+  echo "signer healthz ok"
+else
+  echo "signer healthz UNEXPECTED body: '$BODY'" >&2
+fi
 ```
 
-If the signer cert isn't issued yet (fresh host), the operator needs to
-run `sudo certbot --nginx -d signer.<zone>` on the broker host first and
-then re-run `setup-broker-host.sh` to flip nginx onto the :443 ssl block.
-See `docs/cloud-setup.md §6` for the signer DNS + cert steps (§1.3 is the brief intro).
+| `$BODY` value | Cause | Fix |
+|---|---|---|
+| `ok` | Healthy. | Continue. |
+| `TLS cert not yet issued for signer — see setup-broker-host.sh` | Cert is issued but nginx still serving the HTTP-only stub vhost — `setup-broker-host.sh` step 3 of §6.2 wasn't run. | On broker host: `sudo bash scripts/setup-broker-host.sh --yes` (script detects cert, overwrites vhost with `proxy_pass`). |
+| (curl error: TLS) | Cert not issued at all. | Run [`cloud-setup.md` §6](cloud-setup.md#6-signer-host) end-to-end. |
+| (curl error: connection / NXDOMAIN) | DNS A record missing OR points at a proxied/private IP (e.g. `198.18.x.x` from WARP / Zscaler / Tailscale). | Re-derive `$EIP` from `aws ec2 describe-addresses` (NOT from `dig`) and re-UPSERT — see [`cloud-setup.md` §6.1](cloud-setup.md#61-dns-a-record). |
+| `signer_disabled` (503) | `/etc/agentkeys/dev-key-service.env` didn't load. | `sudo systemctl show agentkeys-signer \| grep EnvironmentFile` — confirm file exists, mode 0600. |
 
 ### 0.3 Pick two demo identities and compute their `omni_account`
 
