@@ -664,7 +664,7 @@ echo "DNS ready: ${SIGNER_HOST} → ${EIP}"
 ```bash
 # === ON BROKER HOST ===
 # 1. First pass writes the HTTP-only nginx vhost for signer.<zone>.
-sudo bash scripts/setup-broker-host.sh --yes --with-nginx
+sudo bash scripts/setup-broker-host.sh --yes
 
 # Sanity-check + read the hostname back out of the vhost.
 ls /etc/nginx/sites-enabled/agentkeys-signer
@@ -677,7 +677,7 @@ echo "SIGNER_HOST=$SIGNER_HOST"
 sudo certbot --nginx -d "$SIGNER_HOST"
 
 # 3. Re-run to flip the signer vhost onto :443 ssl.
-sudo bash scripts/setup-broker-host.sh --yes --with-nginx
+sudo bash scripts/setup-broker-host.sh --yes
 ```
 
 ### 6.3 Verify

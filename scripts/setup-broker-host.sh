@@ -18,8 +18,8 @@
 #     [--region us-east-1] \
 #     [--cred-mode none|instance-profile|profile] \
 #     [--profile-name agentkeys-daemon] \
-#     [--with-nginx | --without-nginx] \
-#     [--with-certbot | --without-certbot] \
+#     [--without-nginx]   \                                  # opt out of nginx setup
+#     [--without-certbot] \                                  # opt out of certbot install
 #     [--ref <branch-or-tag>] \                              # opt-in git fetch+checkout+pull
 #     [--skip-pull] \                                        # alias for "no --ref"
 #     [--upgrade] \                                          # back-compat no-op
@@ -67,8 +67,8 @@ ACCOUNT_ID=""
 REGION="us-east-1"
 CRED_MODE=""                 # set by interactive prompt or --cred-mode
 PROFILE_NAME="agentkeys-daemon"
-WITH_NGINX="auto"            # auto | yes | no
-WITH_CERTBOT="auto"          # auto | yes | no
+WITH_NGINX="yes"             # default: install + configure nginx (opt out via --without-nginx)
+WITH_CERTBOT="yes"           # default: install certbot (opt out via --without-certbot)
 ASSUME_YES=false
 PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
 PULL_SKIP=false              # --skip-pull: alias for "no --ref" (kept for back-compat)
@@ -89,9 +89,7 @@ while (( $# > 0 )); do
     --region)             REGION="$2"; shift 2 ;;
     --cred-mode)          CRED_MODE="$2"; shift 2 ;;
     --profile-name)       PROFILE_NAME="$2"; shift 2 ;;
-    --with-nginx)         WITH_NGINX="yes"; shift ;;
     --without-nginx)      WITH_NGINX="no"; shift ;;
-    --with-certbot)       WITH_CERTBOT="yes"; shift ;;
     --without-certbot)    WITH_CERTBOT="no"; shift ;;
     --non-interactive)    INTERACTIVE=false; shift ;;
     --interactive)        INTERACTIVE=true; shift ;;
@@ -332,11 +330,11 @@ EOF
   #   region      = us-east-1 (or whatever was in the unit / --region flag)
   #   cred-mode   = none      (post-issue-#71 broker is creds-free; --cred-mode
   #                            instance-profile|profile to opt out)
-  #   nginx       = no        (existing nginx / ALB / Cloudflare stays as-is;
-  #                            --with-nginx to install + configure)
-  #   certbot     = no        (--with-certbot to opt in)
-  # Operators bringing up a brand-new host with no existing infra should pass
-  # --with-nginx --with-certbot --cred-mode <choice> at the CLI.
+  #   nginx       = yes       (default — runbook always wants the broker +
+  #                            signer vhosts; --without-nginx to opt out
+  #                            when fronting via ALB / Cloudflare / pre-existing nginx)
+  #   certbot     = yes       (default — needed for Let's Encrypt issuance;
+  #                            --without-certbot to opt out)
 fi
 
 # ─── Validate inputs ─────────────────────────────────────────────────────────
@@ -355,18 +353,8 @@ case "$CRED_MODE" in
   none|instance-profile|profile) ;;
   *) die "--cred-mode must be one of: none, instance-profile, profile (got $CRED_MODE)";;
 esac
-# Resolve auto → yes for the non-interactive path. The runbook
-# (docs/cloud-setup.md §5 + §6) always wants nginx+certbot on a fresh
-# broker host — defaulting to "no" silently skipped both vhost writes
-# (broker AND signer), which made `sudo certbot --nginx -d signer.<zone>`
-# fall through to certbot's "pick from existing vhosts" prompt with only
-# the broker vhost listed. Pass --without-nginx / --without-certbot to
-# opt out (e.g. running behind a non-nginx reverse proxy or pre-provisioned
-# certs).
-# `if`/`fi` instead of `[[ ]] && cmd` to dodge the set-e silent-exit gotcha
-# when the test is false.
-if [[ "$WITH_NGINX"   == "auto" ]]; then WITH_NGINX="yes"; fi
-if [[ "$WITH_CERTBOT" == "auto" ]]; then WITH_CERTBOT="yes"; fi
+# nginx + certbot default to yes; --without-nginx / --without-certbot opts out.
+# (Runbook docs/cloud-setup.md §5 + §6 always want both on a fresh broker host.)
 
 ISSUER_HOST="${ISSUER_URL#https://}"
 ISSUER_HOST="${ISSUER_HOST#http://}"
