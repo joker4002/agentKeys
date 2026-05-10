@@ -375,14 +375,33 @@ echo "OMNI_B=$OMNI_B  length=${#OMNI_B}"
 ### 0.4 Derive the managed wallets
 
 The dev_key_service derives a deterministic EVM wallet for each omni.
-The CLI automatically attaches the saved session JWT as a bearer token.
-Run `agentkeys init` first if you haven't already so a session is saved
-in the keychain.
+The CLI automatically attaches the saved session JWT as a bearer token,
+so **`agentkeys init` must run first** — otherwise every `signer derive`
+/ `signer sign` call below returns `Error: SIGNER_UNAUTHORIZED  invalid
+session JWT: InvalidToken`. See [§2.0](#20-recommended-path-agentkeys-init---email)
+for the full init flow + OAuth2 alternative; the minimum to get §0.4
+working is one `--email` round-trip:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# The CLI reads the saved session (from agentkeys init) and attaches it
-# as Authorization: Bearer <jwt> so the signer can verify the request.
+# Send a magic link, then click it from your inbox. The CLI polls the
+# broker, derives the wallet via the signer, and saves the session JWT
+# in the OS keychain.
+agentkeys init \
+  --email alice@demo.example \
+  --broker-url $OIDC_ISSUER \
+  --signer-url $BACKEND_URL
+# Initialized via email-link.
+#   identity omni: <64 hex>     ← matches OMNI_A from §0.3
+#   derived wallet: 0x…         ← will match ADDR_A below
+#   evm omni:      <64 hex>
+```
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# The CLI reads the saved session (from agentkeys init above) and
+# attaches it as Authorization: Bearer <jwt> so the signer can verify
+# the request.
 ADDR_A=$(agentkeys --json signer derive \
            --signer-url $BACKEND_URL \
            --omni-account $OMNI_A | jq -r .address)
