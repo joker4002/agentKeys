@@ -383,16 +383,14 @@ in the keychain.
 # === ON OPERATOR WORKSTATION ===
 # The CLI reads the saved session (from agentkeys init) and attaches it
 # as Authorization: Bearer <jwt> so the signer can verify the request.
-ADDR_A=$(agentkeys signer derive \
+ADDR_A=$(agentkeys --json signer derive \
            --signer-url $BACKEND_URL \
-           --omni-account $OMNI_A \
-           --json | jq -r .address)
+           --omni-account $OMNI_A | jq -r .address)
 echo "ADDR_A=$ADDR_A"
 
-ADDR_B=$(agentkeys signer derive \
+ADDR_B=$(agentkeys --json signer derive \
            --signer-url $BACKEND_URL \
-           --omni-account $OMNI_B \
-           --json | jq -r .address)
+           --omni-account $OMNI_B | jq -r .address)
 echo "ADDR_B=$ADDR_B"
 
 [[ "$ADDR_A" != "$ADDR_B" ]] && echo "wallet split ok" || echo "WALLET COLLISION — bug?"
@@ -558,11 +556,10 @@ returns the canonical 65-byte signature. The CLI never sees the
 private key.
 
 ```bash
-SIG_A=$(agentkeys signer sign \
+SIG_A=$(agentkeys --json signer sign \
           --signer-url $BACKEND_URL \
           --omni-account $OMNI_A \
-          --message "$SIWE_MSG" \
-          --json | jq -r .signature)
+          --message "$SIWE_MSG" | jq -r .signature)
 echo "SIG_A=${SIG_A:0:32}…  length=${#SIG_A}"
 # SIG_A=0x<130 hex chars>
 ```
@@ -570,11 +567,10 @@ echo "SIG_A=${SIG_A:0:32}…  length=${#SIG_A}"
 Sanity — the signer's `address` reply MUST match `ADDR_A`:
 
 ```bash
-SIG_ADDR=$(agentkeys signer sign \
+SIG_ADDR=$(agentkeys --json signer sign \
              --signer-url $BACKEND_URL \
              --omni-account $OMNI_A \
-             --message "$SIWE_MSG" \
-             --json | jq -r .address)
+             --message "$SIWE_MSG" | jq -r .address)
 [[ "$SIG_ADDR" == "$ADDR_A" ]] && echo "sign↔derive address match" \
                               || echo "ADDRESS DRIFT — master secret rotated mid-session?"
 ```
@@ -632,11 +628,10 @@ START_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
 REQ_ID_B=$(printf '%s' "$START_B" | jq -r .request_id)
 SIWE_MSG_B=$(printf '%s' "$START_B" | jq -r .siwe_message)
 
-SIG_B=$(agentkeys signer sign \
+SIG_B=$(agentkeys --json signer sign \
           --signer-url $BACKEND_URL \
           --omni-account $OMNI_B \
-          --message "$SIWE_MSG_B" \
-          --json | jq -r .signature)
+          --message "$SIWE_MSG_B" | jq -r .signature)
 echo "SIG_B=${SIG_B:0:32}…  length=${#SIG_B}"
 
 VERIFY_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
@@ -1481,8 +1476,8 @@ omni() { printf '%s%s%s' "agentkeys" "$1" "$2" | shasum -a 256 | awk '{print $1}
 OMNI_A=$(omni email "alice@demo.example")
 OMNI_B=$(omni email "bob@demo.example")
 
-ADDR_A=$(agentkeys signer derive --signer-url $BACKEND_URL --omni-account $OMNI_A --json | jq -r .address)
-ADDR_B=$(agentkeys signer derive --signer-url $BACKEND_URL --omni-account $OMNI_B --json | jq -r .address)
+ADDR_A=$(agentkeys --json signer derive --signer-url $BACKEND_URL --omni-account $OMNI_A | jq -r .address)
+ADDR_B=$(agentkeys --json signer derive --signer-url $BACKEND_URL --omni-account $OMNI_B | jq -r .address)
 
 # SIWE round-trip for A.
 START=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
@@ -1490,7 +1485,7 @@ START=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
   -d "$(jq -n --arg a "$ADDR_A" '{address:$a, chain_id:84532}')")
 REQ_ID=$(printf '%s' "$START"  | jq -r .request_id)
 SIWE_MSG=$(printf '%s' "$START" | jq -r .siwe_message)
-SIG_A=$(agentkeys signer sign --signer-url $BACKEND_URL --omni-account $OMNI_A --message "$SIWE_MSG" --json | jq -r .signature)
+SIG_A=$(agentkeys --json signer sign --signer-url $BACKEND_URL --omni-account $OMNI_A --message "$SIWE_MSG" | jq -r .signature)
 VERIFY=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/verify \
   -H 'content-type: application/json' \
   -d "$(jq -n --arg r "$REQ_ID" --arg s "$SIG_A" '{request_id:$r, signature:$s}')")
