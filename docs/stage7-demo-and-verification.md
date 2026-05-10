@@ -15,7 +15,8 @@ When you finish this guide you will have:
 2. Verified AWS IAM accepts the broker's OIDC discovery + JWKS.
 3. Walked the **managed-wallet** SIWE auth flow end-to-end without
    ever holding a private key locally — the dev_key_service signs on
-   behalf of the operator's `omni_account`.
+   behalf of the operator's `omni_account` (the master actor omni
+   per [`architecture.md` §4](spec/architecture.md)).
 4. Minted real AWS STS credentials via the post-issue-#71 daemon-side
    flow (`/v1/mint-oidc-jwt` + client-side `AssumeRoleWithWebIdentity`).
 5. **Proven cloud-enforced per-user isolation** — `omni_A`'s derived
@@ -39,19 +40,21 @@ If you're on a pre-issue-#74 build, run
 
 ## Trust model (post-issue-#74 step 1b)
 
-> **Heads up — step 1c is coming.** This guide currently exercises
-> the bearer-JWT auth on `/dev/*` (step 1b). Issue #74 step 1c
-> ([`docs/spec/plans/issue-74-step-1c-device-key-auth.md`](spec/plans/issue-74-step-1c-device-key-auth.md);
-> tracked in gh [#76](https://github.com/litentry/agentKeys/issues/76))
-> upgrades this to device-key per-request signatures: daemon
-> generates a device keypair locally at init, identity ceremony
-> binds the device pubkey atomically, every `/dev/*` call carries
-> a fresh signature signed by the device key. After 1c lands, the
-> bearer-JWT path documented below becomes the legacy fallback;
-> the canonical demo will exercise the device-key flow end-to-end.
-> The wire shape (`/dev/derive-address`, `/dev/sign-message`),
-> the auth flow at the broker, and the AWS isolation proof do
-> NOT change at the 1b → 1c swap.
+> **Status: v1c-interim demo.** This guide exercises what's
+> actually shipped in PR #75: bearer-JWT auth on `/dev/*` (step
+> 1b), bespoke per-identity PoP shapes (step 1c v1c-interim). The
+> v0.2 target — HDKD per-agent omni + uniform WebAuthn binding
+> for masters — is documented in
+> [`docs/spec/architecture.md`](spec/architecture.md) §4 (HDKD
+> actor tree), §4a (mental model), and §5a (per-actor binding
+> ceremonies) but is **not yet implemented**. See
+> [step-1c plan](spec/plans/issue-74-step-1c-device-key-auth.md)
+> for the wire-shape evolution and gh
+> [#76](https://github.com/litentry/agentKeys/issues/76) /
+> [#79](https://github.com/litentry/agentKeys/issues/79) for the
+> tracking issues. The wire shape (`/dev/derive-address`,
+> `/dev/sign-message`), the auth flow at the broker, and the AWS
+> isolation proof do NOT change between v1c and v0.2.
 
 ```
 Operator workstation / daemon                         Broker host (EC2)
@@ -91,10 +94,24 @@ inline `# === ON … ===` banner.
 
 | Machine | What it has | Used for |
 |---|---|---|
-| **Operator workstation** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS |
+| **Operator workstation (master role)** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS. The operator running these commands IS the master per [`architecture.md` §4a](spec/architecture.md). |
 | **Broker host (EC2)** | `agentkeys-broker-server` and `agentkeys-mock-server` binaries at `/usr/local/bin/`, both ES256 keypairs at `/var/lib/agentkeys/.agentkeys/broker/`, systemd services `agentkeys-broker.service` + `agentkeys-backend.service` + `agentkeys-signer.service`, nginx fronting broker on `:8091` at `https://$BROKER_HOST` and signer on `:8092` at `https://signer.<zone>` | Broker process, audit DB, JWT minting, **dev_key_service signer** |
 
 Hop between them with `ssh agentkey@$BROKER_HOST`.
+
+> **Roles + key inventory primer.** This demo exercises the **master**
+> role only (workstation = master per [`architecture.md` §4a](spec/architecture.md)).
+> The **agent** role (sandbox VM / CI runner / `agent-infra/sandbox`
+> container, bootstrapped via link-code from a master) is documented
+> in [`architecture.md` §5a.2](spec/architecture.md) and the
+> [agent wiki page](../.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
+> but is **not exercised here** — the v0.2 `agentkeys agent create`
+> endpoint isn't shipped yet (tracked in
+> [#76](https://github.com/litentry/agentKeys/issues/76)). For the
+> K-numbered key inventory referenced throughout (K1 = broker session
+> keypair, K3 = dev-signer master secret, K4 = per-actor derived
+> wallet, K6 = session JWT, K7 = OIDC JWT, K10 = device key, K11 =
+> WebAuthn credential), see [`architecture.md` §3](spec/architecture.md).
 
 ---
 
