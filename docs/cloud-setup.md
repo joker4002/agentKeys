@@ -652,6 +652,21 @@ Same IP as the broker host (`$EIP` from [§5.1](#51-allocate--attach-an-elastic-
 If the signer is ever moved to its own host, swap `$EIP` for that host's
 static IP — the rest is identical.
 
+> **If `$EIP` is unset** (returning to this section in a fresh shell, or
+> §5.1 was run on a different workstation), re-derive from AWS — never
+> from `dig +short broker.<zone>`. Local resolvers behind Cloudflare WARP
+> / Zscaler / Tailscale Magic DNS / corporate VPNs return RFC 2544
+> "TEST-NET-2" addresses (`198.18.0.0/15`) for proxied hostnames, which
+> will silently mis-route the A record to a private network and break
+> Let's Encrypt validation:
+>
+> ```bash
+> # Authoritative — bypasses every local resolver
+> EIP=$(aws ec2 describe-addresses --region "$REGION" \
+>         --query 'Addresses[?AssociationId!=`null`].PublicIp' --output text)
+> echo "EIP=$EIP"   # MUST be a routable public IP, not 198.18.x.x / 10.x.x.x / 100.64.x.x
+> ```
+
 ```bash
 # === ON OPERATOR WORKSTATION ===
 SIGNER_ZONE="${BROKER_HOST#*.}"   # e.g. litentry.org
@@ -665,9 +680,13 @@ aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
     }]
   }')"
 
-# Verify DNS resolves
-curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
-  -H 'accept: application/dns-json' | jq '.Answer[0].data'
+# Verify DNS resolves to the EIP (Cloudflare DoH bypasses your local
+# resolver — important if you're behind WARP/Zscaler/Tailscale).
+until [ "$(curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
+            -H 'accept: application/dns-json' | jq -r '.Answer[0].data')" = "$EIP" ]; do
+  echo "waiting for Route 53 propagation (TTL 300s, usually <60s)…"; sleep 5
+done
+echo "DNS ready: ${SIGNER_HOST} → ${EIP}"
 ```
 
 ### 6.2 TLS cert + nginx flip
