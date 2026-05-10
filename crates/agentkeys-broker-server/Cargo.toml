@@ -90,3 +90,6 @@ tempfile = "3"
 # tests/ses_email_flow.rs. Not needed at runtime.
 aws-sdk-s3 = "1"
 uuid = { version = "1", features = ["v4"] }
+# FutureExt::catch_unwind on async — used by tests/ses_email_flow.rs to
+# guarantee cleanup runs in async context regardless of test panic.
+futures-util = "0.3"

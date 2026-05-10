@@ -91,80 +91,50 @@ impl TestEnv {
     }
 }
 
-/// Drop-time cleanup — guarantees every test object gets deleted even
-/// on panic. Holds an S3 client + the test UUID so it can list-and-delete
-/// at drop time without re-loading config.
-struct CleanupGuard {
-    s3: S3Client,
-    bucket: String,
-    token: String,
-}
-
-impl Drop for CleanupGuard {
-    fn drop(&mut self) {
-        // Drop usually runs WHILE still inside the tokio runtime (the
-        // `#[tokio::test]` machinery hasn't shut the runtime down yet),
-        // which makes `Handle::block_on` panic with "Cannot start a
-        // runtime from within a runtime". The escape is `block_in_place`
-        // — it temporarily suspends the current async task so a nested
-        // blocking operation is legal. Requires a multi_thread runtime,
-        // which the #[tokio::test(flavor = "multi_thread")] attribute on
-        // the test guarantees.
-        let s3 = self.s3.clone();
-        let bucket = self.bucket.clone();
-        let token = self.token.clone();
-        let cleanup_fut = async move {
-            let listed = match s3
-                .list_objects_v2()
-                .bucket(&bucket)
-                .prefix(INBOUND_PREFIX)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("CleanupGuard: list_objects_v2 failed: {e}");
-                    return;
-                }
-            };
-            for obj in listed.contents() {
-                let Some(key) = obj.key() else { continue };
-                // Only delete objects whose body contains our unique
-                // token — safer than deleting on key alone (SES doesn't
-                // encode recipient in the key).
-                let body = match s3.get_object().bucket(&bucket).key(key).send().await {
-                    Ok(o) => match o.body.collect().await {
-                        Ok(b) => String::from_utf8_lossy(&b.to_vec()).to_string(),
-                        Err(_) => continue,
-                    },
-                    Err(_) => continue,
-                };
-                if body.contains(&token) {
-                    let _ = s3.delete_object().bucket(&bucket).key(key).send().await;
-                    println!("CleanupGuard: deleted {key}");
-                }
-            }
+/// Explicit async cleanup — list-and-delete every inbound object whose
+/// body contains the per-test UUID. Called by the test wrapper AFTER
+/// the test body, regardless of whether the body succeeded or panicked,
+/// so cleanup runs in plain async context (no Drop/runtime-shutdown
+/// edge cases). Logs every delete via the same unbuffered `log()` helper
+/// the test body uses.
+async fn cleanup_test_objects(s3: &S3Client, bucket: &str, token: &str) {
+    log("cleanup: listing inbound/ to find objects containing token", &[]);
+    let listed = match s3
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(INBOUND_PREFIX)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log("cleanup: list_objects_v2 failed: {} (skipping)", &[&format!("{e}")]);
+            return;
+        }
+    };
+    let total = listed.contents().len();
+    log("cleanup: bucket has {} object(s); scanning for token", &[&total.to_string()]);
+    let mut deleted = 0usize;
+    for obj in listed.contents() {
+        let Some(key) = obj.key() else { continue };
+        let body = match s3.get_object().bucket(bucket).key(key).send().await {
+            Ok(o) => match o.body.collect().await {
+                Ok(b) => String::from_utf8_lossy(&b.to_vec()).to_string(),
+                Err(_) => continue,
+            },
+            Err(_) => continue,
         };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                // Nested block_on inside the test's runtime — only legal
-                // wrapped in block_in_place on a multi_thread runtime.
-                tokio::task::block_in_place(|| handle.block_on(cleanup_fut));
-            }
-            Err(_) => {
-                // No runtime active (e.g. test panicked before the
-                // runtime shut down cleanly). Spin one up.
-                let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("CleanupGuard: failed to spawn runtime: {e}");
-                        return;
-                    }
-                };
-                rt.block_on(cleanup_fut);
+        if body.contains(token) {
+            match s3.delete_object().bucket(bucket).key(key).send().await {
+                Ok(_) => {
+                    log("cleanup: deleted {}", &[key]);
+                    deleted += 1;
+                }
+                Err(e) => log("cleanup: delete {} failed: {}", &[key, &format!("{e}")]),
             }
         }
     }
+    log("cleanup: done — deleted {} object(s) matching token", &[&deleted.to_string()]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -201,17 +171,42 @@ async fn ses_send_and_receive_round_trip() {
     log("verify_sender_ready: ok", &[]);
 
     let s3 = S3Client::new(&sdk_config);
-    // Cleanup guard registered BEFORE send so a panic between send + assert
-    // still purges the bucket.
-    let _guard = CleanupGuard {
-        s3: s3.clone(),
-        bucket: env.bucket.clone(),
-        token: token.clone(),
-    };
 
+    // Run the send + poll + assert flow inside catch_unwind so we can
+    // ALWAYS run cleanup before propagating any panic. AssertUnwindSafe
+    // is needed because S3Client + the captured &env contain interior
+    // mutability and references — neither implements UnwindSafe by
+    // default. Test failure semantics are unchanged: a panic inside the
+    // body still fails the test, just AFTER cleanup has run.
+    use futures_util::FutureExt;
+    let body_result = std::panic::AssertUnwindSafe(run_send_and_poll(
+        &sender, &s3, &env, &token, &recipient, &landing_url,
+    ))
+    .catch_unwind()
+    .await;
+
+    cleanup_test_objects(&s3, &env.bucket, &token).await;
+
+    if let Err(panic) = body_result {
+        std::panic::resume_unwind(panic);
+    }
+    log("test ok — all steps complete", &[]);
+}
+
+/// Test body extracted so it can run inside catch_unwind without polluting
+/// the outer cleanup path. Sends the magic link, polls S3 for the inbound
+/// MIME object, asserts the body contains the token + landing URL.
+async fn run_send_and_poll(
+    sender: &SesEmailSender,
+    s3: &S3Client,
+    env: &TestEnv,
+    token: &str,
+    recipient: &str,
+    landing_url: &str,
+) {
     log("send_magic_link: calling SES SendEmail…", &[]);
     sender
-        .send_magic_link(&recipient, &landing_url)
+        .send_magic_link(recipient, landing_url)
         .await
         .expect("SES SendEmail failed");
     log("send_magic_link: ok — polling for inbound delivery to S3", &[]);
@@ -236,7 +231,10 @@ async fn ses_send_and_receive_round_trip() {
         {
             Ok(r) => r,
             Err(e) => {
-                log("attempt {}: list_objects_v2 ERROR: {}", &[&attempt.to_string(), &format!("{e}")]);
+                log(
+                    "attempt {}: list_objects_v2 ERROR: {}",
+                    &[&attempt.to_string(), &format!("{e}")],
+                );
                 tokio::time::sleep(POLL_INTERVAL).await;
                 continue 'poll;
             }
@@ -260,21 +258,35 @@ async fn ses_send_and_receive_round_trip() {
             let object = match s3.get_object().bucket(&env.bucket).key(key).send().await {
                 Ok(o) => o,
                 Err(e) => {
-                    log("  [{}/{}] {} get_object ERROR: {}",
-                        &[&(i+1).to_string(), &recent.len().to_string(), key, &format!("{e}")]);
+                    log(
+                        "  [{}/{}] {} get_object ERROR: {}",
+                        &[
+                            &(i + 1).to_string(),
+                            &recent.len().to_string(),
+                            key,
+                            &format!("{e}"),
+                        ],
+                    );
                     continue;
                 }
             };
             let bytes = match object.body.collect().await {
                 Ok(b) => b.to_vec(),
                 Err(e) => {
-                    log("  [{}/{}] {} body.collect ERROR: {}",
-                        &[&(i+1).to_string(), &recent.len().to_string(), key, &format!("{e}")]);
+                    log(
+                        "  [{}/{}] {} body.collect ERROR: {}",
+                        &[
+                            &(i + 1).to_string(),
+                            &recent.len().to_string(),
+                            key,
+                            &format!("{e}"),
+                        ],
+                    );
                     continue;
                 }
             };
             let body_str = String::from_utf8_lossy(&bytes).to_string();
-            let hit = body_str.contains(&token);
+            let hit = body_str.contains(token);
             log(
                 "  [{}/{}] {} size={}B contains_token={}",
                 &[
@@ -318,16 +330,14 @@ async fn ses_send_and_receive_round_trip() {
         )
     });
     assert!(
-        body.contains(&token),
+        body.contains(token),
         "MIME body must contain unique token {token}"
     );
     assert!(
-        body.contains(&landing_url) || body.contains(&landing_url.replace('=', "=3D")),
+        body.contains(landing_url) || body.contains(&landing_url.replace('=', "=3D")),
         "MIME body must contain landing URL {landing_url} (allowing for quoted-printable encoding)"
     );
-
-    log("test ok — CleanupGuard will purge inbound objects on Drop", &[]);
-    // CleanupGuard runs on Drop after this point.
+    log("send_and_poll: ok", &[]);
 }
 
 /// Unbuffered logger used throughout this test. Stdout in `cargo test
