@@ -234,16 +234,22 @@ exists with mode 0600.
 
 ### 0.2 Set the signer URL
 
-`$BACKEND_URL` is now the public HTTPS URL of the dedicated signer listener
-(`signer.<zone>`). No SSH tunnel required — the signer is fronted by nginx
-over TLS. Set it once and export it:
+`$BACKEND_URL` / `$AGENTKEYS_SIGNER_URL` are the public HTTPS URL of the
+dedicated signer listener (`signer.<zone>`). No SSH tunnel required — the
+signer is fronted by nginx over TLS, co-located with the broker on the same
+EC2 host (see [`cloud-setup.md` §1.3](cloud-setup.md#13-signer-subdomain--a-record--tls-cert-issue-74-step-1b)
+for the topology + future-split note).
+
+Both vars are pre-set in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env)
+(sourced in §0 above) — `SIGNER_HOST=signer.${BROKER_HOST#*.}` and
+`AGENTKEYS_SIGNER_URL=https://${SIGNER_HOST}`. Confirm + smoke-test:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# Derive from $BROKER_HOST: broker.litentry.org → signer.litentry.org
-SIGNER_ZONE="${BROKER_HOST#*.}"
-export AGENTKEYS_SIGNER_URL="https://signer.${SIGNER_ZONE}"
-export BACKEND_URL="$AGENTKEYS_SIGNER_URL"
+echo "SIGNER_HOST=$SIGNER_HOST"
+echo "AGENTKEYS_SIGNER_URL=$AGENTKEYS_SIGNER_URL"
+# SIGNER_HOST=signer.litentry.org
+# AGENTKEYS_SIGNER_URL=https://signer.litentry.org
 
 # Smoke-test.
 curl -sS "$BACKEND_URL/healthz"

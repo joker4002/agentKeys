@@ -98,12 +98,38 @@ Done as part of [§5 EC2 broker host](#5-ec2-broker-host-optional), once you kno
 
 ### 1.3 Signer subdomain — A record + TLS cert (issue #74 step 1b)
 
-The dedicated signer listener (`agentkeys-signer.service`, `:8092` loopback)
-is fronted by nginx at a separate hostname — `signer.<zone>` derived from the
-broker hostname (e.g. if `$BROKER_HOST` is `broker.litentry.org`, the signer
-hostname is `signer.litentry.org`).
+#### What the signer is + why it gets its own hostname
 
-**Step 1: DNS A record** (same IP as the broker host):
+The signer (`dev_key_service`) is the only process that touches `K3` (the
+master secret) and derives `K4` (per-actor EVM wallets). It exposes exactly
+two endpoints — `POST /dev/derive-address` and `POST /dev/sign-message` per
+[`docs/spec/signer-protocol.md`](spec/signer-protocol.md) — and authenticates
+every request with a broker-issued session JWT (the broker's session pubkey
+is read off-disk at boot). Nothing else is served on this hostname.
+
+| Concern | Today | Future |
+|---|---|---|
+| Process | `agentkeys-signer.service` (Rust, `agentkeys-mock-server --signer-only`, loopback `:8092`) | TEE worker (issue #74 step 2) |
+| Host | **Same EC2 box as the broker** — co-located behind the same nginx, provisioned by the same `setup-broker-host.sh` run | Separate machine (or enclave); only the A record moves |
+| Public hostname | `signer.<zone>` (e.g. `signer.litentry.org`) | `signer.<zone>` (unchanged) |
+| Master secret (K3) | `/etc/agentkeys/dev-key-service.env` (mode 0600, owner `agentkeys`) — auto-generated on first `setup-broker-host.sh` run, **never rotated** (rotation invalidates every previously-derived wallet) | TEE-sealed; same wire shape |
+
+**Why a dedicated hostname instead of a path on the broker:** decoupling the
+signer's public URL from the broker's lets us move the signer process to a
+different host (different VPC, different cloud, eventually a TEE worker)
+without changing any client config — daemon and CLI keep talking to
+`https://signer.<zone>`, only the A record + cert move. The split also gives
+us a clean trust boundary: a leaked broker keypair cannot impersonate the
+signer (different TLS cert, different process, different env file holding K3).
+
+The dedicated signer listener (`agentkeys-signer.service`, `:8092` loopback)
+is fronted by nginx at `signer.<zone>` derived from the broker hostname (e.g.
+if `$BROKER_HOST` is `broker.litentry.org`, the signer hostname is
+`signer.litentry.org`). The hostname is exported as `SIGNER_HOST` /
+`AGENTKEYS_SIGNER_URL` in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env)
+so the demo + CLI invocations pick it up automatically.
+
+**Step 1: DNS A record** (same IP as the broker host — co-located today):
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
