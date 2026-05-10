@@ -673,20 +673,34 @@ curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
 ### 6.2 TLS cert + nginx flip
 
 Three host-side steps. `setup-broker-host.sh` is idempotent — first run
-writes an HTTP-only nginx config, certbot issues the cert, second run flips
-the vhost onto `:443` ssl. The script also auto-generates
+writes an HTTP-only nginx vhost for `signer.<zone>`, certbot issues the cert,
+second run flips the vhost onto `:443` ssl. The script also auto-generates
 `/etc/agentkeys/dev-key-service.env` (mode 0600) and writes
 `agentkeys-signer.service`.
 
+> **`$SIGNER_HOST` is NOT on the broker host.** It lives in
+> `scripts/operator-workstation.env` (your laptop). The broker host derives
+> its own `SIGNER_HOST` inside `setup-broker-host.sh` from `ISSUER_HOST`
+> and writes it into the nginx vhost. The certbot step below reads the
+> hostname back out of that vhost so the command works on a fresh host
+> with no shell vars set.
+
 ```bash
 # === ON BROKER HOST ===
-# Step 1 — first pass writes HTTP-only nginx config
+# Step 1 — first pass writes the HTTP-only nginx vhost for signer.<zone>
 sudo bash scripts/setup-broker-host.sh --yes
 
-# Step 2 — issue the LE cert for the signer hostname
+# Sanity: the signer vhost must exist before certbot can pick it up
+ls /etc/nginx/sites-enabled/agentkeys-signer
+SIGNER_HOST=$(awk '/server_name/ && /signer\./ {gsub(";",""); print $2}' \
+                /etc/nginx/sites-available/agentkeys-signer | head -1)
+echo "SIGNER_HOST=$SIGNER_HOST"   # → signer.<your-zone>, e.g. signer.litentry.org
+
+# Step 2 — issue the LE cert. If the prompt only lists broker.<zone> and
+# NOT signer.<zone>, the vhost was not written — re-pull + re-run step 1.
 sudo certbot --nginx -d "$SIGNER_HOST"
 
-# Step 3 — re-run to flip nginx onto :443 ssl
+# Step 3 — re-run to flip nginx onto :443 ssl for signer.<zone>
 sudo bash scripts/setup-broker-host.sh --yes
 ```
 
