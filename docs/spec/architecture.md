@@ -402,12 +402,44 @@ The WebAuthn signature serves double duty: hardware-attested **user presence** +
 
 Key property: **email-account compromise alone cannot rebind**. An attacker who phished the email account can complete the email-link identity ceremony but cannot complete the WebAuthn ceremony on the legitimate user's hardware (TouchID/Hello requires the physical device). This is the Q7 fix.
 
+#### From J0 to J1 (master only — bridge to per-mint flows)
+
+J0 minted above is the **identity-omni** session JWT (claims bound to the identity authenticator: email-omni / oauth2-omni / evm-omni-of-identity-source / etc.). It is short-lived and used only to drive the wallet-binding round-trip. To get the long-lived **EVM-omni** session JWT (`J1`) the master uses for per-mint flows and link-code minting in §5a.1.A, the master runs §5 steps 2-3 immediately after the binding ceremony:
+
+```
+7. CLI → signer: POST /dev/derive-address {O_id}
+                  Authorization: Bearer J0
+   → returns wallet address A = HKDF(K3, O_id) → secp256k1 → addr.
+
+8. CLI → broker: POST /v1/wallet/link {evm, A}
+                  Authorization: Bearer J0
+   → broker links O_id ↔ A.
+
+9. CLI → broker: POST /v1/auth/wallet/start {address: A}
+   → broker returns SIWE message M.
+
+10. CLI → signer: POST /dev/sign-message {O_id, message_hex: hex(M)}
+                   Authorization: Bearer J0
+    → signer signs EIP-191(M) with K4_priv (HKDF-derived).
+
+11. CLI → broker: POST /v1/auth/wallet/verify {request_id, signature}
+    → broker ecrecover → A; mints J1 = EVM-omni session JWT.
+       Claims: evm_omni, wallet=A, agentkeys_device_pubkey=D_pub,
+                agentkeys_webauthn_cred=K11_id.
+
+12. CLI: persist J1 in OS keychain (J0 may be discarded).
+```
+
+Both `agentkeys_device_pubkey` (K10) and `agentkeys_webauthn_cred` (K11) claims propagate from J0 into J1 atomically — the master's binding ceremony output is preserved across the J0 → J1 transition. **J1 is the bearer referenced as `J1_master` in §5a.1.A's precondition** and is the same long-lived session JWT used for `/v1/mint-oidc-jwt`, `/v1/wallet/link`, and post-step-1b `/dev/*` calls per §6.
+
+For the `evm` identity-type variant, steps 7-11 collapse: the user's own EVM key IS the wallet, so there's no signer call at init and no separate wallet-link step — the broker mints J1 directly at the end of §5a.1.M (same evm-omni it would have arrived at via the round-trip).
+
 #### 5a.1.A Agent binding ceremony — link-code (uniform)
 
 The agent machine has no human present and no platform authenticator. The master vouches by issuing a one-time link code from its already-authenticated session.
 
 ```
-ON MASTER (already initialized per 5a.1.M; holds J1_master):
+ON MASTER (already initialized per §5a.1.M + the J0 → J1 bridge above; holds J1_master = the long-lived EVM-omni session JWT with K10 + K11 claims):
 1. CLI: agentkeys link-code mint --omni O_evm
 2. CLI → broker: POST /v1/auth/link-code/mint
                   { omni_account: O_evm, ttl_seconds: 600 }
