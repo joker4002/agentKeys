@@ -91,14 +91,42 @@ impl TestEnv {
     }
 }
 
-/// Explicit async cleanup — list-and-delete every inbound object whose
-/// body contains the per-test UUID. Called by the test wrapper AFTER
-/// the test body, regardless of whether the body succeeded or panicked,
-/// so cleanup runs in plain async context (no Drop/runtime-shutdown
-/// edge cases). Logs every delete via the same unbuffered `log()` helper
-/// the test body uses.
-async fn cleanup_test_objects(s3: &S3Client, bucket: &str, token: &str) {
-    log("cleanup: listing inbound/ to find objects containing token", &[]);
+/// Explicit async cleanup. Two modes:
+///
+/// 1. **Fast path** (happy case): the poll loop already located the
+///    inbound object containing our token — `fast_key=Some(...)`. We
+///    just `DeleteObject` that one key. ~1 RPC, sub-second.
+///
+/// 2. **Slow path** (test panicked before poll found the key): scan
+///    all of `inbound/`, GetObject + body-grep, delete any object whose
+///    body contains the per-test UUID. O(N) GetObject calls — slow,
+///    but only triggers on test failure.
+///
+/// The per-token body match is production-safe because UUIDs are 128
+/// random bits (~10^-38 collision probability with any production email).
+/// The cleanup ONLY deletes objects whose body contains this specific
+/// test's UUID — every other inbound (production, other tests, SES
+/// verification mails) is left intact.
+async fn cleanup_test_objects(
+    s3: &S3Client,
+    bucket: &str,
+    token: &str,
+    fast_key: Option<String>,
+) {
+    if let Some(key) = fast_key {
+        log("cleanup: fast-path delete of {}", &[&key]);
+        match s3.delete_object().bucket(bucket).key(&key).send().await {
+            Ok(_) => log("cleanup: deleted {} (fast path, 1 RPC)", &[&key]),
+            Err(e) => log("cleanup: delete {} failed: {}", &[&key, &format!("{e}")]),
+        }
+        return;
+    }
+
+    // Slow scan only when the poll didn't find the key (test panicked early).
+    log(
+        "cleanup: SLOW path — poll didn't return a key, scanning all inbound/ for token={}",
+        &[token],
+    );
     let listed = match s3
         .list_objects_v2()
         .bucket(bucket)
@@ -113,7 +141,10 @@ async fn cleanup_test_objects(s3: &S3Client, bucket: &str, token: &str) {
         }
     };
     let total = listed.contents().len();
-    log("cleanup: bucket has {} object(s); scanning for token", &[&total.to_string()]);
+    log(
+        "cleanup: bucket has {} object(s); scanning for token (this is slow)",
+        &[&total.to_string()],
+    );
     let mut deleted = 0usize;
     for obj in listed.contents() {
         let Some(key) = obj.key() else { continue };
@@ -134,7 +165,10 @@ async fn cleanup_test_objects(s3: &S3Client, bucket: &str, token: &str) {
             }
         }
     }
-    log("cleanup: done — deleted {} object(s) matching token", &[&deleted.to_string()]);
+    log(
+        "cleanup: slow-scan done — deleted {} object(s) matching token",
+        &[&deleted.to_string()],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -172,6 +206,12 @@ async fn ses_send_and_receive_round_trip() {
 
     let s3 = S3Client::new(&sdk_config);
 
+    // Shared slot the poll loop writes into when it finds the matching
+    // inbound object. Cleanup reads it post-catch_unwind to fast-path
+    // a single DeleteObject (vs scanning the entire bucket on Drop).
+    let found_key: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+
     // Run the send + poll + assert flow inside catch_unwind so we can
     // ALWAYS run cleanup before propagating any panic. AssertUnwindSafe
     // is needed because S3Client + the captured &env contain interior
@@ -180,12 +220,19 @@ async fn ses_send_and_receive_round_trip() {
     // body still fails the test, just AFTER cleanup has run.
     use futures_util::FutureExt;
     let body_result = std::panic::AssertUnwindSafe(run_send_and_poll(
-        &sender, &s3, &env, &token, &recipient, &landing_url,
+        &sender,
+        &s3,
+        &env,
+        &token,
+        &recipient,
+        &landing_url,
+        found_key.clone(),
     ))
     .catch_unwind()
     .await;
 
-    cleanup_test_objects(&s3, &env.bucket, &token).await;
+    let fast_key = found_key.lock().unwrap().take();
+    cleanup_test_objects(&s3, &env.bucket, &token, fast_key).await;
 
     if let Err(panic) = body_result {
         std::panic::resume_unwind(panic);
@@ -196,6 +243,9 @@ async fn ses_send_and_receive_round_trip() {
 /// Test body extracted so it can run inside catch_unwind without polluting
 /// the outer cleanup path. Sends the magic link, polls S3 for the inbound
 /// MIME object, asserts the body contains the token + landing URL.
+///
+/// Writes the found key into `found_key_slot` so the outer cleanup path
+/// can fast-path a single DeleteObject (vs scanning the entire bucket).
 async fn run_send_and_poll(
     sender: &SesEmailSender,
     s3: &S3Client,
@@ -203,6 +253,7 @@ async fn run_send_and_poll(
     token: &str,
     recipient: &str,
     landing_url: &str,
+    found_key_slot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 ) {
     log("send_magic_link: calling SES SendEmail…", &[]);
     sender
@@ -299,6 +350,8 @@ async fn run_send_and_poll(
             );
             if hit {
                 log("attempt {}: FOUND token in {}", &[&attempt.to_string(), key]);
+                // Publish the key so cleanup can fast-path a single DeleteObject.
+                *found_key_slot.lock().unwrap() = Some(key.to_string());
                 found_body = Some(body_str);
                 break;
             }
