@@ -232,31 +232,57 @@ impl EmailSender for SesEmailSender {
     }
 
     async fn verify_sender_ready(&self) -> Result<(), EmailSendError> {
-        let resp = self
-            .client
-            .get_email_identity()
-            .email_identity(&self.from_address)
-            .send()
+        // SES has two verification granularities:
+        //   - Per-email-address identity (`noreply@bots.litentry.org`)
+        //   - Per-domain identity        (`bots.litentry.org`)        ← grants
+        //     sending rights to ANY address at the domain via DKIM
+        //
+        // Operators following cloud-setup.md §2.1 verify the DOMAIN, not each
+        // address. So GetEmailIdentity on the full FROM returns NotFound even
+        // though SES will accept the SendEmail. We try address-level first
+        // (preferred — explicit), then fall back to the domain identity.
+        if check_identity(&self.client, &self.from_address)
             .await
-            .map_err(|e| {
-                EmailSendError::Verify(format!(
-                    "ses GetEmailIdentity({}): {}",
-                    self.from_address,
-                    e.into_service_error()
-                ))
-            })?;
-
-        // Identity must be SES-verified AND sending must be enabled. We
-        // accept any verification status that allows sending (SUCCESS).
-        let verified_for_sending = resp.verified_for_sending_status();
-        if !verified_for_sending {
-            return Err(EmailSendError::Verify(format!(
-                "{} is not verified for sending in this SES region",
-                self.from_address
-            )));
+            .is_ok()
+        {
+            return Ok(());
         }
-        Ok(())
+        let domain = self.from_address.rsplit_once('@').map(|(_, d)| d).ok_or_else(|| {
+            EmailSendError::Config(format!(
+                "from_address '{}' has no '@' — cannot extract domain for verify fallback",
+                self.from_address
+            ))
+        })?;
+        check_identity(&self.client, domain).await.map_err(|e| {
+            EmailSendError::Verify(format!(
+                "neither {} nor {} is a verified SES sending identity: {}",
+                self.from_address, domain, e
+            ))
+        })
     }
+}
+
+/// Calls `GetEmailIdentity(identity)` and returns Ok only when SES reports
+/// the identity exists AND `verified_for_sending_status` is true. Helper
+/// for the address-then-domain fallback in `SesEmailSender::verify_sender_ready`.
+#[cfg(feature = "auth-email-link")]
+async fn check_identity(
+    client: &aws_sdk_sesv2::Client,
+    identity: &str,
+) -> Result<(), String> {
+    let resp = client
+        .get_email_identity()
+        .email_identity(identity)
+        .send()
+        .await
+        .map_err(|e| format!("GetEmailIdentity({}): {}", identity, e.into_service_error()))?;
+    if !resp.verified_for_sending_status() {
+        return Err(format!(
+            "{} exists but verified_for_sending_status=false",
+            identity
+        ));
+    }
+    Ok(())
 }
 
 /// Persisted SES verification cache. Survives restart so debug-loops
