@@ -102,13 +102,18 @@ struct CleanupGuard {
 
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
-        // Drop runs on the test thread; spin a tokio runtime if we're not
-        // already inside one. The integration test is async so we usually
-        // are — guard with try_handle for safety.
+        // Drop usually runs WHILE still inside the tokio runtime (the
+        // `#[tokio::test]` machinery hasn't shut the runtime down yet),
+        // which makes `Handle::block_on` panic with "Cannot start a
+        // runtime from within a runtime". The escape is `block_in_place`
+        // — it temporarily suspends the current async task so a nested
+        // blocking operation is legal. Requires a multi_thread runtime,
+        // which the #[tokio::test(flavor = "multi_thread")] attribute on
+        // the test guarantees.
         let s3 = self.s3.clone();
         let bucket = self.bucket.clone();
         let token = self.token.clone();
-        let cleanup = async move {
+        let cleanup_fut = async move {
             let listed = match s3
                 .list_objects_v2()
                 .bucket(&bucket)
@@ -124,9 +129,9 @@ impl Drop for CleanupGuard {
             };
             for obj in listed.contents() {
                 let Some(key) = obj.key() else { continue };
-                // Only delete objects whose body we know contains our
-                // unique token — safer than deleting on key alone (SES
-                // doesn't put recipient in the key).
+                // Only delete objects whose body contains our unique
+                // token — safer than deleting on key alone (SES doesn't
+                // encode recipient in the key).
                 let body = match s3.get_object().bucket(&bucket).key(key).send().await {
                     Ok(o) => match o.body.collect().await {
                         Ok(b) => String::from_utf8_lossy(&b.to_vec()).to_string(),
@@ -141,10 +146,14 @@ impl Drop for CleanupGuard {
             }
         };
         match tokio::runtime::Handle::try_current() {
-            Ok(h) => {
-                h.block_on(cleanup);
+            Ok(handle) => {
+                // Nested block_on inside the test's runtime — only legal
+                // wrapped in block_in_place on a multi_thread runtime.
+                tokio::task::block_in_place(|| handle.block_on(cleanup_fut));
             }
             Err(_) => {
+                // No runtime active (e.g. test panicked before the
+                // runtime shut down cleanly). Spin one up.
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
                     Err(e) => {
@@ -152,7 +161,7 @@ impl Drop for CleanupGuard {
                         return;
                     }
                 };
-                rt.block_on(cleanup);
+                rt.block_on(cleanup_fut);
             }
         }
     }
