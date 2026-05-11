@@ -4,9 +4,15 @@
 # receipt rule from cloud-setup.md §2.1.
 #
 # Usage:
-#   awsp agentkeys-admin
+#   awsp agentkeys-admin   # REQUIRED — broker user lacks s3:ListBucket
 #   set -a; source scripts/operator-workstation.env; set +a
 #   bash scripts/ses-verify-sender.sh
+#
+# The script preflights `aws sts get-caller-identity` + a `ListObjectsV2`
+# probe. If you forget the profile switch, it dies immediately with
+# guidance instead of silently scanning a bucket it can't read (the
+# previous behaviour: AccessDenied was masked by `2>/dev/null` and the
+# poll loop reported "0 object(s) under inbound/" forever).
 #
 # Or override the address being verified:
 #   BROKER_EMAIL_FROM_ADDRESS=alerts@bots.litentry.org bash scripts/ses-verify-sender.sh
@@ -55,6 +61,38 @@ log "MAIL_DOMAIN  : $MAIL_DOMAIN"
 log "MAIL_BUCKET  : $MAIL_BUCKET"
 log "REGION       : $REGION"
 
+# ─── Preflight: which AWS identity are we using? ─────────────────────────────
+# The S3 inbound bucket is created + owned by `agentkeys-admin` (per
+# cloud-setup.md §2.1). The default `agentkey-broker` user only has
+# bucket-write/object-write for SES inbound delivery — NOT s3:ListBucket.
+# Without explicit caller-identity surfacing, an AccessDenied here
+# manifests as "0 objects under inbound/" silently (the script masked the
+# error with `2>/dev/null || true` for noisy environments). Surface it
+# upfront, AND prove ListBucket works before entering the poll loop.
+log "Preflight: AWS caller identity"
+caller=$(aws sts get-caller-identity --output json 2>&1) \
+  || die "aws sts get-caller-identity failed:\n$caller\nDid you run \`awsp agentkeys-admin\` first?"
+caller_arn=$(printf '%s' "$caller" | jq -r '.Arn')
+log "  caller ARN : $caller_arn"
+case "$caller_arn" in
+  *":user/agentkeys-admin"*|*":role/agentkeys-admin"*|*":user/agentkeys-admin/"*)
+    : ;;
+  *":user/agentkey-broker"*)
+    die "wrong AWS profile: $caller_arn lacks s3:ListBucket on $MAIL_BUCKET.
+   Run: awsp agentkeys-admin   then re-run this script." ;;
+  *)
+    warn "caller is not agentkeys-admin — if ListBucket fails below, switch profile" ;;
+esac
+
+log "Preflight: ListBucket on s3://$MAIL_BUCKET/$INBOUND_PREFIX"
+preflight=$(aws s3api list-objects-v2 \
+              --bucket "$MAIL_BUCKET" \
+              --prefix "$INBOUND_PREFIX" \
+              --max-items 1 \
+              --region "$REGION" 2>&1) \
+  || die "ListBucket failed (likely wrong profile or bucket missing):\n$preflight"
+log "  ListBucket ok"
+
 # ─── Step 0: Already verified? Skip the rest. ────────────────────────────────
 existing_status=""
 if existing_status=$(aws sesv2 get-email-identity \
@@ -95,11 +133,14 @@ log "Polling s3://$MAIL_BUCKET/$INBOUND_PREFIX for the verification mail…"
 verify_url=""
 verify_key=""
 for attempt in $(seq 1 "$POLL_MAX_ATTEMPTS"); do
+  # No 2>/dev/null mask: the preflight above proves ListBucket works, so
+  # any error here is a real regression worth surfacing immediately.
   keys=$(aws s3api list-objects-v2 \
            --bucket "$MAIL_BUCKET" \
            --prefix "$INBOUND_PREFIX" \
+           --region "$REGION" \
            --query 'Contents[*].Key' \
-           --output text 2>/dev/null || true)
+           --output text)
   # Diagnostic: how many objects + sample keys (first 3) per attempt.
   count=$(printf '%s\n' $keys | grep -c . || true)
   log "  attempt $attempt/$POLL_MAX_ATTEMPTS — $count object(s) under $INBOUND_PREFIX"

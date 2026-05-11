@@ -388,11 +388,18 @@ working is one `--email` round-trip.
 >
 > 1. **One-time SES sender registration** (operator workstation, ~30s):
 >    ```bash
+>    awsp agentkeys-admin     # MUST be admin profile — broker user lacks s3:ListBucket
+>    set -a; source scripts/operator-workstation.env; set +a
 >    bash scripts/ses-verify-sender.sh
 >    ```
 >    Registers `noreply-test@bots.litentry.org` as a per-address SES
 >    identity, polls `s3://$MAIL_BUCKET/inbound/` for the verification
 >    mail, clicks the link, confirms `VerifiedForSendingStatus=true`. Idempotent.
+>
+>    The script now fails loud with `awsp agentkeys-admin` guidance if
+>    you forgot the profile switch (previously it silently reported
+>    "0 object(s) under inbound/" while the broker user's `AccessDenied`
+>    on `s3:ListBucket` was masked by `2>/dev/null`).
 >
 > 2. **Broker host re-deploy with `auth-email-link` feature** (broker
 >    host, ~1 min):
