@@ -151,16 +151,20 @@ log "Polling s3://$MAIL_BUCKET/$INBOUND_PREFIX for the magic-link email"
 landing_url=""
 matched_key=""
 
-# Quoted-printable: '=' is encoded as '=3D'; soft-wraps as '=\n'. Reverse
-# both before grepping for the URL pattern.
+# Two possible encodings for the URL in the body:
+#   - 7bit/8bit (pure-ASCII, the common case for our magic-link URLs):
+#     URL has a LITERAL '=' between 't' and the base64url token.
+#   - quoted-printable (SES picks this when MIME parts have non-ASCII):
+#     '=' is encoded as '=3D' and lines may soft-wrap with '=\n'.
+# Handle both: undo soft-wraps + match either form, then normalize.
 extract_landing_url() {
   local body="$1"
   printf '%s' "$body" \
     | sed 's/=$//' \
     | tr -d '\n' \
-    | grep -oE "${OIDC_ISSUER}/auth/email/landing#t=3D[A-Za-z0-9_-]+" \
+    | grep -oE "${OIDC_ISSUER}/auth/email/landing#t=(3D)?[A-Za-z0-9_-]+" \
     | head -1 \
-    | sed 's/=3D/=/g'
+    | sed 's/#t=3D/#t=/'
 }
 
 for attempt in $(seq 1 "$POLL_MAX_ATTEMPTS"); do
