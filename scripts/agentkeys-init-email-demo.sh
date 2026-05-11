@@ -109,24 +109,20 @@ log "Caller ARN  : $caller_arn"
 # only care about objects that arrive AFTER our SendEmail. snapshot the
 # pre-existing key set; later we filter the post-list against this.
 log "Snapshotting existing inbound/ keys (filter for NEW arrivals)"
-# Build a hash set of pre-existing keys for O(1) membership checks in
-# the polling loop. `aws --output text` returns keys TAB-separated, so
-# bash's default IFS word-splitting handles them when iterating with
-# `for k in $pre_keys` — but a string containment check against a
-# tab-separated blob with space delimiters silently misses every key
-# (manifests as "every poll attempt reports all 415 keys as new" and
-# downloads each one to inspect the body — slow but functionally
-# correct). Use an associative array instead.
-declare -A pre_set
+# Build a string-based set of pre-existing keys: space-separated, with
+# leading + trailing spaces, so a substring check `*" $k "*` is exact.
+# Bash-3.2-compatible (declare -A / associative arrays would be
+# cleaner but require bash 4+, and macOS ships /bin/bash 3.2 forever
+# due to Apple's GPLv3 freeze). `aws --output text` returns keys
+# TAB-separated; `tr '\t' ' '` normalizes them. SES-generated S3 keys
+# are alphanumeric (no spaces), so the substring delimiter is safe.
 pre_keys_text=$(aws s3api list-objects-v2 \
                   --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
                   --region "$REGION" \
-                  --query 'Contents[*].Key' --output text 2>/dev/null || true)
-for k in $pre_keys_text; do
-  [[ -z "$k" ]] && continue
-  pre_set[$k]=1
-done
-pre_count=${#pre_set[@]}
+                  --query 'Contents[*].Key' --output text 2>/dev/null || true \
+                | tr '\t' ' ')
+PRE_KEYS_SET=" $pre_keys_text "          # leading + trailing space for exact match
+pre_count=$(printf '%s\n' $pre_keys_text | grep -c . || true)
 log "  $pre_count existing object(s) — only newer arrivals will be inspected"
 
 # ─── Fire `agentkeys init --email` in the background ────────────────────────
@@ -181,15 +177,17 @@ for attempt in $(seq 1 "$POLL_MAX_ATTEMPTS"); do
   current_keys=$(aws s3api list-objects-v2 \
                    --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
                    --region "$REGION" \
-                   --query 'Contents[*].Key' --output text 2>/dev/null || true)
-  # Build set difference: current_keys - pre_set (the associative
-  # array built at snapshot time). O(1) membership check per key vs
-  # the prior O(n) string-substring scan that silently dropped tab
-  # delimiters.
+                   --query 'Contents[*].Key' --output text 2>/dev/null || true \
+                | tr '\t' ' ')
+  # Build set difference: keys in current but not in PRE_KEYS_SET.
+  # Bash-3.2-compatible substring check against the leading+trailing-
+  # space-padded snapshot string.
   new_keys=()
   for k in $current_keys; do
     [[ -z "$k" ]] && continue
-    [[ -n "${pre_set[$k]:-}" ]] && continue
+    case "$PRE_KEYS_SET" in
+      *" $k "*) continue ;;
+    esac
     new_keys+=("$k")
   done
   new_count=${#new_keys[@]}
