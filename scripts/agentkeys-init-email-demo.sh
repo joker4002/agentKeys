@@ -141,6 +141,16 @@ extract_landing_url() {
 }
 
 for attempt in $(seq 1 "$POLL_MAX_ATTEMPTS"); do
+  # Fast-fail: if agentkeys init died before the email arrives (e.g.
+  # broker rejected the request, signer unauthorized, ses misconfig),
+  # dump the init log and die immediately instead of waiting the full
+  # 2-min poll budget for an email that will never come.
+  if ! kill -0 "$init_pid" 2>/dev/null; then
+    warn "agentkeys init exited before magic link arrived in S3 — dumping log:"
+    cat "$init_log" >&2 || true
+    die "init died early (likely broker rejection); see log above"
+  fi
+
   current_keys=$(aws s3api list-objects-v2 \
                    --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
                    --region "$REGION" \
