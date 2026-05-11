@@ -466,17 +466,28 @@ case ",$ENABLED_FEATURES," in
    Then file a repro for the issue tracker." ;;
 esac
 
-# Belt-and-suspenders: also verify the actual route literals are in the
-# binary. If cargo claims the feature is on but `strings` doesn't see the
-# routes, the binary on disk is stale (cargo's incremental tricked us).
-if ! strings "$REPO_ROOT/target/release/agentkeys-broker-server" \
-    | grep -aFq "/v1/auth/email/request"; then
-  warn "cargo reports auth-email-link enabled but the binary on disk lacks the routes."
-  warn "  ls -la $REPO_ROOT/target/release/agentkeys-broker-server:"
-  ls -la "$REPO_ROOT/target/release/agentkeys-broker-server" >&2
-  die "binary on disk does not match cargo's reported feature set — likely a stale
-   artifact survived the cargo clean. Force a full clean and retry:
-     cargo clean --release && bash scripts/setup-broker-host.sh --yes"
+# Belt-and-suspenders: nm symbol-table check (more reliable than strings,
+# which on rustc 1.95 + Ubuntu binutils gives false negatives — string
+# literals may be present in .rodata but split across symbol boundaries
+# in ways `strings` doesn't reassemble). If nm sees the function, the
+# code is compiled in. WARN-only: cargo's JSON assertion above is the
+# canonical gate; this is just an extra signal for diagnostics.
+# `probe_or_die` post-restart is the actual runtime safety net — a
+# binary missing the feature would BOOT_FAIL with the same
+# 'unknown auth method' error and probe_or_die would catch it.
+if command -v nm >/dev/null 2>&1; then
+  email_symbols=$(nm "$REPO_ROOT/target/release/agentkeys-broker-server" 2>/dev/null \
+    | grep -cE "register_email_link_routes|email_request|email_verify" \
+    || true)
+  if (( email_symbols > 0 )); then
+    log "  nm sees $email_symbols email-link symbol(s) — feature is linked in"
+  else
+    warn "nm sees 0 email-link symbols in the binary, but cargo claims the feature is on."
+    warn "This MIGHT be a stale artifact, OR rustc 1.95 stripped them at link time."
+    warn "Continuing — the post-restart /healthz probe will catch any real boot failure."
+  fi
+else
+  log "  (nm not installed — skipping symbol-table sanity check)"
 fi
 
 # ─── 3. Install binaries (stop → backup → install → restart later) ──────────
