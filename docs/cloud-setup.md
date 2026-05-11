@@ -261,16 +261,49 @@ aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerAssumeData \
                  Resource:"arn:aws:iam::\($acct):role/agentkeys-data-role"}]
   }')"
 
-# Email-link auth (Pass 2): broker calls SES v2 SendEmail with its OWN
-# runtime credentials (instance profile), NOT via the assumed
-# agentkeys-data-role. Grant ses:SendEmail directly here. NOTE: the IAM
-# action is `ses:SendEmail` for sesv2 SendEmail — `ses:SendRawEmail`
-# only authorizes the v1 SendRawEmail API (different code path; the
-# broker doesn't use it). Without this the operator hits:
-#   broker rejected /v1/auth/email/request: status=502 body=
-#   {"error":"backend_unreachable","message":"… ses SendEmail:
-#    unhandled error (AccessDeniedException)"}
-aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerSendEmail \
+aws iam create-instance-profile --instance-profile-name $ROLE_NAME
+aws iam add-role-to-instance-profile --instance-profile-name $ROLE_NAME --role-name $ROLE_NAME
+aws ec2 associate-iam-instance-profile --region "$REGION" \
+  --instance-id <broker-host-instance-id> \
+  --iam-instance-profile Name=$ROLE_NAME
+```
+
+### 3.4a `ses:SendEmail` grant on the broker's runtime role (Pass 2 prereq)
+
+The broker calls SES v2 `SendEmail` with its **own** runtime credentials
+(instance profile), NOT via the assumed `agentkeys-data-role`. Without
+`ses:SendEmail` on the broker's role the operator hits:
+
+```
+broker rejected /v1/auth/email/request: status=502 body=
+{"error":"backend_unreachable","message":"… ses SendEmail:
+ unhandled error (AccessDeniedException)"}
+```
+
+The IAM action is `ses:SendEmail` (sesv2) — NOT `ses:SendRawEmail` (v1
+only; different code path the broker doesn't use).
+
+**Step 1: discover the actual role name attached to your broker host.**
+On a fresh setup following §3.4 above, this is `agentkeys-broker-host`.
+Existing/legacy deploys may use a different name (e.g. an ad-hoc
+`S3-full-access` from initial provisioning). Find it:
+
+```bash
+# By the broker host's elastic IP (replace 1.2.3.4 with $EIP):
+ROLE=$(aws ec2 describe-instances \
+  --filters "Name=ip-address,Values=1.2.3.4" \
+  --query 'Reservations[].Instances[].IamInstanceProfile.Arn' \
+  --output text | sed 's|.*instance-profile/||')
+ROLE=$(aws iam get-instance-profile --instance-profile-name "$ROLE" \
+  --query 'InstanceProfile.Roles[0].RoleName' --output text)
+echo "broker runtime role: $ROLE"
+```
+
+**Step 2: grant `ses:SendEmail` against the verified sender identity.**
+
+```bash
+aws iam put-role-policy --role-name "$ROLE" \
+  --policy-name BrokerSendEmail \
   --policy-document "$(jq -n \
     --arg region "$REGION" --arg acct "$ACCOUNT_ID" --arg domain "$MAIL_DOMAIN" '{
     Version: "2012-10-17",
@@ -283,12 +316,14 @@ aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerSendEmail \
       ]
     }]
   }')"
+```
 
-aws iam create-instance-profile --instance-profile-name $ROLE_NAME
-aws iam add-role-to-instance-profile --instance-profile-name $ROLE_NAME --role-name $ROLE_NAME
-aws ec2 associate-iam-instance-profile --region "$REGION" \
-  --instance-id <broker-host-instance-id> \
-  --iam-instance-profile Name=$ROLE_NAME
+No broker restart needed — sesv2 picks up creds per-call. Verify:
+
+```bash
+aws iam get-role-policy --role-name "$ROLE" --policy-name BrokerSendEmail \
+  --query 'PolicyDocument.Statement[*].Action'
+# → [["ses:SendEmail"]]
 ```
 
 ### 3.5 S3 bucket policy
