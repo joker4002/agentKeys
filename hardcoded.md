@@ -96,4 +96,4 @@ broker's expectations at startup.
 
 **Trade-off**: in a multi-broker-replica deployment with shared SQLite, stateless HMAC tokens become attractive again (avoids a DB round-trip per verify). v0.1 is single-broker so this doesn't apply, but v0.2+ with replica scaling should revisit.
 
-**Unblock**: when scaling to multi-broker, reopen the HMAC discussion via a new K-key entry in `architecture.md §3` (K12?) + a fresh design doc.
+**Unblock**: tracked in [issue #81 — v0.2+ email-auth enhancement: WebAuthn binding integration + stateless HMAC tokens for multi-broker scale](https://github.com/litentry/agentKeys/issues/81). Re-introduction will add **K12** (Email-token HMAC key) to `architecture.md §3` and revert the relevant pieces of `b8481fe` with proper architectural documentation this time. The same issue also tracks the v0.2 WebAuthn binding ceremony at email_link Stage 2 (currently v1c-interim ships bespoke per-identity PoP shapes).
