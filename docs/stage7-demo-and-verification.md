@@ -494,11 +494,25 @@ working is one `--email` round-trip.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# Send a magic link via real SES, then click it from your inbox. The CLI
-# polls the broker, derives the wallet via the signer, and saves the
-# session JWT in the OS keychain.
+# RECOMMENDED: fully automated end-to-end demo using a verified
+# bots.litentry.org alias. Sends magic link via real SES, polls S3
+# inbound for arrival, extracts the broker landing URL, parses the
+# #t=<token> URL fragment, and POSTs to /v1/auth/email/verify
+# (replicates the browser-side JS in /auth/email/landing). Then waits
+# for `agentkeys init` to complete.
+#
+# Default rotates demo-1@bots.litentry.org / demo-2@bots.litentry.org
+# by parity of unix-epoch seconds (no collisions on consecutive runs).
+# Override with $RECIPIENT or a positional arg.
+bash scripts/agentkeys-init-email-demo.sh         # auto-rotate demo-1/demo-2
+# bash scripts/agentkeys-init-email-demo.sh alice # use alice@bots.litentry.org
+
+# MANUAL alternative: send to a real inbox you control, click the
+# link in your mail client. The CLI polls until the broker flips
+# status. Do NOT use undeliverable example.com / demo.example
+# addresses — the link goes into the void and the CLI polls forever.
 agentkeys init \
-  --email alice@demo.example \
+  --email <you>@<your-real-domain> \
   --broker-url $OIDC_ISSUER \
   --signer-url $BACKEND_URL
 # Initialized via email-link.

@@ -299,7 +299,12 @@ ROLE=$(aws iam get-instance-profile --instance-profile-name "$ROLE" \
 echo "broker runtime role: $ROLE"
 ```
 
-**Step 2: grant `ses:SendEmail` against the verified sender identity.**
+**Step 2: grant `ses:SendEmail` + `ses:GetEmailIdentity` (least-privilege).**
+
+The broker calls `ses:GetEmailIdentity` at startup via `verify_sender_ready`
+to confirm the sender is verified, and `ses:SendEmail` per request.
+Both grants are scoped to the verified domain identity (and any
+per-address subset) — nothing wider.
 
 ```bash
 aws iam put-role-policy --role-name "$ROLE" \
@@ -309,7 +314,7 @@ aws iam put-role-policy --role-name "$ROLE" \
     Version: "2012-10-17",
     Statement: [{
       Effect: "Allow",
-      Action: "ses:SendEmail",
+      Action: ["ses:SendEmail", "ses:GetEmailIdentity"],
       Resource: [
         "arn:aws:ses:\($region):\($acct):identity/\($domain)",
         "arn:aws:ses:\($region):\($acct):identity/*@\($domain)"
@@ -323,7 +328,34 @@ No broker restart needed — sesv2 picks up creds per-call. Verify:
 ```bash
 aws iam get-role-policy --role-name "$ROLE" --policy-name BrokerSendEmail \
   --query 'PolicyDocument.Statement[*].Action'
-# → [["ses:SendEmail"]]
+# → [["ses:SendEmail", "ses:GetEmailIdentity"]]
+```
+
+**Step 3 (security audit): strip any over-broad legacy attached policies.**
+
+Some legacy deploys ship with `AmazonS3FullAccess` (or similar wide
+permissions) attached to the broker's instance role from initial
+provisioning. The broker process at runtime ONLY uses `aws-sdk-sts`
+(STS GetCallerIdentity startup probe) + `aws-sdk-sesv2` (this section's
+grants) — it never accesses S3 with its own creds. Per-user S3 access
+is via JWT-assumed `agentkeys-data-role` (§3.2), NOT the broker's
+runtime role.
+
+A broker compromise with `AmazonS3FullAccess` would expose every
+inbound email in the SES bucket (verification tokens, magic links,
+user-data buckets if any). Strip it:
+
+```bash
+# List currently attached policies on the broker's role:
+aws iam list-attached-role-policies --role-name "$ROLE"
+
+# Detach AmazonS3FullAccess if present:
+aws iam detach-role-policy --role-name "$ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+# Verify only BrokerSendEmail (inline, this section) remains:
+aws iam list-role-policies --role-name "$ROLE"        # → ["BrokerSendEmail"]
+aws iam list-attached-role-policies --role-name "$ROLE" # → []
 ```
 
 ### 3.5 S3 bucket policy
