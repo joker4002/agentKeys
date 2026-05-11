@@ -375,18 +375,42 @@ echo "OMNI_B=$OMNI_B  length=${#OMNI_B}"
 ### 0.4 Derive the managed wallets
 
 The dev_key_service derives a deterministic EVM wallet for each omni.
-The CLI automatically attaches the saved session JWT as a bearer token,
-so **`agentkeys init` must run first** — otherwise every `signer derive`
-/ `signer sign` call below returns `Error: SIGNER_UNAUTHORIZED  invalid
+The CLI attaches the saved session JWT as a bearer token, so
+**`agentkeys init` must run first** — otherwise every `signer derive` /
+`signer sign` call below returns `Error: SIGNER_UNAUTHORIZED  invalid
 session JWT: InvalidToken`. See [§2.0](#20-recommended-path-agentkeys-init---email)
 for the full init flow + OAuth2 alternative; the minimum to get §0.4
-working is one `--email` round-trip:
+working is one `--email` round-trip.
+
+> **Two-step prereq if you've never run `--email` against this broker
+> before** (per [issue #80](https://github.com/litentry/agentKeys/issues/80) —
+> closed by Pass 2 of Option B):
+>
+> 1. **One-time SES sender registration** (operator workstation, ~30s):
+>    ```bash
+>    bash scripts/ses-verify-sender.sh
+>    ```
+>    Registers `noreply-test@bots.litentry.org` as a per-address SES
+>    identity, polls `s3://$MAIL_BUCKET/inbound/` for the verification
+>    mail, clicks the link, confirms `VerifiedForSendingStatus=true`. Idempotent.
+>
+> 2. **Broker host re-deploy with `auth-email-link` feature** (broker
+>    host, ~1 min):
+>    ```bash
+>    ssh agentkey@$BROKER_HOST
+>    cd ~/agentKeys && git pull && sudo bash scripts/setup-broker-host.sh --yes
+>    ```
+>    Pass 2 of Option B: the script now builds with `--features
+>    auth-email-link`, mints `/etc/agentkeys/email-hmac.key`, and sets
+>    `BROKER_AUTH_METHODS=wallet_sig,email_link` + `BROKER_EMAIL_SENDER=ses`
+>    in the systemd unit. Without this, the broker returns 404 on
+>    `/v1/auth/email/request` and `agentkeys init --email` fails.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# Send a magic link, then click it from your inbox. The CLI polls the
-# broker, derives the wallet via the signer, and saves the session JWT
-# in the OS keychain.
+# Send a magic link via real SES, then click it from your inbox. The CLI
+# polls the broker, derives the wallet via the signer, and saves the
+# session JWT in the OS keychain.
 agentkeys init \
   --email alice@demo.example \
   --broker-url $OIDC_ISSUER \
@@ -498,8 +522,15 @@ HKDF-backed (today) or TEE-backed (issue #74 step 2).
 
 ### 2.0 Recommended path: `agentkeys init --email`
 
-Issue #74 step 1 ships a single-command bootstrap that drives the
-entire chain. Use this for any real demo or production deployment:
+Issue #74 step 1 + Pass 2 of Option B (closed [issue #80](https://github.com/litentry/agentKeys/issues/80))
+ship a single-command bootstrap that drives the entire chain end-to-end
+against real SES delivery. Use this for any real demo or production deployment.
+
+> **Prereq if you haven't done it yet:** the two-step setup from §0.4 —
+> `bash scripts/ses-verify-sender.sh` (one-time SES sender registration) +
+> `sudo bash scripts/setup-broker-host.sh --yes` on the broker host
+> (Pass 2 build with `auth-email-link` + email-HMAC key + email_link in
+> BROKER_AUTH_METHODS).
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -507,7 +538,8 @@ agentkeys init \
   --email alice@demo.example \
   --broker-url $OIDC_ISSUER \
   --signer-url $BACKEND_URL
-# Magic link sent to alice@demo.example. Click the link in your inbox; the CLI is polling…
+# Magic link sent to alice@demo.example via real SES (FROM noreply-test@bots.litentry.org).
+# Click the link in your inbox; the CLI is polling…
 # (operator clicks the magic link)
 # Initialized via email-link.
 #   identity omni: <64 hex>
