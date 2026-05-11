@@ -32,6 +32,20 @@
 
 set -euo pipefail
 
+# This script does NOT need root. It only makes AWS API calls (operator
+# admin profile creds, in your shell env) and runs the user-space
+# `agentkeys` binary (writes session JWT to YOUR OS keychain, not
+# root's). Running with sudo strips the env vars you sourced from
+# operator-workstation.env and the script dies on the first
+# ${VAR:?...} guard with a misleading "env var required" error.
+if [[ -n "${SUDO_USER:-}" ]]; then
+  printf '\033[1;31mxx\033[0m  do NOT run this with sudo — sudo strips your env vars,\n' >&2
+  printf '    and the script needs to inherit your operator-workstation.env values.\n' >&2
+  printf '    Re-run as your normal user:\n' >&2
+  printf '      bash scripts/agentkeys-init-email-demo.sh %s\n' "$*" >&2
+  exit 1
+fi
+
 REGION="${REGION:?REGION env var required (source operator-workstation.env)}"
 MAIL_DOMAIN="${MAIL_DOMAIN:?MAIL_DOMAIN env var required}"
 MAIL_BUCKET="${MAIL_BUCKET:?MAIL_BUCKET env var required}"

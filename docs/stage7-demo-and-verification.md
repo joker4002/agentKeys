@@ -506,6 +506,9 @@ working is one `--email` round-trip.
 # Override with $RECIPIENT or a positional arg.
 bash scripts/agentkeys-init-email-demo.sh         # auto-rotate demo-1/demo-2
 # bash scripts/agentkeys-init-email-demo.sh alice # use alice@bots.litentry.org
+# Do NOT prefix `sudo` — the script is user-space only (AWS APIs +
+# `agentkeys` CLI write to YOUR keychain, not root's), and sudo
+# strips the env vars you sourced from operator-workstation.env.
 
 # MANUAL alternative: send to a real inbox you control, click the
 # link in your mail client. The CLI polls until the broker flips
