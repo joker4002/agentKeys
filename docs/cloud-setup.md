@@ -134,11 +134,11 @@ aws s3api create-bucket \
   --region "$REGION" --bucket "$BUCKET" \
   $([ "$REGION" != "us-east-1" ] && echo "--create-bucket-configuration LocationConstraint=$REGION")
 
-aws s3api put-public-access-block --bucket "$BUCKET" \
+aws s3api put-public-access-block --region "$REGION" --bucket "$BUCKET" \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 
 # 30-day TTL on inbound objects (throwaway-inbox model)
-aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
+aws s3api put-bucket-lifecycle-configuration --region "$REGION" --bucket "$BUCKET" \
   --lifecycle-configuration "$(jq -n '{
     Rules: [{ID:"inbound-30d-ttl", Status:"Enabled", Filter:{Prefix:"inbound/"}, Expiration:{Days:30}}]
   }')"
@@ -289,14 +289,32 @@ Existing/legacy deploys may use a different name (e.g. an ad-hoc
 `S3-full-access` from initial provisioning). Find it:
 
 ```bash
-# By the broker host's elastic IP (replace 1.2.3.4 with $EIP):
-ROLE=$(aws ec2 describe-instances \
-  --filters "Name=ip-address,Values=1.2.3.4" \
+# REQUIRED: admin profile + operator env loaded.
+awsp agentkeys-admin
+set -a; source scripts/operator-workstation.env; set +a
+
+# CRITICAL: pass --region "$REGION". The agentkeys-admin profile
+# defaults to us-west-2, but the broker EC2 lives in us-east-1 (from
+# operator-workstation.env). Without --region, describe-instances
+# searches us-west-2, finds nothing, returns empty silently (no error),
+# and the downstream put-role-policy silently runs with --role-name "".
+# See CLAUDE.md → AWS local-profile ↔ remote-IAM mapping.
+INSTANCE_PROFILE_ARN=$(aws ec2 describe-instances \
+  --region "$REGION" \
+  --filters "Name=ip-address,Values=$EIP" \
   --query 'Reservations[].Instances[].IamInstanceProfile.Arn' \
-  --output text | sed 's|.*instance-profile/||')
-ROLE=$(aws iam get-instance-profile --instance-profile-name "$ROLE" \
-  --query 'InstanceProfile.Roles[0].RoleName' --output text)
-echo "broker runtime role: $ROLE"
+  --output text)
+
+if [[ -z "$INSTANCE_PROFILE_ARN" || "$INSTANCE_PROFILE_ARN" == "None" ]]; then
+  echo "ABORT: no EC2 instance with EIP=$EIP found in region $REGION." >&2
+  echo "Caller: $(aws sts get-caller-identity --query Arn --output text)" >&2
+  unset ROLE
+else
+  ROLE=$(aws iam get-instance-profile \
+    --instance-profile-name "${INSTANCE_PROFILE_ARN##*/}" \
+    --query 'InstanceProfile.Roles[0].RoleName' --output text)
+  echo "broker runtime role: $ROLE"
+fi
 ```
 
 **Step 2: grant `ses:SendEmail` + `ses:GetEmailIdentity` (least-privilege).**
@@ -363,7 +381,7 @@ aws iam list-attached-role-policies --role-name "$ROLE" # → []
 Now that `agentkeys-data-role` exists, attach the bucket policy. The static-IAM-user variant: SES writes inbound, role reads everything.
 
 ```bash
-aws s3api put-bucket-policy --bucket "$BUCKET" \
+aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
   --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" '{
     Version: "2012-10-17",
     Statement: [
@@ -475,7 +493,7 @@ Replaces `AllowDaemonRead` from §3.5. The cloud now enforces "the assumed sessi
 The daemon's read perms split into two statements because `s3:prefix` is a request-time condition that **only applies to `s3:ListBucket`** (the prefix filter on listings) — `s3:GetObject` doesn't carry a prefix parameter, so combining the two actions under one `s3:prefix` condition triggers `MalformedPolicy: Conditions do not apply to combination of actions and resources in statement`. For `GetObject` the resource ARN itself enforces the prefix via `${aws:PrincipalTag/...}` expansion.
 
 ```bash
-aws s3api put-bucket-policy --bucket "$BUCKET" \
+aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
   --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" '{
     Version: "2012-10-17",
     Statement: [
@@ -810,7 +828,7 @@ aws iam delete-role        --role-name agentkeys-broker-host 2>/dev/null
 aws ses set-active-receipt-rule-set --rule-set-name "" --region "$REGION"
 aws sesv2 delete-email-identity --region "$REGION" --email-identity "$DOMAIN"
 aws s3 rm "s3://$BUCKET" --recursive
-aws s3api delete-bucket --bucket "$BUCKET"
+aws s3api delete-bucket --region "$REGION" --bucket "$BUCKET"
 
 # DNS records on the parent zone are NOT auto-deleted — you'll need to
 # remove the DKIM CNAMEs, MX, SPF, DMARC, and broker A record by hand

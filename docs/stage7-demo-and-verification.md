@@ -435,16 +435,32 @@ working is one `--email` round-trip.
 >    legacy deploys may use an ad-hoc name like `S3-full-access`),
 >    so discover it first:
 >    ```bash
+>    # REQUIRED: admin profile + operator env loaded.
 >    awsp agentkeys-admin
 >    set -a; source scripts/operator-workstation.env; set +a
->    # Discover the actual role attached to the broker EC2:
->    ROLE=$(aws ec2 describe-instances \
+>
+>    # CRITICAL: pass --region "$REGION" explicitly. The agentkeys-admin
+>    # profile defaults to us-west-2, but the broker EC2 lives in
+>    # us-east-1. Without --region, describe-instances searches us-west-2,
+>    # finds nothing, returns empty (no error), and the downstream
+>    # put-role-policy silently runs with --role-name "". See CLAUDE.md
+>    # → AWS local-profile ↔ remote-IAM mapping.
+>    INSTANCE_PROFILE_ARN=$(aws ec2 describe-instances \
+>      --region "$REGION" \
 >      --filters "Name=ip-address,Values=$EIP" \
 >      --query 'Reservations[].Instances[].IamInstanceProfile.Arn' \
->      --output text | sed 's|.*instance-profile/||')
->    ROLE=$(aws iam get-instance-profile --instance-profile-name "$ROLE" \
->      --query 'InstanceProfile.Roles[0].RoleName' --output text)
->    echo "broker runtime role: $ROLE"
+>      --output text)
+>    if [[ -z "$INSTANCE_PROFILE_ARN" || "$INSTANCE_PROFILE_ARN" == "None" ]]; then
+>      echo "ABORT: no EC2 instance with EIP=$EIP found in region $REGION." >&2
+>      echo "Check: AWS_PROFILE=$AWS_PROFILE, expected ARN owner = $(aws sts get-caller-identity --query Arn --output text)" >&2
+>      unset ROLE
+>    else
+>      # iam is global — no --region needed.
+>      ROLE=$(aws iam get-instance-profile \
+>        --instance-profile-name "${INSTANCE_PROFILE_ARN##*/}" \
+>        --query 'InstanceProfile.Roles[0].RoleName' --output text)
+>      echo "broker runtime role: $ROLE"
+>    fi
 >    # Grant ses:SendEmail on the verified sender identity:
 >    aws iam put-role-policy --role-name "$ROLE" \
 >      --policy-name BrokerSendEmail \
@@ -917,9 +933,9 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 awsp agentkeys-admin
 
 # Derived addresses are already lowercase from the dev_key_service.
-aws s3api put-object --bucket "$BUCKET" \
+aws s3api put-object --region "$REGION" --bucket "$BUCKET" \
   --key "bots/${ADDR_A}/hello.txt" --body /dev/null
-aws s3api put-object --bucket "$BUCKET" \
+aws s3api put-object --region "$REGION" --bucket "$BUCKET" \
   --key "bots/${ADDR_B}/hello.txt" --body /dev/null
 ```
 
@@ -935,12 +951,12 @@ aws s3api list-objects-v2 --bucket "$BUCKET" \
   --prefix "bots/${ADDR_A}/" --query 'Contents[*].Key'
 # [ "bots/0x…<A>/hello.txt" ]
 
-aws s3api get-object --bucket "$BUCKET" \
+aws s3api get-object --region "$REGION" --bucket "$BUCKET" \
   --key "bots/${ADDR_A}/hello.txt" /tmp/got-A.txt
 # { "ContentLength": 0, ... }
 
 # 4b — the OTHER derived wallet's prefix: AccessDenied (CLOUD-ENFORCED)
-aws s3api get-object --bucket "$BUCKET" \
+aws s3api get-object --region "$REGION" --bucket "$BUCKET" \
   --key "bots/${ADDR_B}/hello.txt" /tmp/got-B.txt
 # An error occurred (AccessDenied) when calling the GetObject operation:
 # Access Denied
@@ -1705,7 +1721,7 @@ aws s3api list-objects-v2 --bucket "$BUCKET" \
   --prefix "bots/${ADDR_A}/" --query 'Contents[*].Key'
 
 # Wallet B's prefix — AccessDenied (cloud-enforced).
-aws s3api get-object --bucket "$BUCKET" \
+aws s3api get-object --region "$REGION" --bucket "$BUCKET" \
   --key "bots/${ADDR_B}/hello.txt" /tmp/got-B.txt
 # An error occurred (AccessDenied) when calling the GetObject operation
 ```

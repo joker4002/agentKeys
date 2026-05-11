@@ -74,7 +74,12 @@ caller=$(aws sts get-caller-identity --output json 2>&1) \
   || die "aws sts get-caller-identity failed:\n$caller\nDid you run \`awsp agentkeys-admin\` first?"
 caller_arn=$(printf '%s' "$caller" | jq -r '.Arn')
 log "  caller ARN : $caller_arn"
-case "$caller_arn" in
+# Case-insensitive match — remote IAM user is `agentKeys-admin` (capital K)
+# while the local AWS profile is `agentkeys-admin` (lowercase). See
+# CLAUDE.md → AWS local-profile ↔ remote-IAM mapping. `tr` is portable
+# to /bin/bash 3.2 (`${var,,}` requires bash 4+).
+caller_arn_lc=$(printf '%s' "$caller_arn" | tr '[:upper:]' '[:lower:]')
+case "$caller_arn_lc" in
   *":user/agentkeys-admin"*|*":role/agentkeys-admin"*|*":user/agentkeys-admin/"*)
     : ;;
   *":user/agentkey-broker"*)

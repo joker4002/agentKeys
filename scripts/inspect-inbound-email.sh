@@ -18,6 +18,7 @@
 set -euo pipefail
 
 : "${BUCKET:?BUCKET is empty. Run 'set -a; source scripts/operator-workstation.env; set +a' first.}"
+: "${REGION:?REGION is empty. Run 'set -a; source scripts/operator-workstation.env; set +a' first. (agentkeys-admin profile defaults to us-west-2; the bucket lives in us-east-1.)}"
 
 # Mirror provisioner-scripts/email-backends/ses-s3.ts normalizeQuotedPrintable():
 # strip QP soft-wraps then decode the common reserved chars that split URLs.
@@ -30,11 +31,11 @@ normalize_qp() {
 
 if [[ "${1:-}" == "--all" ]]; then
   echo "=== All inbound/* keys with From+Subject headers ==="
-  aws s3api list-objects-v2 --bucket "$BUCKET" --prefix inbound/ \
+  aws s3api list-objects-v2 --region "$REGION" --bucket "$BUCKET" --prefix inbound/ \
     --query "sort_by(Contents,&LastModified)[*].[Key,LastModified]" \
     --output text | while read -r key ts; do
     [[ "$key" == "inbound/AMAZON_SES_SETUP_NOTIFICATION" ]] && continue
-    headers=$(aws s3 cp "s3://$BUCKET/$key" - 2>/dev/null | tr -d '\r' | head -40 | grep -iE '^(From|Subject):' | head -2)
+    headers=$(aws s3 --region "$REGION" cp "s3://$BUCKET/$key" - 2>/dev/null | tr -d '\r' | head -40 | grep -iE '^(From|Subject):' | head -2)
     echo "--- $key ($ts) ---"
     echo "$headers"
   done
@@ -43,7 +44,7 @@ fi
 
 KEY="${1:-}"
 if [[ -z "$KEY" ]]; then
-  KEY=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix inbound/ \
+  KEY=$(aws s3api list-objects-v2 --region "$REGION" --bucket "$BUCKET" --prefix inbound/ \
     --query "sort_by(Contents[?Key!=\`inbound/AMAZON_SES_SETUP_NOTIFICATION\`], &LastModified)[-1].Key" \
     --output text)
   [[ "$KEY" == "None" || -z "$KEY" ]] && { echo "No inbound emails found."; exit 1; }
@@ -52,7 +53,7 @@ fi
 
 RAW="/tmp/inbound-email-${KEY##*/}.eml"
 NORM="/tmp/inbound-email-${KEY##*/}.normalized.txt"
-aws s3 cp "s3://$BUCKET/$KEY" "$RAW" >/dev/null
+aws s3 --region "$REGION" cp "s3://$BUCKET/$KEY" "$RAW" >/dev/null
 cat "$RAW" | normalize_qp > "$NORM"
 echo "Saved raw: $RAW"
 echo "Saved normalized (what scraper sees): $NORM"
