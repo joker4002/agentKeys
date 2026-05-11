@@ -461,7 +461,7 @@ log "Rust: $(rustc --version)"
 # agentkeys-broker-server is built with `--features auth-email-link` so the
 # /v1/auth/email/* routes are registered. Without the feature the broker
 # returns 404 on /v1/auth/email/request and `agentkeys init --email` cannot
-# work — see issue #N (TODO: fill once filed) and Pass 2 of Option B.
+# work — see issue #80 and Pass 2 of Option B.
 log "Building agentkeys-mock-server + agentkeys-broker-server (release, +auth-email-link)"
 ( cd "$REPO_ROOT" && cargo build --release \
     -p agentkeys-mock-server \
