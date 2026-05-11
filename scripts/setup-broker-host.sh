@@ -869,10 +869,39 @@ sudo systemctl --no-pager --full status agentkeys-backend agentkeys-broker agent
 
 log "Recent broker logs (look for 'broker listening on 127.0.0.1:8091'):"
 sudo journalctl -u agentkeys-broker -n 20 --no-pager || true
-log "Loopback /healthz probes:"
-curl -sf --max-time 5 http://127.0.0.1:8091/healthz && echo " (broker)" || warn "broker /healthz did not return 200"
-curl -sf --max-time 5 http://127.0.0.1:8090/healthz && echo " (backend)" || warn "backend /healthz did not return 200"
-curl -sf --max-time 5 http://127.0.0.1:8092/healthz && echo " (signer)" || warn "signer /healthz did not return 200"
+log "Loopback /healthz probes (polling up to 20s per service — services may be in restart-loop on bad config):"
+
+# Poll-then-die-with-journal: a single 5s curl + warn was the silent-fail
+# vector that hid Pass-2 boot crashes (e.g. binary built without
+# --features auth-email-link → broker exits with BOOT_FAIL but the
+# probe just shrugged and the operator declared the host healthy).
+# Now: poll for 20s; on persistent failure, dump status + last 40 journal
+# lines for that unit and `die` so the operator cannot move on.
+probe_or_die() {
+  local name="$1" port="$2" unit="$3"
+  for attempt in $(seq 1 10); do
+    if curl -sf --max-time 2 "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+      log "  $name :$port /healthz ok (attempt $attempt)"
+      return 0
+    fi
+    sleep 2
+  done
+  warn "$name :$port /healthz did not return 200 after 20s — dumping diagnostics"
+  echo "── systemctl status $unit ─────────────────────────────────────────────────"
+  sudo systemctl status "$unit" --no-pager -l | head -25 || true
+  echo "── journalctl -u $unit -n 40 ─────────────────────────────────────────────"
+  sudo journalctl -u "$unit" -n 40 --no-pager || true
+  die "$name boot failed — see diagnostics above. Common causes:
+   • BOOT_FAIL: BROKER_AUTH_METHODS=email_link with binary missing --features auth-email-link
+       fix: rm -rf $REPO_ROOT/target/release/agentkeys-broker-server && re-run this script
+   • BOOT_FAIL: BROKER_EMAIL_FROM_ADDRESS unset
+       fix: export BROKER_EMAIL_FROM_ADDRESS or pass --email-from to this script
+   • aws credentials not resolvable for SES sender
+       fix: verify EC2 instance role has ses:SendEmail OR set BROKER_EMAIL_SENDER=stub"
+}
+probe_or_die broker  8091 agentkeys-broker
+probe_or_die backend 8090 agentkeys-backend
+probe_or_die signer  8092 agentkeys-signer
 
 # ─── 9. Print remaining manual steps ──────────────────────────────────────────
 cat <<EOF
