@@ -423,6 +423,35 @@ working is one `--email` round-trip.
 >    stateful per [`architecture.md`](spec/architecture.md) §5a.1.M:
 >    CSPRNG token → SHA256 in EmailTokenStore → single-use within TTL.)
 >
+>    **If `agentkeys init --email` returns `502 backend_unreachable`
+>    with body `... ses SendEmail: unhandled error
+>    (AccessDeniedException)`**: the broker's runtime IAM role
+>    (`agentkeys-broker-host` instance profile) lacks `ses:SendEmail`
+>    permission. The broker calls SES v2 SendEmail with its OWN
+>    instance-profile creds — NOT via the assumed `agentkeys-data-role`
+>    — so the SES grant must live on the broker's own role. The IAM
+>    action is `ses:SendEmail` (sesv2), not `ses:SendRawEmail` (v1
+>    only). Fix:
+>    ```bash
+>    awsp agentkeys-admin
+>    set -a; source scripts/operator-workstation.env; set +a
+>    aws iam put-role-policy --role-name agentkeys-broker-host \
+>      --policy-name BrokerSendEmail \
+>      --policy-document "$(jq -n \
+>        --arg region "$REGION" \
+>        --arg acct "$ACCOUNT_ID" \
+>        --arg domain "$MAIL_DOMAIN" \
+>        '{Version:"2012-10-17",Statement:[{Effect:"Allow",
+>          Action:"ses:SendEmail",
+>          Resource:[
+>            "arn:aws:ses:\($region):\($acct):identity/\($domain)",
+>            "arn:aws:ses:\($region):\($acct):identity/*@\($domain)"
+>          ]}]}')"
+>    ```
+>    No broker restart needed — sesv2 picks up creds per-call. See
+>    [`cloud-setup.md` §3.4](cloud-setup.md#34-agentkeys-broker-host-instance-profile-optional-ec2-only)
+>    for the full role policy.
+>
 >    **If the setup script dies with `cargo did NOT enable
 >    auth-email-link despite --features auth-email-link`**: cargo's
 >    own `--message-format=json` reports the feature is missing — this

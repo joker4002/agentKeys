@@ -261,6 +261,29 @@ aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerAssumeData \
                  Resource:"arn:aws:iam::\($acct):role/agentkeys-data-role"}]
   }')"
 
+# Email-link auth (Pass 2): broker calls SES v2 SendEmail with its OWN
+# runtime credentials (instance profile), NOT via the assumed
+# agentkeys-data-role. Grant ses:SendEmail directly here. NOTE: the IAM
+# action is `ses:SendEmail` for sesv2 SendEmail — `ses:SendRawEmail`
+# only authorizes the v1 SendRawEmail API (different code path; the
+# broker doesn't use it). Without this the operator hits:
+#   broker rejected /v1/auth/email/request: status=502 body=
+#   {"error":"backend_unreachable","message":"… ses SendEmail:
+#    unhandled error (AccessDeniedException)"}
+aws iam put-role-policy --role-name $ROLE_NAME --policy-name BrokerSendEmail \
+  --policy-document "$(jq -n \
+    --arg region "$REGION" --arg acct "$ACCOUNT_ID" --arg domain "$MAIL_DOMAIN" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Action: "ses:SendEmail",
+      Resource: [
+        "arn:aws:ses:\($region):\($acct):identity/\($domain)",
+        "arn:aws:ses:\($region):\($acct):identity/*@\($domain)"
+      ]
+    }]
+  }')"
+
 aws iam create-instance-profile --instance-profile-name $ROLE_NAME
 aws iam add-role-to-instance-profile --instance-profile-name $ROLE_NAME --role-name $ROLE_NAME
 aws ec2 associate-iam-instance-profile --region "$REGION" \
