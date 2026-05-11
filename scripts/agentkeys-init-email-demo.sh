@@ -109,11 +109,24 @@ log "Caller ARN  : $caller_arn"
 # only care about objects that arrive AFTER our SendEmail. snapshot the
 # pre-existing key set; later we filter the post-list against this.
 log "Snapshotting existing inbound/ keys (filter for NEW arrivals)"
-pre_keys=$(aws s3api list-objects-v2 \
-             --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
-             --region "$REGION" \
-             --query 'Contents[*].Key' --output text 2>/dev/null || true)
-pre_count=$(printf '%s\n' $pre_keys | grep -c . || true)
+# Build a hash set of pre-existing keys for O(1) membership checks in
+# the polling loop. `aws --output text` returns keys TAB-separated, so
+# bash's default IFS word-splitting handles them when iterating with
+# `for k in $pre_keys` — but a string containment check against a
+# tab-separated blob with space delimiters silently misses every key
+# (manifests as "every poll attempt reports all 415 keys as new" and
+# downloads each one to inspect the body — slow but functionally
+# correct). Use an associative array instead.
+declare -A pre_set
+pre_keys_text=$(aws s3api list-objects-v2 \
+                  --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
+                  --region "$REGION" \
+                  --query 'Contents[*].Key' --output text 2>/dev/null || true)
+for k in $pre_keys_text; do
+  [[ -z "$k" ]] && continue
+  pre_set[$k]=1
+done
+pre_count=${#pre_set[@]}
 log "  $pre_count existing object(s) — only newer arrivals will be inspected"
 
 # ─── Fire `agentkeys init --email` in the background ────────────────────────
@@ -169,18 +182,20 @@ for attempt in $(seq 1 "$POLL_MAX_ATTEMPTS"); do
                    --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
                    --region "$REGION" \
                    --query 'Contents[*].Key' --output text 2>/dev/null || true)
-  # Build set difference: current_keys - pre_keys
-  new_keys=""
+  # Build set difference: current_keys - pre_set (the associative
+  # array built at snapshot time). O(1) membership check per key vs
+  # the prior O(n) string-substring scan that silently dropped tab
+  # delimiters.
+  new_keys=()
   for k in $current_keys; do
-    case " $pre_keys " in
-      *" $k "*) ;;
-      *) new_keys="$new_keys $k" ;;
-    esac
+    [[ -z "$k" ]] && continue
+    [[ -n "${pre_set[$k]:-}" ]] && continue
+    new_keys+=("$k")
   done
-  new_count=$(printf '%s\n' $new_keys | grep -c . || true)
+  new_count=${#new_keys[@]}
   log "  attempt $attempt/$POLL_MAX_ATTEMPTS — $new_count new object(s)"
 
-  for key in $new_keys; do
+  for key in "${new_keys[@]}"; do
     [[ -z "$key" ]] && continue
     body=$(aws s3 cp "s3://$MAIL_BUCKET/$key" - --region "$REGION" 2>/dev/null || true)
     [[ -z "$body" ]] && continue
