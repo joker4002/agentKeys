@@ -1,61 +1,23 @@
 #!/usr/bin/env bash
 # AgentKeys broker-host setup — single idempotent entry point.
 #
-# This script is THE place to bootstrap a fresh broker host AND to redeploy
-# changes onto an existing one. It auto-detects which case it is by looking
-# at the systemd unit's existing Environment= lines, so the same invocation
-# works in both states.
+# Bootstraps a fresh broker host AND re-deploys changes onto an existing
+# one. Auto-detects which case it is by reading the existing systemd unit's
+# Environment= lines, so `bash scripts/setup-broker-host.sh --yes` is a
+# valid full re-deploy after a `git pull`.
 #
-# Per CLAUDE.md, all remote-host changes (binary upgrades, systemd unit
-# edits, env-var tweaks, nginx/certbot wiring, mock-server redeploys) MUST
-# go through this script — no ad-hoc systemctl edits, no hand-built scp.
+# Per CLAUDE.md, ALL remote-host changes (binary upgrades, systemd edits,
+# env tweaks, nginx/certbot wiring, mock-server redeploys) go through this
+# script — no ad-hoc systemctl edits, no hand-built scp.
 #
-# Usage:
-#   bash scripts/setup-broker-host.sh                        # interactive
-#   bash scripts/setup-broker-host.sh --non-interactive \    # CI / re-deploy
-#     [--issuer-url https://broker.litentry.org] \           # required first time
-#     [--account-id 429071895007] \                          # required first time
-#     [--region us-east-1] \
-#     [--cred-mode none|instance-profile|profile] \
-#     [--profile-name agentkeys-daemon] \
-#     [--without-nginx]   \                                  # opt out of nginx setup
-#     [--without-certbot] \                                  # opt out of certbot install
-#     [--ref <branch-or-tag>] \                              # opt-in git fetch+checkout+pull
-#     [--skip-pull] \                                        # alias for "no --ref"
-#     [--upgrade] \                                          # back-compat no-op
-#     [--yes]
+# Usage: bash scripts/setup-broker-host.sh [--help]
+#   Interactive when stdin is a TTY; pass --yes to skip the confirm.
+#   Pass --ref <branch-or-tag> to opt into an in-script git fetch+pull;
+#   otherwise builds whatever is currently checked out.
 #
-# On re-runs, missing flags are filled in from the existing
-# /etc/systemd/system/agentkeys-broker.service Environment= lines, so
-# `bash scripts/setup-broker-host.sh --yes` is a valid full re-deploy.
-#
-# Pass --ref to opt into a git fetch+checkout+pull before building. Without
-# --ref, the script builds whatever is currently checked out — the operator
-# is expected to git-pull themselves if they want fresh code.
-#
-# Order of operations (all idempotent):
-#   1. Pre-flight (Linux, sudo, repo checkout, optional git pull on --ref)
-#   2. Detect existing config from systemd unit (issuer URL, account ID, etc.)
-#   3. Interactive prompts (only for values still missing after detection)
-#   4. Summary + confirmation
-#   5. Install build deps + Rust toolchain (skip if already present)
-#   6. Build agentkeys-mock-server + agentkeys-broker-server (incremental)
-#   7. Stop services if running (idempotent — safe on fresh host)
-#   8. Backup existing binaries → .bak (skip if no existing)
-#   9. Install fresh binaries to /usr/local/bin (mode 0755)
-#  10. Create agentkeys system user + /var/lib/agentkeys (mode 0700) if missing
-#  11. Write systemd units for backend + broker (always — same content most runs)
-#  12. (Optional) install nginx + write site config (always — idempotent)
-#  13. (Optional) install certbot package
-#  14. Mint missing ES256 keypairs as the agentkeys user (idempotent)
-#  15. systemctl daemon-reload + enable + restart agentkeys-backend + agentkeys-broker
-#  16. Tail recent logs + print remaining out-of-scope manual steps
-#
-# Out of scope (operator does these by hand):
-#   - DNS A record for $ISSUER_URL host
-#   - AWS-side IAM role/policy creation
-#   - Cert issuance (certbot --nginx prompts interactively)
-#   - Firewall rules
+# Out of scope (operator does these by hand): DNS A records, AWS IAM
+# role/policy creation, first-time cert issuance (see §7 manual steps),
+# firewall rules.
 
 set -euo pipefail
 
@@ -71,7 +33,6 @@ WITH_NGINX="yes"             # default: install + configure nginx (opt out via -
 WITH_CERTBOT="yes"           # default: install certbot (opt out via --without-certbot)
 ASSUME_YES=false
 PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
-PULL_SKIP=false              # --skip-pull: alias for "no --ref" (kept for back-compat)
 SIGNER_HOST=""               # --signer-host: hostname for the dedicated signer listener
 # Verified SES sender for email-link auth. Operator must register this
 # identity via scripts/ses-verify-sender.sh BEFORE booting the broker;
@@ -103,9 +64,8 @@ while (( $# > 0 )); do
     --non-interactive)    INTERACTIVE=false; shift ;;
     --interactive)        INTERACTIVE=true; shift ;;
     --yes|-y)             ASSUME_YES=true; shift ;;
-    --upgrade)            shift ;;          # back-compat no-op (script is idempotent now)
+    --upgrade|--skip-pull) shift ;;        # back-compat no-ops (script is idempotent; --ref drives any pull)
     --ref)                PULL_REF="$2"; shift 2 ;;
-    --skip-pull)          PULL_SKIP=true; shift ;;
     --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
     --email-from)         BROKER_EMAIL_FROM_ADDRESS="$2"; shift 2 ;;
     -h|--help)
@@ -133,14 +93,6 @@ explain() {
     printf '  %s\n' "$line"
   done
   printf '\n'
-}
-
-# Read a value with a default; non-empty input wins, empty input keeps the default.
-# Args: var-name prompt-label default
-prompt_default() {
-  local __var="$1" __label="$2" __default="$3" __answer
-  read -r -p "$__label [$__default]: " __answer || true
-  printf -v "$__var" '%s' "${__answer:-$__default}"
 }
 
 # Read a required value. Re-asks until non-empty.
@@ -172,26 +124,6 @@ prompt_yn() {
       y|yes) printf -v "$__var" '%s' "yes"; return ;;
       n|no)  printf -v "$__var" '%s' "no"; return ;;
     esac
-  done
-}
-
-# Numbered choice prompt with a default index.
-# Args: var-name prompt-label default-index choice1 choice2 ...
-prompt_choice() {
-  local __var="$1" __label="$2" __default="$3"; shift 3
-  local __choices=("$@") __i __pick
-  while :; do
-    printf '%s (default %s):\n' "$__label" "$__default"
-    for __i in "${!__choices[@]}"; do
-      printf '  %d) %s\n' "$(( __i + 1 ))" "${__choices[__i]}"
-    done
-    read -r -p "Choice [$__default]: " __pick || true
-    __pick="${__pick:-$__default}"
-    if [[ "$__pick" =~ ^[1-9][0-9]*$ ]] && (( __pick >= 1 && __pick <= ${#__choices[@]} )); then
-      printf -v "$__var" '%s' "${__choices[$(( __pick - 1 ))]}"
-      return
-    fi
-    warn "pick a number between 1 and ${#__choices[@]}"
   done
 }
 
@@ -281,8 +213,8 @@ fi
 # Default behavior: build whatever is currently checked out. The operator is
 # expected to git-pull themselves before invoking the script if they want a
 # fresh tree. Pass --ref <branch-or-tag> to opt into an in-script pull —
-# useful for unattended CI redeploys. --skip-pull is a back-compat no-op.
-if [[ -n "$PULL_REF" ]] && ! $PULL_SKIP; then
+# useful for unattended CI redeploys. --skip-pull / --upgrade are back-compat no-ops.
+if [[ -n "$PULL_REF" ]]; then
   have git || die "git not found — install git or drop --ref"
   CURRENT_BRANCH="$( cd "$REPO_ROOT" && git symbolic-ref --short HEAD 2>/dev/null || true )"
   if [[ -n "$CURRENT_BRANCH" && "$CURRENT_BRANCH" != "$PULL_REF" ]]; then
@@ -789,9 +721,6 @@ server {
     }
 }
 EOF
-    if [[ -d /etc/nginx/sites-enabled ]]; then
-      sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
-    fi
   else
     log "Writing nginx site for $SIGNER_HOST (HTTP-only — no LE cert yet)"
     log "After issuing the cert (see manual steps below), re-run this script."
@@ -809,9 +738,6 @@ server {
     }
 }
 EOF
-    if [[ -d /etc/nginx/sites-enabled ]]; then
-      sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
-    fi
   fi
 }
 
@@ -822,8 +748,12 @@ if [[ "$WITH_NGINX" == "yes" ]]; then
   fi
   sudo install -d -m 0755 /var/www/certbot
   write_nginx_site
+  # Single point of enabling — one ln -sf per vhost (idempotent), default
+  # vhost out of the way. Done here (not inside write_nginx_site) so the
+  # symlinks aren't sprinkled across HTTPS / HTTP-only branches.
   if [[ -d /etc/nginx/sites-enabled ]]; then
     sudo ln -sf /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
+    sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
     sudo rm -f /etc/nginx/sites-enabled/default
   fi
   if sudo nginx -t; then
@@ -834,14 +764,9 @@ if [[ "$WITH_NGINX" == "yes" ]]; then
 fi
 
 # ─── 7. certbot (optional) ────────────────────────────────────────────────────
-if [[ "$WITH_CERTBOT" == "yes" ]]; then
-  if ! have certbot; then
-    log "Installing certbot"
-    case "$PM" in
-      apt) "${PM_INSTALL[@]}" certbot python3-certbot-nginx ;;
-      dnf) "${PM_INSTALL[@]}" certbot python3-certbot-nginx ;;
-    esac
-  fi
+if [[ "$WITH_CERTBOT" == "yes" ]] && ! have certbot; then
+  log "Installing certbot"
+  "${PM_INSTALL[@]}" certbot python3-certbot-nginx
 fi
 
 # ─── 8. Mint missing broker keypairs ──────────────────────────────────────────
@@ -925,7 +850,7 @@ What you still need to do by hand:
 EOF
 
 case "$CRED_MODE" in
-  instance-profile)
+  none)
     cat <<EOF
   AWS credentials (none mode — recommended post-issue-#71):
     1. Nothing to configure. Broker mints via AssumeRoleWithWebIdentity (JWT-authenticated).
