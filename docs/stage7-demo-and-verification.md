@@ -423,21 +423,36 @@ working is one `--email` round-trip.
 >    stateful per [`architecture.md`](spec/architecture.md) §5a.1.M:
 >    CSPRNG token → SHA256 in EmailTokenStore → single-use within TTL.)
 >
+>    **If the setup script dies with `cargo did NOT enable
+>    auth-email-link despite --features auth-email-link`**: cargo's
+>    own `--message-format=json` reports the feature is missing — this
+>    is a host-environment override, NOT a script bug. The die message
+>    lists 5 specific things to check (`~/.cargo/config.toml`,
+>    workspace `.cargo/config.toml`, `env | grep CARGO`, `which cargo`,
+>    `Cargo.lock`). The script catches this at build-time so a bad
+>    binary never reaches systemd.
+>
 >    **If `agentkeys init --email` returns `502 Bad Gateway` from
->    nginx**: the broker process crashed at boot — nginx is up but
->    `127.0.0.1:8091` is dead. The setup script's post-restart probe
->    will now `die` with the journal output if this happens during
->    re-deploy, but if you ran the broker some other way, diagnose with:
+>    nginx**: the broker process crashed at boot (nginx up, `:8091`
+>    dead). The post-restart probe should die loud with the journal
+>    output during re-deploy, but if the broker was started some other
+>    way, diagnose with:
 >    ```bash
 >    ssh agentkey@$BROKER_HOST '
 >      sudo journalctl -u agentkeys-broker -n 60 --no-pager | grep -E "BOOT_FAIL|ERROR" | tail -10
 >    '
 >    ```
->    The most common Pass-2 boot crash is `BROKER_AUTH_METHODS="email_link":
->    unknown or feature-gated-out auth method` — the binary was built
->    without `--features auth-email-link`. Fix: `rm -f
->    ~/agentKeys/target/release/agentkeys-broker-server` then re-run
->    `setup-broker-host.sh --yes`.
+>    Historical Pass-2 trap (now caught at build-time per above):
+>    `BROKER_AUTH_METHODS="email_link": unknown or feature-gated-out
+>    auth method` meant the binary was built without
+>    `--features auth-email-link`. The current script defends against
+>    this two ways: (1) `cargo clean -p agentkeys-broker-server
+>    --release` before the broker rebuild defeats stale incremental
+>    cache; (2) the `--message-format=json` assertion fails the script
+>    at build-time if cargo did not enable the feature. If you still
+>    see this BOOT_FAIL on a fresh re-deploy, run the script with
+>    `bash -x scripts/setup-broker-host.sh 2>&1 | grep -E "cargo|features"`
+>    and file an issue with the output.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
