@@ -34,6 +34,7 @@ WITH_CERTBOT="yes"           # default: install certbot (opt out via --without-c
 ASSUME_YES=false
 PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
 SIGNER_HOST=""               # --signer-host: hostname for the dedicated signer listener
+CLEAN_BROKER="auto"          # --clean: force `cargo clean -p` first; auto = self-heal only on assertion miss
 # Verified SES sender for email-link auth. Operator must register this
 # identity via scripts/ses-verify-sender.sh BEFORE booting the broker;
 # the broker's verify_sender_ready precheck calls SES GetEmailIdentity
@@ -68,6 +69,8 @@ while (( $# > 0 )); do
     --ref)                PULL_REF="$2"; shift 2 ;;
     --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
     --email-from)         BROKER_EMAIL_FROM_ADDRESS="$2"; shift 2 ;;
+    --clean)              CLEAN_BROKER="yes"; shift ;;
+    --no-clean)           CLEAN_BROKER="no"; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -407,74 +410,95 @@ log "Rust: $(rustc --version)"
 log "Building agentkeys-mock-server (release)"
 ( cd "$REPO_ROOT" && cargo build --release -p agentkeys-mock-server )
 
-# Force-rebuild the broker artifacts so cargo cannot reuse a stale .rlib
-# compiled WITHOUT auth-email-link. `cargo clean -p` only touches this
-# crate's incremental cache (cheap; ~1s) and is the only known-reliable
-# way to defeat host-side feature-pinned dep caching that has bitten this
-# script before. Without it: `rm target/release/agentkeys-broker-server`
-# alone is insufficient — cargo's incremental still relinks from cached
-# deps in target/release/deps/ that may pre-date the feature flip.
-log "cargo clean -p agentkeys-broker-server --release  (defeat stale feature-pinned deps)"
-( cd "$REPO_ROOT" && cargo clean -p agentkeys-broker-server --release ) \
-  || warn "cargo clean -p returned non-zero — continuing (may be a fresh tree)"
-
-log "Building agentkeys-broker-server (release, +auth-email-link)"
-# Capture cargo's --message-format=json output so we can ASSERT (from
-# cargo's own mouth) that auth-email-link was enabled. This is canonical:
-# `strings | grep` was a heuristic that gave both false positives (e.g.
-# tower middleware names accidentally matching) and false negatives (LTO
-# string deduplication). The feature list cargo reports IS the truth.
+# Build agentkeys-broker-server with auth-email-link, asserting via
+# cargo's --message-format=json output that the feature is actually
+# enabled. Three modes for incremental-cache hygiene:
+#
+#   --clean       force `cargo clean -p agentkeys-broker-server --release`
+#                 before the build (3-5min full rebuild).
+#   --no-clean    never clean; trust incremental cache. Use when you
+#                 KNOW the cache is good and want the fastest re-deploy.
+#   (default)     auto: skip clean, run incremental build, ASSERT the
+#                 feature is in cargo's reported feature set; if NOT,
+#                 self-heal by running `cargo clean -p` and rebuilding
+#                 ONCE. Failing again is a real environment bug (host
+#                 .cargo/config.toml override, env-var pin, etc.) and
+#                 the script dies with 5 specific things to check.
 #
 # Critical: stdout (NDJSON) and stderr (compiler progress / errors) MUST
 # be redirected separately. Merging them with `2>&1` corrupts the NDJSON
 # stream and jq dies on `Invalid numeric literal at line N column M`.
 BUILD_JSON=$(mktemp); BUILD_ERR=$(mktemp)
 trap 'rm -f "$BUILD_JSON" "$BUILD_ERR"' EXIT
-( cd "$REPO_ROOT" && cargo build --release \
-    -p agentkeys-broker-server --features auth-email-link \
-    --message-format=json ) > "$BUILD_JSON" 2> "$BUILD_ERR" \
-  || { warn "cargo build failed — last 30 lines of stderr:"; tail -30 "$BUILD_ERR" >&2; die "build failed"; }
 
-# Post-build sanity check: cargo must report auth-email-link in the
-# binary artifact's features list. If the cargo footgun ever resurfaces
-# (e.g. someone re-merges the two builds, or the host has a stale
-# .cargo/config.toml pinning features), die HERE rather than after install.
-log "Verifying broker binary has auth-email-link compiled in"
-ENABLED_FEATURES=$(jq -r '
-  select(.reason=="compiler-artifact"
-         and .target.name=="agentkeys-broker-server"
-         and (.target.kind | index("bin")))
-  | .features | join(",")
-' "$BUILD_JSON" 2>/dev/null | tail -1)
-if [[ -z "$ENABLED_FEATURES" ]]; then
-  warn "cargo did not emit a compiler-artifact for the broker binary — last 30 lines of stderr:"
-  tail -30 "$BUILD_ERR" >&2
-  die "broker binary build produced no artifact line — see $BUILD_JSON"
+build_broker_with_features() {
+  log "Building agentkeys-broker-server (release, +auth-email-link)"
+  ( cd "$REPO_ROOT" && cargo build --release \
+      -p agentkeys-broker-server --features auth-email-link \
+      --message-format=json ) > "$BUILD_JSON" 2> "$BUILD_ERR" \
+    || { warn "cargo build failed — last 30 lines of stderr:"; tail -30 "$BUILD_ERR" >&2; die "build failed"; }
+}
+
+# Returns 0 if cargo reported auth-email-link in the bin artifact's
+# features list, 1 otherwise. Sets ENABLED_FEATURES for diagnostics.
+assert_feature_enabled() {
+  ENABLED_FEATURES=$(jq -r '
+    select(.reason=="compiler-artifact"
+           and .target.name=="agentkeys-broker-server"
+           and (.target.kind | index("bin")))
+    | .features | join(",")
+  ' "$BUILD_JSON" 2>/dev/null | tail -1)
+  # Empty features list usually means cargo skipped the artifact line
+  # (incremental: nothing to rebuild → no compiler-artifact emitted).
+  # That's NOT a failure — the existing binary is fine. Treat as pass.
+  if [[ -z "$ENABLED_FEATURES" ]]; then
+    log "  cargo emitted no fresh artifact (incremental cache hit) — trusting existing binary"
+    return 0
+  fi
+  log "  cargo reports features: $ENABLED_FEATURES"
+  case ",$ENABLED_FEATURES," in
+    *,auth-email-link,*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ "$CLEAN_BROKER" == "yes" ]]; then
+  log "cargo clean -p agentkeys-broker-server --release  (--clean requested)"
+  ( cd "$REPO_ROOT" && cargo clean -p agentkeys-broker-server --release ) \
+    || warn "cargo clean -p returned non-zero — continuing (may be a fresh tree)"
 fi
-log "  cargo reports features: $ENABLED_FEATURES"
-case ",$ENABLED_FEATURES," in
-  *,auth-email-link,*) : ;;
-  *)
-    die "cargo did NOT enable auth-email-link despite --features auth-email-link.
+
+build_broker_with_features
+
+log "Verifying broker binary has auth-email-link compiled in"
+if ! assert_feature_enabled && [[ "$CLEAN_BROKER" != "no" ]]; then
+  warn "auth-email-link missing from cargo's reported features [$ENABLED_FEATURES]"
+  warn "Self-healing: cargo clean -p + rebuild (one retry; ~3-5min)"
+  warn "Pass --no-clean to disable self-heal, or --clean to skip this and clean upfront."
+  ( cd "$REPO_ROOT" && cargo clean -p agentkeys-broker-server --release ) \
+    || warn "cargo clean -p returned non-zero — continuing"
+  build_broker_with_features
+  if ! assert_feature_enabled; then
+    die "cargo STILL did not enable auth-email-link after a clean rebuild.
    Reported features: [$ENABLED_FEATURES]
-   This means the host environment is overriding feature resolution. Check:
+   The host environment is overriding feature resolution. Check:
      1. cat \$HOME/.cargo/config.toml  (any [build] / [profile.release.package] sections?)
      2. cat $REPO_ROOT/.cargo/config.toml  (workspace-level overrides?)
      3. env | grep -i cargo  (CARGO_BUILD_*, CARGO_FEATURE_*, CARGO_PROFILE_* vars?)
      4. which cargo + cargo --version  (multiple toolchains?)
      5. cat $REPO_ROOT/Cargo.lock | head -5  (committed lockfile drift?)
-   Then file a repro for the issue tracker." ;;
-esac
+   Then file a repro for the issue tracker."
+  fi
+elif ! assert_feature_enabled; then
+  # --no-clean explicitly requested: don't self-heal, just die.
+  die "auth-email-link missing from cargo's reported features [$ENABLED_FEATURES] and --no-clean is set.
+   Re-run without --no-clean (or with --clean) to let the script self-heal."
+fi
 
 # Belt-and-suspenders: nm symbol-table check (more reliable than strings,
-# which on rustc 1.95 + Ubuntu binutils gives false negatives — string
-# literals may be present in .rodata but split across symbol boundaries
-# in ways `strings` doesn't reassemble). If nm sees the function, the
-# code is compiled in. WARN-only: cargo's JSON assertion above is the
-# canonical gate; this is just an extra signal for diagnostics.
-# `probe_or_die` post-restart is the actual runtime safety net — a
-# binary missing the feature would BOOT_FAIL with the same
-# 'unknown auth method' error and probe_or_die would catch it.
+# which on rustc 1.95 + Ubuntu binutils gives false negatives). WARN-only:
+# cargo's JSON assertion above is the canonical gate; probe_or_die
+# post-restart catches any actual runtime mismatch.
 if command -v nm >/dev/null 2>&1; then
   email_symbols=$(nm "$REPO_ROOT/target/release/agentkeys-broker-server" 2>/dev/null \
     | grep -cE "register_email_link_routes|email_request|email_verify" \
@@ -482,8 +506,7 @@ if command -v nm >/dev/null 2>&1; then
   if (( email_symbols > 0 )); then
     log "  nm sees $email_symbols email-link symbol(s) — feature is linked in"
   else
-    warn "nm sees 0 email-link symbols in the binary, but cargo claims the feature is on."
-    warn "This MIGHT be a stale artifact, OR rustc 1.95 stripped them at link time."
+    warn "nm sees 0 email-link symbols, but cargo claims the feature is on."
     warn "Continuing — the post-restart /healthz probe will catch any real boot failure."
   fi
 else
