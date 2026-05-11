@@ -174,6 +174,7 @@ pub async fn complete_oauth2_google(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_init(
     http: &reqwest::Client,
     broker: &str,
@@ -184,10 +185,18 @@ async fn finish_init(
     identity_type: &str,
     identity_value: &str,
 ) -> FlowResult<InitResult> {
-    let derived = derive_via_signer(signer_url, identity_omni).await?;
+    let derived = derive_via_signer(signer_url, identity_omni, identity_session_jwt).await?;
     link_wallet_at_broker(http, broker, identity_session_jwt, "evm", &derived).await?;
-    let (evm_session_jwt, evm_omni, wallet_addr) =
-        siwe_round_trip(http, broker, signer_url, identity_omni, &derived, chain_id).await?;
+    let (evm_session_jwt, evm_omni, wallet_addr) = siwe_round_trip(
+        http,
+        broker,
+        signer_url,
+        identity_omni,
+        &derived,
+        chain_id,
+        identity_session_jwt,
+    )
+    .await?;
     let session = build_session_from_jwt(&evm_session_jwt, &wallet_addr);
     Ok(InitResult {
         session,
@@ -258,8 +267,18 @@ async fn identity_value_from_status(
     string_field(&body, "/v1/auth/{provider}/status", "identity_value")
 }
 
-async fn derive_via_signer(signer_url: &str, omni_account: &str) -> FlowResult<String> {
-    let client = HttpSignerClient::new(signer_url);
+async fn derive_via_signer(
+    signer_url: &str,
+    omni_account: &str,
+    session_jwt: &str,
+) -> FlowResult<String> {
+    // Signer (post-issue-#74 step 1b) requires the broker's session JWT
+    // as a Bearer token on every /dev/* request. Standalone commands
+    // (cli::cmd_signer_derive) chain .with_session_jwt() from the
+    // keychain; the in-flow init_via_email_link path also has the
+    // identity-session JWT in hand (just minted by the broker after
+    // the magic-link click), so chain it here too.
+    let client = HttpSignerClient::new(signer_url).with_session_jwt(session_jwt.to_string());
     let derived = client.derive_address(omni_account).await?;
     Ok(derived.address)
 }
@@ -301,6 +320,7 @@ async fn siwe_round_trip(
     identity_omni: &str,
     derived_addr: &str,
     chain_id: u64,
+    session_jwt: &str,
 ) -> FlowResult<(String, String, String)> {
     let start = post_json(
         http,
@@ -311,7 +331,9 @@ async fn siwe_round_trip(
     let request_id = string_field(&start, "/v1/auth/wallet/start", "request_id")?;
     let siwe_message = string_field(&start, "/v1/auth/wallet/start", "siwe_message")?;
 
-    let signer = HttpSignerClient::new(signer_url);
+    // Signer requires the broker's session JWT (same one threaded
+    // through derive_via_signer above) for the SIWE-message sign call.
+    let signer = HttpSignerClient::new(signer_url).with_session_jwt(session_jwt.to_string());
     let signed = signer
         .sign_eip191(identity_omni, siwe_message.as_bytes())
         .await?;

@@ -825,6 +825,24 @@ The session JWT is broker-internal. To talk to AWS STS you need a
 separate OIDC JWT signed by the OIDC keypair, with claims AWS knows how
 to consume.
 
+**Populating `SESSION_JWT_A`** depends on which §2 path you took:
+
+- **§2.0 path (`agentkeys init --email`)** — the CLI saved the EVM
+  session JWT to the OS keychain OR to the file fallback at
+  `~/.agentkeys/master/session.json` (file mode when the keyring
+  marker is empty). Extract it:
+  ```bash
+  SESSION_JWT_A=$(jq -r .token ~/.agentkeys/master/session.json)
+  ```
+  (A future CLI subcommand will wrap this — for now, raw file/keychain
+  access is the documented path. The fallback location depends on
+  keyring state; check `~/.agentkeys/master/.keyring_managed`: empty
+  → file mode → read `session.json`; absent → use macOS Keychain
+  `security find-generic-password -s agentkeys -a master -w | jq -r .token`.)
+- **§2.1-2.4 manual SIWE path** — `SESSION_JWT_A` was captured
+  in-line from the broker's `/v1/auth/wallet/verify` response; reuse
+  the variable you set there.
+
 ```bash
 JWT_A=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
