@@ -450,10 +450,17 @@ assert_feature_enabled() {
   ' "$BUILD_JSON" 2>/dev/null | tail -1)
   # Empty features list usually means cargo skipped the artifact line
   # (incremental: nothing to rebuild → no compiler-artifact emitted).
-  # That's NOT a failure — the existing binary is fine. Treat as pass.
+  # That's NOT a failure — the existing binary is fine. Treat as pass,
+  # but only after verifying the binary actually exists on disk (a
+  # manual `rm target/release/agentkeys-broker-server` would otherwise
+  # let us proceed to `install` and fail there with a worse message).
   if [[ -z "$ENABLED_FEATURES" ]]; then
-    log "  cargo emitted no fresh artifact (incremental cache hit) — trusting existing binary"
-    return 0
+    if [[ -x "$REPO_ROOT/target/release/agentkeys-broker-server" ]]; then
+      log "  cargo emitted no fresh artifact (incremental cache hit) — trusting existing binary"
+      return 0
+    fi
+    warn "cargo emitted no fresh artifact but binary doesn't exist at target/release/agentkeys-broker-server"
+    return 1
   fi
   log "  cargo reports features: $ENABLED_FEATURES"
   case ",$ENABLED_FEATURES," in
