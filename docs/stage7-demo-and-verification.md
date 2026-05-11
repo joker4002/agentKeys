@@ -401,10 +401,12 @@ working is one `--email` round-trip.
 >    cd ~/agentKeys && git pull && sudo bash scripts/setup-broker-host.sh --yes
 >    ```
 >    Pass 2 of Option B: the script now builds with `--features
->    auth-email-link`, mints `/etc/agentkeys/email-hmac.key`, and sets
->    `BROKER_AUTH_METHODS=wallet_sig,email_link` + `BROKER_EMAIL_SENDER=ses`
->    in the systemd unit. Without this, the broker returns 404 on
->    `/v1/auth/email/request` and `agentkeys init --email` fails.
+>    auth-email-link` and sets `BROKER_AUTH_METHODS=wallet_sig,email_link`
+>    + `BROKER_EMAIL_SENDER=ses` in the systemd unit. Without this, the
+>    broker returns 404 on `/v1/auth/email/request` and
+>    `agentkeys init --email` fails. (No HMAC key — magic-link is
+>    stateful per [`architecture.md`](spec/architecture.md) §5a.1.M:
+>    CSPRNG token → SHA256 in EmailTokenStore → single-use within TTL.)
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -529,8 +531,8 @@ against real SES delivery. Use this for any real demo or production deployment.
 > **Prereq if you haven't done it yet:** the two-step setup from §0.4 —
 > `bash scripts/ses-verify-sender.sh` (one-time SES sender registration) +
 > `sudo bash scripts/setup-broker-host.sh --yes` on the broker host
-> (Pass 2 build with `auth-email-link` + email-HMAC key + email_link in
-> BROKER_AUTH_METHODS).
+> (Pass 2 build with `auth-email-link` + `email_link` in
+> `BROKER_AUTH_METHODS`).
 
 ```bash
 # === ON OPERATOR WORKSTATION ===

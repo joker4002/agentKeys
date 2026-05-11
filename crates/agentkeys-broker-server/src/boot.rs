@@ -374,23 +374,10 @@ fn build_registry(
                     EmailLinkAuth, EmailSender, SesEmailSender, StubEmailSender,
                 };
                 use crate::storage::{EmailRateLimitStore, EmailTokenStore};
-                // HMAC key
-                let hmac_path = std::env::var(env::BROKER_EMAIL_HMAC_KEY_PATH).map_err(|_| {
-                    boot_fail(
-                        env::BROKER_EMAIL_HMAC_KEY_PATH,
-                        "(unset)",
-                        "required when email_link is in BROKER_AUTH_METHODS",
-                        "email-hmac-key",
-                    )
-                })?;
-                let hmac_key = std::fs::read(&hmac_path).map_err(|e| {
-                    boot_fail(
-                        env::BROKER_EMAIL_HMAC_KEY_PATH,
-                        &hmac_path,
-                        format!("read failed: {}", e),
-                        "email-hmac-key",
-                    )
-                })?;
+                // No HMAC key — magic-link is stateful (CSPRNG token →
+                // SHA256(token) keyed by request_id in EmailTokenStore →
+                // single-use within TTL). See arch.md §5a.1.M Stage 1 +
+                // EmailLinkAuth::new doc comment for the design rationale.
                 let from_address =
                     std::env::var(env::BROKER_EMAIL_FROM_ADDRESS).map_err(|_| {
                         boot_fail(
@@ -495,17 +482,16 @@ fn build_registry(
                     sender,
                     Arc::clone(&token_store),
                     Arc::clone(&rl_store),
-                    from_address,
+                    from_address.clone(),
                     landing_base,
-                    hmac_key,
                     ses_cache_path,
                     per_email,
                     per_ip,
                 )
                 .map_err(|e| {
                     boot_fail(
-                        env::BROKER_EMAIL_HMAC_KEY_PATH,
-                        &hmac_path,
+                        env::BROKER_EMAIL_FROM_ADDRESS,
+                        &from_address,
                         format!("EmailLinkAuth::new: {}", e),
                         "email-link-construct",
                     )

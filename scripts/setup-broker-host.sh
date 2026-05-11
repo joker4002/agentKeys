@@ -569,22 +569,6 @@ else
   log "DEV_KEY_SERVICE_MASTER_SECRET already present at $DEV_KEY_SERVICE_ENV_FILE — preserving (re-runs are idempotent)"
 fi
 
-# ─── 4b. Email-link HMAC key (auth-email-link feature) ───────────────────────
-# Required when BROKER_AUTH_METHODS contains email_link. 32 random bytes,
-# kept on disk at mode 0600. Used by EmailLinkAuth to HMAC-sign magic-link
-# tokens before storing the SHA256 in SQLite. Idempotent — re-runs preserve
-# the existing key (rotating it would invalidate any in-flight magic links).
-EMAIL_HMAC_KEY_PATH=/etc/agentkeys/email-hmac.key
-if ! sudo test -s "$EMAIL_HMAC_KEY_PATH"; then
-  log "Generating BROKER_EMAIL_HMAC_KEY (first-time only — re-runs preserve it)"
-  sudo bash -c "openssl rand 32 > '$EMAIL_HMAC_KEY_PATH'"
-  sudo chown agentkeys:agentkeys "$EMAIL_HMAC_KEY_PATH"
-  sudo chmod 0600 "$EMAIL_HMAC_KEY_PATH"
-  log "  → wrote $EMAIL_HMAC_KEY_PATH (32 bytes, mode 0600, owner agentkeys)"
-else
-  log "BROKER_EMAIL_HMAC_KEY already present at $EMAIL_HMAC_KEY_PATH — preserving (re-runs are idempotent)"
-fi
-
 # ─── 5. systemd units ─────────────────────────────────────────────────────────
 log "Writing systemd units"
 
@@ -650,7 +634,6 @@ Environment=BROKER_OIDC_ISSUER=$ISSUER_URL
 Environment=BROKER_AUTH_METHODS=wallet_sig,email_link
 Environment=BROKER_EMAIL_SENDER=ses
 Environment=BROKER_EMAIL_FROM_ADDRESS=$BROKER_EMAIL_FROM_ADDRESS
-Environment=BROKER_EMAIL_HMAC_KEY_PATH=$EMAIL_HMAC_KEY_PATH
 $CRED_LINE
 ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1 \
   --export-session-pubkey-to /var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem

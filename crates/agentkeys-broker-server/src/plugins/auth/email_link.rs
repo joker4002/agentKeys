@@ -30,7 +30,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::env;
 use crate::plugins::auth::{
     AuthChallenge, AuthError, AuthResponse, ChallengeParams, IdentityType, UserAuthMethod,
     VerifiedIdentity,
@@ -311,42 +310,40 @@ pub struct EmailLinkAuth {
     pub rate_limit_store: Arc<EmailRateLimitStore>,
     pub from_address: String,
     pub landing_url_base: String, // e.g. "https://broker.example.com/auth/email/landing"
-    pub hmac_key: Vec<u8>,
     pub ses_verify_cache_path: PathBuf,
     pub per_email_hourly_limit: i64,
     pub per_ip_minutely_limit: i64,
 }
 
 impl EmailLinkAuth {
-    /// Construct from already-loaded dependencies. The `hmac_key` MUST
-    /// be at least 32 bytes (boot validates this; the constructor
-    /// re-checks to make accidental misuse a hard error).
-    #[allow(clippy::too_many_arguments)] // 9 deps; refactoring into a builder hides nothing
+    /// Construct from already-loaded dependencies.
+    ///
+    /// **No HMAC key.** Per `docs/spec/architecture.md` §5a.1.M Stage 1
+    /// and the K1–K11 inventory in §3, the magic-link is stateful:
+    /// the token is generated CSPRNG, `SHA256(token)` is keyed by
+    /// `request_id` in `EmailTokenStore`, and the broker confirms
+    /// single-use within TTL on click. No HMAC signature is needed —
+    /// the security comes from token randomness, stateful TTL, and
+    /// consume-once. (Earlier `hmac_key` field was vestigial — never
+    /// used cryptographically — and was removed alongside the
+    /// BROKER_EMAIL_HMAC_KEY_PATH env var to align with arch.md.)
+    #[allow(clippy::too_many_arguments)] // 8 deps; refactoring into a builder hides nothing
     pub fn new(
         sender: Arc<dyn EmailSender>,
         token_store: Arc<EmailTokenStore>,
         rate_limit_store: Arc<EmailRateLimitStore>,
         from_address: impl Into<String>,
         landing_url_base: impl Into<String>,
-        hmac_key: Vec<u8>,
         ses_verify_cache_path: PathBuf,
         per_email_hourly_limit: i64,
         per_ip_minutely_limit: i64,
     ) -> Result<Self, AuthError> {
-        if hmac_key.len() < 32 {
-            return Err(AuthError::Internal(format!(
-                "{} must be >= 32 bytes, got {}",
-                env::BROKER_EMAIL_HMAC_KEY_PATH,
-                hmac_key.len()
-            )));
-        }
         Ok(Self {
             sender,
             token_store,
             rate_limit_store,
             from_address: from_address.into(),
             landing_url_base: landing_url_base.into(),
-            hmac_key,
             ses_verify_cache_path,
             per_email_hourly_limit,
             per_ip_minutely_limit,
@@ -554,7 +551,6 @@ mod tests {
             rate_limit_store,
             "broker@example.com",
             "https://broker.test/auth/email/landing",
-            vec![0u8; 32],
             tmp.path().join("ses-verify.json"),
             5,
             30,
@@ -725,25 +721,6 @@ mod tests {
         };
         cache.save(&p.ses_verify_cache_path).unwrap();
         assert!(p.ready().is_ready());
-    }
-
-    #[tokio::test]
-    async fn hmac_key_too_short_rejected() {
-        let token_store = Arc::new(EmailTokenStore::open_in_memory().unwrap());
-        let rate_limit_store = Arc::new(EmailRateLimitStore::open_in_memory().unwrap());
-        let sender: Arc<dyn EmailSender> = Arc::new(StubEmailSender::new());
-        let res = EmailLinkAuth::new(
-            sender,
-            token_store,
-            rate_limit_store,
-            "broker@example.com",
-            "https://broker.test/auth/email/landing",
-            vec![0u8; 16], // < 32 bytes
-            std::path::PathBuf::from("/tmp/dummy.json"),
-            5,
-            30,
-        );
-        assert!(res.is_err());
     }
 
     #[tokio::test]
