@@ -394,10 +394,37 @@ log "Rust: $(rustc --version)"
 # /v1/auth/email/* routes are registered. Without the feature the broker
 # returns 404 on /v1/auth/email/request and `agentkeys init --email` cannot
 # work — see issue #80 and Pass 2 of Option B.
-log "Building agentkeys-mock-server + agentkeys-broker-server (release, +auth-email-link)"
+#
+# CARGO FOOTGUN: the broker MUST be built in a SEPARATE cargo invocation
+# from agentkeys-mock-server. With combined `-p A -p B --features pkg/feat`
+# (or even `--features A/feat`) cargo silently DROPS the feature flag —
+# the resulting binary is compiled with the broker's defaults only
+# (auth-wallet-sig + audit-sqlite + wallet-keystore — NO auth-email-link),
+# manifesting as `BOOT_FAIL: BROKER_AUTH_METHODS="email_link": unknown or
+# feature-gated-out auth method` at startup. Verified empirically:
+# `cargo build --message-format json` shows features=[…] with auth-email-link
+# missing in the combined form, present in the separate form.
+log "Building agentkeys-mock-server (release)"
+( cd "$REPO_ROOT" && cargo build --release -p agentkeys-mock-server )
+log "Building agentkeys-broker-server (release, +auth-email-link)"
 ( cd "$REPO_ROOT" && cargo build --release \
-    -p agentkeys-mock-server \
-    -p agentkeys-broker-server --features agentkeys-broker-server/auth-email-link )
+    -p agentkeys-broker-server --features auth-email-link )
+
+# Post-build sanity check: the binary must contain the auth-email-link
+# code paths. If the cargo footgun above ever resurfaces (e.g. someone
+# re-merges the two builds), die HERE rather than after install + restart.
+log "Verifying broker binary has auth-email-link compiled in"
+if ! "$REPO_ROOT/target/release/agentkeys-broker-server" --help 2>&1 \
+    | grep -q . ; then
+  die "broker binary failed to run --help — build is broken"
+fi
+if ! strings "$REPO_ROOT/target/release/agentkeys-broker-server" \
+    | grep -qE "/v1/auth/email/request|/v1/auth/email/verify"; then
+  die "broker binary at $REPO_ROOT/target/release/agentkeys-broker-server is missing auth-email-link routes.
+   This is the cargo multi-package + --features footgun — the build call must invoke
+   'cargo build -p agentkeys-broker-server --features auth-email-link' in a SEPARATE
+   invocation from any other -p target. See the comment block above this check."
+fi
 
 # ─── 3. Install binaries (stop → backup → install → restart later) ──────────
 # Stop both services before swap so the kernel isn't holding old inodes
