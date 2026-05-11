@@ -406,24 +406,77 @@ log "Rust: $(rustc --version)"
 # missing in the combined form, present in the separate form.
 log "Building agentkeys-mock-server (release)"
 ( cd "$REPO_ROOT" && cargo build --release -p agentkeys-mock-server )
-log "Building agentkeys-broker-server (release, +auth-email-link)"
-( cd "$REPO_ROOT" && cargo build --release \
-    -p agentkeys-broker-server --features auth-email-link )
 
-# Post-build sanity check: the binary must contain the auth-email-link
-# code paths. If the cargo footgun above ever resurfaces (e.g. someone
-# re-merges the two builds), die HERE rather than after install + restart.
+# Force-rebuild the broker artifacts so cargo cannot reuse a stale .rlib
+# compiled WITHOUT auth-email-link. `cargo clean -p` only touches this
+# crate's incremental cache (cheap; ~1s) and is the only known-reliable
+# way to defeat host-side feature-pinned dep caching that has bitten this
+# script before. Without it: `rm target/release/agentkeys-broker-server`
+# alone is insufficient — cargo's incremental still relinks from cached
+# deps in target/release/deps/ that may pre-date the feature flip.
+log "cargo clean -p agentkeys-broker-server --release  (defeat stale feature-pinned deps)"
+( cd "$REPO_ROOT" && cargo clean -p agentkeys-broker-server --release ) \
+  || warn "cargo clean -p returned non-zero — continuing (may be a fresh tree)"
+
+log "Building agentkeys-broker-server (release, +auth-email-link)"
+# Capture cargo's --message-format=json output so we can ASSERT (from
+# cargo's own mouth) that auth-email-link was enabled. This is canonical:
+# `strings | grep` was a heuristic that gave both false positives (e.g.
+# tower middleware names accidentally matching) and false negatives (LTO
+# string deduplication). The feature list cargo reports IS the truth.
+#
+# Critical: stdout (NDJSON) and stderr (compiler progress / errors) MUST
+# be redirected separately. Merging them with `2>&1` corrupts the NDJSON
+# stream and jq dies on `Invalid numeric literal at line N column M`.
+BUILD_JSON=$(mktemp); BUILD_ERR=$(mktemp)
+trap 'rm -f "$BUILD_JSON" "$BUILD_ERR"' EXIT
+( cd "$REPO_ROOT" && cargo build --release \
+    -p agentkeys-broker-server --features auth-email-link \
+    --message-format=json ) > "$BUILD_JSON" 2> "$BUILD_ERR" \
+  || { warn "cargo build failed — last 30 lines of stderr:"; tail -30 "$BUILD_ERR" >&2; die "build failed"; }
+
+# Post-build sanity check: cargo must report auth-email-link in the
+# binary artifact's features list. If the cargo footgun ever resurfaces
+# (e.g. someone re-merges the two builds, or the host has a stale
+# .cargo/config.toml pinning features), die HERE rather than after install.
 log "Verifying broker binary has auth-email-link compiled in"
-if ! "$REPO_ROOT/target/release/agentkeys-broker-server" --help 2>&1 \
-    | grep -q . ; then
-  die "broker binary failed to run --help — build is broken"
+ENABLED_FEATURES=$(jq -r '
+  select(.reason=="compiler-artifact"
+         and .target.name=="agentkeys-broker-server"
+         and (.target.kind | index("bin")))
+  | .features | join(",")
+' "$BUILD_JSON" 2>/dev/null | tail -1)
+if [[ -z "$ENABLED_FEATURES" ]]; then
+  warn "cargo did not emit a compiler-artifact for the broker binary — last 30 lines of stderr:"
+  tail -30 "$BUILD_ERR" >&2
+  die "broker binary build produced no artifact line — see $BUILD_JSON"
 fi
+log "  cargo reports features: $ENABLED_FEATURES"
+case ",$ENABLED_FEATURES," in
+  *,auth-email-link,*) : ;;
+  *)
+    die "cargo did NOT enable auth-email-link despite --features auth-email-link.
+   Reported features: [$ENABLED_FEATURES]
+   This means the host environment is overriding feature resolution. Check:
+     1. cat \$HOME/.cargo/config.toml  (any [build] / [profile.release.package] sections?)
+     2. cat $REPO_ROOT/.cargo/config.toml  (workspace-level overrides?)
+     3. env | grep -i cargo  (CARGO_BUILD_*, CARGO_FEATURE_*, CARGO_PROFILE_* vars?)
+     4. which cargo + cargo --version  (multiple toolchains?)
+     5. cat $REPO_ROOT/Cargo.lock | head -5  (committed lockfile drift?)
+   Then file a repro for the issue tracker." ;;
+esac
+
+# Belt-and-suspenders: also verify the actual route literals are in the
+# binary. If cargo claims the feature is on but `strings` doesn't see the
+# routes, the binary on disk is stale (cargo's incremental tricked us).
 if ! strings "$REPO_ROOT/target/release/agentkeys-broker-server" \
-    | grep -qE "/v1/auth/email/request|/v1/auth/email/verify"; then
-  die "broker binary at $REPO_ROOT/target/release/agentkeys-broker-server is missing auth-email-link routes.
-   This is the cargo multi-package + --features footgun — the build call must invoke
-   'cargo build -p agentkeys-broker-server --features auth-email-link' in a SEPARATE
-   invocation from any other -p target. See the comment block above this check."
+    | grep -aFq "/v1/auth/email/request"; then
+  warn "cargo reports auth-email-link enabled but the binary on disk lacks the routes."
+  warn "  ls -la $REPO_ROOT/target/release/agentkeys-broker-server:"
+  ls -la "$REPO_ROOT/target/release/agentkeys-broker-server" >&2
+  die "binary on disk does not match cargo's reported feature set — likely a stale
+   artifact survived the cargo clean. Force a full clean and retry:
+     cargo clean --release && bash scripts/setup-broker-host.sh --yes"
 fi
 
 # ─── 3. Install binaries (stop → backup → install → restart later) ──────────
