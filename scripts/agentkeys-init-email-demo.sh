@@ -116,11 +116,11 @@ log "Snapshotting existing inbound/ keys (filter for NEW arrivals)"
 # due to Apple's GPLv3 freeze). `aws --output text` returns keys
 # TAB-separated; `tr '\t' ' '` normalizes them. SES-generated S3 keys
 # are alphanumeric (no spaces), so the substring delimiter is safe.
-pre_keys_text=$(aws s3api list-objects-v2 \
-                  --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
-                  --region "$REGION" \
-                  --query 'Contents[*].Key' --output text 2>/dev/null || true \
-                | tr '\t' ' ')
+pre_keys_text=$( { aws s3api list-objects-v2 \
+                     --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
+                     --region "$REGION" \
+                     --query 'Contents[*].Key' --output text 2>/dev/null \
+                   || true; } | tr '\t' ' ')
 PRE_KEYS_SET=" $pre_keys_text "          # leading + trailing space for exact match
 pre_count=$(printf '%s\n' $pre_keys_text | grep -c . || true)
 log "  $pre_count existing object(s) — only newer arrivals will be inspected"
@@ -174,11 +174,11 @@ for attempt in $(seq 1 "$POLL_MAX_ATTEMPTS"); do
     die "init died early (likely broker rejection); see log above"
   fi
 
-  current_keys=$(aws s3api list-objects-v2 \
-                   --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
-                   --region "$REGION" \
-                   --query 'Contents[*].Key' --output text 2>/dev/null || true \
-                | tr '\t' ' ')
+  current_keys=$( { aws s3api list-objects-v2 \
+                      --bucket "$MAIL_BUCKET" --prefix "$INBOUND_PREFIX" \
+                      --region "$REGION" \
+                      --query 'Contents[*].Key' --output text 2>/dev/null \
+                    || true; } | tr '\t' ' ')
   # Build set difference: keys in current but not in PRE_KEYS_SET.
   # Bash-3.2-compatible substring check against the leading+trailing-
   # space-padded snapshot string.
