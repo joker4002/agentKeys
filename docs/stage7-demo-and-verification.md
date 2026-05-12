@@ -423,28 +423,33 @@ working is one `--email` round-trip.
 >    stateful per [`architecture.md`](spec/architecture.md) §5a.1.M:
 >    CSPRNG token → SHA256 in EmailTokenStore → single-use within TTL.)
 >
->    **If `agentkeys init --email` returns `502 backend_unreachable`
->    with body `... ses SendEmail: unhandled error
->    (AccessDeniedException)`**: the broker's runtime IAM role lacks
->    `ses:SendEmail` permission. The broker calls SES v2 SendEmail
->    with its OWN instance-profile creds — NOT via the assumed
->    `agentkeys-data-role` — so the SES grant must live on the
->    broker's own role. The IAM action is `ses:SendEmail` (sesv2), NOT
->    `ses:SendRawEmail` (v1 only). The canonical role is
->    `agentkeys-broker-host` (per `cloud-setup.md` §3.4); the discovery
->    snippet below stays intact in case the operator landed on a
->    different ad-hoc name during early provisioning. Find it:
+>    **Broker IAM role: `agentkeys-broker-host`** (canonical, per
+>    `cloud-setup.md` §3.4 — the legacy `S3-full-access` name was
+>    fully retired 2026-05-12). The role's `BrokerSendEmail` inline
+>    policy must grant **both** `ses:SendEmail` (per-request) **and**
+>    `ses:GetEmailIdentity` (Tier-2 verify probe — without it /readyz
+>    stays 503-degraded on `auth/email_link`). Verify with:
 >    ```bash
->    # REQUIRED: admin profile + operator env loaded.
 >    awsp agentkeys-admin
 >    set -a; source scripts/operator-workstation.env; set +a
+>    aws iam get-role-policy --role-name agentkeys-broker-host \
+>      --policy-name BrokerSendEmail \
+>      --query 'PolicyDocument.Statement[*].Action'
+>    # Expected: [["ses:SendEmail","ses:GetEmailIdentity"]]
+>    ```
 >
+>    **If `agentkeys init --email` returns `502 backend_unreachable`
+>    with body `... ses SendEmail: unhandled error
+>    (AccessDeniedException)`**: the broker's runtime role lost a perm
+>    or got swapped under it. Confirm it's still `agentkeys-broker-host`
+>    via the discovery snippet below (defensive — guards against future
+>    instance-profile drift), then re-apply the grant if needed:
+>    ```bash
 >    # CRITICAL: pass --region "$REGION" explicitly. The agentkeys-admin
 >    # profile defaults to us-west-2, but the broker EC2 lives in
 >    # us-east-1. Without --region, describe-instances searches us-west-2,
->    # finds nothing, returns empty (no error), and the downstream
->    # put-role-policy silently runs with --role-name "". See CLAUDE.md
->    # → AWS local-profile ↔ remote-IAM mapping.
+>    # finds nothing, returns empty (no error). See CLAUDE.md → AWS
+>    # local-profile ↔ remote-IAM mapping.
 >    INSTANCE_PROFILE_ARN=$(aws ec2 describe-instances \
 >      --region "$REGION" \
 >      --filters "Name=ip-address,Values=$EIP" \
@@ -452,29 +457,34 @@ working is one `--email` round-trip.
 >      --output text)
 >    if [[ -z "$INSTANCE_PROFILE_ARN" || "$INSTANCE_PROFILE_ARN" == "None" ]]; then
 >      echo "ABORT: no EC2 instance with EIP=$EIP found in region $REGION." >&2
->      echo "Check: AWS_PROFILE=$AWS_PROFILE, expected ARN owner = $(aws sts get-caller-identity --query Arn --output text)" >&2
+>      echo "Caller: $(aws sts get-caller-identity --query Arn --output text)" >&2
 >      unset ROLE
 >    else
 >      # iam is global — no --region needed.
 >      ROLE=$(aws iam get-instance-profile \
 >        --instance-profile-name "${INSTANCE_PROFILE_ARN##*/}" \
 >        --query 'InstanceProfile.Roles[0].RoleName' --output text)
->      echo "broker runtime role: $ROLE"
+>      echo "broker runtime role: $ROLE   (expected: agentkeys-broker-host)"
 >    fi
->    # Grant ses:SendEmail on the verified sender identity:
+>
+>    # Re-apply the BrokerSendEmail policy with BOTH actions
+>    # (idempotent — put-role-policy replaces the prior inline policy):
 >    aws iam put-role-policy --role-name "$ROLE" \
 >      --policy-name BrokerSendEmail \
 >      --policy-document "$(jq -n \
 >        --arg region "$REGION" --arg acct "$ACCOUNT_ID" --arg domain "$MAIL_DOMAIN" \
 >        '{Version:"2012-10-17",Statement:[{Effect:"Allow",
->          Action:"ses:SendEmail",
+>          Action:["ses:SendEmail","ses:GetEmailIdentity"],
 >          Resource:[
 >            "arn:aws:ses:\($region):\($acct):identity/\($domain)",
 >            "arn:aws:ses:\($region):\($acct):identity/*@\($domain)"
 >          ]}]}')"
 >    ```
->    No broker restart needed — sesv2 picks up creds per-call. See
->    [`cloud-setup.md` §3.4a](cloud-setup.md#34a-sessendemail-grant-on-the-brokers-runtime-role-pass-2-prereq)
+>    No broker restart needed for SendEmail — sesv2 picks up creds
+>    per-call. **A restart IS needed** for `ses:GetEmailIdentity` to
+>    take effect on /readyz, because the Tier-2 verify probe runs once
+>    at boot (then every 12h) — see commit `722a990` for the probe wiring.
+>    See [`cloud-setup.md` §3.4a](cloud-setup.md#34a-sessendemail-grant-on-the-brokers-runtime-role-pass-2-prereq)
 >    for the full discovery + grant flow.
 >
 >    **If the setup script dies with `cargo did NOT enable
