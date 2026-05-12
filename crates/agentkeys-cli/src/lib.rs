@@ -112,6 +112,16 @@ impl CommandContext {
         self
     }
 
+    /// Override the session namespace. Empty strings fall back to the
+    /// `"master"` default so a forgotten `AGENTKEYS_SESSION_ID=` shell
+    /// export doesn't silently write to `~/.agentkeys//session.json`.
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        if !session_id.is_empty() {
+            self.session_id = session_id;
+        }
+        self
+    }
+
     pub fn with_session(mut self, session: Session) -> Self {
         self.session_override = Some(session);
         self

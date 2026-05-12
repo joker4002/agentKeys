@@ -31,6 +31,14 @@ struct Cli {
     )]
     broker_url: Option<String>,
 
+    #[arg(
+        long,
+        env = "AGENTKEYS_SESSION_ID",
+        default_value = "master",
+        help = "Session namespace under ~/.agentkeys/<id>/session.json. Defaults to \"master\". Use distinct ids to hold multiple concurrent sessions (e.g. --session-id=alice and --session-id=bob) without overwriting each other."
+    )]
+    session_id: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -287,7 +295,8 @@ enum InboxAction {
 async fn main() {
     let cli = Cli::parse();
     let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json)
-        .with_broker_url(cli.broker_url.clone());
+        .with_broker_url(cli.broker_url.clone())
+        .with_session_id(cli.session_id.clone());
 
     let result: anyhow::Result<String> = match &cli.command {
         Commands::Init {

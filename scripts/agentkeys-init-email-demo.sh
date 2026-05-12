@@ -18,14 +18,26 @@
 #                                          # MAIL_BUCKET, OIDC_ISSUER, BACKEND_URL
 #
 # Usage:
-#   bash scripts/agentkeys-init-email-demo.sh                 # auto-pick demo-N alias
-#   bash scripts/agentkeys-init-email-demo.sh demo-1          # use specific local-part
+#   bash scripts/agentkeys-init-email-demo.sh                  # auto-pick demo-N alias, session="master"
+#   bash scripts/agentkeys-init-email-demo.sh demo-1           # use specific local-part
+#   bash scripts/agentkeys-init-email-demo.sh --session-id alice  # writes ~/.agentkeys/alice/session.json
+#   bash scripts/agentkeys-init-email-demo.sh --session-id alice demo-1
 #   RECIPIENT=alice@bots.litentry.org bash scripts/agentkeys-init-email-demo.sh
+#   AGENTKEYS_SESSION_ID=alice         bash scripts/agentkeys-init-email-demo.sh
 #
 # The default rotates between `demo-1@bots.litentry.org` and
 # `demo-2@bots.litentry.org` so consecutive runs don't collide on the
 # email_request_status row keyed by the request_id (single-use TTL).
 # Override with $RECIPIENT or a positional arg.
+#
+# **Multi-tenant sessions** (for the §4 isolation proof + general test
+# isolation): pass `--session-id <name>` (or set `AGENTKEYS_SESSION_ID`)
+# to write under `~/.agentkeys/<name>/session.json` instead of the default
+# `~/.agentkeys/master/session.json`. Two back-to-back runs with distinct
+# session-ids leave both sessions live — no need to re-init to switch
+# between them. Subsequent `agentkeys --session-id <name> ...` commands
+# read from the matching dir; `bash scripts/agentkeys-demo-show.sh <name>`
+# prints the (omni, wallet) pair for that session.
 #
 # Idempotent: if the script crashes mid-run, re-running cleans the
 # previous attempt's S3 inbound object on the way through.
@@ -66,10 +78,30 @@ require jq
 require curl
 require agentkeys
 
+# ─── Argument parsing: --session-id <id> + optional positional recipient ─────
+SESSION_ID="${AGENTKEYS_SESSION_ID:-master}"
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session-id)
+      [[ $# -lt 2 ]] && die "--session-id requires a value"
+      SESSION_ID="$2"; shift 2 ;;
+    --session-id=*) SESSION_ID="${1#*=}"; shift ;;
+    --) shift; while [[ $# -gt 0 ]]; do positional+=("$1"); shift; done ;;
+    --*) die "unknown flag: $1" ;;
+    *)   positional+=("$1"); shift ;;
+  esac
+done
+set -- "${positional[@]:-}"
+
+# The CLI reads AGENTKEYS_SESSION_ID at parse time; exporting here makes
+# the background `agentkeys init` write under ~/.agentkeys/$SESSION_ID/.
+export AGENTKEYS_SESSION_ID="$SESSION_ID"
+
 # ─── Recipient selection ─────────────────────────────────────────────────────
 if [[ -n "${RECIPIENT:-}" ]]; then
   recipient="$RECIPIENT"
-elif [[ $# -ge 1 ]]; then
+elif [[ $# -ge 1 && -n "${1:-}" ]]; then
   case "$1" in
     *@*) recipient="$1" ;;
     *)   recipient="$1@$MAIL_DOMAIN" ;;
@@ -85,6 +117,7 @@ else
   fi
 fi
 
+log "Session id  : $SESSION_ID                  (writes ~/.agentkeys/$SESSION_ID/session.json)"
 log "Recipient   : $recipient"
 log "Broker URL  : $OIDC_ISSUER"
 log "Mail bucket : $MAIL_BUCKET"
@@ -275,3 +308,14 @@ else
 fi
 
 log "DONE — end-to-end magic-link demo passed for $recipient"
+
+# ─── Auto-invoke the rich-output inspector ──────────────────────────────────
+# Saves the operator the next "now what does the session look like?" step.
+# Skip if the helper isn't co-located (e.g. ad-hoc copy of this script).
+SHOW="$(dirname "$0")/agentkeys-demo-show.sh"
+if [[ -x "$SHOW" ]]; then
+  echo
+  log "Session detail (= scripts/agentkeys-demo-show.sh $SESSION_ID):"
+  AGENTKEYS_SESSION_ID="$SESSION_ID" bash "$SHOW" "$SESSION_ID" || \
+    warn "demo-show failed (non-fatal — the session was saved successfully above)"
+fi
