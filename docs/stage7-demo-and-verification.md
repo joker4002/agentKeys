@@ -338,11 +338,17 @@ fi
 | (curl error: connection / NXDOMAIN) | DNS A record missing OR points at a proxied/private IP (e.g. `198.18.x.x` from WARP / Zscaler / Tailscale). | Re-derive `$EIP` from `aws ec2 describe-addresses` (NOT from `dig`) and re-UPSERT — see [`cloud-setup.md` §6.1](cloud-setup.md#61-dns-a-record). |
 | `signer_disabled` (503) | `/etc/agentkeys/dev-key-service.env` didn't load. | `sudo systemctl show agentkeys-signer \| grep EnvironmentFile` — confirm file exists, mode 0600. |
 
-### 0.3 Pick two demo identities and compute their `omni_account`
+### 0.3 Identity → `omni_account` math (reference)
 
 The broker derives `omni_account = SHA256("agentkeys" || identity_type
-|| identity_value)`. The operator computes the same value locally so
-they can drive the dev_key_service with it.
+|| identity_value)`. This helper recomputes it locally so you can
+verify the math — but the demo's **actual** `OMNI_A` / `OMNI_B` come
+from the live session JWTs minted by `agentkeys-init-email-demo.sh`
+in §0.4 below, not from this helper. The signer enforces
+`JWT.omni_account == request.omni_account` (per issue #74 step 1b),
+so we MUST use the omni that's in the session JWT — feeding the signer
+an arbitrary `omni("email", "alice@demo.example")` will fail with
+`SIGNER_UNAUTHORIZED: JWT omni_account claim does not match request body`.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -355,22 +361,17 @@ omni() {
     | awk '{print $1}'
 }
 
-OMNI_A=$(omni email "alice@demo.example")
-echo "OMNI_A=$OMNI_A  length=${#OMNI_A}"
-OMNI_B=$(omni email "bob@demo.example")
-echo "OMNI_B=$OMNI_B  length=${#OMNI_B}"
-
-# These should NEVER collide — different identity_value → different omni.
-[[ "$OMNI_A" != "$OMNI_B" ]] && echo "omni split ok" || echo "OMNI COLLISION — bug?"
+# Math sanity-check only — these don't drive the rest of the demo:
+omni email "demo-1@bots.litentry.org"   # what the broker computes for this address
+omni evm   "0x5a0c3df691d55008d88a17e06710b6b28718ec4d"  # post-SIWE EVM identity
 ```
 
-> **Why `email` as the identity_type for a demo with no real email?**
-> The choice is just a namespace label that the broker hashes into
-> `omni_account`. Using `email` keeps the demo identities distinct
-> from raw EVM identities (which the broker stamps post-SIWE-verify
-> as `("evm", lower(wallet))`). For a fully cleaned-up demo you can
-> use any nonempty `(type, value)` pair; the only invariant is that
-> A and B differ.
+> **What `identity_type` does each demo identity get?** The
+> magic-link flow stamps `("email", lower(address))` for the initial
+> identity, then promotes to `("evm", lower(wallet))` post-SIWE — so
+> the FINAL session JWT (the one the signer sees) carries the EVM omni.
+> Both omnis end up in the JWT's `agentkeys` claim; §0.4 extracts the
+> EVM one (the broker uses that for `/dev/*` calls).
 
 ### 0.4 Derive the managed wallets
 
@@ -545,28 +546,93 @@ agentkeys init \
   --broker-url $OIDC_ISSUER \
   --signer-url $BACKEND_URL
 # Initialized via email-link.
-#   identity omni: <64 hex>     ← matches OMNI_A from §0.3
-#   derived wallet: 0x…         ← will match ADDR_A below
-#   evm omni:      <64 hex>
+#   identity omni: <64 hex>     ← email identity_omni
+#   derived wallet: 0x…         ← ADDR_A (also in JWT.agentkeys.wallet_address)
+#   evm omni:      <64 hex>     ← OMNI_A — extracted in the next block via decode_jwt_payload
 ```
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# The CLI reads the saved session (from agentkeys init above) and
-# attaches it as Authorization: Bearer <jwt> so the signer can verify
-# the request.
-ADDR_A=$(agentkeys --json signer derive \
-           --signer-url $BACKEND_URL \
-           --omni-account $OMNI_A | jq -r .address)
+# After init-email-demo.sh succeeds, the session JWT in
+# ~/.agentkeys/master/session.json carries BOTH the omni and the
+# wallet address. Extract them rather than recomputing — the signer's
+# strict JWT-omni check (issue #74 step 1b) requires that the omni
+# we send to `/dev/derive-address` matches the JWT's claim exactly.
+decode_jwt_payload() {
+  jq -r .token ~/.agentkeys/master/session.json | awk -F. '{
+    p=$2; pad = 4 - length(p) % 4;
+    if (pad < 4) for (i=0; i<pad; i++) p = p "=";
+    gsub("-", "+", p); gsub("_", "/", p);
+    print p
+  }' | base64 -d 2>/dev/null
+}
+
+OMNI_A=$(decode_jwt_payload | jq -r '.agentkeys.omni_account')
+echo "OMNI_A=$OMNI_A"
+
+# Verify the signer wire is reachable. --omni-account MUST match the
+# JWT claim — if it doesn't, the signer returns SIGNER_UNAUTHORIZED
+# with "JWT omni_account claim does not match request body".
+#
+# NOTE: ADDR_A (the wallet returned here) is NOT the same as
+# JWT.agentkeys.wallet_address — the latter is the email-omni's
+# derived wallet (the one used to SIWE-sign), while this derive call
+# returns the EVM-omni's wallet (a different keypair for the EVM
+# identity). Both are real, both are derived by the same signer; they
+# play different roles in the demo. ADDR_A here is what we use for
+# the S3 isolation proof in §4.
+ADDR_A=$(agentkeys --json signer derive --omni-account "$OMNI_A" | jq -r .address)
 echo "ADDR_A=$ADDR_A"
 
-ADDR_B=$(agentkeys --json signer derive \
-           --signer-url $BACKEND_URL \
-           --omni-account $OMNI_B | jq -r .address)
+# ─── For the §4 isolation proof we need a SECOND identity ─────────────
+# Re-run init-email-demo.sh. The script rotates demo-1/demo-2 by epoch
+# parity so consecutive runs give two distinct sessions automatically;
+# or pass an explicit alias to force the other one:
+bash scripts/agentkeys-init-email-demo.sh    # auto-rotated (demo-1 ↔ demo-2)
+# bash scripts/agentkeys-init-email-demo.sh demo-2   # explicit
+
+OMNI_B=$(decode_jwt_payload | jq -r '.agentkeys.omni_account')
+ADDR_B=$(agentkeys --json signer derive --omni-account "$OMNI_B" | jq -r .address)
+echo "OMNI_B=$OMNI_B"
 echo "ADDR_B=$ADDR_B"
 
+[[ "$OMNI_A" != "$OMNI_B" ]] && echo "omni split ok"   || echo "OMNI COLLISION — bug?"
 [[ "$ADDR_A" != "$ADDR_B" ]] && echo "wallet split ok" || echo "WALLET COLLISION — bug?"
 ```
+
+> **Why two `init-email-demo.sh` runs?** The signer's strict JWT-omni
+> check means each session JWT only authorizes derive/sign for ITS own
+> omni. To prove per-user isolation in §4 we need two distinct
+> `(omni, wallet)` pairs, hence two distinct init flows. The second
+> init's session OVERWRITES `~/.agentkeys/master/session.json` — that's
+> fine; we've already captured `OMNI_A` / `ADDR_A` into shell vars
+> above, and the §4 isolation proof uses each session in turn (not
+> simultaneously).
+>
+> **macOS Keychain prompts during `agentkeys` calls?** The CLI defaults
+> to `KeyringMode::Auto` — Keychain first, file fallback. On a fresh
+> machine that's fine, but if you've run earlier dev cycles the
+> Keychain can hold a stale entry that returns
+> `SIGNER_UNAUTHORIZED: invalid session JWT: InvalidToken` from
+> `agentkeys signer derive` even while the file at
+> `~/.agentkeys/master/session.json` is fresh and valid. The fix is
+> to force file mode for the entire demo:
+> ```bash
+> export AGENTKEYS_SESSION_STORE=file
+> # (or just `set -a; source scripts/operator-workstation.env; set +a`
+> # — the env file sets this for you.)
+> ```
+> Verify with a raw curl against the signer using the file's JWT — if
+> that succeeds while the CLI fails, your Keychain definitely has a
+> stale entry:
+> ```bash
+> JWT=$(jq -r .token ~/.agentkeys/master/session.json)
+> curl -sS -H "Authorization: Bearer $JWT" -H 'content-type: application/json' \
+>   -d "$(jq -n --arg o "$OMNI_A" '{omni_account: $o}')" \
+>   "$AGENTKEYS_SIGNER_URL/dev/derive-address" | jq .
+> # → {"address":"0x...","key_version":1} means JWT + signer wire are good;
+> #    only the CLI's Keychain read is broken.
+> ```
 
 `ADDR_A` and `ADDR_B` are 0x-prefixed 40-char lowercase hex EVM
 addresses. They're stable across daemon reinstalls as long as the
