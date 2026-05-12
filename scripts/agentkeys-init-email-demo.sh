@@ -78,6 +78,21 @@ require jq
 require curl
 require agentkeys
 
+# ─── Preflight: agentkeys binary must support --session-id (added 2026-05-12) ─
+# The script ONLY works when the on-PATH `agentkeys` binary knows about the
+# top-level --session-id flag — otherwise AGENTKEYS_SESSION_ID is silently
+# ignored, the session lands under ~/.agentkeys/master/ regardless of what
+# --session-id you passed, and demo-show.sh later fails with "no session file
+# at ~/.agentkeys/<your-id>/session.json".
+#
+# Fail loud + tell the operator EXACTLY what to run to get a fresh binary.
+if ! agentkeys --help 2>&1 | grep -q -- "--session-id"; then
+  die "stale 'agentkeys' binary at $(command -v agentkeys) — missing --session-id flag.
+   Rebuild + reinstall from this worktree:
+     cargo install --path crates/agentkeys-cli --force
+   then re-run this script. (Verify with: agentkeys --help | grep session-id)"
+fi
+
 # ─── Argument parsing: --session-id <id> + optional positional recipient ─────
 SESSION_ID="${AGENTKEYS_SESSION_ID:-master}"
 positional=()

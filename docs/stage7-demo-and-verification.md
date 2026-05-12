@@ -203,6 +203,15 @@ hash -r                                    # zsh: forget cached lookups
 command -v agentkeys                       # → /Users/<you>/.local/bin/agentkeys
 agentkeys --version
 agentkeys signer --help                    # confirms the signer subcommand exists
+
+# 6. Capability check — the binary MUST be new enough to expose
+#    --session-id (added 2026-05-12). Without it, AGENTKEYS_SESSION_ID
+#    is silently ignored by `init-email-demo.sh --session-id alice` and
+#    the session lands at ~/.agentkeys/master/session.json regardless,
+#    breaking the §4 two-session isolation proof and `demo-show.sh`.
+agentkeys --help | grep -q -- "--session-id" \
+  && echo "session-id flag present (multi-tenant supported)" \
+  || { echo "STALE BINARY — re-run steps 3-4. Probable cause: skipped 'cargo build' after pulling latest evm."; exit 1; }
 ```
 
 > **If `command -v agentkeys` still prints `agentkeys: aliased to …`,**

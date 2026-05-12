@@ -91,6 +91,8 @@ SIGNER_NOTE=""
 if [[ "$DO_DERIVE" -eq 1 ]]; then
   if ! command -v agentkeys >/dev/null 2>&1; then
     SIGNER_NOTE="(agentkeys CLI not on PATH — skipped)"
+  elif ! agentkeys --help 2>&1 | grep -q -- "--session-id"; then
+    SIGNER_NOTE="(stale 'agentkeys' binary at $(command -v agentkeys) — missing --session-id flag; rebuild with: cargo install --path crates/agentkeys-cli --force)"
   elif [[ -z "${AGENTKEYS_SIGNER_URL:-}" && -z "${BACKEND_URL:-}" ]]; then
     SIGNER_NOTE="(AGENTKEYS_SIGNER_URL unset — source operator-workstation.env to enable)"
   else
