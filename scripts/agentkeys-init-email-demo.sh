@@ -86,11 +86,29 @@ require agentkeys
 # at ~/.agentkeys/<your-id>/session.json".
 #
 # Fail loud + tell the operator EXACTLY what to run to get a fresh binary.
+# NOTE: `cargo install --path crates/agentkeys-cli --force` installs to
+# ~/.cargo/bin/, but if ~/.local/bin/ comes EARLIER in $PATH (the §0
+# default), the stale ~/.local/bin/agentkeys still shadows the new one
+# even after a successful cargo install. Use the helper script instead —
+# it installs to ~/.local/bin/ directly (overwriting the shadowing
+# binary in place) and runs the same capability check this preflight
+# does, so a green exit there means this preflight will also pass.
 if ! agentkeys --help 2>&1 | grep -q -- "--session-id"; then
-  die "stale 'agentkeys' binary at $(command -v agentkeys) — missing --session-id flag.
-   Rebuild + reinstall from this worktree:
-     cargo install --path crates/agentkeys-cli --force
-   then re-run this script. (Verify with: agentkeys --help | grep session-id)"
+  resolved="$(command -v agentkeys)"
+  cargo_bin="$HOME/.cargo/bin/agentkeys"
+  shadow_msg=""
+  if [[ "$resolved" != "$cargo_bin" && -x "$cargo_bin" ]]; then
+    if "$cargo_bin" --help 2>&1 | grep -q -- "--session-id"; then
+      shadow_msg="
+   Heads-up: a FRESH agentkeys at $cargo_bin already has --session-id, but
+   $resolved is shadowing it because $(dirname "$resolved") comes earlier
+   in \$PATH. The install script overwrites $resolved with the new binary."
+    fi
+  fi
+  die "stale 'agentkeys' binary at $resolved — missing --session-id flag.
+   Rebuild + reinstall (idempotent — safe to re-run on every git pull):
+     bash scripts/install-agentkeys-cli.sh
+   then re-run this script. (Verify with: agentkeys --help | grep session-id)${shadow_msg}"
 fi
 
 # ─── Argument parsing: --session-id <id> + optional positional recipient ─────
@@ -114,6 +132,14 @@ set -- "${positional[@]:-}"
 export AGENTKEYS_SESSION_ID="$SESSION_ID"
 
 # ─── Recipient selection ─────────────────────────────────────────────────────
+# Precedence: $RECIPIENT > positional arg > $SESSION_ID-derived > demo-N rotation.
+#
+# The session-id-derived path is critical for "different sessions must produce
+# different wallets". HKDF(K3, identity_omni) is deterministic — same omni in,
+# same wallet out. identity_omni = SHA256("agentkeys"||type||value), so identical
+# recipients map to identical wallets across runs. The legacy demo-1/demo-2
+# rotation (last fallback) collided on back-to-back runs that hit the same epoch
+# parity, breaking the §4 two-actor isolation proof.
 if [[ -n "${RECIPIENT:-}" ]]; then
   recipient="$RECIPIENT"
 elif [[ $# -ge 1 && -n "${1:-}" ]]; then
@@ -121,10 +147,15 @@ elif [[ $# -ge 1 && -n "${1:-}" ]]; then
     *@*) recipient="$1" ;;
     *)   recipient="$1@$MAIL_DOMAIN" ;;
   esac
+elif [[ "$SESSION_ID" != "master" ]]; then
+  # Each --session-id gets a unique recipient deterministically. Two runs
+  # `--session-id alice` + `--session-id bob` are GUARANTEED to produce
+  # different wallets, no rotation guesswork.
+  recipient="$SESSION_ID@$MAIL_DOMAIN"
 else
-  # Rotate demo-1 / demo-2 by parity of unix-epoch seconds. Keeps the
-  # set bounded (2 addresses, easy to monitor in S3) without collisions
-  # on back-to-back runs.
+  # Legacy default path (no --session-id, no positional, no $RECIPIENT).
+  # Kept for back-compat with pre-multi-tenant doc snippets that just
+  # called the script bare. Rotates demo-1 / demo-2 by epoch parity.
   if (( $(date +%s) % 2 == 0 )); then
     recipient="demo-1@$MAIL_DOMAIN"
   else
@@ -132,10 +163,19 @@ else
   fi
 fi
 
-log "Session id  : $SESSION_ID                  (writes ~/.agentkeys/$SESSION_ID/session.json)"
-log "Recipient   : $recipient"
-log "Broker URL  : $OIDC_ISSUER"
-log "Mail bucket : $MAIL_BUCKET"
+# Show the SHA256 inputs inline so the operator can reproduce the math.
+# identity_type for the magic-link flow is "email"; identity_value is the
+# lowercased recipient. The broker mints the FIRST JWT with this omni;
+# post-SIWE the FINAL JWT carries the evm actor omni instead (see §0.3).
+identity_omni_email=$(printf 'agentkeysemail%s' "$(printf '%s' "$recipient" | tr '[:upper:]' '[:lower:]')" \
+                       | shasum -a 256 | awk '{print $1}')
+
+log "Session id   : $SESSION_ID                  (writes ~/.agentkeys/$SESSION_ID/session.json)"
+log "Recipient    : $recipient"
+log "  identity_omni (email) = $identity_omni_email"
+log "  = SHA256(\"agentkeys\" || \"email\" || \"$(printf '%s' "$recipient" | tr '[:upper:]' '[:lower:]')\")"
+log "Broker URL   : $OIDC_ISSUER"
+log "Mail bucket  : $MAIL_BUCKET"
 
 # ─── Preflight: AWS caller identity (admin profile required for ListBucket) ─
 caller_arn=$(aws sts get-caller-identity --query 'Arn' --output text 2>&1) \

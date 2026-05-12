@@ -35,11 +35,24 @@ set -euo pipefail
 SESSION_ID="${AGENTKEYS_SESSION_ID:-master}"
 DO_DERIVE=1
 JSON_OUTPUT=0
+EXPORT_PREFIX=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-derive) DO_DERIVE=0; shift ;;
     --json)      JSON_OUTPUT=1; shift ;;
+    --export)
+      # --export <prefix> emits eval-able VAR=value lines so the doc /
+      # an operator script can capture all six fields in one `eval $(...)`.
+      # Prefix is uppercased + suffixed with _ — e.g. --export A emits
+      # OMNI_A=… ADDR_A=… MASTER_WALLET_A=… IDENTITY_TYPE_A=… IDENTITY_VALUE_A=…
+      [[ $# -lt 2 ]] && { printf -- '--export requires a prefix label\n' >&2; exit 2; }
+      EXPORT_PREFIX="$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')"
+      DO_DERIVE=1     # caller wants ADDR — force derive
+      shift 2 ;;
+    --export=*)
+      EXPORT_PREFIX="$(printf '%s' "${1#*=}" | tr '[:lower:]' '[:upper:]')"
+      DO_DERIVE=1; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -92,7 +105,7 @@ if [[ "$DO_DERIVE" -eq 1 ]]; then
   if ! command -v agentkeys >/dev/null 2>&1; then
     SIGNER_NOTE="(agentkeys CLI not on PATH — skipped)"
   elif ! agentkeys --help 2>&1 | grep -q -- "--session-id"; then
-    SIGNER_NOTE="(stale 'agentkeys' binary at $(command -v agentkeys) — missing --session-id flag; rebuild with: cargo install --path crates/agentkeys-cli --force)"
+    SIGNER_NOTE="(stale 'agentkeys' at $(command -v agentkeys) — missing --session-id flag; rebuild with: bash scripts/install-agentkeys-cli.sh)"
   elif [[ -z "${AGENTKEYS_SIGNER_URL:-}" && -z "${BACKEND_URL:-}" ]]; then
     SIGNER_NOTE="(AGENTKEYS_SIGNER_URL unset — source operator-workstation.env to enable)"
   else
@@ -106,6 +119,24 @@ if [[ "$DO_DERIVE" -eq 1 ]]; then
       [[ -z "$SIGNER_DERIVE_ADDR" ]] && SIGNER_NOTE="(could not parse address from derive response: $derive_json)"
     fi
   fi
+fi
+
+if [[ -n "$EXPORT_PREFIX" ]]; then
+  # Emit eval-able shell assignments. q-escape values so they survive
+  # `eval` even if they contain unexpected chars (none of these fields
+  # should, but defensive — JWT bodies are operator-controlled).
+  q() { printf '%q' "$1"; }
+  printf 'SESSION_ID_%s=%s\n'     "$EXPORT_PREFIX" "$(q "$SESSION_ID")"
+  printf 'OMNI_%s=%s\n'           "$EXPORT_PREFIX" "$(q "$ACTOR_OMNI")"
+  printf 'ADDR_%s=%s\n'           "$EXPORT_PREFIX" "$(q "$SIGNER_DERIVE_ADDR")"
+  printf 'MASTER_WALLET_%s=%s\n'  "$EXPORT_PREFIX" "$(q "$MASTER_WALLET")"
+  printf 'IDENTITY_TYPE_%s=%s\n'  "$EXPORT_PREFIX" "$(q "$IDENTITY_TYPE")"
+  printf 'IDENTITY_VALUE_%s=%s\n' "$EXPORT_PREFIX" "$(q "$IDENTITY_VALUE")"
+  printf 'IDENTITY_OMNI_%s=%s\n'  "$EXPORT_PREFIX" "$(q "$IDENTITY_OMNI")"
+  if [[ -n "$SIGNER_NOTE" && -z "$SIGNER_DERIVE_ADDR" ]]; then
+    printf 'echo %s >&2\n' "$(q "[demo-show:$SESSION_ID] derive skipped: $SIGNER_NOTE")"
+  fi
+  exit 0
 fi
 
 if [[ "$JSON_OUTPUT" -eq 1 ]]; then
@@ -148,11 +179,15 @@ echo
 cyan  "── identity (transient — what the human authenticated as) ──"; echo
 bold "  type          "; echo ": $IDENTITY_TYPE"
 bold "  value         "; echo ": $IDENTITY_VALUE"
-bold "  identity_omni "; printf ': %s  ' "$IDENTITY_OMNI"; dim '(SHA256("agentkeys"||type||value); not in JWT post-SIWE)'; echo
+bold "  identity_omni "; echo ": $IDENTITY_OMNI"
+dim   "    = SHA256(\"agentkeys\" || \"$IDENTITY_TYPE\" || \"$IDENTITY_VALUE\")"; echo
+dim   "    (computed locally; NOT present in the post-SIWE JWT — see §0.3)"; echo
 echo
 cyan  "── actor (durable — what AWS / signer / audit see) ──"; echo
-bold "  actor_omni    "; printf ': %s  ' "$ACTOR_OMNI"; dim '(JWT.agentkeys.omni_account)'; echo
-bold "  master_wallet "; printf ': %s  ' "$MASTER_WALLET"; dim '(JWT.agentkeys.wallet_address — THIS is the S3-prefix wallet)'; echo
+bold "  actor_omni    "; echo ": $ACTOR_OMNI"
+dim   "    (= JWT.agentkeys.omni_account)"; echo
+bold "  master_wallet "; echo ": $MASTER_WALLET"
+dim   "    (= JWT.agentkeys.wallet_address — the wallet linked at init; audit only)"; echo
 echo
 cyan  "── signer-wire smoke test (NOT used for AWS) ──"; echo
 if [[ -n "$SIGNER_DERIVE_ADDR" ]]; then

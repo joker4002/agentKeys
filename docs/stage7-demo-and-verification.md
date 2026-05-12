@@ -556,7 +556,7 @@ Three distinct wallets show up in this demo. Keep them straight:
 |------------------|------------------------------------|-----------------------------------------|-----------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
 | `MASTER_WALLET`  | `identity_omni_email` (transient)  | K4 = HKDF(K3, identity_omni_email)      | `agentkeys init` step 3 (`/dev/derive-address` w/ id-omni JWT)  | The wallet the broker linked + SIWE-verified at init. Stored in JWT as `wallet_address`. **Never re-used in §2–§4** — it lives in the JWT only as audit evidence of "this actor's first-ever wallet". |
 | `ADDR` (= `W2`)  | `actor_omni` (durable, in JWT)     | K4' = HKDF(K3, actor_omni)              | §0.4 below, via `signer derive --omni-account $OMNI`             | A *second* K4 derivation, available post-init because the signer accepts any omni that matches the JWT. §2's SIWE round-trip uses this; §4's S3 isolation proof tags traffic with this (via §2.3's freshly-minted OIDC JWT). |
-| `identity_omni`  | n/a — input only                   | SHA256("agentkeys"\|\|"email"\|\|email) | broker `/v1/auth/email/verify`                                  | Transient handle; gone from the JWT after the SIWE round-trip at init. The demo never references it again post-init. |
+| `identity_omni`  | n/a — input only                   | SHA256("agentkeys"\|\|identity_type\|\|identity_value) | broker `/v1/auth/email/verify`                                  | Transient handle; gone from the JWT after the SIWE round-trip at init. The demo never references it again post-init. |
 
 **Why two K4 wallets (one per omni)?** The signer's `/dev/derive-address`
 is a pure function of `(K3, omni)` — same omni in, same wallet out. At
@@ -647,32 +647,53 @@ bash scripts/agentkeys-demo-show.sh bob
 
 #### Capture the (`OMNI`, `ADDR`) pair the §2 SIWE round-trip + §4 isolation proof use
 
+`agentkeys-demo-show.sh --export <label> <session-id>` emits eval-able
+shell assignments for the session — one line per field, prefixed with
+the label. Two `eval` calls give you both `(OMNI_A, ADDR_A, …)` and
+`(OMNI_B, ADDR_B, …)` ready for §2 onwards. Idempotent: the script
+reads from disk + calls signer-derive deterministically, so re-running
+overwrites the same shell vars with the same values.
+
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# Extract actor_omni from the saved JWT, then derive ADDR = HKDF(K3, actor_omni)
-# at the signer. `agentkeys-demo-show.sh` does both in one shot and prints them
-# alongside MASTER_WALLET (= JWT.wallet_address from init) for cross-reference.
-SHOW_A=$(bash scripts/agentkeys-demo-show.sh --json alice)
-SHOW_B=$(bash scripts/agentkeys-demo-show.sh --json bob)
+eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"
+eval "$(bash scripts/agentkeys-demo-show.sh --export B bob)"
 
-OMNI_A=$(printf '%s' "$SHOW_A" | jq -r '.actor.omni')
-ADDR_A=$(printf '%s' "$SHOW_A" | jq -r '.signer_derive.address')
-MASTER_WALLET_A=$(printf '%s' "$SHOW_A" | jq -r '.actor.master_wallet')
-
-OMNI_B=$(printf '%s' "$SHOW_B" | jq -r '.actor.omni')
-ADDR_B=$(printf '%s' "$SHOW_B" | jq -r '.signer_derive.address')
-MASTER_WALLET_B=$(printf '%s' "$SHOW_B" | jq -r '.actor.master_wallet')
+# Exported (per label, here A): SESSION_ID_A, OMNI_A, ADDR_A,
+#   MASTER_WALLET_A, IDENTITY_TYPE_A, IDENTITY_VALUE_A, IDENTITY_OMNI_A
+# (`MASTER_WALLET_A` = JWT.wallet_address from init — audit only;
+#  `ADDR_A`          = HKDF(K3, OMNI_A) — what §2/§4 uses;
+#  `IDENTITY_OMNI_A` = SHA256("agentkeys"||IDENTITY_TYPE_A||IDENTITY_VALUE_A)
+#                      — recomputed locally; not in JWT post-SIWE).
 
 echo "OMNI_A=$OMNI_A"
+echo "  IDENTITY_OMNI_A  = $IDENTITY_OMNI_A    = SHA256(\"agentkeys\"||\"$IDENTITY_TYPE_A\"||\"$IDENTITY_VALUE_A\")"
 echo "  ADDR_A           = $ADDR_A           (HKDF(K3, OMNI_A) — what §2/§4 uses)"
 echo "  MASTER_WALLET_A  = $MASTER_WALLET_A  (JWT.wallet_address from init — audit only)"
 echo "OMNI_B=$OMNI_B"
+echo "  IDENTITY_OMNI_B  = $IDENTITY_OMNI_B    = SHA256(\"agentkeys\"||\"$IDENTITY_TYPE_B\"||\"$IDENTITY_VALUE_B\")"
 echo "  ADDR_B           = $ADDR_B           (HKDF(K3, OMNI_B))"
 echo "  MASTER_WALLET_B  = $MASTER_WALLET_B  (JWT.wallet_address from init)"
 
-[[ "$OMNI_A" != "$OMNI_B" ]] && echo "omni split ok"   || echo "OMNI COLLISION — bug?"
-[[ "$ADDR_A" != "$ADDR_B" ]] && echo "wallet split ok" || echo "WALLET COLLISION — bug?"
+[[ "$OMNI_A"          != "$OMNI_B"          ]] && echo "actor-omni split ok"  || echo "OMNI COLLISION — bug?"
+[[ "$ADDR_A"          != "$ADDR_B"          ]] && echo "ADDR split ok"        || echo "ADDR COLLISION — bug?"
+[[ "$MASTER_WALLET_A" != "$MASTER_WALLET_B" ]] && echo "wallet split ok"      || echo "WALLET COLLISION — same identity_omni? Check recipient defaults: --session-id alice should yield alice@\$MAIL_DOMAIN, NOT a rotating demo-N."
 ```
+
+> **Symptom: `MASTER_WALLET_A == MASTER_WALLET_B` after two distinct
+> `--session-id` inits.** This means both inits hit the same recipient
+> email → same `identity_omni_email` → HKDF(K3, …) deterministically
+> returned the same wallet. The legacy bare-script default was an
+> epoch-parity demo-1/demo-2 rotation that collided on back-to-back
+> runs hitting the same parity. Since the 2026-05-13 fix, calling the
+> script with `--session-id <name>` defaults the recipient to
+> `<name>@$MAIL_DOMAIN`, which is guaranteed-unique per session-id. If
+> you see a collision today, either (a) you passed the same positional
+> recipient to both runs (`bash …-demo.sh --session-id alice demo-2`
+> twice), or (b) you set `$RECIPIENT` in your shell and it's overriding
+> both. The `init-email-demo.sh` log prints the recipient + the
+> computed `identity_omni (email)` line so the collision is visible
+> at-a-glance before the SES SendEmail fires.
 
 > **Why `--session-id` matters.** The signer's strict JWT-omni check
 > means each session JWT only authorizes `/dev/*` calls for ITS own
