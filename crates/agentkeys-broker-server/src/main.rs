@@ -217,9 +217,11 @@ async fn main() -> anyhow::Result<()> {
 /// Spawn the Tier-2 reachability probes that flip the AtomicBool flags
 /// on `Tier2State` as each external dependency becomes reachable.
 ///
-/// Phase 0 ships only the backend probe (the only Tier-2 check whose
-/// dependencies exist this early). SES + EVM probes land in Phase A.1
-/// and Phase C respectively, behind their feature gates.
+/// Currently spawns the backend probe (always) and, when email-link auth
+/// is compiled in and enabled, the SES sender-verify probe that also
+/// persists `SesVerifyCache` to disk so the email-link plug-in's
+/// `Readiness::ready()` flips from `Degraded` to `Ready`. The EVM probe
+/// lands in Phase C.
 fn spawn_tier2_probes(
     state: Arc<AppState>,
     profile: agentkeys_broker_server::boot::Tier2Profile,
@@ -254,6 +256,87 @@ fn spawn_tier2_probes(
                     "Tier-2 backend probe: unreachable; /readyz will return 503 until reachable"
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            }
+        }
+    });
+
+    #[cfg(feature = "auth-email-link")]
+    if profile.email_link_enabled {
+        spawn_ses_verify_probe(Arc::clone(&state), strict);
+    }
+}
+
+/// SES sender-verify probe. Calls `verify_sender_ready()` on the
+/// configured `EmailSender`, persists `SesVerifyCache` on success so the
+/// plug-in's `Readiness` flips to `Ready`, and flips the `tier2/ses`
+/// `AtomicBool`. Retries with exponential backoff on failure (capped at
+/// 5 minutes); after a success, re-verifies every 12h so the cache stays
+/// under the plug-in's 24h freshness TTL.
+#[cfg(feature = "auth-email-link")]
+fn spawn_ses_verify_probe(state: Arc<AppState>, strict: bool) {
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use agentkeys_broker_server::plugins::auth::SesVerifyCache;
+
+    let Some(email_link) = state.email_link.clone() else {
+        tracing::error!(
+            "Tier-2 SES probe: email_link is in BROKER_AUTH_METHODS but the \
+             concrete plug-in handle is missing from AppState — /readyz will \
+             stay degraded. Indicates a build/config bug."
+        );
+        return;
+    };
+
+    tokio::spawn(async move {
+        let mut backoff_seconds: u64 = 30;
+        loop {
+            match email_link.sender.verify_sender_ready().await {
+                Ok(()) => {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let cache = SesVerifyCache {
+                        last_verified_at: now,
+                        sender_email: email_link.from_address.clone(),
+                    };
+                    match cache.save(&email_link.ses_verify_cache_path) {
+                        Ok(()) => {
+                            state.tier2.ses_verified.store(true, Ordering::Relaxed);
+                            tracing::info!(
+                                sender = %email_link.from_address,
+                                path = %email_link.ses_verify_cache_path.display(),
+                                "Tier-2 SES probe: sender verified; cache persisted"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                path = %email_link.ses_verify_cache_path.display(),
+                                "Tier-2 SES probe: verify succeeded but cache save failed; auth/email_link readiness will stay degraded"
+                            );
+                        }
+                    }
+                    backoff_seconds = 30;
+                    tokio::time::sleep(std::time::Duration::from_secs(12 * 3600)).await;
+                }
+                Err(e) => {
+                    if strict {
+                        tracing::error!(
+                            error = %e,
+                            "BROKER_REFUSE_TO_BOOT_STRICT=true and SES sender verify failed; exiting"
+                        );
+                        std::process::exit(1);
+                    }
+                    tracing::warn!(
+                        error = %e,
+                        retry_seconds = backoff_seconds,
+                        "Tier-2 SES probe: sender verify failed; /readyz will report unready until verified"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_seconds)).await;
+                    backoff_seconds = (backoff_seconds * 2).min(300);
+                }
             }
         }
     });
