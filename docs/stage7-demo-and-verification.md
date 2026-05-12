@@ -430,10 +430,10 @@ working is one `--email` round-trip.
 >    with its OWN instance-profile creds — NOT via the assumed
 >    `agentkeys-data-role` — so the SES grant must live on the
 >    broker's own role. The IAM action is `ses:SendEmail` (sesv2), NOT
->    `ses:SendRawEmail` (v1 only). The role name varies by deployment
->    (a fresh setup per `cloud-setup.md` §3.4 uses `agentkeys-broker-host`;
->    legacy deploys may use an ad-hoc name like `S3-full-access`),
->    so discover it first:
+>    `ses:SendRawEmail` (v1 only). The canonical role is
+>    `agentkeys-broker-host` (per `cloud-setup.md` §3.4); the discovery
+>    snippet below stays intact in case the operator landed on a
+>    different ad-hoc name during early provisioning. Find it:
 >    ```bash
 >    # REQUIRED: admin profile + operator env loaded.
 >    awsp agentkeys-admin

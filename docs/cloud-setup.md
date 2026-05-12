@@ -284,9 +284,11 @@ The IAM action is `ses:SendEmail` (sesv2) — NOT `ses:SendRawEmail` (v1
 only; different code path the broker doesn't use).
 
 **Step 1: discover the actual role name attached to your broker host.**
-On a fresh setup following §3.4 above, this is `agentkeys-broker-host`.
-Existing/legacy deploys may use a different name (e.g. an ad-hoc
-`S3-full-access` from initial provisioning). Find it:
+The canonical name is `agentkeys-broker-host` (created by §3.4 above).
+The discovery command below stays as-is so the runbook is robust to
+operators who landed on a non-canonical name during early provisioning
+(historically: `S3-full-access`, fully retired 2026-05-12 via the role
+rename in [PR #75 follow-up](#)). Find it:
 
 ```bash
 # REQUIRED: admin profile + operator env loaded.
