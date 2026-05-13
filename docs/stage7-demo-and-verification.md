@@ -1196,8 +1196,8 @@ present — that's what makes the §4 isolation work:
 
 ```bash
 echo "$JWT_A" | cut -d. -f2 | tr '_-' '/+' \
-  | { read p; printf '%s=%.0s' "$p" $(seq 1 $(( (4 - ${#p} % 4) % 4 ))); } \
-  | base64 -d 2>/dev/null | jq '{aud, sub, tags: ."https://aws.amazon.com/tags"}'
+  | { read p; printf '%s%s' "$p" "$(printf '====' | head -c $(( (4 - ${#p} % 4) % 4 )))" | base64 -d 2>/dev/null; } \
+  | jq '{aud, sub, tags: ."https://aws.amazon.com/tags"}'
 # {
 #   "aud": "sts.amazonaws.com",
 #   "sub": "agentkeys:agent:0x…<ADDR_A>",
