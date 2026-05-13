@@ -1301,6 +1301,50 @@ bucket's system prefixes. The bucket policy from
 grants access conditioned on
 `bots/${aws:PrincipalTag/agentkeys_user_wallet}/*`.
 
+### 4.0 One-shot run: `agentkeys-isolation-demo.sh`
+
+This script is the executable form of §3 + §4.1–§4.3. It reads alice
++ bob's saved sessions (running `init-email-demo.sh` first if either
+isn't on disk), mints both OIDC JWTs, decodes `$WALLET_A` /
+`$WALLET_B` from the `agentkeys_user_wallet` claim, assumes the data
+role as alice, seeds `bots/$WALLET_A/` + `bots/$WALLET_B/` via admin,
+then asserts:
+
+- 4a: `list bots/$WALLET_A/` → success (alice's own prefix)
+- 4b: `get bots/$WALLET_B/hello.txt` → AccessDenied (bob's prefix)
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Prereqs: operator-workstation.env sourced; awsp agentkeys-admin (for the
+# seed step); bucket policy applied per cloud-setup.md §4.4; role inline
+# policy stripped per cloud-setup.md §4.4.1.
+bash scripts/agentkeys-isolation-demo.sh
+# ==> WALLET_A=0x…
+# ==> WALLET_B=0x…
+# ✓ alice reads bots/<WALLET_A>/ — allowed (expected)
+# ✓ alice DENIED on bots/<WALLET_B>/ — cloud-enforced isolation works
+# ✓ §4 isolation proof PASSED
+```
+
+Flags:
+
+- `--reinit-alice` / `--reinit-bob` / `--reinit-both` — force a fresh
+  init (replaces the on-disk session JWT) before the proof. Default
+  reuses existing sessions.
+
+Exit codes:
+
+- `0` proof passed
+- `1` precondition missing (env vars, tools, sessions)
+- `2` alice's own-prefix read failed (false-negative — check
+  cloud-setup.md §4.4 bucket policy + §4.4.1 role inline strip)
+- `3` bob's peer-prefix read succeeded (false-positive — **isolation
+  broken**, §4.4.1 wasn't applied so the role's broad `s3:GetObject`
+  overrides the bucket-policy PrincipalTag check)
+
+§4.1–§4.3 below are the same chain, broken into copy-paste steps for
+when you want to inspect each wire frame manually.
+
 ### 4.1 Assume the role with JWT_A
 
 ```bash
