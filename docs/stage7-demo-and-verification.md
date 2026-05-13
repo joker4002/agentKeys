@@ -584,116 +584,145 @@ after init.)
 
 #### Run two distinct sessions with `--session-id` (no overwrite)
 
+`init-email-demo.sh` is a fully-automated end-to-end demo: it sends a
+magic link via real SES, polls `s3://$MAIL_BUCKET/inbound/` for the
+arrival, extracts the broker landing URL, parses the `#t=<token>` URL
+fragment, and POSTs to `/v1/auth/email/verify` — replicating the
+browser-side JS in `/auth/email/landing`. Then it waits for the
+foreground `agentkeys init` to complete.
+
+The script honors a top-level `--session-id <name>` flag (and the
+`AGENTKEYS_SESSION_ID` env var). The agentkeys CLI threads this
+through to `session_store`, so the resulting JWT lands at
+`~/.agentkeys/<name>/session.json` instead of overwriting the default
+`~/.agentkeys/master/session.json`. Two back-to-back runs with distinct
+session-ids leave both sessions live — exactly what §4's two-actor
+isolation proof needs.
+
+When `--session-id <name>` is set AND no positional recipient or
+`$RECIPIENT` env override is in play, the script picks
+`<name>@$MAIL_DOMAIN` as the recipient. So `--session-id alice` sends
+the magic link to `alice@bots.litentry.org` and `--session-id bob` to
+`bob@bots.litentry.org`. The two recipients hash to two different
+`identity_omni`s, which `signer.derive(K3, omni)` deterministically
+maps to two different wallets — the §4 isolation proof can then
+exercise true cross-actor denial. Recipient precedence is
+`$RECIPIENT` env > positional arg > derived from `--session-id` >
+legacy `demo-1`/`demo-2` epoch-parity rotation (only when no
+session-id is set).
+
+Do not prefix `sudo` — the script is user-space (AWS APIs + the
+`agentkeys` CLI write to YOUR keychain/file, not root's), and `sudo`
+strips the env vars you sourced from `operator-workstation.env`.
+
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# RECOMMENDED: fully automated end-to-end demo using a verified
-# bots.litentry.org alias. Sends magic link via real SES, polls S3
-# inbound for arrival, extracts the broker landing URL, parses the
-# #t=<token> URL fragment, and POSTs to /v1/auth/email/verify
-# (replicates the browser-side JS in /auth/email/landing). Then waits
-# for `agentkeys init` to complete.
-#
-# Default rotates demo-1@bots.litentry.org / demo-2@bots.litentry.org
-# by parity of unix-epoch seconds (no collisions on consecutive runs).
-# Override with $RECIPIENT or a positional arg.
-#
-# --session-id <name> is the NEW multi-tenant knob: the script (and the
-# CLI) write to ~/.agentkeys/<name>/session.json instead of overwriting
-# ~/.agentkeys/master/session.json. Two back-to-back runs with distinct
-# session-ids leave BOTH sessions live, so the §4 isolation proof can
-# use the two sessions in turn without a third re-init.
-bash scripts/agentkeys-init-email-demo.sh --session-id alice  # → ~/.agentkeys/alice/, demo-1 or demo-2
-bash scripts/agentkeys-init-email-demo.sh --session-id bob    # → ~/.agentkeys/bob/,   the other demo-N
-# Do NOT prefix `sudo` — the script is user-space only (AWS APIs +
-# `agentkeys` CLI write to YOUR keychain, not root's), and sudo
-# strips the env vars you sourced from operator-workstation.env.
+bash scripts/agentkeys-init-email-demo.sh --session-id alice
+bash scripts/agentkeys-init-email-demo.sh --session-id bob
+```
 
-# MANUAL alternative: send to a real inbox you control, click the
-# link in your mail client. The CLI polls until the broker flips
-# status. Do NOT use undeliverable example.com / demo.example
-# addresses — the link goes into the void and the CLI polls forever.
+The first ~5 log lines surface the recipient and the SHA256 inputs:
+
+```
+==> Session id   : alice                  (writes ~/.agentkeys/alice/session.json)
+==> Recipient    : alice@bots.litentry.org
+==>   identity_omni (email) = dbcb6acda12532fa3838923534288dd89e32bbf9ad7d14e8ff191cf497bf8010
+==>   = SHA256("agentkeys" || "email" || "alice@bots.litentry.org")
+```
+
+so a recipient collision is diagnosable BEFORE SES SendEmail fires.
+
+For a real inbox you control instead of an `@bots.litentry.org` alias,
+override the recipient explicitly:
+
+```bash
 agentkeys --session-id alice init \
   --email <you>@<your-real-domain> \
   --broker-url $OIDC_ISSUER \
   --signer-url $BACKEND_URL
-# Initialized via email-link.
-#   identity omni: <64 hex>     ← email identity_omni (transient — gone after this line)
-#   derived wallet: 0x…         ← master_wallet = K4 = HKDF(K3, identity_omni_email)
-#   evm omni:      <64 hex>     ← actor_omni — what ends up in JWT.agentkeys.omni_account
 ```
 
-#### Inspect what landed (one command, rich output)
+`agentkeys init` prints the three init-time omnis on success
+(`identity omni`, `derived wallet`, `evm omni`). The `evm omni` is the
+durable `actor_omni` that lands in `JWT.agentkeys.omni_account`; the
+`identity omni` is transient and never persisted.
+
+#### Inspect what landed: `agentkeys-demo-show.sh` modes
+
+The helper reads `~/.agentkeys/<id>/session.json`, base64-decodes the
+JWT body, computes the locally-derivable fields (e.g. `identity_omni`),
+and emits one of three formats.
+
+| Mode                    | What it prints                                                                                                                                                                                              | Use when                                                                              |
+|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| (default — human)       | Color-coded report grouped under `identity` / `actor` / `signer-wire smoke test` / `JWT lifetime` headings. The `SHA256("agentkeys"\|\|type\|\|value)` formula prints under `identity_omni`.                | Eyeball check — "is the session healthy? what's the wallet? when does it expire?"     |
+| `--json`                | Same fields nested under `identity` / `actor` / `signer_derive` / `jwt`.                                                                                                                                    | Piping into `jq` or another script.                                                   |
+| `--export <PREFIX>`     | Eval-able `printf %q`-escaped assignments: `SESSION_ID_<P>=…`, `OMNI_<P>=…`, `ADDR_<P>=…`, `MASTER_WALLET_<P>=…`, `IDENTITY_TYPE_<P>=…`, `IDENTITY_VALUE_<P>=…`, `IDENTITY_OMNI_<P>=…`. Forces `--derive`.  | Capturing the seven fields into shell vars for §2/§4 (`eval "$(...)"`).               |
+
+Two flags adjust behavior across modes:
+
+- `--no-derive` skips the `signer derive` round-trip; the `ADDR` field
+  ends up empty. Useful when the signer is offline or you only need
+  JWT-side fields.
+- A positional `<session-id>` (default `master`) selects which
+  `~/.agentkeys/<id>/session.json` to read. `AGENTKEYS_SESSION_ID`
+  has the same effect.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# Prints actor_omni, master_wallet, identity, JWT TTL, AND fires a
-# signer-wire smoke test in one shot. Reads ~/.agentkeys/<id>/session.json.
 bash scripts/agentkeys-demo-show.sh alice
-bash scripts/agentkeys-demo-show.sh bob
-
-# Shape:
-#   ── identity (transient — what the human authenticated as) ──
-#     type          : evm                                       (post-SIWE)
-#     value         : 0x<master_wallet>
-#     identity_omni : <64 hex>                                  (recomputed locally)
-#   ── actor (durable — what AWS / signer / audit see) ──
-#     actor_omni    : <64 hex>      ← JWT.agentkeys.omni_account
-#     master_wallet : 0x<wallet>    ← JWT.agentkeys.wallet_address  (S3-prefix wallet)
-#   ── signer-wire smoke test (NOT used for AWS) ──
-#     derive(actor_omni): 0x<other> ← HKDF(K3, actor_omni); proves /dev wire works
-#   ── JWT lifetime ──
-#     ttl_remaining : NNNs remaining
+bash scripts/agentkeys-demo-show.sh --json bob | jq .actor.omni
+bash scripts/agentkeys-demo-show.sh --no-derive alice
 ```
 
-#### Capture the (`OMNI`, `ADDR`) pair the §2 SIWE round-trip + §4 isolation proof use
+#### Capture (`OMNI`, `ADDR`) pairs for §2 + §4 via `--export`
 
-`agentkeys-demo-show.sh --export <label> <session-id>` emits eval-able
-shell assignments for the session — one line per field, prefixed with
-the label. Two `eval` calls give you both `(OMNI_A, ADDR_A, …)` and
-`(OMNI_B, ADDR_B, …)` ready for §2 onwards. Idempotent: the script
-reads from disk + calls signer-derive deterministically, so re-running
-overwrites the same shell vars with the same values.
+`--export <PREFIX>` is the canonical way to feed §2's SIWE round-trip
+and §4's S3 isolation proof. Two `eval` calls populate the seven
+per-session vars for both A and B labels; the rest of the demo just
+references `$OMNI_A` / `$ADDR_A` / `$ADDR_B` etc. without re-decoding
+the JWT. Idempotent — the script reads the file + calls `signer derive`
+deterministically, so re-running overwrites the same shell vars with
+the same values.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
 eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"
 eval "$(bash scripts/agentkeys-demo-show.sh --export B bob)"
+```
 
-# Exported (per label, here A): SESSION_ID_A, OMNI_A, ADDR_A,
-#   MASTER_WALLET_A, IDENTITY_TYPE_A, IDENTITY_VALUE_A, IDENTITY_OMNI_A
-# (`MASTER_WALLET_A` = JWT.wallet_address from init — audit only;
-#  `ADDR_A`          = HKDF(K3, OMNI_A) — what §2/§4 uses;
-#  `IDENTITY_OMNI_A` = SHA256("agentkeys"||IDENTITY_TYPE_A||IDENTITY_VALUE_A)
-#                      — recomputed locally; not in JWT post-SIWE).
+Per-session vars (label `A` shown; `B` is symmetric):
 
-echo "OMNI_A=$OMNI_A"
-echo "  IDENTITY_OMNI_A  = $IDENTITY_OMNI_A    = SHA256(\"agentkeys\"||\"$IDENTITY_TYPE_A\"||\"$IDENTITY_VALUE_A\")"
-echo "  ADDR_A           = $ADDR_A           (HKDF(K3, OMNI_A) — what §2/§4 uses)"
-echo "  MASTER_WALLET_A  = $MASTER_WALLET_A  (JWT.wallet_address from init — audit only)"
-echo "OMNI_B=$OMNI_B"
-echo "  IDENTITY_OMNI_B  = $IDENTITY_OMNI_B    = SHA256(\"agentkeys\"||\"$IDENTITY_TYPE_B\"||\"$IDENTITY_VALUE_B\")"
-echo "  ADDR_B           = $ADDR_B           (HKDF(K3, OMNI_B))"
-echo "  MASTER_WALLET_B  = $MASTER_WALLET_B  (JWT.wallet_address from init)"
+| Var                | Source                                                                                  | Used by                                                                                              |
+|--------------------|-----------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
+| `SESSION_ID_A`     | The session-id the script was called with (`alice`).                                    | Routing follow-up `agentkeys --session-id` calls.                                                    |
+| `OMNI_A`           | `JWT.agentkeys.omni_account` — durable EVM actor omni.                                  | Every `/dev/*` call (signer's strict JWT check requires the request omni to match the JWT claim).    |
+| `ADDR_A`           | `signer.derive(OMNI_A) = HKDF(K3, OMNI_A)`.                                             | §2's SIWE round-trip; §4's S3 isolation proof tags traffic with this via §2.3's freshly-minted JWT.  |
+| `MASTER_WALLET_A`  | `JWT.agentkeys.wallet_address` from init — the wallet the broker linked + SIWE-verified at init. | Audit only post-init; not used by §2 or §4.                                                          |
+| `IDENTITY_TYPE_A`  | `JWT.agentkeys.identity_type` — `"evm"` post-SIWE for the email-link flow.              | The `omni()` helper in §0.3 + the SHA256 cross-check.                                                |
+| `IDENTITY_VALUE_A` | `JWT.agentkeys.identity_value` — same as `MASTER_WALLET_A` post-SIWE.                   | Same.                                                                                                |
+| `IDENTITY_OMNI_A`  | Locally recomputed `SHA256("agentkeys" \|\| IDENTITY_TYPE_A \|\| IDENTITY_VALUE_A)`.    | Cross-check — the JWT does NOT carry this post-SIWE.                                                 |
 
-[[ "$OMNI_A"          != "$OMNI_B"          ]] && echo "actor-omni split ok"  || echo "OMNI COLLISION — bug?"
-[[ "$ADDR_A"          != "$ADDR_B"          ]] && echo "ADDR split ok"        || echo "ADDR COLLISION — bug?"
-[[ "$MASTER_WALLET_A" != "$MASTER_WALLET_B" ]] && echo "wallet split ok"      || echo "WALLET COLLISION — same identity_omni? Check recipient defaults: --session-id alice should yield alice@\$MAIL_DOMAIN, NOT a rotating demo-N."
+Sanity-check both sessions are distinct (any of these failing means
+the recipient defaults collided — see the callout below):
+
+```bash
+[[ "$OMNI_A"          != "$OMNI_B"          ]] && echo "actor-omni split ok"
+[[ "$ADDR_A"          != "$ADDR_B"          ]] && echo "ADDR split ok"
+[[ "$MASTER_WALLET_A" != "$MASTER_WALLET_B" ]] && echo "wallet split ok"
 ```
 
 > **Symptom: `MASTER_WALLET_A == MASTER_WALLET_B` after two distinct
-> `--session-id` inits.** This means both inits hit the same recipient
-> email → same `identity_omni_email` → HKDF(K3, …) deterministically
-> returned the same wallet. The legacy bare-script default was an
-> epoch-parity demo-1/demo-2 rotation that collided on back-to-back
-> runs hitting the same parity. Since the 2026-05-13 fix, calling the
-> script with `--session-id <name>` defaults the recipient to
-> `<name>@$MAIL_DOMAIN`, which is guaranteed-unique per session-id. If
-> you see a collision today, either (a) you passed the same positional
-> recipient to both runs (`bash …-demo.sh --session-id alice demo-2`
-> twice), or (b) you set `$RECIPIENT` in your shell and it's overriding
-> both. The `init-email-demo.sh` log prints the recipient + the
-> computed `identity_omni (email)` line so the collision is visible
-> at-a-glance before the SES SendEmail fires.
+> `--session-id` inits.** Both inits hit the same recipient email,
+> producing the same `identity_omni_email`, and HKDF(K3, …)
+> deterministically returned the same wallet. Since the 2026-05-13
+> fix, calling `init-email-demo.sh --session-id <name>` defaults the
+> recipient to `<name>@$MAIL_DOMAIN`, which is guaranteed-unique per
+> session-id. If you see a collision today: (a) you passed the same
+> positional recipient to both runs (`--session-id alice demo-2`
+> twice), or (b) you set `$RECIPIENT` in your shell and it's
+> overriding both. The script's recipient + `identity_omni (email)`
+> log lines make the collision visible BEFORE SES SendEmail fires.
 
 > **Why `--session-id` matters.** The signer's strict JWT-omni check
 > means each session JWT only authorizes `/dev/*` calls for ITS own
@@ -703,7 +732,7 @@ echo "  MASTER_WALLET_B  = $MASTER_WALLET_B  (JWT.wallet_address from init)"
 > `--session-id bob` the two sessions live side by side and §4 can
 > drive each in turn (`agentkeys --session-id alice ...` vs
 > `--session-id bob ...`).
->
+
 > **Why `ADDR_A` is `signer derive(OMNI_A)` and NOT `JWT.wallet_address`.**
 > §2.2 below calls `agentkeys signer sign --omni-account $OMNI_A` and
 > ecrecover on the resulting signature recovers to `HKDF(K3, OMNI_A)` —
@@ -717,7 +746,7 @@ echo "  MASTER_WALLET_B  = $MASTER_WALLET_B  (JWT.wallet_address from init)"
 > only matters if you skip §2 entirely and mint OIDC directly from the
 > init JWT — see the "Which one does AWS see?" paragraph above for the
 > mechanical explanation.
->
+
 > **macOS Keychain prompts during `agentkeys` calls?** The CLI defaults
 > to `KeyringMode::Auto` — Keychain first, file fallback. On a fresh
 > machine that's fine, but if you've run earlier dev cycles the
@@ -728,20 +757,19 @@ echo "  MASTER_WALLET_B  = $MASTER_WALLET_B  (JWT.wallet_address from init)"
 > for the entire demo:
 > ```bash
 > export AGENTKEYS_SESSION_STORE=file
-> # (or just `set -a; source scripts/operator-workstation.env; set +a`
-> # — the env file sets this for you.)
 > ```
-> Verify with a raw curl against the signer using the file's JWT — if
-> that succeeds while the CLI fails, your Keychain definitely has a
-> stale entry:
+> `operator-workstation.env` sets this for you when you `set -a;
+> source` it. Verify with a raw curl using the file's JWT — if that
+> succeeds while the CLI fails, your Keychain definitely has a stale
+> entry:
 > ```bash
 > JWT=$(jq -r .token ~/.agentkeys/alice/session.json)
 > curl -sS -H "Authorization: Bearer $JWT" -H 'content-type: application/json' \
 >   -d "$(jq -n --arg o "$OMNI_A" '{omni_account: $o}')" \
 >   "$AGENTKEYS_SIGNER_URL/dev/derive-address" | jq .
-> # → {"address":"0x...","key_version":1} means JWT + signer wire are good;
-> #    only the CLI's Keychain read is broken.
 > ```
+> A `{"address":"0x...","key_version":1}` response means the JWT and
+> signer wire are good and only the CLI's Keychain read is broken.
 
 `ADDR_A` and `ADDR_B` are 0x-prefixed 40-char lowercase hex EVM
 addresses. They're stable across daemon reinstalls as long as the K3
