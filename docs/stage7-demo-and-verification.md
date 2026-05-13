@@ -546,54 +546,68 @@ working is one `--email` round-trip.
 >    `bash -x scripts/setup-broker-host.sh 2>&1 | grep -E "cargo|features"`
 >    and file an issue with the output.
 
-#### Key topology in the saved session JWT (cross-link to `architecture.md` §3 + §4)
+#### Key topology in the saved session JWT (cross-link to `architecture.md` §3 + §3a + §4)
 
 Before you run any derive call, it pays to know what `agentkeys init`
 actually wrote to disk and which of the THREE wallets the rest of the
-demo refers to. Names below match
-[`architecture.md` §4](spec/architecture.md#4-identity-model) (`identity
-omni` vs `actor omni`) and §3 (`K3` = signer master secret, `K4` =
-per-actor derived wallet).
+demo refers to. The shell-var spellings (`OMNI_A`, `ADDR_A`,
+`MASTER_WALLET_A`) are local to this demo; the **arch.md canonical
+names** in the table below are the source-of-truth spellings used in
+[`architecture.md` §3a Canonical names](spec/architecture.md#3a-canonical-names-one-concept-one-canonical-spelling)
+and in the broker / CLI source. Any future doc / runbook / commit
+should use the arch.md spellings; this demo keeps the `_A` / `_B`
+shell vars because they're embedded across §0.4–§4 + scripts.
 
 ```
-session.json → JWT claims:
+session.json → JWT claims (arch.md K6 = session JWT, §3 row K4 = per-actor wallet):
   agentkeys.identity_type   = "evm"                ← always "evm" in the FINAL JWT (even for --email init)
-  agentkeys.identity_value  = 0x<MASTER_WALLET>    ← the SIWE-verified wallet (== wallet_address below)
-  agentkeys.omni_account    = SHA256("agentkeys"||"evm"||lower(MASTER_WALLET))   ← ACTOR omni
-  agentkeys.wallet_address  = 0x<MASTER_WALLET>    ← master wallet from init (K4 = HKDF(K3, identity_omni_email))
+  agentkeys.identity_value  = 0x<master_wallet>    ← the SIWE-verified wallet (== wallet_address below)
+  agentkeys.omni_account    = SHA256("agentkeys"||"evm"||lower(master_wallet))   ← arch.md actor_omni
+  agentkeys.wallet_address  = 0x<master_wallet>    ← arch.md master_wallet (K4 = HKDF(K3, identity_omni_email))
 ```
 
-Three distinct wallets show up in this demo. Keep them straight:
+| Demo shell var (this guide) | arch.md §3a canonical name      | Derivation                                              | First minted at                                                 | Used for                                                                                                            |
+|-----------------------------|---------------------------------|---------------------------------------------------------|-----------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| `MASTER_WALLET` / `MASTER_WALLET_A` | `master_wallet`           | K4 = HKDF(K3, `identity_omni`) where `identity_omni = SHA256("agentkeys" \|\| identity_type \|\| identity_value)` at init time | `agentkeys init` step 3 (`/dev/derive-address` w/ id-omni JWT)  | The wallet the broker linked + SIWE-verified at init. Stored in the post-init JWT as `wallet_address`. `agentkeys whoami` prints this under the label `session_wallet:`. If you skip §2 and mint OIDC from the init JWT directly, this is the wallet AWS sees in `agentkeys_user_wallet`. |
+| `ADDR` / `ADDR_A`           | `derived_address(actor_omni)`   | K4' = HKDF(K3, `actor_omni`) where `actor_omni = SHA256("agentkeys" \|\| "evm" \|\| master_wallet)`                            | §0.4 below, via `agentkeys signer derive --omni-account $OMNI`   | A *second* K4 instance, recomputed on demand. §2's SIWE round-trip uses it; §2.3 mints a FRESH session JWT with `wallet_address=ADDR_A`, and §3/§4 mints OIDC from THAT JWT — so for the §2 manual path, this is what AWS sees in `agentkeys_user_wallet`. Never persisted on disk. |
+| `OMNI` / `OMNI_A`           | `actor_omni`                    | `SHA256("agentkeys" \|\| "evm" \|\| master_wallet)`     | `agentkeys init` SIWE-verify response (`/v1/auth/wallet/verify`) | Every `/dev/*` call's `--omni-account`. The signer's strict JWT-omni check (issue #74 step 1b) rejects any call where this doesn't equal `JWT.agentkeys.omni_account`.  |
+| `IDENTITY_OMNI`             | `identity_omni`                 | `SHA256("agentkeys" \|\| identity_type \|\| identity_value)`                                                                    | broker `/v1/auth/email/verify` (transient)                       | Used internally by init between email-link → SIWE; gone from the JWT post-SIWE (when identity rebinds to `"evm"` + `master_wallet`). Recomputable locally for cross-check. |
 
-| Symbol           | Identity argument                  | Derivation                              | First minted at                                                 | Used for                                                                                                            |
-|------------------|------------------------------------|-----------------------------------------|-----------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `MASTER_WALLET`  | `identity_omni_email` (transient)  | K4 = HKDF(K3, identity_omni_email)      | `agentkeys init` step 3 (`/dev/derive-address` w/ id-omni JWT)  | The wallet the broker linked + SIWE-verified at init. Stored in JWT as `wallet_address`. **Never re-used in §2–§4** — it lives in the JWT only as audit evidence of "this actor's first-ever wallet". |
-| `ADDR` (= `W2`)  | `actor_omni` (durable, in JWT)     | K4' = HKDF(K3, actor_omni)              | §0.4 below, via `signer derive --omni-account $OMNI`             | A *second* K4 derivation, available post-init because the signer accepts any omni that matches the JWT. §2's SIWE round-trip uses this; §4's S3 isolation proof tags traffic with this (via §2.3's freshly-minted OIDC JWT). |
-| `identity_omni`  | n/a — input only                   | SHA256("agentkeys"\|\|identity_type\|\|identity_value) | broker `/v1/auth/email/verify`                                  | Transient handle; gone from the JWT after the SIWE round-trip at init. The demo never references it again post-init. |
-
-**Why two K4 wallets (one per omni)?** The signer's `/dev/derive-address`
-is a pure function of `(K3, omni)` — same omni in, same wallet out. At
-init the CLI calls derive with `identity_omni_email`, producing
-`MASTER_WALLET`. Post-init the operator's saved JWT carries
-`actor_omni` (≠ `identity_omni_email`), so any subsequent
+**Two K4 wallets, one per omni — why both exist.** The signer's
+`/dev/derive-address` is a pure function of `(K3, omni)` — same omni
+in, same wallet out. At init the CLI calls derive with
+`identity_omni`, producing `master_wallet`. Post-init the saved JWT
+carries `actor_omni` (≠ `identity_omni`), so any subsequent
 `signer derive` call against that JWT returns a *different* wallet —
-`ADDR` = HKDF(K3, actor_omni). Both wallets are real, signable, and
-deterministic. The choice of which to use for any given step is
-mechanical: §2 has to use `ADDR` because that's the only wallet the
-post-init JWT can authorize signing for (strict JWT-omni check per
-[issue #74 step 1b](https://github.com/litentry/agentKeys/issues/74)).
+`derived_address(actor_omni)`. Both are real, signable, deterministic.
+§2 has to use `derived_address(actor_omni)` because that's the only
+wallet the post-init JWT can authorize signing for (strict JWT-omni
+check rejects sign requests where `request.omni ≠ JWT.omni_account`).
 
-**Which one does AWS see?** Whatever wallet was in the session JWT used
-to mint the OIDC token —
-[`handlers/oidc.rs:106`](../crates/agentkeys-broker-server/src/handlers/oidc.rs#L106)
+**Which wallet ends up in AWS PrincipalTag?** Whatever wallet was the
+`wallet_address` claim of the session JWT used to mint the OIDC token.
+The broker (at
+[`handlers/oidc.rs:106`](../crates/agentkeys-broker-server/src/handlers/oidc.rs#L106))
 reads `session_claims.agentkeys.wallet_address` and stamps it into
-`aws.amazon.com/tags.principal_tags.agentkeys_user_wallet`. After §2.3
-the operator has a fresh session JWT minted with `wallet_address=ADDR`,
-so §4's S3 prefix is `bots/<ADDR>/`. (If you skipped §2 and minted OIDC
-from the init JWT directly, the prefix would be `bots/<MASTER_WALLET>/`
-instead — same shape, different bytes. The original `MASTER_WALLET`
-exists, has a real S3 prefix, but the demo's chain stops referencing it
-after init.)
+`aws.amazon.com/tags.principal_tags.agentkeys_user_wallet`. Two paths:
+
+- **§2 manual SIWE path** (this demo's canonical route): §2.3 mints a
+  FRESH session JWT with `wallet_address = derived_address(actor_omni)`
+  (= `$ADDR_A`). §3 mints OIDC from that JWT, so
+  `agentkeys_user_wallet = $ADDR_A`, and §4's S3 prefix is
+  `bots/$ADDR_A/`.
+- **§0.4-only path** (skip §2): the OIDC mint reads the on-disk init
+  JWT whose `wallet_address = master_wallet` (= `$MASTER_WALLET_A`).
+  `agentkeys_user_wallet = $MASTER_WALLET_A` and S3 prefix would be
+  `bots/$MASTER_WALLET_A/`.
+
+The CLI's `agentkeys whoami` always reads the on-disk JWT, so its
+`session_wallet:` field is `$MASTER_WALLET_A` regardless of which path
+you used for §3. If you walked §2 manually, `whoami session_wallet`
+and the OIDC `agentkeys_user_wallet` decode to **different** values —
+both arch.md `master_wallet`, but of two different JWTs (on-disk init
+JWT vs §2.3 fresh JWT). See `architecture.md` §3a for the full alias
+table.
 
 #### Run two distinct sessions with `--session-id` (no overwrite)
 
@@ -1159,11 +1173,11 @@ override per-call with `--session-id <id>`.
 agentkeys whoami \
   --signer-url $BACKEND_URL \
   --omni-account $OMNI_A
-# session_wallet: 0x… (legacy session if any)
-# signer_url: http://…
-# omni_account: <OMNI_A>
-# derived_address: <ADDR_A>
-# key_version: 1
+# session_wallet:   0x<master_wallet>     ← JWT.agentkeys.wallet_address from ~/.agentkeys/alice/session.json
+# signer_url:       https://signer…
+# omni_account:     <actor_omni>           ← OMNI_A
+# derived_address:  0x<derived_address>    ← HKDF(K3, OMNI_A) = ADDR_A
+# key_version:      1
 
 # For bob, retarget the session-id once and rerun:
 agentkeys --session-id "$SESSION_ID_B" whoami \
@@ -1171,9 +1185,22 @@ agentkeys --session-id "$SESSION_ID_B" whoami \
   --omni-account $OMNI_B
 ```
 
-This is the read-only operator-UX command that ships in this PR. It
-calls `/dev/derive-address` and surfaces the omni → address mapping
-without any side effects.
+Field-by-field, in arch.md §3a canonical names:
+
+| CLI label          | arch.md canonical name        | What the CLI computes                                                                                                |
+|--------------------|--------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `session_wallet`   | `master_wallet`               | Loaded from `~/.agentkeys/$SESSION_ID/session.json` → `JWT.agentkeys.wallet_address`. The init-flow's wallet.        |
+| `omni_account`     | `actor_omni`                  | Echoed from the `--omni-account` flag.                                                                               |
+| `derived_address`  | `derived_address(actor_omni)` | Server-side `HKDF(K3, actor_omni)` — what `/dev/derive-address` returns for this omni. Equals `$ADDR_A` post-export. |
+
+`session_wallet` and `derived_address` are **two different K4
+wallets** — both signable, both deterministic, derived from two
+different omnis (`identity_omni` at init vs `actor_omni` post-SIWE).
+After §2.3, the §3 OIDC mint stamps `derived_address(actor_omni)`
+(NOT `session_wallet`) into `agentkeys_user_wallet`, because §3 reads
+`$SESSION_JWT_A` from §2.3's fresh verify response, not the on-disk
+session.json. See the "Which wallet ends up in AWS PrincipalTag?"
+callout in §0.4 for the full mechanical reason.
 
 ---
 
@@ -1229,6 +1256,16 @@ JWT expired — rerun the curl above.
 This is the climax of the demo. We assume `agentkeys-data-role` with
 `JWT_A`, then attempt to read both `ADDR_A`'s prefix (allowed) and
 `ADDR_B`'s prefix (denied **by AWS, not by app code**).
+
+The S3 prefix shape (`bots/<wallet>/…`) uses
+arch.md `derived_address(actor_omni)` for the wallet because that's
+what §2.3's fresh session JWT carries as `wallet_address`, and §3
+stamps that into `agentkeys_user_wallet` (= the AWS PrincipalTag the
+bucket policy keys on). For the §0.4-only path (no manual §2), swap
+`$ADDR_A` → `$MASTER_WALLET_A` throughout this section — the OIDC
+mint reads the init JWT instead, whose `wallet_address` is
+arch.md `master_wallet`. See §0.4's "Which wallet ends up in AWS
+PrincipalTag?" callout for the full table.
 
 ### 4.1 Assume the role with JWT_A
 
@@ -1295,8 +1332,11 @@ aws s3api get-object --region "$REGION" --bucket "$BUCKET" \
 
 **Step 4b is the property the static-IAM path cannot prove.** No app
 code participated in the deny — S3's policy engine evaluated
-`${aws:PrincipalTag/agentkeys_user_wallet}` (which is `ADDR_A`)
-against the resource ARN's `bots/${ADDR_B}/` and refused.
+`${aws:PrincipalTag/agentkeys_user_wallet}` (which equals arch.md
+`master_wallet` of `$SESSION_JWT_A` = `$ADDR_A` for the §2 manual
+path, since §2.3 minted that JWT with
+`wallet_address = derived_address(actor_omni)`) against the resource
+ARN's `bots/${ADDR_B}/` and refused.
 
 ### 4.4 Diagnosing intermediate states
 
