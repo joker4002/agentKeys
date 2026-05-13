@@ -934,11 +934,31 @@ The automated equivalent — same result, no click required — is what
 
 ```bash
 bash scripts/agentkeys-init-email-demo.sh --session-id alice
+# (auto-prints a "Next: capture eval-able shell vars" hint at the end —
+#  copy-paste the eval line below to populate $ADDR_A / $OMNI_A / …)
+eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"
+export AGENTKEYS_SESSION_ID=alice
 ```
 
 Pick whichever fits the run: the script for unattended demos / CI /
 docs verification, the manual `--email <addr>` form when you want the
 magic link delivered to an inbox you control.
+
+> **Why the second line matters.** `init-email-demo.sh` runs in a
+> subprocess, so it can't `export` variables into your parent shell.
+> The human-mode session detail it prints at the end is text, not
+> assignments. Without the `eval … --export A alice` line, your shell
+> either has no `$ADDR_A` / `$OMNI_A` (and §2.1's
+> `/v1/auth/wallet/start` fails JSON-validation on an empty address)
+> or — worse — carries stale `$ADDR_A` from a previous run against a
+> different session/identity. Stale `$ADDR_A` produces the
+> `ADDRESS DRIFT — master secret rotated mid-session?` failure at the
+> end of §2.2 (the sanity check `[[ "$SIG_ADDR" == "$ADDR_A" ]]`
+> compares the just-now signer-returned address against your shell's
+> `$ADDR_A`; they only match when both come from the *current* alice
+> session). The §0.4 callout earlier already pins this — the eval line
+> above is the same line, repeated here for the operator who jumped
+> straight into §2 without running §0.4 top-to-bottom.
 
 > **Don't substitute a placeholder email** like `alice@demo.example`
 > when you've already run `init-email-demo.sh --session-id alice`. The
@@ -1821,19 +1841,42 @@ The CLI cannot reach `--signer-url`. Verify, in order:
 3. The DNS A record for `signer.<zone>` resolves to the broker host
    IP — `dig +short signer.<zone>` should return the EC2 EIP.
 
-### 14.4 SIWE verify returns `signature does not recover to claimed address`
+### 14.4 SIWE verify returns `signature does not recover to claimed address` — OR `ADDRESS DRIFT — master secret rotated mid-session?` at end of §2.2
 
-Possible causes:
-- The SIWE message bytes were mutated between `/v1/auth/wallet/start`
-  and `/dev/sign-message`. Always pass `$SIWE_MSG` straight from
-  `printf '%s' "$START" | jq -r .siwe_message` — never re-render or
-  re-quote.
-- The `omni_account` you signed with is NOT the one that derived
-  `$ADDR_A`. Re-derive: `agentkeys signer derive --omni-account
-  $OMNI_A` and confirm the address matches what you sent to
-  `/v1/auth/wallet/start`.
-- `DEV_KEY_SERVICE_MASTER_SECRET` rotated mid-flow. Re-derive
-  everything; previously-issued addresses are invalidated.
+Both symptoms have the same family of causes — `$ADDR_A` (or `$OMNI_A`)
+in your shell doesn't match the just-now-live alice/bob session. In
+practice 9 out of 10 hits are **stale shell vars from a previous run**,
+not actual K3 rotation.
+
+Most common diagnosis path — run this triplet and compare:
+
+```bash
+echo "OMNI_A (shell)   = $OMNI_A"
+echo "ADDR_A (shell)   = $ADDR_A"
+DERIVE_NOW=$(agentkeys --json signer derive \
+               --signer-url $BACKEND_URL --omni-account $OMNI_A | jq -r .address)
+echo "derive(OMNI_A)   = $DERIVE_NOW   ← what signer returns RIGHT NOW"
+JWT_OMNI=$(jq -r .token ~/.agentkeys/$AGENTKEYS_SESSION_ID/session.json \
+            | cut -d. -f2 | tr '_-' '/+' \
+            | { read p; printf '%s%s' "$p" "$(printf '====' | head -c $(( (4 - ${#p} % 4) % 4 )))" \
+                | base64 -d 2>/dev/null; } | jq -r '.agentkeys.omni_account')
+echo "JWT.omni_account = $JWT_OMNI    ← what's persisted on disk"
+```
+
+Then match against the failure mode:
+
+| Symptom                                                    | Cause                                                                                                                       | Fix                                                                                                                                                                                                                                  |
+|------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `OMNI_A` (shell) `!=` `JWT.omni_account` (on disk)         | Shell `$OMNI_A` is stale — set by a previous `--export` against a different session. Re-init happened after `--export`.     | Re-run `eval "$(bash scripts/agentkeys-demo-show.sh --export A $AGENTKEYS_SESSION_ID)"`. Then re-do §2.1 (SIWE start) — your old `$SIWE_MSG` is also stale because it embeds the old `$ADDR_A`.                                       |
+| `DERIVE_NOW != ADDR_A` (shell)                             | Shell `$ADDR_A` is stale — same root cause as above.                                                                        | Same fix.                                                                                                                                                                                                                            |
+| `ADDR_A == MASTER_WALLET_A` (= JWT.wallet_address)         | You substituted `$MASTER_WALLET_A` for `$ADDR_A` somewhere — easy mistake reading demo-show's human-mode output.            | Re-run the eval line; `--export A` is the only mode that reliably sets `$ADDR_A = HKDF(K3, OMNI_A)`.                                                                                                                                  |
+| `DERIVE_NOW != SIG_ADDR` (where `SIG_ADDR` = §2.2's check) | Real K3 rotation — `setup-broker-host.sh` regenerated `/etc/agentkeys/dev-key-service.env`, or `agentkeys-backend` restarted with a new `DEV_KEY_SERVICE_MASTER_SECRET`. | All previously-derived wallets are invalidated. Re-init via `init-email-demo.sh --session-id alice`, re-export, restart from §2.1. To keep K3 stable across runs, the setup script preserves the env file — only `--force` rotates it. |
+| SIWE message bytes mutated mid-flow                        | `$SIWE_MSG` was re-quoted or re-printed (zsh `echo` corrupts `\n` escapes — see §0 the printf note).                       | Always pass `$SIWE_MSG` straight from `printf '%s' "$START" \| jq -r .siwe_message`. Never `echo "$SIWE_MSG"` into the sign call.                                                                                                    |
+
+The two stale-shell-vars rows are by far the most common when an
+operator runs `init-email-demo.sh --session-id alice` twice in a row,
+or runs it after a previous `--export A bob`. **Run the eval line every
+time a fresh init lands** — it's idempotent and cheap.
 
 ### 14.5 `AssumeRoleWithWebIdentity` returns InvalidIdentityToken
 

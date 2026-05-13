@@ -374,3 +374,37 @@ if [[ -x "$SHOW" ]]; then
   AGENTKEYS_SESSION_ID="$SESSION_ID" bash "$SHOW" "$SESSION_ID" || \
     warn "demo-show failed (non-fatal — the session was saved successfully above)"
 fi
+
+# ─── Tell the operator how to capture eval-able shell vars ─────────────────
+# The demo-show output above is human-readable only — it does NOT export
+# $OMNI / $ADDR / $MASTER_WALLET into the parent shell (this script runs
+# in a subprocess, and the human-mode renderer prints to stdout as text,
+# not as `KEY=value` assignments).
+#
+# Without the eval line below, the operator's shell either has no
+# $ADDR_<P> / $OMNI_<P> at all (=> §2.1's /v1/auth/wallet/start sends an
+# empty address and fails JSON-validation), or worse, carries STALE
+# values from a previous run against a different session/identity (=>
+# §2.2's `sign↔derive address match` check prints "ADDRESS DRIFT" because
+# the SIWE message was constructed against the stale $ADDR but the
+# signer signs HKDF(K3, current $OMNI), and the two no longer agree).
+#
+# Print the exact eval command with a session-id-derived label so the
+# operator can copy-paste it directly. alice → A, bob → B; otherwise
+# uppercase the whole session-id.
+echo
+case "$SESSION_ID" in
+  alice)   prefix_label="A" ;;
+  bob)     prefix_label="B" ;;
+  master)  prefix_label="M" ;;
+  *)       prefix_label="$(printf '%s' "$SESSION_ID" | tr '[:lower:]' '[:upper:]')" ;;
+esac
+log "Next: capture eval-able shell vars for §2 / §4. In the SAME shell, run:"
+printf '\n    \033[1mexport AGENTKEYS_SESSION_ID=%s\033[0m\n' "$SESSION_ID"
+printf '    \033[1meval "$(bash scripts/agentkeys-demo-show.sh --export %s %s)"\033[0m\n\n' \
+  "$prefix_label" "$SESSION_ID"
+log "  populates: SESSION_ID_$prefix_label, OMNI_$prefix_label, ADDR_$prefix_label,"
+log "             MASTER_WALLET_$prefix_label, IDENTITY_TYPE_$prefix_label,"
+log "             IDENTITY_VALUE_$prefix_label, IDENTITY_OMNI_$prefix_label"
+log "  (Without this, §2.1's SIWE start uses whatever \$ADDR_$prefix_label your shell had"
+log "   from a previous run — usually stale, manifests as ADDR DRIFT at §2.2 end.)"
