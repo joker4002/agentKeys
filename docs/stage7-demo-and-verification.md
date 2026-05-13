@@ -878,25 +878,49 @@ behalf, and the broker mints an EVM-omni session JWT. The broker sees
 a normal SIWE round-trip — it cannot tell whether the signer is
 HKDF-backed (today) or TEE-backed (issue #74 step 2).
 
+**Two ways to drive this section** — pick one, then jump to §3:
+
+| Path                       | When to use                                                                  | What it runs                                                                                                                       |
+|----------------------------|------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `init-email-demo.sh` (§0.4) | Default for demos, CI, doc verification — no human-in-the-loop click needed. | The script auto-clicks the magic link by polling `s3://$MAIL_BUCKET/inbound/`. §0.4 already ran this for alice + bob.               |
+| Manual `agentkeys init --email` (§2.0) | You want the magic link in an inbox you control (real demo to a stakeholder, or smoke-testing real SES delivery). | Same `/v1/auth/email/request` + `/v1/auth/email/verify` chain, but you click the link in your mail client. Requires `--email <deliverable-addr>`. |
+| Manual SIWE walkthrough (§2.1–§2.5) | Debugging a step the one-command path hides, or explaining the trust model to a reviewer. | Exactly the chain `init --email` runs internally, exposed call-by-call. Functionally redundant after §0.4 or §2.0 — read it for understanding, don't expect it to produce a new session. |
+
 ### 2.0 Recommended path: `agentkeys init --email`
 
 Issue #74 step 1 + Pass 2 of Option B (closed [issue #80](https://github.com/litentry/agentKeys/issues/80))
 ship a single-command bootstrap that drives the entire chain end-to-end
 against real SES delivery. Use this for any real demo or production deployment.
 
-> **Prereq if you haven't done it yet:** the two-step setup from §0.4 —
-> `bash scripts/ses-verify-sender.sh` (one-time SES sender registration) +
-> `sudo bash scripts/setup-broker-host.sh --yes` on the broker host
-> (Pass 2 build with `auth-email-link` + `email_link` in
+> **Already done by §0.4 if you ran `init-email-demo.sh --session-id
+> alice` (and bob).** That script runs `agentkeys init --email` against
+> a deliverable `<id>@$MAIL_DOMAIN` recipient, polls
+> `s3://$MAIL_BUCKET/inbound/` for the SES inbound, parses the
+> `#t=<token>` fragment, and POSTs `/v1/auth/email/verify` —
+> programmatically replicating the browser-side click. By the time it
+> exits, alice's `~/.agentkeys/alice/session.json` holds a fully
+> SIWE'd JWT and §2.1–§2.5 below would re-do the same chain manually.
+> **For automation, skip to [§3](#3-mint-oidc-jwt-for-sts).** Read
+> §2.1–§2.5 only when you want to inspect each wire frame or are
+> debugging a step the script normally hides.
+
+> **Prereq if you haven't done §0.4 yet:** the two-step setup from
+> §0.4 — `bash scripts/ses-verify-sender.sh` (one-time SES sender
+> registration) + `sudo bash scripts/setup-broker-host.sh --yes` on the
+> broker host (Pass 2 build with `auth-email-link` + `email_link` in
 > `BROKER_AUTH_METHODS`).
+
+If you're driving the init manually (because you want a real
+operator-controlled inbox rather than the `@bots.litentry.org` alias),
+the equivalent one-command form is:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
 agentkeys --session-id alice init \
-  --email alice@demo.example \
+  --email <your-deliverable-address> \
   --broker-url $OIDC_ISSUER \
   --signer-url $BACKEND_URL
-# Magic link sent to alice@demo.example via real SES (FROM noreply-test@bots.litentry.org).
+# Magic link sent via real SES (FROM noreply-test@bots.litentry.org).
 # Click the link in your inbox; the CLI is polling…
 # (operator clicks the magic link)
 # Initialized via email-link.
@@ -904,6 +928,29 @@ agentkeys --session-id alice init \
 #   derived wallet: 0x…
 #   evm omni:      <64 hex>
 ```
+
+The automated equivalent — same result, no click required — is what
+§0.4 already runs:
+
+```bash
+bash scripts/agentkeys-init-email-demo.sh --session-id alice
+```
+
+Pick whichever fits the run: the script for unattended demos / CI /
+docs verification, the manual `--email <addr>` form when you want the
+magic link delivered to an inbox you control.
+
+> **Don't substitute a placeholder email** like `alice@demo.example`
+> when you've already run `init-email-demo.sh --session-id alice`. The
+> placeholder produces a *different* `identity_omni_email` → different
+> `MASTER_WALLET` → different `actor_omni`, and the second init
+> overwrites `~/.agentkeys/alice/session.json`. Your shell still holds
+> the §0.4 `$OMNI_A` / `$ADDR_A` from the bots-alias identity, so the
+> §2.2 strict JWT-omni check fails with a mismatch
+> (`request.omni ≠ JWT.omni_account`). Either skip §2.0 entirely (use
+> §0.4's script), or pass `--email <addr-you-control>` with a domain
+> SES can actually deliver to and re-run §0.4's `--export A alice`
+> afterwards to refresh the shell vars.
 
 The `--session-id alice` writes to `~/.agentkeys/alice/session.json`
 instead of the default `master`. Subsequent `agentkeys signer …` calls
