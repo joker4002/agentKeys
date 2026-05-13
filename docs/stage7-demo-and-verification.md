@@ -1210,12 +1210,37 @@ The session JWT is broker-internal. AWS STS speaks a different JWT
 (signed by K2, the OIDC keypair) carrying the PrincipalTag claim.
 Exchange one for the other:
 
+> **`$SESSION_JWT_A` precedence — pick ONE source, don't shadow.**
+> The wallet AWS sees in §4's PrincipalTag is whatever
+> `wallet_address` claim is in the session JWT you mint OIDC from.
+> Two sources exist and they carry **different** wallets:
+> | Source                                                                            | `wallet_address`                  | When to use                       |
+> |-----------------------------------------------------------------------------------|-----------------------------------|------------------------------------|
+> | `$VERIFY` from §2.3 (set via `SESSION_JWT_A=$(printf '%s' "$VERIFY" \| jq -r .session_jwt)`) | `$ADDR_A` = `derived_address(actor_omni)` | You walked §2.1–§2.3 manually.    |
+> | `~/.agentkeys/$AGENTKEYS_SESSION_ID/session.json` on disk                          | `$MASTER_WALLET_A` = arch.md `master_wallet` | You skipped §2 (`init-email-demo.sh` only). |
+> Mixing them is the §4 AccessDenied trap: if you ran §2.3 AND then
+> re-read from disk, the on-disk value shadows §2.3's, AWS stamps
+> `$MASTER_WALLET_A`, you try to list `bots/$ADDR_A/`, AccessDenied
+> because the policy expanded to `bots/$MASTER_WALLET_A/*`. Pick one
+> source NOW and remember which wallet you committed to for §4's
+> prefix.
+
 ```bash
-# Prereq: $SESSION_JWT_A was set by §2.3's VERIFY response.
+# Prereq: $SESSION_JWT_A set per the precedence table above.
 
 JWT_A=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
 echo "JWT_A=${JWT_A:0:32}…  length=${#JWT_A}"
+
+# IMMEDIATELY decode to find out which wallet AWS will see — this is
+# the value §4's S3 prefix MUST use, or every read 403s.
+WALLET_FOR_S3=$(echo "$JWT_A" | cut -d. -f2 | tr '_-' '/+' \
+  | python3 -c "import base64,sys; s=sys.stdin.read().strip(); print(base64.urlsafe_b64decode(s+'='*(-len(s)%4)).decode())" \
+  | jq -r .agentkeys_user_wallet)
+echo "WALLET_FOR_S3=$WALLET_FOR_S3"
+# Compare:
+#   $WALLET_FOR_S3 == $ADDR_A          → §2 manual path (use bots/$ADDR_A/)
+#   $WALLET_FOR_S3 == $MASTER_WALLET_A → §0.4-only path (use bots/$MASTER_WALLET_A/)
 ```
 
 Decode the body and confirm the `aws.amazon.com/tags` claim is
@@ -1265,14 +1290,17 @@ replication scope cleanly to "user data" without touching the
 bucket's system prefixes. The bucket policy from
 [`cloud-setup.md` §4.4](cloud-setup.md#44-upgrade-bucket-policy-to-principaltag-scoped)
 grants access conditioned on
-`bots/${aws:PrincipalTag/agentkeys_user_wallet}/*`. The wallet plugged
-into the `<wallet>` slot is arch.md `derived_address(actor_omni)` for
-the §2 manual path — that's what §2.3's fresh session JWT carries as
-`wallet_address`, and §3 stamps it into `agentkeys_user_wallet` (= the
-PrincipalTag the policy keys on). For the §0.4-only path (no manual
-§2), swap `$ADDR_A` → `$MASTER_WALLET_A` — the OIDC mint reads the
-init JWT whose `wallet_address` is arch.md `master_wallet`. See §0.4's
-"Which wallet ends up in AWS PrincipalTag?" callout.
+`bots/${aws:PrincipalTag/agentkeys_user_wallet}/*`.
+
+**Use `$WALLET_FOR_S3` from §3 throughout this section**, NOT bare
+`$ADDR_A` or `$MASTER_WALLET_A`. `$WALLET_FOR_S3` is whichever wallet
+the broker actually stamped into your `$JWT_A` — for the §2 manual
+path it's `$ADDR_A` (arch.md `derived_address(actor_omni)`); for the
+§0.4-only path it's `$MASTER_WALLET_A` (arch.md `master_wallet`).
+Substituting either bare name only works if you're *certain* which
+path you took; substituting `$WALLET_FOR_S3` is always correct because
+§3 decoded the JWT to compute it. See §0.4's "Which wallet ends up in
+AWS PrincipalTag?" callout for the mechanics.
 
 ### 4.1 Assume the role with JWT_A
 
@@ -1312,10 +1340,16 @@ awsp agentkeys-admin
 # on macOS — character device, not a regular file). Use a tmp file:
 EMPTY=$(mktemp) && trap 'rm -f "$EMPTY"' EXIT
 
+# OTHER_WALLET picks the §4.2 "deny target" matching the path §3 took:
+#   §2 manual path → WALLET_FOR_S3 == $ADDR_A, OTHER → $ADDR_B
+#   §0.4-only path → WALLET_FOR_S3 == $MASTER_WALLET_A, OTHER → $MASTER_WALLET_B
+if [[ "$WALLET_FOR_S3" == "$ADDR_A" ]]; then OTHER_WALLET="$ADDR_B"; else OTHER_WALLET="$MASTER_WALLET_B"; fi
+echo "WALLET_FOR_S3=$WALLET_FOR_S3  OTHER_WALLET=$OTHER_WALLET"
+
 aws s3api put-object --region "$REGION" --bucket "$BUCKET" \
-  --key "bots/${ADDR_A}/hello.txt" --body "$EMPTY"
+  --key "bots/${WALLET_FOR_S3}/hello.txt" --body "$EMPTY"
 aws s3api put-object --region "$REGION" --bucket "$BUCKET" \
-  --key "bots/${ADDR_B}/hello.txt" --body "$EMPTY"
+  --key "bots/${OTHER_WALLET}/hello.txt" --body "$EMPTY"
 ```
 
 ### 4.3 Re-export the assumed-role creds and probe both prefixes
@@ -1327,27 +1361,25 @@ export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToke
 
 # 4a — your own prefix: SUCCESS
 aws s3api list-objects-v2 --bucket "$BUCKET" \
-  --prefix "bots/${ADDR_A}/" --query 'Contents[*].Key'
-# [ "bots/0x…<A>/hello.txt" ]
+  --prefix "bots/${WALLET_FOR_S3}/" --query 'Contents[*].Key'
+# [ "bots/<WALLET_FOR_S3>/hello.txt" ]
 
 aws s3api get-object --region "$REGION" --bucket "$BUCKET" \
-  --key "bots/${ADDR_A}/hello.txt" /tmp/got-A.txt
+  --key "bots/${WALLET_FOR_S3}/hello.txt" /tmp/got-A.txt
 # { "ContentLength": 0, ... }
 
-# 4b — the OTHER derived wallet's prefix: AccessDenied (CLOUD-ENFORCED)
+# 4b — the OTHER wallet's prefix: AccessDenied (CLOUD-ENFORCED)
 aws s3api get-object --region "$REGION" --bucket "$BUCKET" \
-  --key "bots/${ADDR_B}/hello.txt" /tmp/got-B.txt
+  --key "bots/${OTHER_WALLET}/hello.txt" /tmp/got-B.txt
 # An error occurred (AccessDenied) when calling the GetObject operation:
 # Access Denied
 ```
 
 **Step 4b is the property the static-IAM path cannot prove.** No app
 code participated in the deny — S3's policy engine evaluated
-`${aws:PrincipalTag/agentkeys_user_wallet}` (which equals arch.md
-`master_wallet` of `$SESSION_JWT_A` = `$ADDR_A` for the §2 manual
-path, since §2.3 minted that JWT with
-`wallet_address = derived_address(actor_omni)`) against the resource
-ARN's `bots/${ADDR_B}/` and refused.
+`${aws:PrincipalTag/agentkeys_user_wallet}` (= `$WALLET_FOR_S3` —
+arch.md `master_wallet` of the session JWT used in §3) against the
+resource ARN's `bots/${OTHER_WALLET}/` and refused.
 
 ### 4.4 Diagnosing intermediate states
 
