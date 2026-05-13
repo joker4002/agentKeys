@@ -220,9 +220,22 @@ agentkeys --help | grep -q -- "--session-id" \
 > `grep -rn 'alias agentkeys' ~/.zshenv ~/.zshrc ~/.zprofile ~/.aliases 2>/dev/null`
 > to find it, delete it, then `exec zsh -l` to reload.
 
-After the build is on `$PATH`, run `agentkeys init` once to save a
-session JWT in the OS keychain (the CLI auto-attaches it as
-`Authorization: Bearer …` on every `/dev/*` call in §0.4).
+After the build is on `$PATH`, run `agentkeys --session-id <id> init`
+once per tenant to save a session JWT under
+`~/.agentkeys/<id>/session.json` (or in the OS keychain — see the
+`AGENTKEYS_SESSION_STORE=file` note in §0.4). The CLI auto-attaches
+the saved JWT as `Authorization: Bearer …` on every `/dev/*` call.
+
+This demo runs two side-by-side tenants — `alice` and `bob` — to
+exercise the multi-tenant story end-to-end (§0.4 inits both via
+`init-email-demo.sh`, §2 SIWEs them in turn, §4 proves cloud-enforced
+isolation between them). Every `agentkeys` call below either passes
+`--session-id <id>` explicitly OR relies on `export
+AGENTKEYS_SESSION_ID=<id>` having been set earlier in the section.
+Skipping that wiring sends the call to the default `master` session,
+which is usually a stale older session and fails with
+`SIGNER_UNAUTHORIZED  invalid session JWT: ExpiredSignature` — see
+[§14.8](#148-agentkeys-signer-sign-returns-error-signer_unauthorized--invalid-session-jwt-expiredsignature).
 
 > **No `cast`, no Foundry, no local private keys.** The pre-issue-#74
 > path required `cast wallet new` to mint operator-held EVM keypairs
@@ -1058,6 +1071,11 @@ echo "OMNI_EVM_B=$OMNI_EVM_B"
 
 ### 2.5 `agentkeys whoami` — sanity at-a-glance
 
+`whoami` is a read-only `/dev/derive-address` call — it surfaces the
+omni → address mapping under whichever session is currently pinned.
+Inherits `$AGENTKEYS_SESSION_ID` from §0.4 (still `alice` here) or
+override per-call with `--session-id <id>`.
+
 ```bash
 agentkeys whoami \
   --signer-url $BACKEND_URL \
@@ -1067,6 +1085,11 @@ agentkeys whoami \
 # omni_account: <OMNI_A>
 # derived_address: <ADDR_A>
 # key_version: 1
+
+# For bob, retarget the session-id once and rerun:
+agentkeys --session-id "$SESSION_ID_B" whoami \
+  --signer-url $BACKEND_URL \
+  --omni-account $OMNI_B
 ```
 
 This is the read-only operator-UX command that ships in this PR. It
@@ -1085,16 +1108,20 @@ to consume.
 
 - **§2.0 path (`agentkeys init --email`)** — the CLI saved the EVM
   session JWT to the OS keychain OR to the file fallback at
-  `~/.agentkeys/master/session.json` (file mode when the keyring
-  marker is empty). Extract it:
+  `~/.agentkeys/$SESSION_ID_A/session.json` (file mode when the keyring
+  marker is empty). `$SESSION_ID_A` was populated by §0.4's
+  `eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"` and
+  equals `alice` for the canonical demo path. Extract it:
   ```bash
-  SESSION_JWT_A=$(jq -r .token ~/.agentkeys/master/session.json)
+  SESSION_JWT_A=$(jq -r .token ~/.agentkeys/$SESSION_ID_A/session.json)
   ```
   (A future CLI subcommand will wrap this — for now, raw file/keychain
   access is the documented path. The fallback location depends on
-  keyring state; check `~/.agentkeys/master/.keyring_managed`: empty
-  → file mode → read `session.json`; absent → use macOS Keychain
-  `security find-generic-password -s agentkeys -a master -w | jq -r .token`.)
+  keyring state; check
+  `~/.agentkeys/$SESSION_ID_A/.keyring_managed`: empty → file mode →
+  read `session.json`; absent → use macOS Keychain
+  `security find-generic-password -s agentkeys -a "$SESSION_ID_A" -w | jq -r .token`.)
+  For bob, swap `SESSION_ID_A` → `SESSION_ID_B`.
 - **§2.1-2.4 manual SIWE path** — `SESSION_JWT_A` was captured
   in-line from the broker's `/v1/auth/wallet/verify` response; reuse
   the variable you set there.
@@ -1472,11 +1499,18 @@ curl -sS --fail-with-body $OIDC_ISSUER/v1/auth/email/status/em_… | jq
 
 # 4. The session JWT is now an `omni_email` session. Derive the wallet:
 EMAIL_SESSION_JWT=...                # from step 3
-agentkeys signer derive \
+agentkeys --session-id alice signer derive \
   --signer-url $BACKEND_URL \
   --omni-account $(omni email "alice@demo.example")
 # 5. Then run §2.1 onwards using that derived address.
 ```
+
+§8 is a manual alternative to §2.0's one-command `agentkeys init
+--email`. If you're driving it raw like this, persist the
+`session_jwt` from step 3 into `~/.agentkeys/alice/session.json`
+(matching `--session-id alice`) before running step 4 — or skip
+step 4 entirely and inline the JWT as `Authorization: Bearer
+$EMAIL_SESSION_JWT` against `$BACKEND_URL/dev/derive-address`.
 
 ### 8.1 Debugging — inspecting the inbound email at S3
 
@@ -1524,10 +1558,16 @@ curl -sS --fail-with-body $OIDC_ISSUER/v1/auth/oauth2/status/oa2-… | jq
 #  "identity_type":"oauth2_google", "identity_value":"<google-sub>"}
 
 # 4. Derive the wallet:
-agentkeys signer derive \
+agentkeys --session-id alice signer derive \
   --signer-url $BACKEND_URL \
   --omni-account $(omni oauth2_google "<google-sub>")
 ```
+
+Same caveat as §8: §9 is a manual alternative to §2.0's
+`agentkeys --session-id alice init --oauth2-google`. The shorthand
+mints + persists the session JWT for you; the raw flow above needs
+the step-3 JWT inlined as `Authorization: Bearer` or persisted into
+`~/.agentkeys/alice/session.json` before step 4 reads it.
 
 `prompt=select_account` is hardcoded into the auth URL so Google
 always forces the account chooser — defends against the
@@ -2022,13 +2062,20 @@ export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-ro
 export AGENTKEYS_SIGNER_URL=$BACKEND_URL          # public signer URL from §0.2
 export AWS_REGION=us-east-1
 
-# Bootstrap the master session via the new flow. The CLI prompts you
+# Bootstrap the alice session via the new flow. The CLI prompts you
 # to click the magic link; once verified, it derives + links + SIWEs
-# and saves the EVM session JWT to the OS keychain.
-agentkeys init \
+# and saves the EVM session JWT under ~/.agentkeys/alice/session.json
+# (or the OS keychain). --session-id alice keeps this isolated from
+# any prior `master` session.
+agentkeys --session-id alice init \
   --email alice@demo.example \
   --broker-url $AGENTKEYS_BROKER_URL \
   --signer-url $AGENTKEYS_SIGNER_URL
+
+# Pin the alice session for the provisioner subprocess too — without
+# this, the provisioner falls back to --session-id master and reads
+# whatever stale JWT lives there (see §14.8).
+export AGENTKEYS_SESSION_ID=alice
 
 # Now run the provisioner. AWS temp creds get minted via
 # /v1/mint-oidc-jwt + AssumeRoleWithWebIdentity using the saved
@@ -2044,6 +2091,7 @@ daemon stays running afterward to serve MCP via stdio:
 
 ```bash
 agentkeys-daemon \
+  --session-id alice \
   --backend $BACKEND_URL \
   --broker-url $AGENTKEYS_BROKER_URL \
   --signer-url $AGENTKEYS_SIGNER_URL \
@@ -2053,6 +2101,13 @@ agentkeys-daemon \
 # (operator clicks the magic link in their inbox)
 # (daemon then enters MCP-stdio loop)
 ```
+
+The daemon's `--session-id` mirrors the CLI's: it pins which
+`~/.agentkeys/<id>/session.json` the long-running process reads + writes.
+Omitting it falls back to a `daemon-<ulid>` auto-discovered fallback
+(see `agentkeys-daemon --help`) — fine for the very-first run on a
+clean machine, but explicit `--session-id alice` keeps the daemon
+session aligned with the CLI tenant for the operator-tracing case.
 
 ### 16.8 Audit log inspection
 
