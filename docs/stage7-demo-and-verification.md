@@ -1257,15 +1257,22 @@ This is the climax of the demo. We assume `agentkeys-data-role` with
 `JWT_A`, then attempt to read both `ADDR_A`'s prefix (allowed) and
 `ADDR_B`'s prefix (denied **by AWS, not by app code**).
 
-The S3 prefix shape (`bots/<wallet>/…`) uses
-arch.md `derived_address(actor_omni)` for the wallet because that's
-what §2.3's fresh session JWT carries as `wallet_address`, and §3
-stamps that into `agentkeys_user_wallet` (= the AWS PrincipalTag the
-bucket policy keys on). For the §0.4-only path (no manual §2), swap
-`$ADDR_A` → `$MASTER_WALLET_A` throughout this section — the OIDC
-mint reads the init JWT instead, whose `wallet_address` is
-arch.md `master_wallet`. See §0.4's "Which wallet ends up in AWS
-PrincipalTag?" callout for the full table.
+The S3 prefix shape (`bots/<wallet>/…`) matches arch.md §6's
+sequence diagram — `bots/` is the per-actor data namespace, sibling to
+SES's `inbound/`, future `audit/`, etc. Keeping user data under a
+single parent prefix lets lifecycle rules, encryption defaults, and
+replication scope cleanly to "user data" without touching the
+bucket's system prefixes. The bucket policy from
+[`cloud-setup.md` §4.4](cloud-setup.md#44-upgrade-bucket-policy-to-principaltag-scoped)
+grants access conditioned on
+`bots/${aws:PrincipalTag/agentkeys_user_wallet}/*`. The wallet plugged
+into the `<wallet>` slot is arch.md `derived_address(actor_omni)` for
+the §2 manual path — that's what §2.3's fresh session JWT carries as
+`wallet_address`, and §3 stamps it into `agentkeys_user_wallet` (= the
+PrincipalTag the policy keys on). For the §0.4-only path (no manual
+§2), swap `$ADDR_A` → `$MASTER_WALLET_A` — the OIDC mint reads the
+init JWT whose `wallet_address` is arch.md `master_wallet`. See §0.4's
+"Which wallet ends up in AWS PrincipalTag?" callout.
 
 ### 4.1 Assume the role with JWT_A
 

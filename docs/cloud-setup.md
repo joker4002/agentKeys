@@ -512,20 +512,31 @@ aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
         Action: "s3:ListBucket",
         Resource: "arn:aws:s3:::\($bucket)",
         Condition: {
-          StringLike: {"s3:prefix": "${aws:PrincipalTag/agentkeys_user_wallet}/*"}
+          StringLike: {"s3:prefix": "bots/${aws:PrincipalTag/agentkeys_user_wallet}/*"}
         }
       },
       {
         Sid: "AllowDaemonGetOwnObjects", Effect: "Allow",
         Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
         Action: "s3:GetObject",
-        Resource: "arn:aws:s3:::\($bucket)/${aws:PrincipalTag/agentkeys_user_wallet}/*"
+        Resource: "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_user_wallet}/*"
       }
     ]
   }')"
 ```
 
-`StringLike "${tag}/*"` (not `StringEquals "${tag}/"`) lets the daemon list sub-prefixes like `<wallet>/inbox/` and `<wallet>/sent/2026-05/`, not just the exact root `<wallet>/`. Matches the shape in [`docs/spec/ses-email-architecture.md` §10.4](spec/ses-email-architecture.md) and [`wiki/tag-based-access`](../wiki/tag-based-access.md).
+**`bots/` is the per-actor data namespace** — sibling to SES's
+`inbound/`, and to future system prefixes like `audit/`, `dkim/`,
+`config/`. Keeping every actor's data under a single parent prefix
+lets lifecycle rules, encryption defaults, replication, and ops audits
+scope cleanly to "user data" without sweeping in system prefixes.
+Matches arch.md §6 (`bots/A/file` in the runtime sequence diagram).
+Both the policy resource ARN (`bucket/bots/${tag}/*`) and the
+`s3:prefix` condition (`bots/${tag}/*`) carry the `bots/` parent —
+omit it on either and the other half of the policy denies even legit
+reads.
+
+`StringLike "bots/${tag}/*"` (not `StringEquals "bots/${tag}/"`) lets the daemon list sub-prefixes like `bots/<wallet>/inbox/` and `bots/<wallet>/sent/2026-05/`, not just the exact root `bots/<wallet>/`. Matches the shape in [`docs/spec/ses-email-architecture.md` §10.4](spec/ses-email-architecture.md) and [`wiki/tag-based-access`](../wiki/tag-based-access.md).
 
 ### 4.4.1 Strip the §3 broad-bucket grant from the role's inline policy
 
