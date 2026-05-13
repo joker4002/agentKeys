@@ -1179,63 +1179,48 @@ without any side effects.
 
 ## 3. Mint OIDC JWT for STS
 
-The session JWT is broker-internal. To talk to AWS STS you need a
-separate OIDC JWT signed by the OIDC keypair, with claims AWS knows how
-to consume.
-
-**Populating `SESSION_JWT_A`** depends on which §2 path you took:
-
-- **§2.0 path (`agentkeys init --email`)** — the CLI saved the EVM
-  session JWT to the OS keychain OR to the file fallback at
-  `~/.agentkeys/$SESSION_ID_A/session.json` (file mode when the keyring
-  marker is empty). `$SESSION_ID_A` was populated by §0.4's
-  `eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"` and
-  equals `alice` for the canonical demo path. Extract it:
-  ```bash
-  SESSION_JWT_A=$(jq -r .token ~/.agentkeys/$SESSION_ID_A/session.json)
-  ```
-  (A future CLI subcommand will wrap this — for now, raw file/keychain
-  access is the documented path. The fallback location depends on
-  keyring state; check
-  `~/.agentkeys/$SESSION_ID_A/.keyring_managed`: empty → file mode →
-  read `session.json`; absent → use macOS Keychain
-  `security find-generic-password -s agentkeys -a "$SESSION_ID_A" -w | jq -r .token`.)
-  For bob, swap `SESSION_ID_A` → `SESSION_ID_B`.
-- **§2.1-2.4 manual SIWE path** — `SESSION_JWT_A` was captured
-  in-line from the broker's `/v1/auth/wallet/verify` response; reuse
-  the variable you set there.
+The session JWT is broker-internal. AWS STS speaks a different JWT
+(signed by K2, the OIDC keypair) carrying the PrincipalTag claim.
+Exchange one for the other:
 
 ```bash
+# Prereq: $SESSION_JWT_A was set by §2.3's VERIFY response.
+
 JWT_A=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
 echo "JWT_A=${JWT_A:0:32}…  length=${#JWT_A}"
+```
 
-# Decode and verify the claim shape AWS cares about:
-echo "$JWT_A" | cut -d. -f2 \
-  | tr '_-' '/+' \
-  | { read p; printf '%s%s' "$p" "$(printf '====' | head -c $(( (4 - ${#p} % 4) % 4 )))" | base64 -d 2>/dev/null; } \
-  | jq
+Decode the body and confirm the `aws.amazon.com/tags` claim is
+present — that's what makes the §4 isolation work:
+
+```bash
+echo "$JWT_A" | cut -d. -f2 | tr '_-' '/+' \
+  | { read p; printf '%s=%.0s' "$p" $(seq 1 $(( (4 - ${#p} % 4) % 4 ))); } \
+  | base64 -d 2>/dev/null | jq '{aud, sub, tags: ."https://aws.amazon.com/tags"}'
 # {
-#   "iss": "https://broker.litentry.org",
-#   "sub": "agentkeys:agent:0x…<wallet>",
 #   "aud": "sts.amazonaws.com",
-#   "exp": <unix>,
-#   "iat": <unix>,
-#   "agentkeys_user_wallet": "0x…",
-#   "https://aws.amazon.com/tags": {
-#     "principal_tags": {"agentkeys_user_wallet": ["0x…"]},
+#   "sub": "agentkeys:agent:0x…<ADDR_A>",
+#   "tags": {
+#     "principal_tags": {"agentkeys_user_wallet": ["0x…<ADDR_A>"]},
 #     "transitive_tag_keys": ["agentkeys_user_wallet"]
 #   }
 # }
 ```
 
-The `https://aws.amazon.com/tags` claim is what makes
-`PrincipalTag`-scoped isolation work — AWS STS reads it during
-`AssumeRoleWithWebIdentity` and stamps the assumed session with that
-tag. The role's trust policy requires this tag to be present (set up
-in `cloud-setup.md §4.3`).
+JWT TTL is **5 min**. If §4 errors with `InvalidIdentityToken`, the
+JWT expired — rerun the curl above.
 
-JWT TTL is 5 min. If you wait too long, rerun this step.
+> **Didn't run §2.1–§2.4 manually?** If you only ran `init-email-demo.sh`
+> (or `agentkeys --session-id alice init --email`), `$SESSION_JWT_A`
+> isn't in your shell yet. Read it from disk:
+> ```bash
+> SESSION_JWT_A=$(jq -r .token ~/.agentkeys/$AGENTKEYS_SESSION_ID/session.json)
+> ```
+> (Or `security find-generic-password -s agentkeys -a "$AGENTKEYS_SESSION_ID" -w | jq -r .token` if
+> the CLI is in Keychain mode — check by listing
+> `~/.agentkeys/$AGENTKEYS_SESSION_ID/.keyring_managed`: present-and-non-empty
+> ⇒ Keychain, otherwise file.) Swap `SESSION_JWT_A` ⇄ `SESSION_JWT_B` for bob.
 
 ---
 
