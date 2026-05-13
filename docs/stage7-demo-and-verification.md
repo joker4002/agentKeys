@@ -689,7 +689,20 @@ the same values.
 # === ON OPERATOR WORKSTATION ===
 eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"
 eval "$(bash scripts/agentkeys-demo-show.sh --export B bob)"
+
+# Stick the alice session as the default for the rest of §2. Without
+# this, every `agentkeys signer sign`/`derive` call below falls back to
+# --session-id master, which is likely an older expired session (see
+# §14.8). Retarget to "$SESSION_ID_B" right before §2.4's bob block.
+export AGENTKEYS_SESSION_ID="$SESSION_ID_A"
 ```
+
+`--export` emits shell vars only — it does NOT route follow-up
+`agentkeys` calls. The CLI's `--session-id` flag defaults to `master`,
+so an unset `AGENTKEYS_SESSION_ID` silently reads
+`~/.agentkeys/master/session.json` even after `eval … --export A alice`.
+The explicit `export` line above pins routing for the rest of the
+section; §2.4 retargets to bob the same way.
 
 Per-session vars (label `A` shown; `B` is symmetric):
 
@@ -866,7 +879,7 @@ against real SES delivery. Use this for any real demo or production deployment.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-agentkeys init \
+agentkeys --session-id alice init \
   --email alice@demo.example \
   --broker-url $OIDC_ISSUER \
   --signer-url $BACKEND_URL
@@ -879,10 +892,17 @@ agentkeys init \
 #   evm omni:      <64 hex>
 ```
 
+The `--session-id alice` writes to `~/.agentkeys/alice/session.json`
+instead of the default `master`. Subsequent `agentkeys signer …` calls
+in §2.1–§2.5 need either the same `--session-id alice` flag or
+`export AGENTKEYS_SESSION_ID=alice` once at the top of the shell —
+otherwise the CLI silently reads `master`, which is usually a stale
+older session (see [§14.8](#148-agentkeys-signer-sign-returns-error-signer_unauthorized--invalid-session-jwt-expiredsignature)).
+
 For OAuth2/Google instead of email-link:
 
 ```bash
-agentkeys init \
+agentkeys --session-id alice init \
   --oauth2-google \
   --broker-url $OIDC_ISSUER \
   --signer-url $BACKEND_URL
@@ -1003,6 +1023,13 @@ echo "OMNI_A    =$OMNI_A   (the omni you used to drive the signer)"
 > JWT can't be replayed as a session token.
 
 ### 2.4 Repeat for `ADDR_B`
+
+Retarget the CLI to the bob session for the rest of this subsection
+(§0.4's `eval --export B bob` already populated `$SESSION_ID_B`):
+
+```bash
+export AGENTKEYS_SESSION_ID="$SESSION_ID_B"
+```
 
 ```bash
 START_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
@@ -1748,6 +1775,46 @@ systemd unit ships with `Restart=always` (commit
 systemd restarts it automatically. Verify with
 `sudo journalctl -u agentkeys-broker --since "1 day ago" | grep -E "max-uptime|listening"`.
 
+### 14.8 `agentkeys signer sign` returns `Error: SIGNER_UNAUTHORIZED  invalid session JWT: ExpiredSignature`
+
+The CLI's `--session-id` flag defaults to `master`. If you ran
+`bash scripts/agentkeys-init-email-demo.sh --session-id alice` (which
+writes `~/.agentkeys/alice/session.json`) but then called
+`agentkeys signer sign …` without threading the session-id, the CLI
+read `~/.agentkeys/master/session.json` instead — almost certainly an
+older session whose JWT has since expired.
+
+Diagnose:
+
+```bash
+# Confirm which file the CLI would read by default (master) vs. the one
+# init-email-demo.sh just wrote (alice).
+ls -la ~/.agentkeys/master/session.json ~/.agentkeys/alice/session.json
+# Decode the JWT exp claim from each; the older one is what the bare
+# `agentkeys signer sign` was using.
+for f in ~/.agentkeys/{master,alice}/session.json; do
+  echo "=== $f ==="
+  payload="$(jq -r '.token' "$f" | awk -F. '{print $2}')"
+  pad=$(( (4 - ${#payload} % 4) % 4 ))
+  printf '%s' "$payload$(printf '=%.0s' $(seq 1 $pad))" | tr '_-' '/+' \
+    | base64 -d 2>/dev/null | jq '{exp_iso: (.exp | todate)}'
+done
+```
+
+Fix — pin the right session for the rest of this shell:
+
+```bash
+export AGENTKEYS_SESSION_ID=alice    # or whatever --session-id you initted
+```
+
+This matches the same pattern §0.4 and §2.4 use. The bare per-call
+alternative is `agentkeys --session-id alice signer sign …` but the
+env-var sticks across §2 + §4, which is what the demo assumes.
+
+If `alice`'s JWT is also expired (init was >5h ago), re-run
+`bash scripts/agentkeys-init-email-demo.sh --session-id alice` to mint
+a fresh one. `ttl_seconds` is 18000 (5h) by default.
+
 ---
 
 ## 15. What's intentionally not yet live
@@ -1865,6 +1932,11 @@ Point the workstation at the public signer hostname (§0.2):
 export AGENTKEYS_SIGNER_URL=https://signer.litentry.org
 export BACKEND_URL=$AGENTKEYS_SIGNER_URL
 curl -sS $BACKEND_URL/healthz   # → ok
+
+# Make sure follow-up `agentkeys signer sign` calls read the session
+# this section initted (not the default `master`, which is usually
+# stale — see §14.8).
+export AGENTKEYS_SESSION_ID=alice
 ```
 
 Compute omnis + derive wallets + run SIWE round-trip — exactly §0.3
