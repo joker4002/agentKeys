@@ -1104,12 +1104,24 @@ echo "OMNI_A    =$OMNI_A   (the omni you used to drive the signer)"
 
 ### 2.4 Repeat for `ADDR_B`
 
-Retarget the CLI to the bob session for the rest of this subsection
-(§0.4's `eval --export B bob` already populated `$SESSION_ID_B`):
+**Run this FIRST** — refresh the shell vars for bob's *current*
+session and pin the CLI to read bob's session file. Without it, the
+`START_B` call below sends a stale `$ADDR_B` from a previous run and
+§2.4 ends with `HTTP 401 — signature does not recover to claimed
+address` (the SIWE message claims an address derived from
+`$ADDR_B_stale`, but `$OMNI_B_stale` doesn't agree — see [§14.4](#144-siwe-verify-returns-signature-does-not-recover-to-claimed-address--or-address-drift--master-secret-rotated-mid-session-at-end-of-22)):
 
 ```bash
+eval "$(bash scripts/agentkeys-demo-show.sh --export B bob)"
 export AGENTKEYS_SESSION_ID="$SESSION_ID_B"
 ```
+
+The `eval` line is **idempotent** — re-running it after every fresh
+`init-email-demo.sh --session-id bob` is the canonical fix when bob's
+session got re-minted (e.g. expired JWT, K3 rotation, switched
+broker hosts). The script's own end-of-run hint prints the exact same
+line; this is just here for the operator who jumped straight from
+§2.3 into §2.4 without scrolling back.
 
 ```bash
 START_B=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/auth/wallet/start \
