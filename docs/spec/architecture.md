@@ -171,6 +171,35 @@ as the source-of-truth when designing the Figma trust-flow diagram.
 above are referenced directly so any flow can be unambiguously
 mapped back to which key signed/verified/wrapped what.
 
+### 3a. Canonical names (one concept, one canonical spelling)
+
+Pinned to disambiguate the same value showing up under different
+labels across components. **Use the canonical column** in every new
+doc, runbook, CLI output, and commit message; the alias column lists
+every spelling that exists today so a reader chasing one of them can
+find their way back. Per `CLAUDE.md` →
+"Terminology-source-of-truth rule", if you introduce a name not in
+this table, either add the alias row here or rename the call site to
+match the canonical name in the same change.
+
+| Canonical name              | Identity                                                                                                                                                    | Aliases seen in the codebase / docs (NOT to introduce new ones)                                                                                                                                                                                                                                            |
+|-----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `master_wallet`             | K4 instance bound to one actor's actor_omni at init/SIWE-verify. Source = `JWT.agentkeys.wallet_address` of the persisted session JWT (K6).                  | `wallet_address` (JWT claim shape), `agentkeys_user_wallet` (OIDC JWT claim + AWS PrincipalTag key), `session_wallet` (CLI `agentkeys whoami` field), `MASTER_WALLET` (demo doc shell var), `session.wallet.0` (Rust field).                                                                                |
+| `derived_address(omni)`     | K4 instance computed on demand by `/dev/derive-address` for any omni — `HKDF(K3, omni)`. NOT persisted to a session JWT; NOT in AWS PrincipalTag.            | `derived_address` (CLI `whoami` field), `ADDR_A` / `ADDR_B` (demo doc shell vars for the specific case `omni=actor_omni`), `SIGNER_DERIVE_ADDR` (`demo-show.sh` internal var).                                                                                                                              |
+| `actor_omni`                | The durable per-actor omni — `SHA256("agentkeys"||"evm"||master_wallet)` once SIWE-bound. Carried in `JWT.agentkeys.omni_account`.                          | `omni_account` (JWT claim + CLI `whoami` field), `OMNI_A` / `OMNI_B` (demo doc shell vars), `evm_omni` (init-flow return field, transient name pre-SIWE).                                                                                                                                                  |
+| `identity_omni`             | The transient identity omni — `SHA256("agentkeys"||identity_type||identity_value)`. Used internally by the broker between init and SIWE-verify; never in a post-SIWE JWT. | `identity_omni_email` / `identity_omni_oauth2` (demo doc when narrowing to a specific identity type), `identity omni` (init-flow CLI log line).                                                                                                                                                            |
+| `K3` (= `master_secret`)    | The 32 bytes in `/etc/agentkeys/dev-key-service.env` that every K4 is HKDF-derived from. Single per-broker-host.                                            | `DEV_KEY_SERVICE_MASTER_SECRET` (env var name), `master_secret` (signer-side log).                                                                                                                                                                                                                         |
+| `session JWT` (= K6)        | The bearer token at `~/.agentkeys/<id>/session.json` (or OS keychain). Signed by K1.                                                                        | `session_jwt` (JSON field name in broker responses), `evm_session_jwt` (init-flow internal var post-SIWE), `SESSION_JWT_A` / `SESSION_JWT_B` (demo doc shell vars).                                                                                                                                         |
+| `OIDC JWT` (= K7)           | Per-mint short-lived JWT signed by K2; consumed by `AssumeRoleWithWebIdentity`.                                                                             | `oidc_jwt`, `JWT_A` / `JWT_B` (demo doc shell vars).                                                                                                                                                                                                                                                       |
+
+The most common confusion this table resolves: **`master_wallet`
+(persisted in the session JWT, used by AWS PrincipalTag) ≠
+`derived_address(actor_omni)` (recomputed on each `/dev/derive-address`
+call, never reaches AWS).** Both are valid K4 instances; only the
+first is what AWS sees in `${aws:PrincipalTag/agentkeys_user_wallet}`.
+The post-SIWE `actor_omni` itself is *not a wallet* — it's the 32-byte
+SHA256 input that defines which K4 the signer derives.
+
 ---
 
 ## 4. Identity model
