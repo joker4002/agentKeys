@@ -1301,10 +1301,14 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 awsp agentkeys-admin
 
 # Derived addresses are already lowercase from the dev_key_service.
+# AWS CLI's --body requires a seekable regular file (rejects /dev/null
+# on macOS — character device, not a regular file). Use a tmp file:
+EMPTY=$(mktemp) && trap 'rm -f "$EMPTY"' EXIT
+
 aws s3api put-object --region "$REGION" --bucket "$BUCKET" \
-  --key "bots/${ADDR_A}/hello.txt" --body /dev/null
+  --key "bots/${ADDR_A}/hello.txt" --body "$EMPTY"
 aws s3api put-object --region "$REGION" --bucket "$BUCKET" \
-  --key "bots/${ADDR_B}/hello.txt" --body /dev/null
+  --key "bots/${ADDR_B}/hello.txt" --body "$EMPTY"
 ```
 
 ### 4.3 Re-export the assumed-role creds and probe both prefixes
