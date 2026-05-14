@@ -1455,9 +1455,43 @@ the production auto-provision path no longer hits it.
 # === ON OPERATOR WORKSTATION === (or anywhere with the JWT)
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
+# 0. Load $SESSION_JWT_A from the saved session for `--session-id alice`.
+#    `agentkeys-demo-show.sh --export A alice` populates OMNI_A / ADDR_A
+#    / MASTER_WALLET_A but NOT the JWT — load it here. Tries Keychain
+#    first (macOS default), falls back to ~/.agentkeys/<id>/session.json.
+load_session_jwt() {
+  local sid="$1"
+  local marker="${HOME}/.agentkeys/${sid}/.keyring_managed"
+  if [[ -s "$marker" ]]; then
+    security find-generic-password -s agentkeys -a "$sid" -w 2>/dev/null | jq -r .token 2>/dev/null
+  else
+    jq -r .token "${HOME}/.agentkeys/${sid}/session.json" 2>/dev/null
+  fi
+}
+SESSION_JWT_A=$(load_session_jwt alice)
+[[ -n "$SESSION_JWT_A" && "$SESSION_JWT_A" != "null" ]] || {
+  echo "ERROR: no alice session JWT on disk or in Keychain. Run:"
+  echo "  bash scripts/agentkeys-init-email-demo.sh --session-id alice"
+  echo "first, then retry."; return 1 2>/dev/null || exit 1; }
+[[ "$SESSION_JWT_A" =~ ^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] || {
+  echo "ERROR: \$SESSION_JWT_A is not a well-formed JWT — alice session corrupt"
+  return 1 2>/dev/null || exit 1; }
+
 # 1. Ask the broker for an OIDC JWT (lightweight call — broker just signs).
+#    HTTP 401 here ⇒ session JWT expired (5h TTL). Re-run init.
 JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
+
+# 1a. Decode the wallet the JWT actually carries — this IS the prefix
+# AWS will let you read. Don't assume $ADDR_A or $MASTER_WALLET_A;
+# decode and use the authoritative value (same pattern as §3/§4).
+decode_aws_wallet() {
+  echo "$1" | cut -d. -f2 | tr '_-' '/+' \
+    | python3 -c "import base64,sys; s=sys.stdin.read().strip(); print(base64.urlsafe_b64decode(s+'='*(-len(s)%4)).decode())" \
+    | jq -r .agentkeys_user_wallet
+}
+WALLET_A=$(decode_aws_wallet "$JWT")
+[[ "$WALLET_A" =~ ^0x[0-9a-f]{40}$ ]] || { echo "ERROR: decoded WALLET_A=$WALLET_A not a 0x-address — JWT malformed or expired"; return 1 2>/dev/null || exit 1; }
 
 # 2. Exchange it for AWS creds CLIENT-SIDE. No broker creds participate.
 CREDS=$(aws sts assume-role-with-web-identity \
@@ -1469,65 +1503,116 @@ export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretA
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
 # 3. Use the temp creds. PrincipalTag-scoped per cloud-setup.md §4.4.
-aws s3 ls "s3://$BUCKET/bots/${ADDR_A}/"
+#    `$WALLET_A` is the canonical prefix — never `$ADDR_A` (which is
+#    only correct on §2's manual SIWE path; the auto-init path puts
+#    `master_wallet` in the JWT, and AWS gates on the JWT, not the
+#    operator's mental model).
+aws s3 ls "s3://$BUCKET/bots/${WALLET_A}/"
 ```
 
 Inside `agentkeys-provisioner`, the `fetch_via_broker_default_ttl()`
 helper does the same two-step internally and returns an `AwsTempCreds`
 struct ready for env-var injection into the scraper subprocess.
 
-### 5.2 The server-side aggregator (still available)
+### 5.2 The server-side aggregator (parallel architectural endpoint — not curl-able)
 
-If you want the broker to be the policy point — mandatory audit log,
-Phase B grant check, Idempotency-Key dedup, multi-anchor coordination —
-hit `/v1/mint-aws-creds` instead. It does steps 1+2 above internally
-plus the audit-anchor write, and returns the temp creds in the same
-shape.
+`/v1/mint-aws-creds` is NOT a legacy / backward-compat shim — it's the
+broker-as-policy-point endpoint upgraded in issue-64 (US-027: grant
+resolution + atomic counter). It does §5.1's steps 1+2 internally
+plus the audit-anchor write, and returns temp creds in the same shape.
 
-```bash
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-aws-creds \
-  -H "Authorization: Bearer $SESSION_JWT_A" \
-  -H 'content-type: application/json' \
-  -d "$(jq -n --arg w "$ADDR_A" '{
-        request_id: "demo-1",
-        issued_at: (now | floor | todate),
-        intent:    {agent_id: $w, service: "s3", scope_path: "bots/"}
-      }')" | jq
-# {
-#   "access_key_id": "ASIA…",  "secret_access_key": "…",  "session_token": "…",
-#   "expiration": <unix+session_duration>,
-#   "wallet": "0x…",
-#   "audit_record_id": "aud_<ulid>",
-#   "anchored": ["sqlite"]
-# }
-```
+**Why no curl example.** The endpoint requires `auth.address` +
+`auth.signature` — an EIP-191 signature by the wallet bound in the
+session JWT over the canonical body (sans `auth.signature`). The
+broker enforces three checks ([handlers/mint.rs:125–145](../crates/agentkeys-broker-server/src/handlers/mint.rs#L125)):
 
-The two paths return functionally equivalent creds — both
-`AssumeRoleWithWebIdentity`, both PrincipalTag-scoped. Pick based on
-whether you want the broker or the caller to be the policy point.
+1. `ecrecover(canonical, auth.signature) == auth.address`
+2. `auth.address == claims.agentkeys.wallet_address`
+3. Atomic grant-store consume for `(actor_omni, daemon_address, service)`
+
+For an auto-init operator: `wallet_address = master_wallet`, but the
+signer's strict JWT-omni check ([dev_keys.rs:98](../crates/agentkeys-mock-server/src/handlers/dev_keys.rs#L98))
+only signs with `JWT.omni_account = actor_omni` — which recovers to
+`derived_address(actor_omni)`, not `master_wallet`. Check 2 fails.
+
+For a §2 manual SIWE operator: `wallet_address = derived_address(actor_omni)`,
+the signer signs with `actor_omni`, ecrecover matches, and the endpoint
+returns creds. But that's already what §5.1 does without the audit-write
+overhead, so the curl is operator-unfriendly.
+
+**Realistic callers.** Test fixtures with in-memory signing keys (see
+[`crates/agentkeys-broker-server/tests/mint_v2_flow.rs:201–237`](../crates/agentkeys-broker-server/tests/mint_v2_flow.rs#L201)
+for the working canonical-body + EIP-191 pattern), and the future TEE
+worker (issue #74 step 2) which will hold the master_wallet key inside
+the enclave.
+
+**For end-to-end demos, use §5.1 (client-side flow) or §5.3 (CLI
+provision).** They both exercise the same STS path; §5.2's audit
+record is a server-side bonus that operators rarely need to invoke
+directly.
 
 ### 5.3 Auto-provision pipeline against live broker.litentry.org
 
-`agentkeys-daemon` / `agentkeys-mcp` invoke
-`agentkeys-provisioner::fetch_via_broker_default_ttl` under the hood
-when `AGENTKEYS_BROKER_URL` is set. End-to-end:
+The end-to-end auto-provision trigger is the CLI's `provision`
+subcommand. `agentkeys provision <service>` loads the saved session
+JWT, calls `/v1/mint-oidc-jwt`, exchanges it for AWS temp creds via
+`AssumeRoleWithWebIdentity`, and injects the creds into the scraper
+subprocess as env vars — all in one shot.
+
+**Prereq — install scraper deps once.** The provisioner subprocess
+runs a TypeScript scraper that imports `playwright`. If you've never
+run `agentkeys provision` on this workstation, install the deps first
+(otherwise the subprocess dies with `Cannot find package 'playwright'`
+and the CLI surfaces it as `internal error: unhandled`).
+
+```bash
+# === ON OPERATOR WORKSTATION === — one-time setup per service
+(cd provisioner-scripts && npm install && npx playwright install chromium)
+```
+
+Then run the provision:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
 export AGENTKEYS_BROKER_URL=https://broker.litentry.org
 export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
 export AWS_REGION=us-east-1
+export AGENTKEYS_SIGNER_URL=$BACKEND_URL          # public signer URL from §0.2
 
-# Daemon picks up the env vars; provisioner subprocess receives the AWS
-# temp creds the daemon mints by hitting /v1/mint-oidc-jwt + STS.
-agentkeys-daemon \
-  --backend $BACKEND_URL \
-  --broker-url $AGENTKEYS_BROKER_URL \
-  --session $SESSION_JWT_A
+# Pin the alice session — the CLI reads `~/.agentkeys/alice/session.json`
+# (the JWT init-email-demo.sh or §2 saved there). Without this the CLI
+# falls back to `--session-id master` (typically stale).
+export AGENTKEYS_SESSION_ID=alice
+
+agentkeys --session-id alice provision openrouter
+# … scraper runs, fetches the verification email from S3 using the
+# injected temp creds …
 ```
 
-Inside the daemon, the call site is
+> **What "success" looks like vs scraper-DOM drift.** §5.3 demonstrates
+> the auto-provision **pipeline** — session JWT → OIDC JWT → STS →
+> env-var-injection. If openrouter's signup page DOM has drifted since
+> the scraper was last updated, you'll see a `trip_wire_fired` log line
+> with `"kind":"SelectorTimeout"` and the CLI exits with
+> `A script step timed out at 'signup_flow'`. **That message is proof
+> the pipeline worked** — the scraper subprocess only ran because the
+> AWS creds were minted and injected. Scraper-maintenance (updating
+> selectors when target sites change) is tracked separately in the
+> per-service scraper file under
+> [`provisioner-scripts/src/scrapers/`](../provisioner-scripts/src/scrapers/)
+> — the openrouter scraper specifically is tracked in
+> [issue #83](https://github.com/litentry/agentKeys/issues/83) (label:
+> `provision-fix`). Out of scope for the §5.3 demo.
+
+> **Why NOT `agentkeys-daemon --session $JWT`?** The daemon binary is
+> an MCP host; without `--stdio` it starts, logs `daemon ready, session
+> wallet=local` (the `wallet="local"` placeholder is from
+> [`session.rs:6`](../crates/agentkeys-daemon/src/session.rs#L6) — the
+> daemon doesn't decode the JWT body), and exits immediately. It never
+> calls the provisioner on its own — that's MCP-tool-driven. Use the
+> CLI subcommand above for an end-to-end run.
+
+Inside the CLI, the call site is
 [`crates/agentkeys-mcp/src/lib.rs`](../crates/agentkeys-mcp/src/lib.rs)::`broker_env_for_provision`
 → `fetch_via_broker_default_ttl` → `/v1/mint-oidc-jwt` →
 `AssumeRoleWithWebIdentity` → env-var-injection into the scraper.
@@ -1536,14 +1621,16 @@ Inside the daemon, the call site is
 
 ## 6. Capability grants (Phase B)
 
-A grant is an explicit, master-OmniAccount-issued authorization that
-daemon address X can mint S3 creds for `(service, scope_path)` until
-`expires_at`, up to `max_uses` times. It's the cloud's
-fail-closed-by-default story.
+A grant is an explicit, `master_wallet`-issued authorization that the
+daemon at `derived_address(actor_omni)` (arch.md §3a) can mint S3 creds
+for `(service, scope_path)` until `expires_at`, up to `max_uses` times.
+It's the cloud's fail-closed-by-default story.
 
 ### 6.1 Master creates a grant
 
 ```bash
+# `daemon_address` is arch.md §3a `derived_address(actor_omni)`
+# (= `$ADDR_A` in this demo's shell vars).
 GRANT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/grant/create \
   -H "Authorization: Bearer $SESSION_JWT_A" \
   -H 'content-type: application/json' \
@@ -1603,11 +1690,12 @@ on the broker host once every daemon has a grant.
 ## 7. Wallet linking + recovery (Phase B)
 
 After issue #74 step 1 the canonical recovery model is "any linked
-identity unlocks the same derived wallet." The daemon links its
-identity-omni (e.g. `OMNI_A` from email) to the derived wallet so
-re-authenticating as that email recovers the same EVM address.
+identity unlocks the same `derived_address(actor_omni)`" (arch.md §3a).
+The daemon links its `identity_omni` (e.g. the email-derived omni used
+at init time) to the post-SIWE `actor_omni` so re-authenticating as that
+email recovers the same EVM address.
 
-### 7.1 Master links the identity-omni to the derived wallet
+### 7.1 Master links the `identity_omni` to the `actor_omni`
 
 ```bash
 curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/wallet/link \
@@ -1617,7 +1705,8 @@ curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/wallet/link \
 ```
 
 After this call the broker's `IdentityLinkStore` knows that
-`("email", "alice@demo.example")` ↔ `OMNI_EVM_A` ↔ `ADDR_A`.
+`("email", "alice@demo.example")` (= `identity_omni`) ↔ `$OMNI_EVM_A`
+(= `actor_omni` from §2.3) ↔ `$ADDR_A` (= `derived_address(actor_omni)`).
 
 ### 7.2 List linked identities
 
@@ -1647,11 +1736,12 @@ flow](operator-runbook-stage7.md#recovery-flow).
 
 ## 8. Email-link auth (Phase A.1) — alternative entry point
 
-Email-link is the canonical way to bootstrap `OMNI_A` in a real
-deployment instead of computing it offline like §0.3 does. After
-verification, the broker mints a session JWT bound to `omni_email`,
-and the daemon then derives the wallet via `/dev/derive-address`.
-Same dev_key_service flow from there on out.
+Email-link is the canonical way to bootstrap `identity_omni` (arch.md
+§3a) in a real deployment instead of computing it offline like §0.3
+does. After verification, the broker mints a session JWT carrying
+`identity_omni` (where `identity_type="email"`); the daemon then derives
+`master_wallet = HKDF(K3, identity_omni)` via `/dev/derive-address`.
+§2's SIWE rebinds the JWT to `actor_omni` from there.
 
 Requires `BROKER_AUTH_METHODS=…,email_link` and `BROKER_EMAIL_*` env
 vars set (see runbook). SES sender identity must be verified.
@@ -1676,12 +1766,14 @@ curl -sS --fail-with-body $OIDC_ISSUER/v1/auth/email/status/em_… | jq
 #   "identity_value": "alice@demo.example"
 # }
 
-# 4. The session JWT is now an `omni_email` session. Derive the wallet:
+# 4. The session JWT now carries `identity_omni` (arch.md §3a;
+#    identity_type="email"). Derive `master_wallet`:
 EMAIL_SESSION_JWT=...                # from step 3
 agentkeys --session-id alice signer derive \
   --signer-url $BACKEND_URL \
   --omni-account $(omni email "alice@demo.example")
-# 5. Then run §2.1 onwards using that derived address.
+# 5. Then run §2.1 onwards — SIWE rebinds the JWT to `actor_omni` and
+#    a second derive yields `derived_address(actor_omni)`.
 ```
 
 §8 is a manual alternative to §2.0's one-command `agentkeys init
@@ -1767,9 +1859,13 @@ sudo sqlite3 /var/lib/agentkeys/.agentkeys/broker/audit.sqlite \
 ```
 
 Columns of interest:
-- `omni_account` — `OMNI_EVM_A` for derived-wallet mints (post issue
-  #74 the wallet is the public side; the identity omni stays on the
-  daemon).
+- `omni_account` — arch.md §3a `actor_omni` (= `$OMNI_EVM_A` post-SIWE).
+  Post issue #74 the wallet (`master_wallet` or `derived_address`) is
+  the public side; the bootstrap `identity_omni` stays on the daemon
+  and never lands here.
+- `wallet` — arch.md §3a `master_wallet` or `derived_address(actor_omni)`
+  depending on which the OIDC JWT carried (see §0.4 "Which wallet
+  ends up in AWS PrincipalTag").
 - `status` — `confirmed` after `sqlite_primary` or `sqlite`-only
   policy completes; `pending` → `confirmed | quarantined` for
   `dual_strict` policy (Phase C).
@@ -2187,6 +2283,10 @@ and `$BACKEND_URL=https://signer.litentry.org`. No tunnel; the signer
 listener is fronted by nginx with TLS (issued via certbot per §0.2).
 
 ```bash
+# `omni()` computes arch.md §3a `actor_omni` for the EVM identity-type
+# (after SIWE), and `identity_omni` for the email identity-type (before
+# SIWE). Here we use it for `actor_omni` directly — short-circuiting
+# §0.3's bootstrap. `$ADDR_A` / `$ADDR_B` = `derived_address(actor_omni)`.
 omni() { printf '%s%s%s' "agentkeys" "$1" "$2" | shasum -a 256 | awk '{print $1}'; }
 OMNI_A=$(omni email "alice@demo.example")
 OMNI_B=$(omni email "bob@demo.example")
@@ -2222,6 +2322,18 @@ JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
   -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
 echo "JWT prefix: ${JWT:0:40}…"
 
+# Decode the wallet the JWT actually carries — same pattern as §3.
+# This is the prefix AWS will let the assumed role read. Don't assume
+# `$ADDR_A` (only correct under §16.4's manual SIWE path).
+decode_aws_wallet() {
+  echo "$1" | cut -d. -f2 | tr '_-' '/+' \
+    | python3 -c "import base64,sys; s=sys.stdin.read().strip(); print(base64.urlsafe_b64decode(s+'='*(-len(s)%4)).decode())" \
+    | jq -r .agentkeys_user_wallet
+}
+WALLET_A=$(decode_aws_wallet "$JWT")
+[[ "$WALLET_A" =~ ^0x[0-9a-f]{40}$ ]] || { echo "ERROR: decoded WALLET_A=$WALLET_A not a 0x-address"; return 1 2>/dev/null || exit 1; }
+echo "WALLET_A=$WALLET_A   (the prefix bot/<WALLET_A>/ is what alice can read)"
+
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 CREDS=$(aws sts assume-role-with-web-identity \
   --role-arn "$DATA_ROLE_ARN" \
@@ -2243,11 +2355,15 @@ aws sts get-caller-identity
 ```bash
 # === ON OPERATOR WORKSTATION (still with assumed-role creds) ===
 
-# Wallet A's prefix — SUCCESS.
+# Alice's prefix — SUCCESS. (`$WALLET_A` decoded from JWT in §16.5;
+#  arch.md §3a canonical: whichever of `master_wallet` or
+#  `derived_address(actor_omni)` ended up in `agentkeys_user_wallet`.)
 aws s3api list-objects-v2 --bucket "$BUCKET" \
-  --prefix "bots/${ADDR_A}/" --query 'Contents[*].Key'
+  --prefix "bots/${WALLET_A}/" --query 'Contents[*].Key'
 
-# Wallet B's prefix — AccessDenied (cloud-enforced).
+# A peer wallet — AccessDenied (cloud-enforced). `$ADDR_B` is bob's
+# `derived_address(actor_omni)` from §16.4; any wallet ≠ `$WALLET_A`
+# triggers the same deny.
 aws s3api get-object --region "$REGION" --bucket "$BUCKET" \
   --key "bots/${ADDR_B}/hello.txt" /tmp/got-B.txt
 # An error occurred (AccessDenied) when calling the GetObject operation
