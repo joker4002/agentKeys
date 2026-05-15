@@ -1570,23 +1570,67 @@ and the CLI surfaces it as `internal error: unhandled`).
 (cd provisioner-scripts && npm install && npx playwright install chromium)
 ```
 
-Then run the provision:
+**Full fresh-start sequence (auto-init path, last verified 2026-05-15).**
+Copy-paste from a clean shell — produces the same `trip_wire_fired`
+event observed in [issue #83](https://github.com/litentry/agentKeys/issues/83):
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
+
+# 1. Auto-init alice (sends magic link, polls SES inbound, completes
+#    SIWE rebinding, writes ~/.agentkeys/alice/session.json).
+bash scripts/agentkeys-init-email-demo.sh --session-id alice
+
+# 2. Export OMNI_A / ADDR_A / MASTER_WALLET_A into shell (does NOT
+#    export SESSION_JWT_A — that's loaded from disk below).
+eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"
+
+# 3. Load operator env (OIDC_ISSUER, BUCKET, ACCOUNT_ID, REGION,
+#    BACKEND_URL all come from here).
+set -a; source scripts/operator-workstation.env; set +a
+
+# 4. Load the saved session JWT from disk / Keychain (helper from §5.1).
+load_session_jwt() {
+  local sid="$1"
+  local marker="${HOME}/.agentkeys/${sid}/.keyring_managed"
+  if [[ -s "$marker" ]]; then
+    security find-generic-password -s agentkeys -a "$sid" -w 2>/dev/null | jq -r .token
+  else
+    jq -r .token "${HOME}/.agentkeys/${sid}/session.json"
+  fi
+}
+SESSION_JWT_A=$(load_session_jwt alice)
+
+# 5. Mint OIDC JWT from the broker (5-min TTL).
+JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
+  -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
+
+# 6. Exchange for AWS temp creds (client-side STS — no broker creds).
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
+CREDS=$(aws sts assume-role-with-web-identity \
+  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
+  --role-session-name "demo-A-$(date +%s)" \
+  --web-identity-token "$JWT")
+export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
+export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
+export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
+
+# 7. Configure provisioner env + pin alice session for the subprocess.
 export AGENTKEYS_BROKER_URL=https://broker.litentry.org
 export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
 export AWS_REGION=us-east-1
-export AGENTKEYS_SIGNER_URL=$BACKEND_URL          # public signer URL from §0.2
-
-# Pin the alice session — the CLI reads `~/.agentkeys/alice/session.json`
-# (the JWT init-email-demo.sh or §2 saved there). Without this the CLI
-# falls back to `--session-id master` (typically stale).
+export AGENTKEYS_SIGNER_URL=$BACKEND_URL
 export AGENTKEYS_SESSION_ID=alice
 
+# 8. Run the provision. CLI re-mints OIDC JWT internally (steps 5+6
+#    above are belt-and-suspenders; the CLI does them too) and spawns
+#    the scraper subprocess with AWS env injected.
 agentkeys --session-id alice provision openrouter
-# … scraper runs, fetches the verification email from S3 using the
-# injected temp creds …
+# Expected output (proves auto-provision pipeline succeeded):
+# {"level":"info","event":"provision_metric","name":"trip_wire_fired",
+#  "service":"openrouter","kind":"SelectorTimeout","step":"signup_flow"}
+# Problem: A script step timed out at 'signup_flow'.
+# Cause: The target site's DOM may have changed (tripwire: SelectorTimeout).
 ```
 
 > **What "success" looks like vs scraper-DOM drift.** §5.3 demonstrates
