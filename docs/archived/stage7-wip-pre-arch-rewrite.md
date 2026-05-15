@@ -27,7 +27,7 @@ Both `mint-*` endpoints write a row to the broker's append-only SQLite audit DB 
 
 ## Configuration
 
-The broker reads AWS credentials from the SDK default chain (instance profile → named profile → static keys, in that order). See [`operator-runbook.md` §2](./operator-runbook.md#2-aws-credentials) for the full credential story.
+The broker reads AWS credentials from the SDK default chain (instance profile → named profile → static keys, in that order). See [`operator-runbook-stage7.md`](./operator-runbook-stage7.md) for the full credential story.
 
 | Env var | Default | Notes |
 |---|---|---|
@@ -241,7 +241,7 @@ If `.issuer` doesn't match the URL byte-for-byte, fix `BROKER_OIDC_ISSUER` on th
 
 ## Operations
 
-- **Start, supervise, rotate, audit** → [`operator-runbook.md`](./operator-runbook.md).
+- **Start, supervise, rotate, audit** → [`operator-runbook-stage7.md`](./operator-runbook-stage7.md).
 - **Cloud-account provisioning + OIDC federation** → [`cloud-setup.md`](./cloud-setup.md).
 - **Don't expose `:8091` ingress.** Host firewall must drop `:8091` from anywhere except `127.0.0.1`. Nginx is the only legitimate caller.
 - **Cert renewal.** Certbot's renewal timer ships with the package (`sudo systemctl list-timers | grep certbot`). AWS doesn't pin the cert; thumbprint persistence comes from the LE intermediate CA.

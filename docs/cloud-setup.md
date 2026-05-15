@@ -13,7 +13,8 @@ The runbook is split by concern, not by stage:
 | [§3 IAM users + role](#3-iam-identities) | `agentkeys-{admin,broker,daemon}` + `agentkeys-data-role` | Once per account |
 | [§4 OIDC federation](#4-oidc-federation-stage-7) | Register the broker as an OIDC provider, swap to PrincipalTag-scoped trust | After §1–§3 + a publicly-reachable broker |
 | [§5 EC2 broker host](#5-ec2-broker-host-optional) | EIP, A record, security group | Only if you're hosting the broker on AWS |
-| [§6 Cleanup](#6-cleanup) | Tear-down recipe | When you want to delete it all |
+| [§6 Signer host](#6-signer-host) | DNS A record + TLS cert + nginx flip for `signer.<zone>` | After §5 — needs `$EIP` |
+| [§7 Cleanup](#7-cleanup) | Tear-down recipe | When you want to delete it all |
 
 **Cloud-portability:** §1 (DNS) and §2 (inbound mail) are the cloud-replaceable layers — Tencent Cloud SimpleDM + COS would slot in here unchanged at the §3+ boundary. See [§2.2](#22-future-tencent-cloud-simpledm--cos).
 
@@ -96,6 +97,10 @@ aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
 
 Done as part of [§5 EC2 broker host](#5-ec2-broker-host-optional), once you know the host's public IP. If the broker lives outside AWS (DigitalOcean, Hetzner, etc.), upsert the A record now using the host's static IP — the rest of the runbook is identical.
 
+### 1.3 Signer subdomain — A record + TLS cert (issue #74 step 1b)
+
+Done as part of [§6 Signer host](#6-signer-host), once `$EIP` is known from [§5.1](#51-allocate--attach-an-elastic-ip).
+
 ---
 
 ## 2. Inbound mail backend
@@ -129,11 +134,11 @@ aws s3api create-bucket \
   --region "$REGION" --bucket "$BUCKET" \
   $([ "$REGION" != "us-east-1" ] && echo "--create-bucket-configuration LocationConstraint=$REGION")
 
-aws s3api put-public-access-block --bucket "$BUCKET" \
+aws s3api put-public-access-block --region "$REGION" --bucket "$BUCKET" \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 
 # 30-day TTL on inbound objects (throwaway-inbox model)
-aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
+aws s3api put-bucket-lifecycle-configuration --region "$REGION" --bucket "$BUCKET" \
   --lifecycle-configuration "$(jq -n '{
     Rules: [{ID:"inbound-30d-ttl", Status:"Enabled", Filter:{Prefix:"inbound/"}, Expiration:{Days:30}}]
   }')"
@@ -263,12 +268,122 @@ aws ec2 associate-iam-instance-profile --region "$REGION" \
   --iam-instance-profile Name=$ROLE_NAME
 ```
 
+### 3.4a `ses:SendEmail` grant on the broker's runtime role (Pass 2 prereq)
+
+The broker calls SES v2 `SendEmail` with its **own** runtime credentials
+(instance profile), NOT via the assumed `agentkeys-data-role`. Without
+`ses:SendEmail` on the broker's role the operator hits:
+
+```
+broker rejected /v1/auth/email/request: status=502 body=
+{"error":"backend_unreachable","message":"… ses SendEmail:
+ unhandled error (AccessDeniedException)"}
+```
+
+The IAM action is `ses:SendEmail` (sesv2) — NOT `ses:SendRawEmail` (v1
+only; different code path the broker doesn't use).
+
+**Step 1: discover the actual role name attached to your broker host.**
+The canonical name is `agentkeys-broker-host` (created by §3.4 above).
+The discovery command below stays as-is so the runbook is robust to
+operators who landed on a non-canonical name during early provisioning
+(historically: `S3-full-access`, fully retired 2026-05-12 via the role
+rename in [PR #75 follow-up](#)). Find it:
+
+```bash
+# REQUIRED: admin profile + operator env loaded.
+awsp agentkeys-admin
+set -a; source scripts/operator-workstation.env; set +a
+
+# CRITICAL: pass --region "$REGION". The agentkeys-admin profile
+# defaults to us-west-2, but the broker EC2 lives in us-east-1 (from
+# operator-workstation.env). Without --region, describe-instances
+# searches us-west-2, finds nothing, returns empty silently (no error),
+# and the downstream put-role-policy silently runs with --role-name "".
+# See CLAUDE.md → AWS local-profile ↔ remote-IAM mapping.
+INSTANCE_PROFILE_ARN=$(aws ec2 describe-instances \
+  --region "$REGION" \
+  --filters "Name=ip-address,Values=$EIP" \
+  --query 'Reservations[].Instances[].IamInstanceProfile.Arn' \
+  --output text)
+
+if [[ -z "$INSTANCE_PROFILE_ARN" || "$INSTANCE_PROFILE_ARN" == "None" ]]; then
+  echo "ABORT: no EC2 instance with EIP=$EIP found in region $REGION." >&2
+  echo "Caller: $(aws sts get-caller-identity --query Arn --output text)" >&2
+  unset ROLE
+else
+  ROLE=$(aws iam get-instance-profile \
+    --instance-profile-name "${INSTANCE_PROFILE_ARN##*/}" \
+    --query 'InstanceProfile.Roles[0].RoleName' --output text)
+  echo "broker runtime role: $ROLE"
+fi
+```
+
+**Step 2: grant `ses:SendEmail` + `ses:GetEmailIdentity` (least-privilege).**
+
+The broker calls `ses:GetEmailIdentity` at startup via `verify_sender_ready`
+to confirm the sender is verified, and `ses:SendEmail` per request.
+Both grants are scoped to the verified domain identity (and any
+per-address subset) — nothing wider.
+
+```bash
+aws iam put-role-policy --role-name "$ROLE" \
+  --policy-name BrokerSendEmail \
+  --policy-document "$(jq -n \
+    --arg region "$REGION" --arg acct "$ACCOUNT_ID" --arg domain "$MAIL_DOMAIN" '{
+    Version: "2012-10-17",
+    Statement: [{
+      Effect: "Allow",
+      Action: ["ses:SendEmail", "ses:GetEmailIdentity"],
+      Resource: [
+        "arn:aws:ses:\($region):\($acct):identity/\($domain)",
+        "arn:aws:ses:\($region):\($acct):identity/*@\($domain)"
+      ]
+    }]
+  }')"
+```
+
+No broker restart needed — sesv2 picks up creds per-call. Verify:
+
+```bash
+aws iam get-role-policy --role-name "$ROLE" --policy-name BrokerSendEmail \
+  --query 'PolicyDocument.Statement[*].Action'
+# → [["ses:SendEmail", "ses:GetEmailIdentity"]]
+```
+
+**Step 3 (security audit): strip any over-broad legacy attached policies.**
+
+Some legacy deploys ship with `AmazonS3FullAccess` (or similar wide
+permissions) attached to the broker's instance role from initial
+provisioning. The broker process at runtime ONLY uses `aws-sdk-sts`
+(STS GetCallerIdentity startup probe) + `aws-sdk-sesv2` (this section's
+grants) — it never accesses S3 with its own creds. Per-user S3 access
+is via JWT-assumed `agentkeys-data-role` (§3.2), NOT the broker's
+runtime role.
+
+A broker compromise with `AmazonS3FullAccess` would expose every
+inbound email in the SES bucket (verification tokens, magic links,
+user-data buckets if any). Strip it:
+
+```bash
+# List currently attached policies on the broker's role:
+aws iam list-attached-role-policies --role-name "$ROLE"
+
+# Detach AmazonS3FullAccess if present:
+aws iam detach-role-policy --role-name "$ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+# Verify only BrokerSendEmail (inline, this section) remains:
+aws iam list-role-policies --role-name "$ROLE"        # → ["BrokerSendEmail"]
+aws iam list-attached-role-policies --role-name "$ROLE" # → []
+```
+
 ### 3.5 S3 bucket policy
 
 Now that `agentkeys-data-role` exists, attach the bucket policy. The static-IAM-user variant: SES writes inbound, role reads everything.
 
 ```bash
-aws s3api put-bucket-policy --bucket "$BUCKET" \
+aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
   --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" '{
     Version: "2012-10-17",
     Statement: [
@@ -380,7 +495,7 @@ Replaces `AllowDaemonRead` from §3.5. The cloud now enforces "the assumed sessi
 The daemon's read perms split into two statements because `s3:prefix` is a request-time condition that **only applies to `s3:ListBucket`** (the prefix filter on listings) — `s3:GetObject` doesn't carry a prefix parameter, so combining the two actions under one `s3:prefix` condition triggers `MalformedPolicy: Conditions do not apply to combination of actions and resources in statement`. For `GetObject` the resource ARN itself enforces the prefix via `${aws:PrincipalTag/...}` expansion.
 
 ```bash
-aws s3api put-bucket-policy --bucket "$BUCKET" \
+aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
   --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" '{
     Version: "2012-10-17",
     Statement: [
@@ -397,20 +512,31 @@ aws s3api put-bucket-policy --bucket "$BUCKET" \
         Action: "s3:ListBucket",
         Resource: "arn:aws:s3:::\($bucket)",
         Condition: {
-          StringLike: {"s3:prefix": "${aws:PrincipalTag/agentkeys_user_wallet}/*"}
+          StringLike: {"s3:prefix": "bots/${aws:PrincipalTag/agentkeys_user_wallet}/*"}
         }
       },
       {
         Sid: "AllowDaemonGetOwnObjects", Effect: "Allow",
         Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
         Action: "s3:GetObject",
-        Resource: "arn:aws:s3:::\($bucket)/${aws:PrincipalTag/agentkeys_user_wallet}/*"
+        Resource: "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_user_wallet}/*"
       }
     ]
   }')"
 ```
 
-`StringLike "${tag}/*"` (not `StringEquals "${tag}/"`) lets the daemon list sub-prefixes like `<wallet>/inbox/` and `<wallet>/sent/2026-05/`, not just the exact root `<wallet>/`. Matches the shape in [`docs/spec/ses-email-architecture.md` §10.4](spec/ses-email-architecture.md) and [`wiki/tag-based-access`](../wiki/tag-based-access.md).
+**`bots/` is the per-actor data namespace** — sibling to SES's
+`inbound/`, and to future system prefixes like `audit/`, `dkim/`,
+`config/`. Keeping every actor's data under a single parent prefix
+lets lifecycle rules, encryption defaults, replication, and ops audits
+scope cleanly to "user data" without sweeping in system prefixes.
+Matches arch.md §6 (`bots/A/file` in the runtime sequence diagram).
+Both the policy resource ARN (`bucket/bots/${tag}/*`) and the
+`s3:prefix` condition (`bots/${tag}/*`) carry the `bots/` parent —
+omit it on either and the other half of the policy denies even legit
+reads.
+
+`StringLike "bots/${tag}/*"` (not `StringEquals "bots/${tag}/"`) lets the daemon list sub-prefixes like `bots/<wallet>/inbox/` and `bots/<wallet>/sent/2026-05/`, not just the exact root `bots/<wallet>/`. Matches the shape in [`docs/spec/ses-email-architecture.md` §10.4](spec/ses-email-architecture.md) and [`wiki/tag-based-access`](../wiki/tag-based-access.md).
 
 ### 4.4.1 Strip the §3 broad-bucket grant from the role's inline policy
 
@@ -612,7 +738,84 @@ The script writes systemd units, an HTTP-only nginx config, then prints the cert
 
 ---
 
-## 6. Cleanup
+## 6. Signer host
+
+| Concern | Today | Future |
+|---|---|---|
+| Process | `agentkeys-signer.service` (Rust, `agentkeys-mock-server --signer-only`, loopback `:8092`) | TEE worker (issue #74 step 2) |
+| Host | **Same EC2 box as the broker** — co-located behind the same nginx, provisioned by the same `setup-broker-host.sh` run | Separate machine (or enclave); only the A record + cert move |
+| Public hostname | `signer.<zone>` (e.g. `signer.litentry.org`) — exported as `SIGNER_HOST` / `AGENTKEYS_SIGNER_URL` in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env) | `signer.<zone>` (unchanged) |
+| Endpoints | `/dev/derive-address`, `/dev/sign-message`, `/healthz` only — every request bearer-JWT-authed against the broker session pubkey ([`signer-protocol.md`](spec/signer-protocol.md)) | unchanged |
+| Master secret (K3) | `/etc/agentkeys/dev-key-service.env` (mode 0600, owner `agentkeys`) — auto-generated on first `setup-broker-host.sh` run, **never rotated** (rotation invalidates every previously-derived wallet) | TEE-sealed; same wire shape |
+
+### 6.1 DNS A record
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+SIGNER_HOST="signer.${BROKER_HOST#*.}"
+
+# If $EIP isn't already set from §5.1, re-derive from AWS — NEVER from
+# `dig`. Local resolvers behind Cloudflare WARP / Zscaler / Tailscale /
+# corporate VPNs return RFC 2544 "TEST-NET-2" (198.18.0.0/15) for
+# proxied hostnames, which silently breaks Let's Encrypt validation.
+[ -z "$EIP" ] && EIP=$(aws ec2 describe-addresses --region "$REGION" \
+  --query 'Addresses[?AssociationId!=`null`].PublicIp' --output text)
+echo "EIP=$EIP"   # MUST be a routable public IP, not 198.18.x.x / 10.x.x.x / 100.64.x.x
+
+aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
+  --change-batch "$(jq -n --arg name "${SIGNER_HOST}." --arg ip "$EIP" '{
+    Changes: [{Action:"UPSERT", ResourceRecordSet:{Name:$name, Type:"A", TTL:300, ResourceRecords:[{Value:$ip}]}}]
+  }')"
+
+# Verify via Cloudflare DoH (your local resolver will keep lying if proxied).
+until [ "$(curl -s "https://cloudflare-dns.com/dns-query?name=${SIGNER_HOST}&type=A" \
+            -H 'accept: application/dns-json' | jq -r '.Answer[0].data')" = "$EIP" ]; do
+  echo "waiting for Route 53 propagation (TTL 300s)…"; sleep 5
+done
+echo "DNS ready: ${SIGNER_HOST} → ${EIP}"
+```
+
+### 6.2 TLS cert + nginx flip
+
+> **`$SIGNER_HOST` is laptop-only** (lives in `operator-workstation.env`).
+> On the broker host, derive it from the nginx vhost that `setup-broker-host.sh`
+> just wrote — the snippet below does it inline so the commands work in a
+> fresh broker shell with no env vars set.
+
+```bash
+# === ON BROKER HOST ===
+# 1. First pass writes the HTTP-only nginx vhost for signer.<zone>.
+sudo bash scripts/setup-broker-host.sh --yes
+
+# Sanity-check + read the hostname back out of the vhost.
+ls /etc/nginx/sites-enabled/agentkeys-signer
+SIGNER_HOST=$(awk '/server_name/ && /signer\./ {gsub(";",""); print $2}' \
+                /etc/nginx/sites-available/agentkeys-signer | head -1)
+echo "SIGNER_HOST=$SIGNER_HOST"
+
+# 2. Issue the LE cert. If the prompt only lists broker.<zone>, the
+# signer vhost wasn't written — re-pull + re-run step 1.
+sudo certbot --nginx -d "$SIGNER_HOST"
+
+# 3. Re-run to flip the signer vhost onto :443 ssl.
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+### 6.3 Verify
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+curl -sS "https://$SIGNER_HOST/healthz"
+# ok
+
+# Defense-in-depth: signer vhost rejects everything except /dev/* + /healthz.
+curl -sS -o /dev/null -w '%{http_code}\n' "https://$SIGNER_HOST/session/create"
+# 404
+```
+
+---
+
+## 7. Cleanup
 
 ```bash
 # OIDC federation (if §4 ran)
@@ -638,7 +841,7 @@ aws iam delete-role        --role-name agentkeys-broker-host 2>/dev/null
 aws ses set-active-receipt-rule-set --rule-set-name "" --region "$REGION"
 aws sesv2 delete-email-identity --region "$REGION" --email-identity "$DOMAIN"
 aws s3 rm "s3://$BUCKET" --recursive
-aws s3api delete-bucket --bucket "$BUCKET"
+aws s3api delete-bucket --region "$REGION" --bucket "$BUCKET"
 
 # DNS records on the parent zone are NOT auto-deleted — you'll need to
 # remove the DKIM CNAMEs, MX, SPF, DMARC, and broker A record by hand
