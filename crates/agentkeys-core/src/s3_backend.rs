@@ -58,6 +58,7 @@ use aes_gcm::{
 };
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
+use aws_credential_types::Credentials as AwsCredentials;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
@@ -91,20 +92,33 @@ pub struct S3CredentialBackend {
 }
 
 impl S3CredentialBackend {
-    /// Build a backend against the live AWS S3 service. Picks up creds
-    /// from the standard AWS_* env or shared-config files via
-    /// `aws_config::defaults`. `region` overrides the SDK default lookup
-    /// chain only when supplied (leaving it `None` lets `AWS_REGION` /
-    /// shared config win).
+    /// Build a backend against the live AWS S3 service.
+    ///
+    /// `credentials` is the **canonical injection point** for the
+    /// short-lived AWS creds the broker mints via OIDC + STS
+    /// `AssumeRoleWithWebIdentity`. When `Some`, the S3 client uses
+    /// those creds explicitly — independent of the process env, which
+    /// matters because `cmd_provision` injects broker-minted creds into
+    /// the *scraper subprocess* env, not the parent. When `None`, the
+    /// S3 client falls back to the standard `aws_config::defaults`
+    /// chain (process AWS_* env, shared config, IMDS, …) — fine for
+    /// callers that already export AWS_* themselves.
+    ///
+    /// `region` overrides the SDK default lookup only when supplied;
+    /// leaving it `None` lets `AWS_REGION` or shared config win.
     pub async fn new(
         bucket: impl Into<String>,
         region: Option<&str>,
+        credentials: Option<AwsCredentials>,
         signer: Arc<dyn SignerClient>,
         omni_account: impl Into<String>,
     ) -> Self {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
         if let Some(r) = region {
             loader = loader.region(Region::new(r.to_string()));
+        }
+        if let Some(c) = credentials {
+            loader = loader.credentials_provider(c);
         }
         let config = loader.load().await;
         let s3 = S3Client::new(&config);
@@ -255,6 +269,53 @@ impl S3CredentialBackend {
     }
 }
 
+/// Enforce `Session.scope` for a per-service credential operation. The
+/// legacy HTTP backend sends the bearer JWT and lets the mock-server's
+/// `/credential/*` handlers do this server-side; with the S3 backend
+/// the client IS the trust boundary (AWS only knows about wallet, not
+/// service), so we have to apply the same gate before we touch S3.
+///
+/// `write` distinguishes store/teardown from read so `read_only`
+/// scopes can still call `read_credential`.
+fn enforce_scope_for_service(
+    session: &Session,
+    service: &ServiceName,
+    write: bool,
+) -> Result<(), BackendError> {
+    let Some(scope) = &session.scope else {
+        return Ok(());
+    };
+    if !scope.services.iter().any(|s| s == service) {
+        let allowed: Vec<&str> = scope.services.iter().map(|s| s.0.as_str()).collect();
+        return Err(BackendError::PermissionDenied(format!(
+            "service '{}' not in session scope (allowed: [{}])",
+            service.0,
+            allowed.join(", ")
+        )));
+    }
+    if write && scope.read_only {
+        return Err(BackendError::PermissionDenied(format!(
+            "session is read_only; refusing to write credential for service '{}'",
+            service.0
+        )));
+    }
+    Ok(())
+}
+
+/// Enforce that a wallet-level destructive op (today only
+/// `teardown_agent`) is invoked from the unscoped master session.
+/// Scoped child sessions don't carry the "delete-all-credentials"
+/// authority even if their scope.services covers what would be
+/// deleted — that's a master decision.
+fn enforce_master_session(session: &Session, op: &str) -> Result<(), BackendError> {
+    if session.scope.is_some() {
+        return Err(BackendError::PermissionDenied(format!(
+            "'{op}' requires the unscoped master session (current session carries a scope)"
+        )));
+    }
+    Ok(())
+}
+
 /// Build the AEAD AAD for `(wallet, service)`. Domain-tagged so this AAD
 /// can never collide with another agentkeys-shaped AEAD payload that
 /// happens to share the same wallet+service.
@@ -293,11 +354,12 @@ fn map_s3_error<E: std::fmt::Display>(op: &str, e: E) -> BackendError {
 impl CredentialBackend for S3CredentialBackend {
     async fn store_credential(
         &self,
-        _session: &Session,
+        session: &Session,
         agent_id: &WalletAddress,
         service: &ServiceName,
         plaintext: &[u8],
     ) -> Result<(), BackendError> {
+        enforce_scope_for_service(session, service, true)?;
         let kek = self.derive_kek(agent_id, service).await?;
         let envelope = Self::seal(&kek, agent_id, service, plaintext)?;
         let key = Self::object_key(agent_id, service);
@@ -316,10 +378,11 @@ impl CredentialBackend for S3CredentialBackend {
 
     async fn read_credential(
         &self,
-        _session: &Session,
+        session: &Session,
         agent_id: &WalletAddress,
         service: &ServiceName,
     ) -> Result<Vec<u8>, BackendError> {
+        enforce_scope_for_service(session, service, false)?;
         let key = Self::object_key(agent_id, service);
         let resp = self
             .s3
@@ -342,9 +405,10 @@ impl CredentialBackend for S3CredentialBackend {
 
     async fn teardown_agent(
         &self,
-        _session: &Session,
+        session: &Session,
         agent_id: &WalletAddress,
     ) -> Result<(), BackendError> {
+        enforce_master_session(session, "teardown_agent")?;
         let prefix = Self::credentials_prefix(agent_id);
         let mut continuation: Option<String> = None;
         loop {
@@ -384,7 +448,7 @@ impl CredentialBackend for S3CredentialBackend {
 
     async fn list_credentials(
         &self,
-        _session: &Session,
+        session: &Session,
         agent_id: &WalletAddress,
     ) -> Result<Vec<ServiceName>, BackendError> {
         let prefix = Self::credentials_prefix(agent_id);
@@ -420,6 +484,15 @@ impl CredentialBackend for S3CredentialBackend {
                 break;
             }
         }
+
+        // Scoped child sessions must not see service names outside their
+        // scope — the bucket-policy PrincipalTag only knows the wallet
+        // prefix, so client-side filtering is the trust boundary. Match
+        // the mock-server's `/credential/list` behavior.
+        if let Some(scope) = &session.scope {
+            names.retain(|n| scope.services.iter().any(|s| s == n));
+        }
+
         Ok(names)
     }
 
@@ -665,12 +738,11 @@ mod tests {
         assert_eq!(prefix, "bots/0xabc/credentials/");
     }
 
-    #[tokio::test]
-    async fn derive_kek_is_deterministic_and_per_service() {
-        // Build a backend without an S3 client; we only exercise the
-        // derive_kek + seal/open helpers.
-        let signer = fake_signer();
-        let backend = S3CredentialBackend {
+    /// Build a `S3CredentialBackend` against an empty config — the
+    /// helper tests (`derive_kek`, `enforce_scope_for_service`) don't
+    /// reach S3, so the client doesn't need to be functional.
+    async fn test_backend(signer: Arc<dyn SignerClient>) -> S3CredentialBackend {
+        S3CredentialBackend {
             s3: S3Client::new(
                 &aws_config::defaults(BehaviorVersion::latest())
                     .region(Region::new("us-east-1"))
@@ -678,9 +750,38 @@ mod tests {
                     .await,
             ),
             bucket: "test-bucket".into(),
-            signer: signer.clone(),
+            signer,
             omni_account: "deadbeef".repeat(8),
-        };
+        }
+    }
+
+    fn scoped_session(services: Vec<&str>, read_only: bool) -> Session {
+        Session {
+            token: "tok".into(),
+            wallet: WalletAddress("0xabc".into()),
+            scope: Some(Scope {
+                services: services.into_iter().map(|s| ServiceName(s.into())).collect(),
+                read_only,
+            }),
+            created_at: 0,
+            ttl_seconds: 3600,
+        }
+    }
+
+    fn master_session() -> Session {
+        Session {
+            token: "tok".into(),
+            wallet: WalletAddress("0xabc".into()),
+            scope: None,
+            created_at: 0,
+            ttl_seconds: 3600,
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_kek_is_deterministic_and_per_service() {
+        let signer = fake_signer();
+        let backend = test_backend(signer).await;
         let wallet = WalletAddress("0xabc".into());
         let svc_a = ServiceName("openrouter".into());
         let svc_b = ServiceName("anthropic".into());
@@ -694,6 +795,119 @@ mod tests {
             kek_a1, kek_b,
             "different services must derive distinct KEKs"
         );
+    }
+
+    // ---- Scope enforcement (codex adversarial review finding #1) ----
+
+    #[test]
+    fn enforce_scope_allows_master_session() {
+        let session = master_session();
+        let svc = ServiceName("openrouter".into());
+        assert!(enforce_scope_for_service(&session, &svc, false).is_ok());
+        assert!(enforce_scope_for_service(&session, &svc, true).is_ok());
+        assert!(enforce_master_session(&session, "teardown_agent").is_ok());
+    }
+
+    #[test]
+    fn enforce_scope_blocks_service_not_in_list() {
+        let session = scoped_session(vec!["openrouter"], false);
+        let svc = ServiceName("anthropic".into());
+        let err = enforce_scope_for_service(&session, &svc, false).unwrap_err();
+        match err {
+            BackendError::PermissionDenied(m) => {
+                assert!(m.contains("anthropic"), "msg = {m}");
+                assert!(m.contains("openrouter"), "msg = {m}");
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_scope_blocks_write_when_read_only() {
+        let session = scoped_session(vec!["openrouter"], true);
+        let svc = ServiceName("openrouter".into());
+        // Read is allowed even on read_only scopes.
+        assert!(enforce_scope_for_service(&session, &svc, false).is_ok());
+        // Write is rejected.
+        let err = enforce_scope_for_service(&session, &svc, true).unwrap_err();
+        match err {
+            BackendError::PermissionDenied(m) => assert!(m.contains("read_only"), "msg = {m}"),
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enforce_master_session_blocks_scoped_session() {
+        let session = scoped_session(vec!["openrouter"], false);
+        let err = enforce_master_session(&session, "teardown_agent").unwrap_err();
+        match err {
+            BackendError::PermissionDenied(m) => assert!(
+                m.contains("teardown_agent") && m.contains("master"),
+                "msg = {m}"
+            ),
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn store_credential_blocks_out_of_scope_before_s3_call() {
+        let backend = test_backend(fake_signer()).await;
+        let session = scoped_session(vec!["openrouter"], false);
+        let err = backend
+            .store_credential(
+                &session,
+                &WalletAddress("0xabc".into()),
+                &ServiceName("anthropic".into()),
+                b"sk-ant-x",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::PermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn read_credential_allows_in_scope_read_only() {
+        // Read-only sessions can still derive the KEK and reach S3
+        // (we'd fail on the GetObject call here, but scope enforcement
+        // must NOT short-circuit). Use a service that's in scope; the
+        // KEK derivation runs against the fake signer.
+        let backend = test_backend(fake_signer()).await;
+        let session = scoped_session(vec!["openrouter"], true);
+        // We can't easily reach S3 in unit tests, so verify the scope
+        // gate alone returns Ok(()) — anything past that is the SDK's
+        // problem.
+        assert!(
+            enforce_scope_for_service(
+                &session,
+                &ServiceName("openrouter".into()),
+                false
+            )
+            .is_ok()
+        );
+        // Sanity: still rejects out-of-scope reads.
+        let err = backend
+            .read_credential(
+                &session,
+                &WalletAddress("0xabc".into()),
+                &ServiceName("anthropic".into()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::PermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn teardown_agent_rejects_scoped_session() {
+        let backend = test_backend(fake_signer()).await;
+        let session = scoped_session(vec!["openrouter"], false);
+        let err = backend
+            .teardown_agent(&session, &WalletAddress("0xabc".into()))
+            .await
+            .unwrap_err();
+        match err {
+            BackendError::PermissionDenied(m) => assert!(m.contains("teardown_agent")),
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
     }
 
     #[test]

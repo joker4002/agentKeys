@@ -246,10 +246,23 @@ impl CommandContext {
     /// `S3CredentialBackend` against `AGENTKEYS_BUCKET` + signer. Falls
     /// back to the `Http` (mock-server) path otherwise.
     ///
-    /// Async because the AWS SDK config loader (`aws_config::defaults`)
-    /// is async — the cred-resolver chain may hit the EC2 IMDS or shared
-    /// config files. The `Http` branch awaits immediately for shape
-    /// symmetry with the `S3` branch.
+    /// **AWS-creds resolution (issue #85 / codex adversarial review).**
+    /// When `--broker-url` is set, this method *mints fresh
+    /// OIDC-scoped AWS temp creds via the broker* and injects them
+    /// directly into the S3 client. That's the only way to keep the
+    /// `agentkeys_user_wallet` PrincipalTag isolation property: relying
+    /// on `aws_config::defaults` would let the operator's *static* AWS
+    /// admin creds drive the S3 PUT (no PrincipalTag, no per-operator
+    /// scoping). It also avoids the trap where `cmd_provision` minted
+    /// creds only for the scraper subprocess env, leaving the parent
+    /// process's `S3CredentialBackend` with no creds at all.
+    ///
+    /// Without `--broker-url` the backend falls back to
+    /// `aws_config::defaults` (process AWS_* env or shared config) —
+    /// fine for callers who already exported `AWS_*` manually.
+    ///
+    /// Async because both the broker JWT-mint + STS exchange and the
+    /// AWS SDK config loader are async.
     async fn credential_backend(&self) -> Result<Arc<dyn CredentialBackend>> {
         if let Some(ref b) = self.backend_override {
             return Ok(b.clone());
@@ -277,12 +290,16 @@ impl CommandContext {
                     ))?;
                 let session_token = self.load_session().ok().map(|s| s.token);
                 let mut signer = HttpSignerClient::new(&signer_url);
-                if let Some(tok) = session_token {
-                    signer = signer.with_session_jwt(tok);
+                if let Some(ref tok) = session_token {
+                    signer = signer.with_session_jwt(tok.clone());
                 }
+
+                let aws_creds = self.mint_s3_credentials(session_token.as_deref()).await?;
+
                 let backend = S3CredentialBackend::new(
                     bucket,
                     self.data_region.as_deref(),
+                    aws_creds,
                     Arc::new(signer),
                     omni,
                 )
@@ -290,6 +307,53 @@ impl CommandContext {
                 Ok(Arc::new(backend))
             }
         }
+    }
+
+    /// Mint broker-scoped AWS temp creds for the S3 client when the
+    /// operator has a Stage-7 broker configured. When not configured,
+    /// return `None` so the SDK falls back to its default cred chain.
+    ///
+    /// Same OIDC + `AssumeRoleWithWebIdentity` path that
+    /// `broker_env_for_provision` uses for the scraper subprocess.
+    /// `cmd_provision` ends up making two STS calls per run (one for
+    /// the scraper, one for the parent's S3 client) — that's cheap
+    /// (each session lasts an hour) and the alternative is threading
+    /// the creds through the orchestrator just to avoid a second STS
+    /// round-trip.
+    async fn mint_s3_credentials(
+        &self,
+        session_token: Option<&str>,
+    ) -> Result<Option<aws_credential_types::Credentials>> {
+        let Some(broker_url) = self.broker_url.as_deref() else {
+            return Ok(None);
+        };
+        let Some(token) = session_token else {
+            return Err(anyhow!(
+                "--credential-backend=s3 with --broker-url requires an active session (run `agentkeys init` first)"
+            ));
+        };
+        let role_arn = std::env::var("AGENTKEYS_DATA_ROLE_ARN").map_err(|_| anyhow!(
+            "--credential-backend=s3 with --broker-url requires AGENTKEYS_DATA_ROLE_ARN env (issue #71 Option A)"
+        ))?;
+        let region = self
+            .data_region
+            .clone()
+            .unwrap_or_else(|| "us-east-1".to_string());
+        let temp = fetch_via_broker_default_ttl(broker_url, token, &role_arn, &region).await?;
+        // Convert the broker-minted creds into the SDK's canonical
+        // `Credentials` type so we can plug them directly into the S3
+        // config builder. The expiration is informational — the SDK
+        // doesn't refresh static creds, but with a 1h TTL the parent
+        // process's S3 client won't outlive a single CLI invocation.
+        let expiry = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(temp.expiration.max(0) as u64);
+        Ok(Some(aws_credential_types::Credentials::new(
+            temp.access_key_id,
+            temp.secret_access_key,
+            Some(temp.session_token),
+            Some(expiry),
+            "agentkeys-broker-oidc",
+        )))
     }
 
     /// Resolve the session store for this context: the injected override
