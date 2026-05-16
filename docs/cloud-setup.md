@@ -167,6 +167,26 @@ The SES scanners stamp `X-SES-Spam-Verdict` / `X-SES-Virus-Verdict` headers. The
 
 Inbound is unaffected by SES sandbox status. You only need to request production access when the agent **sends** mail to arbitrary addresses (replies, notifications). Console → Support → "Service limit increase" → "SES Sending Limits" → "Request Production Access".
 
+### 2.1a Per-recipient routing Lambda (issue #83)
+
+After [§4](#4-oidc-federation-stage-7) lands, the `agentkeys-data-role` is intentionally denied read on `s3://$BUCKET/inbound/` (federation-isolation rule, [§4.5](#45-strip-the-static-iam-grants)). Service-provisioning verification emails (openrouter, brave, anthropic, …) land in `inbound/<msg>` but the OIDC-assumed scraper subprocess cannot read them — operators see the symptom as `internal error: AccessDenied on s3:ListBucket` at the email-fetch step of `agentkeys provision <service>`.
+
+The fix is a small post-receive Lambda that copies inbound objects to the operator's PrincipalTag-scoped prefix when the recipient local-part matches the provisioner's routing pattern. Service emails the scraper generates have the form `or-<0x-wallet>-<unix-ts>@$DOMAIN`; the Lambda parses that local-part, extracts the wallet, and `CopyObject`s (server-side — body never transits Lambda) to `bots/<wallet>/inbound/<msg>`. AGENTKEYS magic-link auth emails (different local-part) stay in `inbound/` for the broker's `/v1/auth/email/*` handlers.
+
+Deploy once per AWS account:
+
+```bash
+awsp agentkeys-admin
+set -a; source scripts/operator-workstation.env; set +a
+bash infra/ses-routing-lambda/deploy.sh
+```
+
+Idempotent (re-runnable). What it provisions: IAM role `agentkeys-ses-router-lambda-role` (inline policy: `s3:GetObject` on `inbound/*`, `s3:PutObject` on `bots/*/inbound/*`, basic CloudWatch Logs), Lambda function `agentkeys-ses-router` (python3.13, 128MB, 10s timeout, reserved-concurrency=10), and the S3 `ObjectCreated:*` notification on `inbound/` → Lambda.
+
+Per-invocation cost ≈ 1.7 µ$ at 128 MB; total Lambda spend stays single-digit cents/month at any sensible operator count. See [`infra/ses-routing-lambda/README.md`](../infra/ses-routing-lambda/README.md) for unit tests, verification commands, and rollback.
+
+> **TODO** (tracked in [`TODOS.md`](../TODOS.md) — "Disable broker's broad S3-full-access"): once this Lambda is deployed and stable, tighten the broker's instance profile so it can no longer read service-provisioning emails (defense-in-depth — today the broker COULD read them but doesn't).
+
 ### 2.2 Future: Tencent Cloud SimpleDM + COS
 
 For deployments serving China-region traffic, the analogous backend is:

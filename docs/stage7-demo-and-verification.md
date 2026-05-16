@@ -1559,79 +1559,49 @@ JWT, calls `/v1/mint-oidc-jwt`, exchanges it for AWS temp creds via
 `AssumeRoleWithWebIdentity`, and injects the creds into the scraper
 subprocess as env vars — all in one shot.
 
-**Prereq — install scraper deps once.** The provisioner subprocess
-runs a TypeScript scraper that imports `playwright`. If you've never
-run `agentkeys provision` on this workstation, install the deps first
-(otherwise the subprocess dies with `Cannot find package 'playwright'`
-and the CLI surfaces it as `internal error: unhandled`).
+**Prereqs — one-time per workstation + per AWS account:**
 
 ```bash
-# === ON OPERATOR WORKSTATION === — one-time setup per service
+# 1. Scraper deps (Playwright Chromium). The provisioner subprocess
+#    imports `playwright`; without this it dies with
+#    `Cannot find package 'playwright'`.
 (cd provisioner-scripts && npm install && npx playwright install chromium)
+
+# 2. SES inbound-routing Lambda (issue #83). Required for the CDP
+#    scraper to read its own verification email via the OIDC workflow
+#    (cloud-setup.md §2.4 + §4.5 federation-isolation rule). Without
+#    it, the assumed `agentkeys-data-role` lacks read on `inbound/`
+#    and the scraper times out at fetch-verification-email.
+awsp agentkeys-admin
+set -a; source scripts/operator-workstation.env; set +a
+bash infra/ses-routing-lambda/deploy.sh
 ```
 
-**Full fresh-start sequence (auto-init path, last verified 2026-05-15).**
-Copy-paste from a clean shell — produces the same `trip_wire_fired`
-event observed in [issue #83](https://github.com/litentry/agentKeys/issues/83):
+**One-shot run** (last verified 2026-05-15). Two lines from a clean
+shell — init the session, then provision. The CLI routes
+`provision openrouter` to the CDP-backed scraper
+([`provisioner-scripts/src/scrapers/openrouter-cdp.ts`](../provisioner-scripts/src/scrapers/openrouter-cdp.ts))
+which connects to a real Chrome over CDP. The wrapper script below
+auto-launches the throwaway-profile Chrome on `:9222` if one isn't
+already listening — no manual `reset-chrome-for-recording.sh` step
+needed:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-
-# 1. Auto-init alice (sends magic link, polls SES inbound, completes
-#    SIWE rebinding, writes ~/.agentkeys/alice/session.json).
 bash scripts/agentkeys-init-email-demo.sh --session-id alice
-
-# 2. Export OMNI_A / ADDR_A / MASTER_WALLET_A into shell (does NOT
-#    export SESSION_JWT_A — that's loaded from disk below).
-eval "$(bash scripts/agentkeys-demo-show.sh --export A alice)"
-
-# 3. Load operator env (OIDC_ISSUER, BUCKET, ACCOUNT_ID, REGION,
-#    BACKEND_URL all come from here).
-set -a; source scripts/operator-workstation.env; set +a
-
-# 4. Load the saved session JWT from disk / Keychain (helper from §5.1).
-load_session_jwt() {
-  local sid="$1"
-  local marker="${HOME}/.agentkeys/${sid}/.keyring_managed"
-  if [[ -s "$marker" ]]; then
-    security find-generic-password -s agentkeys -a "$sid" -w 2>/dev/null | jq -r .token
-  else
-    jq -r .token "${HOME}/.agentkeys/${sid}/session.json"
-  fi
-}
-SESSION_JWT_A=$(load_session_jwt alice)
-
-# 5. Mint OIDC JWT from the broker (5-min TTL).
-JWT=$(curl -sS --fail-with-body -X POST $OIDC_ISSUER/v1/mint-oidc-jwt \
-  -H "Authorization: Bearer $SESSION_JWT_A" | jq -r .jwt)
-
-# 6. Exchange for AWS temp creds (client-side STS — no broker creds).
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
-CREDS=$(aws sts assume-role-with-web-identity \
-  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role \
-  --role-session-name "demo-A-$(date +%s)" \
-  --web-identity-token "$JWT")
-export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
-
-# 7. Configure provisioner env + pin alice session for the subprocess.
-export AGENTKEYS_BROKER_URL=https://broker.litentry.org
-export AGENTKEYS_DATA_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role
-export AWS_REGION=us-east-1
-export AGENTKEYS_SIGNER_URL=$BACKEND_URL
-export AGENTKEYS_SESSION_ID=alice
-
-# 8. Run the provision. CLI re-mints OIDC JWT internally (steps 5+6
-#    above are belt-and-suspenders; the CLI does them too) and spawns
-#    the scraper subprocess with AWS env injected.
-agentkeys --session-id alice provision openrouter
-# Expected output (proves auto-provision pipeline succeeded):
-# {"level":"info","event":"provision_metric","name":"trip_wire_fired",
-#  "service":"openrouter","kind":"SelectorTimeout","step":"signup_flow"}
-# Problem: A script step timed out at 'signup_flow'.
-# Cause: The target site's DOM may have changed (tripwire: SelectorTimeout).
+bash scripts/agentkeys-provision-demo.sh  --session-id alice openrouter
 ```
+
+[`scripts/agentkeys-provision-demo.sh`](../scripts/agentkeys-provision-demo.sh)
+wraps what used to be an eight-step copy-paste block: it sources
+`scripts/operator-workstation.env`, ensures Chrome is on `CDP_URL`
+(launches via [`reset-chrome-for-recording.sh`](../scripts/reset-chrome-for-recording.sh)
+if not), exports the broker URL / `agentkeys-data-role` ARN / signer
+URL / `AGENTKEYS_SESSION_ID`, drops any stale AWS creds in the shell
+(the CLI re-mints internally), then `exec`s
+`agentkeys --session-id alice provision openrouter`. Override defaults
+via env if needed (`AGENTKEYS_BROKER_URL`, `AGENTKEYS_DATA_ROLE_ARN`,
+`AWS_REGION`, `CDP_URL`).
 
 > **What "success" looks like vs scraper-DOM drift.** §5.3 demonstrates
 > the auto-provision **pipeline** — session JWT → OIDC JWT → STS →
