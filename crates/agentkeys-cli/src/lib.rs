@@ -4,6 +4,7 @@ use std::sync::Arc;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
+use agentkeys_core::s3_backend::S3CredentialBackend;
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
 use agentkeys_core::signer_client::{HttpSignerClient, SignerClient, SignerClientError};
@@ -70,6 +71,35 @@ fn wrap_backend_error(err: BackendError) -> anyhow::Error {
     anyhow!("{}", format_backend_error(&err))
 }
 
+/// Which `CredentialBackend` impl `agentkeys` should route credential CRUD
+/// through. The legacy `Http` impl talks to the mock-server's
+/// `/credential/*` endpoints; `S3` (issue #85) PUT/GETs encrypted blobs at
+/// `s3://$BUCKET/bots/<wallet>/credentials/<service>.enc`. Every other
+/// trait method (sessions, audit, identity, scope, inbox, rendezvous,
+/// auth-requests) still goes through `MockHttpClient` regardless of this
+/// flag — `S3CredentialBackend` only implements the credential slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialBackendKind {
+    Http,
+    S3,
+}
+
+impl CredentialBackendKind {
+    /// Parse the `--credential-backend` flag (case-insensitive). Unknown
+    /// values return a clear operator-facing error instead of silently
+    /// falling back, so a typo doesn't pretend it picked a default.
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "http" | "mock" => Ok(Self::Http),
+            "s3" => Ok(Self::S3),
+            other => Err(anyhow!(
+                "unknown --credential-backend '{}': expected 'http' or 's3'",
+                other
+            )),
+        }
+    }
+}
+
 pub struct CommandContext {
     pub backend_url: String,
     pub verbose: bool,
@@ -91,6 +121,24 @@ pub struct CommandContext {
     /// temp creds from this broker URL and injects them into the scraper
     /// subprocess env (no manual `AWS_*` env wiring required).
     pub broker_url: Option<String>,
+    /// Issue #85: which `CredentialBackend` impl handles credential CRUD.
+    /// Defaults to `Http` for backwards-compat during the migration window.
+    pub credential_backend: CredentialBackendKind,
+    /// Issue #85: S3 bucket holding `bots/<wallet>/credentials/<service>.enc`.
+    /// Defaults to `AGENTKEYS_BUCKET` env var, same name cloud-setup.md
+    /// uses. Required when `credential_backend == S3`.
+    pub data_bucket: Option<String>,
+    /// Issue #85: AWS region for the S3 client. `None` falls back to the
+    /// SDK default chain (`AWS_REGION` or shared config).
+    pub data_region: Option<String>,
+    /// Issue #85: signer base URL for `/dev/sign-message`-driven KEK
+    /// derivation. Required when `credential_backend == S3`.
+    pub signer_url: Option<String>,
+    /// Issue #85: 64-lowercase-hex `omni_account`, the derivation domain
+    /// the signer keys off. Required when `credential_backend == S3`.
+    /// Issue #74 step 2 will pull this from the session JWT directly; this
+    /// is a temporary operator-supplied bridge.
+    pub omni_account: Option<String>,
 }
 
 impl CommandContext {
@@ -104,11 +152,39 @@ impl CommandContext {
             backend_override: None,
             session_store_override: None,
             broker_url: std::env::var("AGENTKEYS_BROKER_URL").ok().filter(|s| !s.is_empty()),
+            credential_backend: CredentialBackendKind::Http,
+            data_bucket: std::env::var("AGENTKEYS_BUCKET").ok().filter(|s| !s.is_empty()),
+            data_region: std::env::var("AWS_REGION")
+                .ok()
+                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+                .filter(|s| !s.is_empty()),
+            signer_url: std::env::var("AGENTKEYS_SIGNER_URL").ok().filter(|s| !s.is_empty()),
+            omni_account: std::env::var("AGENTKEYS_OMNI_ACCOUNT").ok().filter(|s| !s.is_empty()),
         }
     }
 
     pub fn with_broker_url(mut self, broker_url: Option<String>) -> Self {
         self.broker_url = broker_url;
+        self
+    }
+
+    pub fn with_credential_backend(mut self, kind: CredentialBackendKind) -> Self {
+        self.credential_backend = kind;
+        self
+    }
+
+    pub fn with_data_bucket(mut self, bucket: Option<String>) -> Self {
+        self.data_bucket = bucket;
+        self
+    }
+
+    pub fn with_signer_url(mut self, signer_url: Option<String>) -> Self {
+        self.signer_url = signer_url;
+        self
+    }
+
+    pub fn with_omni_account(mut self, omni: Option<String>) -> Self {
+        self.omni_account = omni;
         self
     }
 
@@ -151,11 +227,68 @@ impl CommandContext {
             .load_with_legacy_fallback(&self.session_id)
     }
 
+    /// Synchronous backend used by every CLI command that does NOT touch
+    /// credential CRUD (sessions, audit, identity, scope, rendezvous,
+    /// inbox). `--credential-backend s3` does NOT change this — those
+    /// endpoints still live on the legacy mock-server. See
+    /// `credential_backend()` for the credential-CRUD path.
     fn backend(&self) -> Arc<dyn CredentialBackend> {
         if let Some(ref b) = self.backend_override {
             b.clone()
         } else {
             Arc::new(MockHttpClient::new(&self.backend_url))
+        }
+    }
+
+    /// Backend handling credential CRUD (`store_credential`,
+    /// `read_credential`, `teardown_agent`, `list_credentials`). When
+    /// `--credential-backend s3` is selected, builds an
+    /// `S3CredentialBackend` against `AGENTKEYS_BUCKET` + signer. Falls
+    /// back to the `Http` (mock-server) path otherwise.
+    ///
+    /// Async because the AWS SDK config loader (`aws_config::defaults`)
+    /// is async — the cred-resolver chain may hit the EC2 IMDS or shared
+    /// config files. The `Http` branch awaits immediately for shape
+    /// symmetry with the `S3` branch.
+    async fn credential_backend(&self) -> Result<Arc<dyn CredentialBackend>> {
+        if let Some(ref b) = self.backend_override {
+            return Ok(b.clone());
+        }
+        match self.credential_backend {
+            CredentialBackendKind::Http => Ok(Arc::new(MockHttpClient::new(&self.backend_url))),
+            CredentialBackendKind::S3 => {
+                let bucket = self
+                    .data_bucket
+                    .clone()
+                    .ok_or_else(|| anyhow!(
+                        "--credential-backend=s3 requires --bucket or AGENTKEYS_BUCKET env"
+                    ))?;
+                let signer_url = self
+                    .signer_url
+                    .clone()
+                    .ok_or_else(|| anyhow!(
+                        "--credential-backend=s3 requires --signer-url or AGENTKEYS_SIGNER_URL env (for client-side KEK derivation)"
+                    ))?;
+                let omni = self
+                    .omni_account
+                    .clone()
+                    .ok_or_else(|| anyhow!(
+                        "--credential-backend=s3 requires --omni-account or AGENTKEYS_OMNI_ACCOUNT env (until issue #74 step 2 persists omni in the session JWT)"
+                    ))?;
+                let session_token = self.load_session().ok().map(|s| s.token);
+                let mut signer = HttpSignerClient::new(&signer_url);
+                if let Some(tok) = session_token {
+                    signer = signer.with_session_jwt(tok);
+                }
+                let backend = S3CredentialBackend::new(
+                    bucket,
+                    self.data_region.as_deref(),
+                    Arc::new(signer),
+                    omni,
+                )
+                .await;
+                Ok(Arc::new(backend))
+            }
         }
     }
 
@@ -368,16 +501,31 @@ async fn resolve_agent(
 
 pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str, key: &str) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let backend = ctx.backend();
-    let agent_id = resolve_agent(&backend, &session, agent).await?;
+    // Identity resolution (alias / email → wallet) always goes through the
+    // legacy backend — issue #85's S3 path only handles credential CRUD.
+    let id_backend = ctx.backend();
+    let agent_id = resolve_agent(&id_backend, &session, agent).await?;
     let service_name = ServiceName(service.to_string());
+    let cred_backend = ctx.credential_backend().await?;
 
     if ctx.verbose {
-        eprintln!("[verbose] POST {}/credential/store", ctx.backend_url);
+        match ctx.credential_backend {
+            CredentialBackendKind::Http => {
+                eprintln!("[verbose] POST {}/credential/store", ctx.backend_url);
+            }
+            CredentialBackendKind::S3 => {
+                eprintln!(
+                    "[verbose] PUT s3://{}/bots/{}/credentials/{}.enc",
+                    ctx.data_bucket.as_deref().unwrap_or("?"),
+                    agent_id.0.to_lowercase(),
+                    service
+                );
+            }
+        }
         eprintln!("[verbose] agent: {}, service: {}", agent_id.0, service);
     }
 
-    backend
+    cred_backend
         .store_credential(&session, &agent_id, &service_name, key.as_bytes())
         .await
         .map_err(wrap_backend_error)?;
@@ -387,16 +535,29 @@ pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str,
 
 pub async fn cmd_read(ctx: &CommandContext, agent: Option<&str>, service: &str) -> Result<String> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let backend = ctx.backend();
-    let agent_id = resolve_agent(&backend, &session, agent).await?;
+    let id_backend = ctx.backend();
+    let agent_id = resolve_agent(&id_backend, &session, agent).await?;
     let service_name = ServiceName(service.to_string());
+    let cred_backend = ctx.credential_backend().await?;
 
     if ctx.verbose {
-        eprintln!("[verbose] GET {}/credential/read", ctx.backend_url);
+        match ctx.credential_backend {
+            CredentialBackendKind::Http => {
+                eprintln!("[verbose] GET {}/credential/read", ctx.backend_url);
+            }
+            CredentialBackendKind::S3 => {
+                eprintln!(
+                    "[verbose] GET s3://{}/bots/{}/credentials/{}.enc",
+                    ctx.data_bucket.as_deref().unwrap_or("?"),
+                    agent_id.0.to_lowercase(),
+                    service
+                );
+            }
+        }
         eprintln!("[verbose] agent: {}, service: {}", agent_id.0, service);
     }
 
-    let bytes = backend
+    let bytes = cred_backend
         .read_credential(&session, &agent_id, &service_name)
         .await
         .map_err(wrap_backend_error)?;
@@ -422,8 +583,9 @@ pub async fn cmd_run(
     }
 
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let backend = ctx.backend();
-    let agent_id = resolve_agent(&backend, &session, agent).await?;
+    let id_backend = ctx.backend();
+    let agent_id = resolve_agent(&id_backend, &session, agent).await?;
+    let backend = ctx.credential_backend().await?;
 
     // Pre-flight validation: reject any invalid --env entries BEFORE any credential
     // I/O (no network round-trips or audit log entries for a partial invocation).
@@ -606,11 +768,23 @@ pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
     let agent_id = WalletAddress(agent.to_string());
 
     if ctx.verbose {
-        eprintln!("[verbose] DELETE {}/credential/teardown", ctx.backend_url);
+        match ctx.credential_backend {
+            CredentialBackendKind::Http => {
+                eprintln!("[verbose] DELETE {}/credential/teardown", ctx.backend_url);
+            }
+            CredentialBackendKind::S3 => {
+                eprintln!(
+                    "[verbose] DELETE s3://{}/bots/{}/credentials/*",
+                    ctx.data_bucket.as_deref().unwrap_or("?"),
+                    agent.to_lowercase()
+                );
+            }
+        }
         eprintln!("[verbose] agent: {}", agent);
     }
 
-    ctx.backend()
+    ctx.credential_backend()
+        .await?
         .teardown_agent(&session, &agent_id)
         .await
         .map_err(wrap_backend_error)?;
@@ -1048,7 +1222,7 @@ pub async fn cmd_provision(
     provisioner: Option<Arc<Provisioner>>,
 ) -> Result<ProvisionOutput> {
     let session = ctx.load_session().context("load session (run `agentkeys init` first)")?;
-    let backend = ctx.backend();
+    let backend = ctx.credential_backend().await?;
     let agent_id = session.wallet.clone();
 
     if force {

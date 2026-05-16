@@ -1,7 +1,8 @@
 use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link,
     cmd_provision, cmd_read, cmd_recover, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
-    cmd_signer_sign, cmd_store, cmd_teardown, cmd_usage, cmd_whoami, CommandContext, InitMode,
+    cmd_signer_sign, cmd_store, cmd_teardown, cmd_usage, cmd_whoami, CommandContext,
+    CredentialBackendKind, InitMode,
 };
 
 
@@ -38,6 +39,35 @@ struct Cli {
         help = "Session namespace under ~/.agentkeys/<id>/session.json. Defaults to \"master\". Use distinct ids to hold multiple concurrent sessions (e.g. --session-id=alice and --session-id=bob) without overwriting each other."
     )]
     session_id: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_CREDENTIAL_BACKEND",
+        default_value = "http",
+        help = "Issue #85 — where credential CRUD lands. 'http' (default) talks to the legacy mock-server. 's3' encrypts client-side and PUTs to s3://$AGENTKEYS_BUCKET/bots/<wallet>/credentials/<service>.enc, gated by the OIDC-assumed agentkeys-data-role + PrincipalTag isolation. The legacy backend still handles sessions, audit, identity, and scope regardless of this flag."
+    )]
+    credential_backend: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_BUCKET",
+        help = "S3 bucket holding bots/<wallet>/credentials/<service>.enc. Required when --credential-backend=s3."
+    )]
+    bucket: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_SIGNER_URL",
+        help = "Signer base URL — when --credential-backend=s3 is set, the S3 backend calls /dev/sign-message under --omni-account to derive a deterministic per-(wallet, service) KEK for client-side AES-256-GCM."
+    )]
+    signer_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_OMNI_ACCOUNT",
+        help = "64-lowercase-hex omni_account for KEK derivation when --credential-backend=s3. Issue #74 step 2 will pull this from the session JWT automatically."
+    )]
+    omni_account: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -294,9 +324,20 @@ enum InboxAction {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let cred_kind = match CredentialBackendKind::parse(&cli.credential_backend) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json)
         .with_broker_url(cli.broker_url.clone())
-        .with_session_id(cli.session_id.clone());
+        .with_session_id(cli.session_id.clone())
+        .with_credential_backend(cred_kind)
+        .with_data_bucket(cli.bucket.clone())
+        .with_signer_url(cli.signer_url.clone())
+        .with_omni_account(cli.omni_account.clone());
 
     let result: anyhow::Result<String> = match &cli.command {
         Commands::Init {
