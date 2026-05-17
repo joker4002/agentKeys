@@ -834,7 +834,415 @@ across re-deploys). Operator-facing commentary in
 
 ---
 
+## 14. Credential storage v2 — target endpoint architecture
+
+**Status**: forward-looking design for the post-#87 endpoint. Stage 1 + stage 2 GitHub issues track implementation. This section consolidates the v2 design discussions (formerly in a separate `credential-architecture-v2.md` doc, now archived).
+
+The v2 architecture preserves everything in §0–§13 above and extends it with:
+- Per-service worker split (credentials / memory / audit / email; payment deferred)
+- On-chain identity layer (scope, registry, K3 epoch counter) on Litentry chain
+- Multi-master-device M-of-N recovery quorum using K10 + K11 (no anchor wallet, no seed phrase)
+- Sovereign-by-default chain submission (operator's wallet signs; hosted-relay opt-in for gas subsidy + tx batching)
+- Sidecar credential injection at the daemon (no plaintext to agent process)
+- AAD + S3 path keyed on `actor_omni` (stable across K3 rotation)
+
+### 14.1 The three identity layers (clarification of §3a + §4)
+
+The v2 design crystallizes three distinct identity roles that were implicit in earlier revs:
+
+**Layer 1 — Cryptographic anchor (immutable)**
+
+```
+actor_omni = SHA256("agentkeys" || "evm" || initial_master_wallet_K3_v1)
+```
+
+Frozen at first SIWE-bind (per §3a's "once SIWE-bound" wording). Never changes for the lifetime of the account. The operator's durable identity at the cryptographic anchor. Survives K3 rotation, wallet rotation, device-set changes.
+
+**Layer 2 — Current chain identity (rotatable)**
+
+```
+current_master_wallet = HKDF(K3_v[current_epoch], O_master)
+```
+
+Rotates each K3 epoch (~6 months by default). The operator's current identity on a public chain. In **sovereign mode** (v2 default): appears on chain as msg.sender of operator-signed txs. Block-explorer + ENS lookups work on this wallet.
+
+**Layer 3 — Operational uses (each identifier where it's natural)**
+
+| Operational use | Identifier used | Why |
+|---|---|---|
+| Signer-internal K4 derivation | `actor_omni` (Layer 1) | §3a / §4 — actor_omni is the canonical K4 derivation domain |
+| Signer-internal KEK derivation | `actor_omni` (Layer 1) | Stable across K3 rotation; KEK epoch handled by in-blob byte |
+| AAD in credential blob envelopes | `actor_omni` (Layer 1) | Binds blob to its stable location; never changes |
+| S3 path: `bots/<X>/credentials/...` | `actor_omni_hex` (Layer 1) | Stable; **ZERO migration on K3 rotation** |
+| AWS PrincipalTag | `agentkeys_actor_omni = <actor_omni_hex>` (Layer 1) | Stable; bucket policy doesn't rotate |
+| Cap-token `operator_omni` / `agent_omni` fields | `actor_omni` (Layer 1) | Matches scope-index key |
+| Scope index in `ScopeContract` | `actor_omni` (Layer 1) | Stable on-chain key |
+| Sidecar registry key | `device_pubkey_hash → actor_omni` (Layer 1 as value) | Per-actor binding (Codex finding #1) |
+| Chain tx signer (msg.sender) | Mode-dependent: relay-wallet (hosted-relay) OR `current_master_wallet` (sovereign default) | Layer-2 decision per deployment |
+| Chain event payload "author" field | Sovereign mode: `current_master_wallet`; hosted-relay: omitted | Layer-2 decision |
+| Block-explorer audit trail | Sovereign-only: wallet (Layer 2) | Hosted-relay mode has no operator-specific block-explorer trail |
+| Payment-from address (on-chain payments) | Mode-dependent: service-pool-wallet, escrow, or `current_master_wallet` | Per payment-service mode (deferred to separate issue) |
+| Audit event submitter | Sovereign-tier C: `current_master_wallet`; hosted-tier A: shared-relay-wallet | Per audit tier |
+
+This separation is the design's main conceptual win: Layer 1 stays operationally invariant regardless of mode; Layer 2 decisions (sovereign vs hosted) flip only the chain-submission side; Layer 3 spans both consistently.
+
+### 14.2 Five trust roots (rev 4 — bounded compromise per root)
+
+| # | Trust root | Controls | Compromise blast radius | Lives in |
+|---|---|---|---|---|
+| 1 | **Master wallet** (chain identity) | Scope mutations (with K11), recovery, master-key rotation initiation | Attacker changes on-chain scope; visible, revocable via master-recovery if M-of-N device quorum ≥ 2 | Operator's signer-derived K3_v[1] keypair, backed up across master devices |
+| 2 | **K10 device key** (per-host) | Cap-mint requests (no cap mints without K10 sig) | Per-sidecar; attacker can mint caps for THAT one actor's scope only (per-actor binding), bounded by `cred_cache_ttl` window | TPM / Secure Enclave / TEE / fallback file (mode 0600) |
+| 3 | **K11 WebAuthn credential** (per-master-device) | Master-only mutations (scope grant/revoke, device add/revoke, K10 rotation) | Compromise requires both possession of the master device AND ability to satisfy biometric/PIN; biometric-gated hardware-attested credential | Sealed in platform authenticator (Secure Enclave / TPM / StrongBox); cannot be exfiltrated even by host-OS root |
+| 4 | **Broker K1** | Cap counter-signature; session JWT signing | Alone cannot mint usable caps (missing K10 sig + K11 for master mutations); can sign session JWTs within scope but workers cross-check chain | Broker process (eventually HSM / TEE / threshold-signed) |
+| 5 | **Signer K3** (TEE-protected per §13) | K4 derivation, KEK derivation | Catastrophic for credentials if extracted — all KEKs derivable | Inside TEE enclave (AMD SEV-SNP / Intel TDX / AWS Nitro); attested boot |
+| 6 | **Chain** (Litentry / EVM L2) | Scope storage, sidecar device-key registry, audit anchors, K3 epoch counter | Chain-level attack required (51% on chosen chain); bounded by chain security properties | Distributed across chain validators |
+
+**Key property**: any *single* compromise yields bounded damage. Even broker-K1 + chain compromised still requires K11 user-presence on a master device to mint usable scope-mutating caps; even signer-K3 compromised (catastrophic) is mitigated by TEE seal + attestation.
+
+### 14.3 Component roles
+
+#### 14.3.1 Daemon (sidecar)
+
+Per arch.md component #2, extended in v2 with a localhost HTTP proxy + credential cache + controls. The daemon becomes the trust boundary for the agent process:
+
+**Responsibilities**:
+- Holds K10 (device key) in TPM / SE / TEE / fallback file per §5a.4
+- Holds K11 (WebAuthn credential) in platform authenticator IF master device
+- Exposes localhost HTTP proxy at:
+  - E1: Unix socket `$XDG_RUNTIME_DIR/agentkeys-proxy.sock` (SO_PEERCRED gates callers)
+  - E2: pod-internal `localhost:9090` (network namespace gates callers)
+  - E3: TEE-internal IPC (enclave gates callers)
+- Caches plaintext credentials in memory with `cred_cache_ttl` (default 5 min); zeroes on TTL expiry or drop event
+- Mints cap-fetch requests (signs with K10) when agent first requests an unloaded credential
+- Forwards agent's localhost calls to upstream APIs (e.g., `https://api.openrouter.ai/...`) with `Authorization: Bearer <plaintext>` injected
+- Enforces controls before any proxy operation: caller authentication, per-caller scope binding, service/method/path allowlist, spend quotas, per-call audit, fail-closed on stale broker
+- Receives drop events from broker over SSE; atomically purges affected credentials
+
+**NOT responsible for**: K3, K1, master_wallet private keys (signer holds those); scope mutations (master does this on-chain); credential decryption (workers do this); reading S3 credentials prefix (no IAM grant).
+
+#### 14.3.2 Broker (cap-minter + auth-relay)
+
+Per arch.md component #5, narrowed in v2 to pure policy authority:
+
+**Responsibilities**:
+- Verifies cap-mint request's K10 sig against on-chain SidecarRegistry
+- Verifies actor-binding: `registry[device_pubkey].actor_omni == request.agent_omni` (Codex finding #1)
+- Reads scope from on-chain ScopeContract (NOT broker DB)
+- Verifies K3 epoch against on-chain K3EpochCounter (Codex finding #4)
+- For master-only mutations: additionally requires K11 WebAuthn assertion (Codex finding #2)
+- Co-signs caps with K1
+- Pushes drop events to daemons over SSE when on-chain scope changes
+- Relays interactive auth flows that can't go on-chain: email-link (Stage 1), OAuth2
+
+**NOT responsible for**: scope storage (chain); credential decryption (workers); signing user data with K3 (signer); mutating scope (master does this on-chain).
+
+#### 14.3.3 Signer (K3 vault, TEE-protected)
+
+Per arch.md §13 / issue #74 step 2, with v2-specific responsibilities:
+
+**v2 additions**:
+- Holds **historical K3 epochs** (`K3_v[1]`, `K3_v[2]`, ..., `K3_v[current]`) inside attested enclave for lazy decrypt of pre-rotation blobs
+- Derives per-user KEK = `HKDF(K3_v[epoch], "agentkeys.user.v1" || actor_omni)` for credential encryption
+- Derives `current_master_wallet = HKDF(K3_v[current_epoch], O_master)` on demand for AWS STS calls; never persisted as identity material outside the STS call lifecycle
+- On every typed call, signer reads `K3EpochCounter.current_epoch` from chain and verifies the requested epoch is consistent (defense in depth)
+- Exposes verification helpers `/verify/k10-sig` and `/verify/k11-assertion` for workers/brokers
+
+**Typed RPC over mTLS** (callers: broker + workers only, never daemons directly):
+- `/sign/siwe`, `/sign/audit-row`
+- `/derive-cred-kek` (K3 epoch verified against chain)
+- `/sts-credentials` (derives transient master_wallet for one STS call)
+- `/verify/k10-sig`, `/verify/k11-assertion`
+
+#### 14.3.4 Workers (per-service)
+
+Each data-class gets its own worker — independent IAM, independent deploy lifecycle, independent compromise blast radius.
+
+| Worker | Purpose | IAM minimum | master_wallet on chain? |
+|---|---|---|---|
+| `credentials-service` | Encrypt and decrypt API credentials | `s3:GetObject`/`s3:PutObject` on `bots/<actor_omni_hex>/credentials/*`; signer mTLS for KEK | No (S3 only, no chain) |
+| `memory-service` | R/W agent state in S3 | `s3:GetObject`/`s3:PutObject` on `bots/<actor_omni_hex>/memory/*` | No |
+| `audit-service` | Append to audit log + on-chain anchor | `s3:PutObject` on `bots/<actor_omni_hex>/audit/*`; chain tx submitter | **Depends on tier** (see §14.6) |
+| `email-service` | Send/receive via SES on operator's domain | `ses:SendRawEmail` from operator's domain | No |
+| `payment-service` (deferred — separate issue) | Execute payments on operator's behalf | Mode-dependent | Mode-dependent |
+
+**Common worker behavior**:
+- Verify cap's K10 sig against on-chain SidecarRegistry (per-actor binding check)
+- Verify cap's broker_sig against broker's K1 pubkey
+- Verify on-chain scope independently of broker's claim
+- Verify K3 epoch consistency before any K3-dependent op
+- Execute service operation
+- Emit audit row (local log + chain-anchored batch via audit-relay or direct-write per tier)
+
+**Implementations**:
+- AWS Lambda + API Gateway (managed, AWS-native)
+- Self-hosted Rust microservice (vendor-neutral, axum-based)
+- Cloudflare Worker + R2 (edge / global; for memory + audit)
+- Tencent Cloud SCF + COS (China deployment)
+
+#### 14.3.5 Chain (single source of truth)
+
+v2 adds four contracts to the chain layer (deployment target: Litentry chain; reserve EVM L2 as fallback):
+
+```solidity
+contract AgentKeysScope {
+    mapping(bytes32 => mapping(bytes32 => Scope)) public scope;
+    // scope[operator_omni][agent_omni] = {services, read_only, updated_at}
+    struct Scope { string[] services; bool read_only; uint256 updated_at; }
+
+    event ScopeUpdated(bytes32 indexed operator_omni, bytes32 indexed agent_omni,
+                       string[] services, bool read_only);
+
+    function set_scope_with_webauthn(
+        bytes32 operator_omni, bytes32 agent_omni,
+        string[] calldata services, bool read_only,
+        bytes calldata k10_device_sig,
+        bytes calldata k11_webauthn_assertion
+    ) external { /* verify K10 + K11; require both */ }
+}
+
+contract SidecarRegistry {
+    mapping(bytes32 => DeviceBinding) public device;
+    // Codex finding #1: per-actor binding (NOT per-operator-only)
+    struct DeviceBinding {
+        bytes32 operator_omni;   // who owns
+        bytes32 actor_omni;      // WHICH actor this device serves
+        uint8   tier;            // 1=master-with-K11, 2=agent-no-K11, 3=TEE-sealed
+        uint8   roles;           // bitfield: CAP_MINT (0x01) | RECOVERY (0x02) | SCOPE_MGMT (0x04)
+        bytes32 k11_cred_id;     // WebAuthn cred ID — zero for agent devices
+        bytes   attestation;
+        uint256 registered_at;
+    }
+
+    function register_master_device(
+        bytes32 device_pubkey_hash,
+        bytes32 operator_omni, bytes32 actor_omni,
+        bytes32 k11_cred_id, bytes calldata attestation,
+        uint8 roles,
+        bytes calldata authorization_proof
+    ) external;
+
+    function register_agent_device(
+        bytes32 device_pubkey_hash,
+        bytes32 operator_omni, bytes32 actor_omni,
+        bytes calldata link_code_redemption,  // K11-signed by master
+        bytes calldata agent_pop_sig
+    ) external;
+}
+
+contract K3EpochCounter {
+    uint256 public current_epoch;
+    address public signer_governance;
+
+    event K3Rotated(uint256 indexed new_epoch, uint256 effective_block);
+
+    function bump_epoch() external {
+        require(msg.sender == signer_governance, "unauthorized");
+        current_epoch++;
+        emit K3Rotated(current_epoch, block.number);
+    }
+}
+
+contract CredentialAudit {
+    event CredentialUpdated(bytes32 indexed operator_omni, string indexed service,
+                            bytes32 blob_hash, bytes32 updater_actor_omni, uint256 k3_epoch);
+    event CapMintedBatch(bytes32 merkle_root, uint256 block_number, uint256 count);
+}
+```
+
+**Operations**:
+- `ScopeContract.set_scope_with_webauthn(...)` — master mutations (K10 + K11 both required)
+- `SidecarRegistry.register_master_device(...)` — master init (bootstrap) or new-device add per §5a.3.1
+- `SidecarRegistry.register_agent_device(...)` — agent bootstrap via master-issued link code per §5a.2
+- `K3EpochCounter.bump_epoch()` — once per K3 rotation by signer-governance multisig
+- `CredentialAudit.{CredentialUpdated, CapMintedBatch}` — workers submit (direct-write tier C) or audit-relay batches (tier A/B)
+
+### 14.4 KEK scheme + AES-256-GCM envelope
+
+**Per-user KEK derivation** (signer-internal, K3-rotation-tolerant):
+
+```
+KEK_for(operator_omni, k3_epoch) = HKDF-SHA256(
+    salt = "agentkeys.kek-salt.v2",
+    ikm  = K3_v[k3_epoch],
+    info = "agentkeys.user.v1" || operator_omni
+)
+```
+
+Worker calls `signer.derive_cred_kek(operator_omni, k3_epoch)` over mTLS. Signer verifies chain epoch (defense in depth), retrieves the right K3 version from TEE, HKDFs, returns the 32-byte KEK.
+
+**AES-256-GCM envelope** (S3 wire format, v2):
+
+```
+1 byte  version          (0x04 for v2)
+1 byte  k3_epoch         (which K3 generation encrypted this blob)
+12 byte AES-GCM nonce    (random per encryption)
+N bytes ciphertext
+16 byte GCM authentication tag
+
+AAD = "agentkeys.cred.aad.v2|" || operator_actor_omni_hex || "|" || service
+```
+
+**S3 path**: `bots/<operator_actor_omni_hex>/credentials/<service>.enc` — stable across K3 rotation, wallet rotation, master-device changes. The only thing that changes about a blob: (a) `k3_epoch` byte on re-encryption, (b) ciphertext on credential update.
+
+**K3 rotation handling**:
+1. `K3EpochCounter.bump_epoch()` increments the global counter (1 chain tx, O(1) regardless of operator count)
+2. Signer retains historical K3_v[N] for decrypt; generates K3_v[N+1] for new encrypts
+3. **ZERO S3 path migration** (paths key on actor_omni, stable)
+4. **ZERO PrincipalTag changes** (PrincipalTag = `agentkeys_actor_omni`, stable)
+5. **ZERO IAM changes** (bucket policy stays put)
+6. Lazy on-read re-encryption (optional): blob read → decrypt under old K3 → re-encrypt under new K3 → upload to same S3 path
+
+### 14.5 Bucket layout (extending §7a for v2)
+
+Per arch.md §7a: per-data-class buckets × per-actor prefixes. v2 keys all prefixes on `actor_omni_hex`:
+
+```
+$VAULT_BUCKET    bots/<actor_omni_hex>/credentials/<service>.enc     # creds-service
+$MEMORY_BUCKET   bots/<actor_omni_hex>/memory/<key>                  # memory-service
+$AUDIT_BUCKET    bots/<actor_omni_hex>/audit/<batch>                 # audit-service
+                 bots/<actor_omni_hex>/inbound/<msg>                 # email-service inbox
+                 bots/<actor_omni_hex>/sent/<yyyymm>/<msg>           # email-service sent
+```
+
+AWS PrincipalTag `agentkeys_actor_omni = <actor_omni_hex>` scopes IAM access to a single actor's prefix across all buckets.
+
+### 14.6 Mode selection — sovereign default, hosted-relay opt-in
+
+V2 default mode is **sovereign**: operator's wallet signs chain submissions directly (msg.sender = master_wallet). Block-explorer + ENS lookups work. Zero third-party trust required.
+
+Hosted-relay mode kept as **opt-in for gas subsidy + tx batching** only (not for privacy — actor_omni hash exposure does NOT weaken K3 due to 2^160 address-space rainbow infeasibility).
+
+**Audit-service tiers**:
+
+| Tier | Substrate | master_wallet on chain? | Trust model |
+|---|---|---|---|
+| **A — Hosted shared relay** (opt-in for gas) | Service provider runs relay; batches across MANY operators; Merkle root on chain | No (only service-relay-wallet appears, shared across operators) | Operator trusts service to not OMIT events; chain-anchored root catches forgery |
+| **B — Self-hosted relay** (privacy-preserving sovereignty) | Operator runs own audit-relay binary; relay-wallet (separate from master_wallet) signs batches | No (operator's relay-wallet appears, separable burner) | Operator owns the relay; no third-party trust |
+| **C — Direct-write per event** (sovereign default) | Daemon submits each audit event as separate chain tx, signed by operator's K3-derived key | **YES** — master_wallet (or its K3-derived signing key) signs every audit tx | Operator fully self-custodial; pays per-event gas |
+
+V2 default: tier C (sovereign). Tier A is the gas-subsidy escape hatch. Tier B is for operators who want self-sovereignty without master_wallet exposure.
+
+### 14.7 Lifecycle flows (v2)
+
+#### 14.7.1 Master device bootstrap (per arch.md §5 stages 0-3, plus stage 4 v2)
+
+```
+Stage 0 — Device-key (K10) generation [LOCAL, no network]
+  Daemon generates (D_priv, D_pub) = K10 in OS keychain (TouchID-backed on master)
+
+Stage 1 — Identity ceremony [master only]
+  Email-link / OAuth2 → broker confirms identity → returns binding_nonce
+
+Stage 2 — Master binding ceremony (WebAuthn)
+  Platform authenticator generates K11; commits D_pub atomically inside
+  WebAuthn challenge SHA256(binding_nonce || D_pub) per arch.md §5a.1 Q7 fix
+  Broker mints J0
+
+Stage 3 — Wallet derivation + SIWE → J1
+  signer.derive_address(O_master) → first_master_wallet
+  actor_omni = SHA256("agentkeys"||"evm"||first_master_wallet)  ← FROZEN
+  SIWE round-trip → J1 (long-lived bearer)
+
+Stage 4 (v2) — On-chain SidecarRegistry binding [meta-tx or sovereign]
+  SidecarRegistry.register_master_device(D_pub_hash, actor_omni, actor_omni,
+                                         k11_cred_id, roles=CAP_MINT|RECOVERY|SCOPE_MGMT,
+                                         WebAuthn-proof-over-binding_nonce)
+  First device gets all roles; subsequent devices opt-in to SCOPE_MGMT
+```
+
+#### 14.7.2 Adding a 2nd master device (per §5a.3.1 + v2 quorum)
+
+Existing master's K10 + K11 authorize new device's K10 + K11 binding. New device registers in SidecarRegistry with `CAP_MINT | RECOVERY` (default; SCOPE_MGMT opt-in).
+
+#### 14.7.3 Agent device bootstrap (per §5a.2 — link-code only)
+
+Per arch.md §5a.2: master mints one-time link code (K11-signed); agent redeems at broker. SidecarRegistry records the agent device with `actor_omni = agent's_omni` (NOT master's), tier=2 (no K11), roles=CAP_MINT only. Per-actor binding (Codex finding #1) ensures the agent's K10 cannot mint caps as a sibling agent.
+
+#### 14.7.4 Scope grant (K11 required)
+
+Master CLI signs payload with K10; biometric prompt for K11 WebAuthn assertion; relay (or sovereign-direct) submits `ScopeContract.set_scope_with_webauthn(...)`. Compromised K10 alone cannot mutate scope.
+
+#### 14.7.5 Credential store / fetch
+
+Per §14.4 KEK scheme. Worker verifies K10 sig + per-actor binding + broker_sig + on-chain scope + K3 epoch before any S3 / signer call. AAD binds blob to `(actor_omni, service)` location.
+
+#### 14.7.6 Recovery (M-of-N device quorum — no anchor wallet, no seed phrase)
+
+On surviving master device (e.g., phone), operator triggers "Lost device — revoke & rotate". Phone signs revoke payload with K10 + K11 (biometric). Sig count ≥ recovery_threshold authorizes the rotation. Relay submits `SidecarRegistry.revoke_device(...)` + `WalletRotated` audit event. Within ~60 seconds: attacker's cap-mints rejected at broker (registry lookup fails); cached creds expire on TTL.
+
+#### 14.7.7 K3 rotation
+
+`K3EpochCounter.bump_epoch()` (1 chain tx, global). Signer retains historical K3; new writes use new epoch; reads find correct K3 via blob's `k3_epoch` byte. Zero S3 / IAM / PrincipalTag changes.
+
+### 14.8 Codex adversarial review (2026-05-17) — findings + author response
+
+Codex `/codex:adversarial-review` was run against pre-rev-4 design drafts. Four findings, three high + one medium. All addressed.
+
+**Finding 1 [high] — Device-to-actor binding missing.** Pre-rev-4 SidecarRegistry bound device only to `operator_omni`; compromised agent K10 could mint cap claiming a sibling's `agent_omni`. **Fixed**: registry now stores `(operator_omni, actor_omni, role)` per device; cap verification requires `binding.actor_omni == request.agent_omni`.
+
+**Finding 2 [high] — K11 enforcement for master mutations.** Pre-rev-4 scope mutations were authorized by K10 alone or `master_wallet via signer`; per arch.md §5/§5a master authority should require K11. **Fixed**: `set_scope_with_webauthn(...)` requires both K10 sig and K11 WebAuthn assertion over payload.
+
+**Finding 3 [high] — K3 rotation S3 path migration window.** Pre-rev-4 said S3 path uses `current_master_wallet` with lazy migration; first post-rotation read couldn't find pre-rotation blob. **Fixed**: S3 path keyed on `actor_omni` (stable). ZERO migration. Stronger fix than Codex recommended.
+
+**Finding 4 [medium] — Chain as K3 epoch source of truth.** Pre-rev-4 signer held epoch mapping outside chain. **Fixed**: `K3EpochCounter` on chain; workers verify chain epoch at three points (broker mint, worker fetch, signer derive). Triple verification.
+
+**Author push-back recorded**: K11-required-for-scope-revocation could be relaxed in a future rev for emergency UX (stolen-K10 revoke causes DoS, not credential leak, since revocation is fail-safe). Deferred for v2 simplicity.
+
+### 14.9 Phasing — stage 1 (foundation + K11) + stage 2 (multi-device + workers)
+
+**Stage 1** (foundation): sovereign sidecar + on-chain identity + credentials-service worker + **K11 WebAuthn enforcement for master mutations**. Per Codex round-2 (2026-05-17) finding #2, K11 enforcement moved INTO stage 1 — deploying chain-stored ScopeContract with K10-only authorization would create an escalation window. Stage 1 ships:
+- Daemon as sovereign sidecar + host-local controls
+- On-chain ScopeContract / SidecarRegistry / K3EpochCounter
+- credentials-service worker with **dual-read** support (v1 wallet-keyed + v2 actor_omni-keyed paths and envelopes per Codex round-2 finding #3)
+- WebAuthn K11 enrollment + master-mutation enforcement (`set_scope_with_webauthn`)
+- Migration runbook covering dual-read transition window
+
+See `docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md`.
+
+**Stage 2** (multi-device + workers): builds on stage 1's K11 enforcement to add multi-master-device M-of-N recovery quorum + audit/memory/email workers + K3 rotation operational runbook. See `docs/spec/plans/v2-issues/issue-v2-stage-2-hardening.md`.
+
+**Deferred**: payment-service. See `docs/spec/plans/v2-issues/issue-payment-service-deferred.md`.
+
+### 14.9a Codex round-2 review (2026-05-17) — stage 1 plan
+
+A second Codex adversarial review on the stage 1 plan flagged three additional findings, all amended into the stage 1 plan before implementation:
+
+1. **Cloud-enforced vs host-local enforcement clarified.** ScopeContract is cloud-authoritative for "what service is in scope". Per-method / per-path / per-spend lives in host-local sidecar config — bypassable by compromised sidecar but bounded by cloud-enforced actor-binding. Stage 1 plan now marks the split explicitly.
+2. **K11 enforcement moves into stage 1** (not deferred to stage 2 as originally planned). See §14.9 above.
+3. **S3 path / PrincipalTag migration is dual-read by spec.** Stage 1 migration sequence: dual OIDC tags + dual bucket-policy rules + dual-envelope decrypt + dual-path read at credentials-service worker. No step retires v1 until operator-opt-in soak time elapses. See [v2-stage1-migration-and-demo.md](../../docs/v2-stage1-migration-and-demo.md) for the full sequence.
+
+### 14.10 Future work (post stage 2)
+
+- **Per-(user, service) KEK**: finer-grained KEK derivation; v3 hardening
+- **Wrap-and-rewrap**: random per-cred KEK + ECIES wraps in broker wrap-table; defends against K3-alone compromise; reserved
+- **One-shot CAS-burn caps for state-mutating ops**: strict replay protection; broker nonce-table check
+- **ZK-proven cap minting**: broker becomes stateless prover; reserved until proving is sub-100ms
+- **Multi-master / threshold scope mutations**: M-of-M master signatures for scope grants
+- **Per-operator K3 isolation**: separate K3 per tenant for multi-tenant deployments
+
+### 14.11 What v2 guarantees
+
+| Property | How it's enforced |
+|---|---|
+| No seed phrase required for daily use | K10 in OS keychain; K11 sealed in platform authenticator; no operator-managed seed |
+| Recovery via M-of-N device quorum | Per arch.md §5a.3.1 multi-device flow; no friends, no third parties, no anchor wallet |
+| No IdP lock-in after Day 0 | Email/OAuth is one-time sybil check; actor_omni is bound to first SIWE-derived wallet hash, NOT IdP identifier |
+| Agent never holds credential bytes | Sidecar holds plaintext only; agent sees localhost proxy URL + placeholder token |
+| Device key bound to specific actor (Codex #1) | SidecarRegistry per-actor binding; compromised agent K10 cannot mint as siblings |
+| K11 user-presence required for master mutations (Codex #2) | Scope, device-bind, K10-rotation, device-revoke all require fresh K11 WebAuthn |
+| K3-rotation tolerance with ZERO S3 migration (Codex #3) | S3 path keyed on actor_omni; K3EpochCounter is global O(1) |
+| Chain as K3 epoch source of truth (Codex #4) | K3EpochCounter on chain; triple verification at broker/worker/signer |
+| Wallet privacy by default | Sovereign mode default but K3-derived; actor_omni anchors cross-rotation correlation for auditability |
+| Per-data-class compromise isolation | Workers per service; one worker compromise = one data class leaked |
+| Vendor-pluggability | AWS / Cloudflare / Tencent / self-hosted; mTLS + HTTPS + chain signatures only |
+| Audit hosted-but-checkable OR self-hosted OR direct-write | Three tiers per §14.6 |
+
+---
+
 *This is a living document. Update it when the component map, key
 inventory, trust-boundary table, or deployment topology changes.
 For Figma-design use: the K-numbered key inventory (§3) and the
-identity-model diagram (§4) are the most directly transferable.*
+identity-model diagram (§4) are the most directly transferable.
+v2 design lives in §14; foundational architecture in §0-§13. The
+sections build on each other — read §0-§13 first for foundation;
+§14 layers v2-specific design on top.*

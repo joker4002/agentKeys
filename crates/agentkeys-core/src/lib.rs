@@ -1,3 +1,4 @@
+pub mod actor_omni;
 pub mod auth_request;
 pub mod backend;
 pub mod init_flow;

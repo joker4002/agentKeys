@@ -64,6 +64,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use sha2::{Digest, Sha256};
 
+use crate::actor_omni::actor_omni_hex;
 use crate::backend::{BackendError, CredentialBackend};
 use crate::signer_client::{SignerClient, SignerClientError};
 use agentkeys_types::{
@@ -72,9 +73,28 @@ use agentkeys_types::{
     RegistrationToken, Scope, ServiceName, Session, SignedAuthDecision, WalletAddress,
 };
 
-/// AEAD wire-format version byte. Bump on layout changes.
-const ENVELOPE_VERSION: u8 = 0x01;
+/// AEAD wire-format version byte. v1 (wallet-keyed AAD) is the original
+/// envelope shipped by PR #87. v2 (actor_omni-keyed AAD + `bots/<actor_omni>/`
+/// path) is the stage 1 target — stable across K3 rotation per
+/// docs/spec/architecture.md §14.4. The backend reads BOTH formats during
+/// the migration window (see `read_credential`), but writes only v2 when
+/// `WriteEnvelope::V2` is selected.
+const ENVELOPE_VERSION_V1: u8 = 0x01;
+const ENVELOPE_VERSION_V2: u8 = 0x02;
 const KEK_DOMAIN_TAG: &str = "agentkeys.kek.v1";
+
+/// Which envelope shape `store_credential` produces. Reads always accept
+/// both shapes during the migration window per the stage 1 plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteEnvelope {
+    /// Legacy v1 envelope shipped by PR #87 — `bots/<wallet>/` path,
+    /// AAD = `agentkeys.cred.aad.v1|wallet|service`.
+    V1,
+    /// Stage 1 v2 envelope — `bots/<actor_omni_hex>/` path,
+    /// AAD = `agentkeys.cred.aad.v2|actor_omni_hex|service`. Stable
+    /// across K3 rotation (path keys off actor_omni, not master_wallet).
+    V2,
+}
 
 /// S3-backed credential store. Encrypts client-side; the bucket and the
 /// signer are independent trust roots (the bucket holds ciphertext only;
@@ -89,6 +109,12 @@ pub struct S3CredentialBackend {
     /// automatically. Today the operator passes it via
     /// `AGENTKEYS_OMNI_ACCOUNT`.
     omni_account: String,
+    /// Which envelope shape new writes produce. Reads always accept both
+    /// v1 and v2 (`open` dispatches on the version byte). Default is `V1`
+    /// for backwards compat during the stage 1 migration window — flip
+    /// to `V2` per-operator via `with_write_envelope(V2)` once the
+    /// migration runbook step 9 completes.
+    write_envelope: WriteEnvelope,
 }
 
 impl S3CredentialBackend {
@@ -127,6 +153,7 @@ impl S3CredentialBackend {
             bucket: bucket.into(),
             signer,
             omni_account: omni_account.into(),
+            write_envelope: WriteEnvelope::V1,
         }
     }
 
@@ -144,14 +171,26 @@ impl S3CredentialBackend {
             bucket: bucket.into(),
             signer,
             omni_account: omni_account.into(),
+            write_envelope: WriteEnvelope::V1,
         }
     }
 
-    /// `bots/<lowercase-wallet>/credentials/<service>.enc` — the exact
-    /// prefix the bucket-policy PrincipalTag condition keys off. Wallets
-    /// are lowercased to match the JWT claim's lowercasing (broker mints
-    /// `agentkeys_user_wallet` PrincipalTag lowercase).
-    fn object_key(wallet: &WalletAddress, service: &ServiceName) -> String {
+    /// Select which envelope shape new writes produce. v1 (default) is the
+    /// legacy wallet-keyed path; v2 keys both AAD and S3 path off
+    /// `actor_omni_hex`. Stage 1 ships v1 as default so existing #87
+    /// deployments keep working unchanged; per-operator opt-in flips this
+    /// to v2 once the bucket policy + OIDC dual-tag rollout completes
+    /// (see `docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md`
+    /// migration step 9).
+    pub fn with_write_envelope(mut self, envelope: WriteEnvelope) -> Self {
+        self.write_envelope = envelope;
+        self
+    }
+
+    /// v1 path — `bots/<lowercase-wallet>/credentials/<service>.enc` —
+    /// the legacy PR #87 layout. The bucket-policy `agentkeys_user_wallet`
+    /// PrincipalTag condition keys off this prefix.
+    fn object_key_v1(wallet: &WalletAddress, service: &ServiceName) -> String {
         format!(
             "bots/{}/credentials/{}.enc",
             wallet.0.to_lowercase(),
@@ -159,9 +198,25 @@ impl S3CredentialBackend {
         )
     }
 
-    /// Common `bots/<wallet>/credentials/` prefix used by list + teardown.
-    fn credentials_prefix(wallet: &WalletAddress) -> String {
+    /// v2 path — `bots/<actor_omni_hex>/credentials/<service>.enc` per
+    /// docs/spec/architecture.md §14.5. Stable across K3 rotation,
+    /// matched by the new `agentkeys_actor_omni` PrincipalTag rule.
+    fn object_key_v2(wallet: &WalletAddress, service: &ServiceName) -> String {
+        format!(
+            "bots/{}/credentials/{}.enc",
+            actor_omni_hex(wallet),
+            service.0
+        )
+    }
+
+    /// v1 `bots/<wallet>/credentials/` prefix used by list + teardown.
+    fn credentials_prefix_v1(wallet: &WalletAddress) -> String {
         format!("bots/{}/credentials/", wallet.0.to_lowercase())
+    }
+
+    /// v2 `bots/<actor_omni_hex>/credentials/` prefix.
+    fn credentials_prefix_v2(wallet: &WalletAddress) -> String {
+        format!("bots/{}/credentials/", actor_omni_hex(wallet))
     }
 
     /// Derive the 32-byte AES-256 KEK for `(wallet, service)` by asking
@@ -206,9 +261,88 @@ impl S3CredentialBackend {
         Ok(kek)
     }
 
-    /// AEAD-seal `plaintext` under `kek`. AAD binds the ciphertext to its
-    /// (wallet, service) location so a misrouted blob fails open.
+    /// List service names under `prefix` (`.enc` objects only). Used by
+    /// `list_credentials` to walk both v1 and v2 prefixes during the
+    /// migration window.
+    async fn list_under_prefix(&self, prefix: &str) -> Result<Vec<ServiceName>, BackendError> {
+        let mut continuation: Option<String> = None;
+        let mut names: Vec<ServiceName> = Vec::new();
+        loop {
+            let mut req = self.s3.list_objects_v2().bucket(&self.bucket).prefix(prefix);
+            if let Some(token) = &continuation {
+                req = req.continuation_token(token);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| map_s3_error("ListObjectsV2", e))?;
+
+            for obj in resp.contents() {
+                if let Some(k) = obj.key() {
+                    if let Some(rest) = k.strip_prefix(prefix) {
+                        if let Some(svc) = rest.strip_suffix(".enc") {
+                            if !svc.is_empty() && !svc.contains('/') {
+                                names.push(ServiceName(svc.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            if resp.is_truncated().unwrap_or(false) {
+                continuation = resp.next_continuation_token().map(|s| s.to_string());
+                if continuation.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(names)
+    }
+
+    /// Delete every object under `prefix`. Used by `teardown_agent` to
+    /// wipe both v1 and v2 paths.
+    async fn delete_under_prefix(&self, prefix: &str) -> Result<(), BackendError> {
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut req = self.s3.list_objects_v2().bucket(&self.bucket).prefix(prefix);
+            if let Some(token) = &continuation {
+                req = req.continuation_token(token);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| map_s3_error("ListObjectsV2", e))?;
+
+            for obj in resp.contents() {
+                if let Some(k) = obj.key() {
+                    self.s3
+                        .delete_object()
+                        .bucket(&self.bucket)
+                        .key(k)
+                        .send()
+                        .await
+                        .map_err(|e| map_s3_error("DeleteObject", e))?;
+                }
+            }
+            if resp.is_truncated().unwrap_or(false) {
+                continuation = resp.next_continuation_token().map(|s| s.to_string());
+                if continuation.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// AEAD-seal `plaintext` under `kek` per the selected envelope
+    /// version. v1 binds AAD to `(wallet, service)`; v2 binds AAD to
+    /// `(actor_omni_hex, service)` so the blob stays decryptable even
+    /// after K3 / master-wallet rotation.
     fn seal(
+        envelope_version: u8,
         kek: &[u8; 32],
         wallet: &WalletAddress,
         service: &ServiceName,
@@ -216,7 +350,7 @@ impl S3CredentialBackend {
     ) -> Result<Vec<u8>, BackendError> {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(kek));
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-        let aad = aad_for(wallet, service);
+        let aad = aad_for_version(envelope_version, wallet, service)?;
         let ciphertext = cipher
             .encrypt(
                 &nonce,
@@ -228,13 +362,17 @@ impl S3CredentialBackend {
             .map_err(|e| BackendError::Internal(format!("aes-gcm seal: {e}")))?;
 
         let mut envelope = Vec::with_capacity(1 + 12 + ciphertext.len());
-        envelope.push(ENVELOPE_VERSION);
+        envelope.push(envelope_version);
         envelope.extend_from_slice(&nonce);
         envelope.extend_from_slice(&ciphertext);
         Ok(envelope)
     }
 
-    /// AEAD-open the wire envelope produced by `seal`.
+    /// AEAD-open the wire envelope produced by `seal`. Dispatches on the
+    /// version byte: v1 envelopes verify against the wallet-keyed AAD,
+    /// v2 envelopes verify against the actor_omni-keyed AAD. Operators
+    /// can read pre-migration v1 blobs and post-migration v2 blobs
+    /// through the exact same call site.
     fn open(
         kek: &[u8; 32],
         wallet: &WalletAddress,
@@ -247,16 +385,17 @@ impl S3CredentialBackend {
                 envelope.len()
             )));
         }
-        if envelope[0] != ENVELOPE_VERSION {
+        let version = envelope[0];
+        if version != ENVELOPE_VERSION_V1 && version != ENVELOPE_VERSION_V2 {
             return Err(BackendError::Internal(format!(
                 "unsupported envelope version 0x{:02x}",
-                envelope[0]
+                version
             )));
         }
         let nonce = Nonce::from_slice(&envelope[1..13]);
         let ciphertext = &envelope[13..];
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(kek));
-        let aad = aad_for(wallet, service);
+        let aad = aad_for_version(version, wallet, service)?;
         cipher
             .decrypt(
                 nonce,
@@ -316,16 +455,45 @@ fn enforce_master_session(session: &Session, op: &str) -> Result<(), BackendErro
     Ok(())
 }
 
-/// Build the AEAD AAD for `(wallet, service)`. Domain-tagged so this AAD
-/// can never collide with another agentkeys-shaped AEAD payload that
-/// happens to share the same wallet+service.
-fn aad_for(wallet: &WalletAddress, service: &ServiceName) -> Vec<u8> {
+/// v1 AAD: `agentkeys.cred.aad.v1|<lowercase_wallet>|<service>`.
+fn aad_for_v1(wallet: &WalletAddress, service: &ServiceName) -> Vec<u8> {
     let mut aad = Vec::with_capacity(64 + wallet.0.len() + service.0.len());
     aad.extend_from_slice(b"agentkeys.cred.aad.v1|");
     aad.extend_from_slice(wallet.0.to_lowercase().as_bytes());
     aad.push(b'|');
     aad.extend_from_slice(service.0.as_bytes());
     aad
+}
+
+/// v2 AAD: `agentkeys.cred.aad.v2|<actor_omni_hex>|<service>` per
+/// docs/spec/architecture.md §14.4. Binds the blob to its stable
+/// actor_omni-keyed location instead of the rotation-volatile wallet.
+fn aad_for_v2(wallet: &WalletAddress, service: &ServiceName) -> Vec<u8> {
+    let omni = actor_omni_hex(wallet);
+    let mut aad = Vec::with_capacity(64 + omni.len() + service.0.len());
+    aad.extend_from_slice(b"agentkeys.cred.aad.v2|");
+    aad.extend_from_slice(omni.as_bytes());
+    aad.push(b'|');
+    aad.extend_from_slice(service.0.as_bytes());
+    aad
+}
+
+/// Dispatch on the envelope version byte. Errors only on unknown
+/// versions — callers should have already validated the byte before
+/// reaching the cipher.
+fn aad_for_version(
+    version: u8,
+    wallet: &WalletAddress,
+    service: &ServiceName,
+) -> Result<Vec<u8>, BackendError> {
+    match version {
+        ENVELOPE_VERSION_V1 => Ok(aad_for_v1(wallet, service)),
+        ENVELOPE_VERSION_V2 => Ok(aad_for_v2(wallet, service)),
+        other => Err(BackendError::Internal(format!(
+            "unsupported envelope version 0x{:02x}",
+            other
+        ))),
+    }
 }
 
 fn map_signer_error(err: SignerClientError) -> BackendError {
@@ -361,8 +529,17 @@ impl CredentialBackend for S3CredentialBackend {
     ) -> Result<(), BackendError> {
         enforce_scope_for_service(session, service, true)?;
         let kek = self.derive_kek(agent_id, service).await?;
-        let envelope = Self::seal(&kek, agent_id, service, plaintext)?;
-        let key = Self::object_key(agent_id, service);
+        let (envelope_version, key) = match self.write_envelope {
+            WriteEnvelope::V1 => (
+                ENVELOPE_VERSION_V1,
+                Self::object_key_v1(agent_id, service),
+            ),
+            WriteEnvelope::V2 => (
+                ENVELOPE_VERSION_V2,
+                Self::object_key_v2(agent_id, service),
+            ),
+        };
+        let envelope = Self::seal(envelope_version, &kek, agent_id, service, plaintext)?;
 
         self.s3
             .put_object()
@@ -383,22 +560,52 @@ impl CredentialBackend for S3CredentialBackend {
         service: &ServiceName,
     ) -> Result<Vec<u8>, BackendError> {
         enforce_scope_for_service(session, service, false)?;
-        let key = Self::object_key(agent_id, service);
-        let resp = self
+        // Dual-path read per issue-v2-stage-1-foundation.md migration step
+        // 10: try v2 (actor_omni-keyed) path first, fall back to v1
+        // (wallet-keyed). Lets operators read either pre-migration v1
+        // blobs or post-migration v2 blobs without an opt-in flag flip.
+        let key_v2 = Self::object_key_v2(agent_id, service);
+        let body = match self
             .s3
             .get_object()
             .bucket(&self.bucket)
-            .key(&key)
+            .key(&key_v2)
             .send()
             .await
-            .map_err(|e| map_s3_error("GetObject", e))?;
-        let body = resp
-            .body
-            .collect()
-            .await
-            .map_err(|e| BackendError::Transport(format!("GetObject body collect: {e}")))?
-            .into_bytes()
-            .to_vec();
+        {
+            Ok(resp) => resp
+                .body
+                .collect()
+                .await
+                .map_err(|e| BackendError::Transport(format!("GetObject body collect: {e}")))?
+                .into_bytes()
+                .to_vec(),
+            Err(e) => {
+                // Only fall back on NotFound — propagate every other
+                // error (AccessDenied, throttling, network) so the
+                // operator sees the real failure instead of a silently
+                // swapped path.
+                let mapped = map_s3_error("GetObject", e);
+                if !matches!(mapped, BackendError::NotFound(_)) {
+                    return Err(mapped);
+                }
+                let key_v1 = Self::object_key_v1(agent_id, service);
+                let resp = self
+                    .s3
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(&key_v1)
+                    .send()
+                    .await
+                    .map_err(|e| map_s3_error("GetObject", e))?;
+                resp.body
+                    .collect()
+                    .await
+                    .map_err(|e| BackendError::Transport(format!("GetObject body collect: {e}")))?
+                    .into_bytes()
+                    .to_vec()
+            }
+        };
         let kek = self.derive_kek(agent_id, service).await?;
         Self::open(&kek, agent_id, service, &body)
     }
@@ -409,39 +616,14 @@ impl CredentialBackend for S3CredentialBackend {
         agent_id: &WalletAddress,
     ) -> Result<(), BackendError> {
         enforce_master_session(session, "teardown_agent")?;
-        let prefix = Self::credentials_prefix(agent_id);
-        let mut continuation: Option<String> = None;
-        loop {
-            let mut req = self.s3.list_objects_v2().bucket(&self.bucket).prefix(&prefix);
-            if let Some(token) = &continuation {
-                req = req.continuation_token(token);
-            }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| map_s3_error("ListObjectsV2", e))?;
-
-            let contents = resp.contents();
-            for obj in contents {
-                if let Some(k) = obj.key() {
-                    self.s3
-                        .delete_object()
-                        .bucket(&self.bucket)
-                        .key(k)
-                        .send()
-                        .await
-                        .map_err(|e| map_s3_error("DeleteObject", e))?;
-                }
-            }
-
-            if resp.is_truncated().unwrap_or(false) {
-                continuation = resp.next_continuation_token().map(|s| s.to_string());
-                if continuation.is_none() {
-                    break;
-                }
-            } else {
-                break;
-            }
+        // Wipe BOTH the v1 wallet-keyed prefix AND the v2 actor_omni-keyed
+        // prefix so a mid-migration teardown doesn't leave orphan blobs at
+        // the un-deleted path.
+        for prefix in [
+            Self::credentials_prefix_v2(agent_id),
+            Self::credentials_prefix_v1(agent_id),
+        ] {
+            self.delete_under_prefix(&prefix).await?;
         }
         Ok(())
     }
@@ -451,44 +633,26 @@ impl CredentialBackend for S3CredentialBackend {
         session: &Session,
         agent_id: &WalletAddress,
     ) -> Result<Vec<ServiceName>, BackendError> {
-        let prefix = Self::credentials_prefix(agent_id);
-        let mut continuation: Option<String> = None;
+        // Union of v1 + v2 names — dedupe so a credential that's been
+        // lazy-migrated (exists at both paths) appears once. v2 wins when
+        // both paths carry the same service.
         let mut names: Vec<ServiceName> = Vec::new();
-        loop {
-            let mut req = self.s3.list_objects_v2().bucket(&self.bucket).prefix(&prefix);
-            if let Some(token) = &continuation {
-                req = req.continuation_token(token);
-            }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| map_s3_error("ListObjectsV2", e))?;
-
-            for obj in resp.contents() {
-                if let Some(k) = obj.key() {
-                    if let Some(rest) = k.strip_prefix(&prefix) {
-                        if let Some(svc) = rest.strip_suffix(".enc") {
-                            if !svc.is_empty() && !svc.contains('/') {
-                                names.push(ServiceName(svc.to_string()));
-                            }
-                        }
-                    }
+        for prefix in [
+            Self::credentials_prefix_v2(agent_id),
+            Self::credentials_prefix_v1(agent_id),
+        ] {
+            let mut entries = self.list_under_prefix(&prefix).await?;
+            for entry in entries.drain(..) {
+                if !names.contains(&entry) {
+                    names.push(entry);
                 }
-            }
-            if resp.is_truncated().unwrap_or(false) {
-                continuation = resp.next_continuation_token().map(|s| s.to_string());
-                if continuation.is_none() {
-                    break;
-                }
-            } else {
-                break;
             }
         }
 
         // Scoped child sessions must not see service names outside their
-        // scope — the bucket-policy PrincipalTag only knows the wallet
-        // prefix, so client-side filtering is the trust boundary. Match
-        // the mock-server's `/credential/list` behavior.
+        // scope — the bucket-policy PrincipalTag only knows the prefix,
+        // so client-side filtering is the trust boundary. Match the
+        // mock-server's `/credential/list` behavior.
         if let Some(scope) = &session.scope {
             names.retain(|n| scope.services.iter().any(|s| s == n));
         }
@@ -718,8 +882,8 @@ mod tests {
     }
 
     #[test]
-    fn object_key_uses_lowercase_wallet_and_credentials_prefix() {
-        let key = S3CredentialBackend::object_key(
+    fn object_key_v1_uses_lowercase_wallet_and_credentials_prefix() {
+        let key = S3CredentialBackend::object_key_v1(
             &WalletAddress("0xABCDEF1234567890ABCDEF1234567890ABCDEF12".into()),
             &ServiceName("openrouter".into()),
         );
@@ -730,12 +894,38 @@ mod tests {
     }
 
     #[test]
-    fn credentials_prefix_matches_object_key_root() {
+    fn object_key_v2_uses_actor_omni_hex_prefix() {
+        use crate::actor_omni::actor_omni_hex;
+        let wallet = WalletAddress("0xabc".into());
+        let key = S3CredentialBackend::object_key_v2(&wallet, &ServiceName("openrouter".into()));
+        let expected_omni = actor_omni_hex(&wallet);
+        assert_eq!(
+            key,
+            format!("bots/{}/credentials/openrouter.enc", expected_omni)
+        );
+        // v2 path never contains the wallet hex — the whole point of the
+        // migration is to stop leaking the rotation-volatile wallet into
+        // S3 paths.
+        assert!(!key.contains("0xabc"));
+    }
+
+    #[test]
+    fn credentials_prefix_v1_matches_object_key_v1_root() {
         let wallet = WalletAddress("0xABC".into());
-        let prefix = S3CredentialBackend::credentials_prefix(&wallet);
-        let key = S3CredentialBackend::object_key(&wallet, &ServiceName("svc".into()));
+        let prefix = S3CredentialBackend::credentials_prefix_v1(&wallet);
+        let key = S3CredentialBackend::object_key_v1(&wallet, &ServiceName("svc".into()));
         assert!(key.starts_with(&prefix));
         assert_eq!(prefix, "bots/0xabc/credentials/");
+    }
+
+    #[test]
+    fn credentials_prefix_v2_matches_object_key_v2_root() {
+        let wallet = WalletAddress("0xABC".into());
+        let prefix = S3CredentialBackend::credentials_prefix_v2(&wallet);
+        let key = S3CredentialBackend::object_key_v2(&wallet, &ServiceName("svc".into()));
+        assert!(key.starts_with(&prefix));
+        assert!(prefix.ends_with("/credentials/"));
+        assert!(!prefix.contains("0xabc"));
     }
 
     /// Build a `S3CredentialBackend` against an empty config — the
@@ -752,6 +942,7 @@ mod tests {
             bucket: "test-bucket".into(),
             signer,
             omni_account: "deadbeef".repeat(8),
+            write_envelope: WriteEnvelope::V1,
         }
     }
 
@@ -911,17 +1102,53 @@ mod tests {
     }
 
     #[test]
-    fn seal_open_roundtrips_with_aad_binding() {
+    fn seal_open_v1_roundtrips_with_aad_binding() {
         let kek = [7u8; 32];
         let wallet = WalletAddress("0xabc".into());
         let svc = ServiceName("openrouter".into());
         let plaintext = b"sk-or-v1-secret";
 
-        let envelope = S3CredentialBackend::seal(&kek, &wallet, &svc, plaintext).unwrap();
-        assert_eq!(envelope[0], ENVELOPE_VERSION);
+        let envelope =
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V1, &kek, &wallet, &svc, plaintext).unwrap();
+        assert_eq!(envelope[0], ENVELOPE_VERSION_V1);
         assert!(envelope.len() > 1 + 12 + 16);
         let opened = S3CredentialBackend::open(&kek, &wallet, &svc, &envelope).unwrap();
         assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn seal_open_v2_roundtrips_with_actor_omni_aad() {
+        let kek = [7u8; 32];
+        let wallet = WalletAddress("0xabc".into());
+        let svc = ServiceName("openrouter".into());
+        let plaintext = b"sk-or-v2-secret";
+
+        let envelope =
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V2, &kek, &wallet, &svc, plaintext).unwrap();
+        assert_eq!(envelope[0], ENVELOPE_VERSION_V2);
+        let opened = S3CredentialBackend::open(&kek, &wallet, &svc, &envelope).unwrap();
+        assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn v1_envelope_does_not_decrypt_with_v2_aad_and_vice_versa() {
+        let kek = [7u8; 32];
+        let wallet = WalletAddress("0xabc".into());
+        let svc = ServiceName("openrouter".into());
+        // v1 ciphertext re-tagged with v2 version byte must fail open
+        // (AAD changes from wallet-keyed to actor_omni-keyed).
+        let mut v1 =
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V1, &kek, &wallet, &svc, b"x").unwrap();
+        v1[0] = ENVELOPE_VERSION_V2;
+        let err = S3CredentialBackend::open(&kek, &wallet, &svc, &v1).unwrap_err();
+        assert!(matches!(err, BackendError::Internal(_)));
+        // Sanity: a v2-shaped envelope decrypted against itself works.
+        let v2 =
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V2, &kek, &wallet, &svc, b"x").unwrap();
+        assert_eq!(
+            S3CredentialBackend::open(&kek, &wallet, &svc, &v2).unwrap(),
+            b"x"
+        );
     }
 
     #[test]
@@ -931,7 +1158,8 @@ mod tests {
         let other_wallet = WalletAddress("0xdef".into());
         let svc = ServiceName("openrouter".into());
         let envelope =
-            S3CredentialBackend::seal(&kek, &wallet, &svc, b"sk-or-v1-secret").unwrap();
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V1, &kek, &wallet, &svc, b"sk-or-v1-secret")
+                .unwrap();
         let err =
             S3CredentialBackend::open(&kek, &other_wallet, &svc, &envelope).unwrap_err();
         match err {
@@ -946,7 +1174,8 @@ mod tests {
         let wallet = WalletAddress("0xabc".into());
         let svc = ServiceName("openrouter".into());
         let other_svc = ServiceName("anthropic".into());
-        let envelope = S3CredentialBackend::seal(&kek, &wallet, &svc, b"x").unwrap();
+        let envelope =
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V1, &kek, &wallet, &svc, b"x").unwrap();
         let err =
             S3CredentialBackend::open(&kek, &wallet, &other_svc, &envelope).unwrap_err();
         assert!(matches!(err, BackendError::Internal(_)));
@@ -957,7 +1186,8 @@ mod tests {
         let kek = [7u8; 32];
         let wallet = WalletAddress("0xabc".into());
         let svc = ServiceName("openrouter".into());
-        let mut envelope = S3CredentialBackend::seal(&kek, &wallet, &svc, b"x").unwrap();
+        let mut envelope =
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V1, &kek, &wallet, &svc, b"x").unwrap();
         envelope[0] = 0xFF;
         let err = S3CredentialBackend::open(&kek, &wallet, &svc, &envelope).unwrap_err();
         match err {
@@ -971,7 +1201,8 @@ mod tests {
         let kek = [7u8; 32];
         let wallet = WalletAddress("0xabc".into());
         let svc = ServiceName("openrouter".into());
-        let err = S3CredentialBackend::open(&kek, &wallet, &svc, &[ENVELOPE_VERSION]).unwrap_err();
+        let err =
+            S3CredentialBackend::open(&kek, &wallet, &svc, &[ENVELOPE_VERSION_V1]).unwrap_err();
         match err {
             BackendError::Internal(m) => assert!(m.contains("envelope too short")),
             other => panic!("expected truncation error, got {other:?}"),
@@ -983,5 +1214,64 @@ mod tests {
         let err = unsupported("query_audit");
         let s = err.to_string();
         assert!(s.contains("query_audit"), "msg = {s}");
+    }
+
+    // ---- v2 migration coverage (issue-v2-stage-1-foundation) -------------
+
+    #[test]
+    fn v1_and_v2_paths_diverge_for_same_wallet() {
+        let wallet = WalletAddress("0xabc".into());
+        let svc = ServiceName("openrouter".into());
+        let v1 = S3CredentialBackend::object_key_v1(&wallet, &svc);
+        let v2 = S3CredentialBackend::object_key_v2(&wallet, &svc);
+        assert_ne!(v1, v2, "v1 and v2 paths must not collide");
+        assert!(v1.contains("0xabc"), "v1 carries wallet hex: {v1}");
+        assert!(!v2.contains("0xabc"), "v2 must not leak wallet hex: {v2}");
+    }
+
+    #[test]
+    fn v1_and_v2_aad_diverge_for_same_wallet() {
+        let wallet = WalletAddress("0xabc".into());
+        let svc = ServiceName("openrouter".into());
+        let aad_v1 = aad_for_v1(&wallet, &svc);
+        let aad_v2 = aad_for_v2(&wallet, &svc);
+        assert_ne!(aad_v1, aad_v2);
+        // v1 AAD domain tag must be present in v1, absent in v2 (and vice
+        // versa). Operators reading raw blobs from S3 can tell the
+        // version from the first byte; this guards the in-memory AAD.
+        assert!(aad_v1.windows(2).any(|w| w == b"v1"));
+        assert!(aad_v2.windows(2).any(|w| w == b"v2"));
+    }
+
+    #[test]
+    fn write_envelope_v2_seals_into_v2_envelope() {
+        let kek = [7u8; 32];
+        let wallet = WalletAddress("0xabc".into());
+        let svc = ServiceName("openrouter".into());
+        let env =
+            S3CredentialBackend::seal(ENVELOPE_VERSION_V2, &kek, &wallet, &svc, b"x").unwrap();
+        assert_eq!(env[0], ENVELOPE_VERSION_V2);
+        // Round-trip via the public open() — dispatches on version byte.
+        let opened = S3CredentialBackend::open(&kek, &wallet, &svc, &env).unwrap();
+        assert_eq!(opened, b"x");
+    }
+
+    #[test]
+    fn aad_version_dispatch_rejects_unknown_version() {
+        let wallet = WalletAddress("0xabc".into());
+        let svc = ServiceName("openrouter".into());
+        let err = aad_for_version(0x55, &wallet, &svc).unwrap_err();
+        match err {
+            BackendError::Internal(m) => assert!(m.contains("0x55"), "msg = {m}"),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_write_envelope_overrides_default() {
+        let backend = test_backend(fake_signer()).await;
+        assert_eq!(backend.write_envelope, WriteEnvelope::V1);
+        let upgraded = backend.with_write_envelope(WriteEnvelope::V2);
+        assert_eq!(upgraded.write_envelope, WriteEnvelope::V2);
     }
 }

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use agentkeys_core::actor_omni::actor_omni_hex;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
-use agentkeys_core::s3_backend::S3CredentialBackend;
+use agentkeys_core::s3_backend::{S3CredentialBackend, WriteEnvelope};
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
 use agentkeys_core::signer_client::{HttpSignerClient, SignerClient, SignerClientError};
@@ -74,14 +75,20 @@ fn wrap_backend_error(err: BackendError) -> anyhow::Error {
 /// Which `CredentialBackend` impl `agentkeys` should route credential CRUD
 /// through. The legacy `Http` impl talks to the mock-server's
 /// `/credential/*` endpoints; `S3` (issue #85) PUT/GETs encrypted blobs at
-/// `s3://$BUCKET/bots/<wallet>/credentials/<service>.enc`. Every other
-/// trait method (sessions, audit, identity, scope, inbox, rendezvous,
-/// auth-requests) still goes through `MockHttpClient` regardless of this
-/// flag — `S3CredentialBackend` only implements the credential slice.
+/// `s3://$BUCKET/bots/<wallet|actor_omni>/credentials/<service>.enc`.
+/// `Sidecar` is the stage-1-v2 target (localhost daemon proxy mints
+/// cap-tokens against the on-chain ScopeContract + SidecarRegistry); it is
+/// declared here so the CLI surface is forward-compatible, but the daemon
+/// implementation lands in a follow-up — calling it today returns a clear
+/// "not yet implemented" error rather than silently falling back to a
+/// weaker mode. Every other trait method (sessions, audit, identity,
+/// scope, inbox, rendezvous, auth-requests) still goes through
+/// `MockHttpClient` regardless of this flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialBackendKind {
     Http,
     S3,
+    Sidecar,
 }
 
 impl CredentialBackendKind {
@@ -92,10 +99,41 @@ impl CredentialBackendKind {
         match raw.to_ascii_lowercase().as_str() {
             "http" | "mock" => Ok(Self::Http),
             "s3" => Ok(Self::S3),
+            "sidecar" => Ok(Self::Sidecar),
             other => Err(anyhow!(
-                "unknown --credential-backend '{}': expected 'http' or 's3'",
+                "unknown --credential-backend '{}': expected 'http', 's3', or 'sidecar'",
                 other
             )),
+        }
+    }
+}
+
+/// Which envelope format the S3 backend writes. Defaults to `V1` to keep
+/// existing #87 deployments working unchanged; operators opt in to `V2`
+/// once they've finished the dual-tag + bucket-policy migration steps in
+/// `docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeVersionFlag {
+    V1,
+    V2,
+}
+
+impl EnvelopeVersionFlag {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "v1" | "1" => Ok(Self::V1),
+            "v2" | "2" => Ok(Self::V2),
+            other => Err(anyhow!(
+                "unknown --envelope-version '{}': expected 'v1' or 'v2'",
+                other
+            )),
+        }
+    }
+
+    fn to_write_envelope(self) -> WriteEnvelope {
+        match self {
+            Self::V1 => WriteEnvelope::V1,
+            Self::V2 => WriteEnvelope::V2,
         }
     }
 }
@@ -139,6 +177,11 @@ pub struct CommandContext {
     /// Issue #74 step 2 will pull this from the session JWT directly; this
     /// is a temporary operator-supplied bridge.
     pub omni_account: Option<String>,
+    /// v2 stage 1: which envelope shape `--credential-backend=s3` writes.
+    /// Defaults to `V1` so legacy #87 deployments keep working; flip to
+    /// `V2` per-operator post-migration. Reads always accept both formats
+    /// — only writes care about this flag.
+    pub envelope_version: EnvelopeVersionFlag,
 }
 
 impl CommandContext {
@@ -160,7 +203,13 @@ impl CommandContext {
                 .filter(|s| !s.is_empty()),
             signer_url: std::env::var("AGENTKEYS_SIGNER_URL").ok().filter(|s| !s.is_empty()),
             omni_account: std::env::var("AGENTKEYS_OMNI_ACCOUNT").ok().filter(|s| !s.is_empty()),
+            envelope_version: EnvelopeVersionFlag::V1,
         }
+    }
+
+    pub fn with_envelope_version(mut self, v: EnvelopeVersionFlag) -> Self {
+        self.envelope_version = v;
+        self
     }
 
     pub fn with_broker_url(mut self, broker_url: Option<String>) -> Self {
@@ -303,9 +352,15 @@ impl CommandContext {
                     Arc::new(signer),
                     omni,
                 )
-                .await;
+                .await
+                .with_write_envelope(self.envelope_version.to_write_envelope());
                 Ok(Arc::new(backend))
             }
+            CredentialBackendKind::Sidecar => Err(anyhow!(
+                "--credential-backend=sidecar is reserved for the stage 1 daemon proxy (issue v2-stage-1) and is not yet implemented. \
+                 Use --credential-backend=s3 with --envelope-version=v2 to exercise the actor_omni-keyed v2 path against the existing S3 backend, \
+                 or --credential-backend=http for the legacy mock-server."
+            )),
         }
     }
 
@@ -578,12 +633,20 @@ pub async fn cmd_store(ctx: &CommandContext, agent: Option<&str>, service: &str,
                 eprintln!("[verbose] POST {}/credential/store", ctx.backend_url);
             }
             CredentialBackendKind::S3 => {
+                let prefix = match ctx.envelope_version {
+                    EnvelopeVersionFlag::V1 => agent_id.0.to_lowercase(),
+                    EnvelopeVersionFlag::V2 => actor_omni_hex(&agent_id),
+                };
                 eprintln!(
-                    "[verbose] PUT s3://{}/bots/{}/credentials/{}.enc",
+                    "[verbose] PUT s3://{}/bots/{}/credentials/{}.enc (envelope={:?})",
                     ctx.data_bucket.as_deref().unwrap_or("?"),
-                    agent_id.0.to_lowercase(),
-                    service
+                    prefix,
+                    service,
+                    ctx.envelope_version,
                 );
+            }
+            CredentialBackendKind::Sidecar => {
+                eprintln!("[verbose] PUT (sidecar) — not yet implemented");
             }
         }
         eprintln!("[verbose] agent: {}, service: {}", agent_id.0, service);
@@ -610,12 +673,19 @@ pub async fn cmd_read(ctx: &CommandContext, agent: Option<&str>, service: &str) 
                 eprintln!("[verbose] GET {}/credential/read", ctx.backend_url);
             }
             CredentialBackendKind::S3 => {
+                // Reads try v2 first then fall back to v1 — surface both
+                // paths so operators can correlate verbose output with
+                // ListObjectsV2 in CloudTrail.
                 eprintln!(
-                    "[verbose] GET s3://{}/bots/{}/credentials/{}.enc",
-                    ctx.data_bucket.as_deref().unwrap_or("?"),
-                    agent_id.0.to_lowercase(),
-                    service
+                    "[verbose] GET s3://{bucket}/bots/{omni}/credentials/{service}.enc (v2; falls back to wallet={wallet})",
+                    bucket = ctx.data_bucket.as_deref().unwrap_or("?"),
+                    omni = actor_omni_hex(&agent_id),
+                    service = service,
+                    wallet = agent_id.0.to_lowercase(),
                 );
+            }
+            CredentialBackendKind::Sidecar => {
+                eprintln!("[verbose] GET (sidecar) — not yet implemented");
             }
         }
         eprintln!("[verbose] agent: {}, service: {}", agent_id.0, service);
@@ -837,11 +907,16 @@ pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
                 eprintln!("[verbose] DELETE {}/credential/teardown", ctx.backend_url);
             }
             CredentialBackendKind::S3 => {
+                let wallet_addr = WalletAddress(agent.to_string());
                 eprintln!(
-                    "[verbose] DELETE s3://{}/bots/{}/credentials/*",
+                    "[verbose] DELETE s3://{}/bots/{{{wallet},{omni}}}/credentials/*",
                     ctx.data_bucket.as_deref().unwrap_or("?"),
-                    agent.to_lowercase()
+                    wallet = agent.to_lowercase(),
+                    omni = actor_omni_hex(&wallet_addr),
                 );
+            }
+            CredentialBackendKind::Sidecar => {
+                eprintln!("[verbose] DELETE (sidecar) — not yet implemented");
             }
         }
         eprintln!("[verbose] agent: {}", agent);
@@ -1493,6 +1568,13 @@ pub async fn cmd_whoami(
 
     let mut out = serde_json::Map::new();
     out.insert("session_wallet".into(), json!(session.wallet.0));
+    // v2 stage 1: arch.md §14.1 names the stable per-operator anchor
+    // `actor_omni = SHA256("agentkeys"||"evm"||initial_master_wallet)`.
+    // Surface it next to the wallet so operators can sanity-check the
+    // bucket-policy PrincipalTag + S3 path their backend will use after
+    // the dual-tag migration completes.
+    let actor_omni = actor_omni_hex(&session.wallet);
+    out.insert("agentkeys_actor_omni".into(), json!(actor_omni));
     if let Some(scope) = &session.scope {
         out.insert(
             "scope_services".into(),
@@ -1524,6 +1606,7 @@ pub async fn cmd_whoami(
     } else {
         let mut lines = Vec::new();
         lines.push(format!("session_wallet: {}", session.wallet.0));
+        lines.push(format!("agentkeys_actor_omni: {}", actor_omni));
         if let Some(scope) = &session.scope {
             let svc: Vec<&str> = scope.services.iter().map(|s| s.0.as_str()).collect();
             lines.push(format!("scope: [{}] read_only={}", svc.join(", "), scope.read_only));

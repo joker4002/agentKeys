@@ -2,7 +2,7 @@ use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_link,
     cmd_provision, cmd_read, cmd_recover, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
     cmd_signer_sign, cmd_store, cmd_teardown, cmd_usage, cmd_whoami, CommandContext,
-    CredentialBackendKind, InitMode,
+    CredentialBackendKind, EnvelopeVersionFlag, InitMode,
 };
 
 
@@ -44,9 +44,17 @@ struct Cli {
         long,
         env = "AGENTKEYS_CREDENTIAL_BACKEND",
         default_value = "http",
-        help = "Issue #85 — where credential CRUD lands. 'http' (default) talks to the legacy mock-server. 's3' encrypts client-side and PUTs to s3://$AGENTKEYS_BUCKET/bots/<wallet>/credentials/<service>.enc, gated by the OIDC-assumed agentkeys-data-role + PrincipalTag isolation. The legacy backend still handles sessions, audit, identity, and scope regardless of this flag."
+        help = "Where credential CRUD lands. 'http' (default) talks to the legacy mock-server. 's3' encrypts client-side and PUTs to s3://$AGENTKEYS_BUCKET/bots/<wallet|actor_omni>/credentials/<service>.enc, gated by the OIDC-assumed agentkeys-data-role + PrincipalTag isolation. 'sidecar' (stage-1 v2 — not yet implemented) talks to the localhost daemon proxy. The legacy backend still handles sessions, audit, identity, and scope regardless of this flag."
     )]
     credential_backend: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_ENVELOPE_VERSION",
+        default_value = "v1",
+        help = "v2 stage 1 — which envelope shape --credential-backend=s3 writes. 'v1' (default) keys S3 path + AAD off the master wallet (legacy #87 layout). 'v2' keys both off actor_omni_hex per arch.md §14.4 — stable across K3 rotation. Reads always accept BOTH formats during the migration window, so this flag only affects writes."
+    )]
+    envelope_version: String,
 
     #[arg(
         long,
@@ -331,10 +339,18 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let envelope_version = match EnvelopeVersionFlag::parse(&cli.envelope_version) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json)
         .with_broker_url(cli.broker_url.clone())
         .with_session_id(cli.session_id.clone())
         .with_credential_backend(cred_kind)
+        .with_envelope_version(envelope_version)
         .with_data_bucket(cli.bucket.clone())
         .with_signer_url(cli.signer_url.clone())
         .with_omni_account(cli.omni_account.clone());
