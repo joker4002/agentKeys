@@ -1,445 +1,814 @@
-# v2 stage 1 — migration from stage 7 demo + new-feature demo
+# v2 stage 1 — fresh-start demo (Litentry/Heima EVM backbone)
 
-**Audience**: operators running today's stage 7 demo (per [stage7-demo-and-verification.md](stage7-demo-and-verification.md) §0–§5) who will migrate to v2 stage 1 (per [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md) + [arch.md §14](spec/architecture.md)).
+**Audience**: operators bringing up a **brand new** v2 stage-1 deployment from scratch. Everything inherited from the stage-7 demo is called out explicitly so you know exactly which steps are unchanged and which are stage-1 additions.
 
-**This doc has two parts:**
-1. **Part A — migration**: every break/change to the existing stage 7 demo (§0–§5), with the minimum operator steps to adapt
-2. **Part B — new-feature demo**: a fresh end-to-end run that exercises everything stage 1 adds (sovereign sidecar + on-chain identity + credentials-service worker), so an operator can verify stage 1 is live before retiring the old flow
+**This doc is fresh-start only.** Operators migrating from a live PR #87 / stage-7 `S3CredentialBackend` deployment are out of scope — the dual-read code path that landed in [PR #87+stage-1-step-1](crates/agentkeys-core/src/s3_backend.rs) covers that case mechanically, no operator runbook required.
 
-Both parts assume arch.md §14 as the canonical reference and PR #87 (today's `S3CredentialBackend`) as the predecessor that stage 1 replaces.
+**Chain backbone**: Litentry's parachain (rebranded to **Heima Network** in 2026) is the EVM L1 we deploy all stage-1 contracts on. Heima is Substrate + Frontier — `pallet_evm` + `pallet_ethereum` give native EVM compatibility with first-class EVM account addresses as `msg.sender`. Stage-1's four contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) are plain Solidity, deployed via Foundry or Hardhat using the operator's `current_master_wallet`.
+
+**Reference docs**:
+- Stage 1 deliverable inventory — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
+- Stage 7 demo (parent for §0 prereqs, §1 init, §2 SIWE, §3 OIDC+STS, §4 isolation proof, §5 provision) — [docs/stage7-demo-and-verification.md](stage7-demo-and-verification.md)
+- Architecture v2 (single source of truth) — [docs/spec/architecture.md](spec/architecture.md)
 
 ---
 
-## What landed in this commit (incremental stage-1 deliverable)
+## Litentry/Heima EVM — chain reference
 
-This commit ships the **first batch of stage-1 CLI/backend changes** that are safe to merge without the chain contracts or sidecar daemon being live yet. Operators can adopt these immediately; the remaining stage-1 work (broker cap-mint endpoints, on-chain contracts, sidecar daemon, K11 WebAuthn) lands in follow-up commits.
+Everything stage 1 puts on chain (scope, sidecar registry, K3 epoch counter, credential audit) lives on Heima. Reference values used throughout this doc:
 
-| What's live now | Where to see it | What's still TBD |
+| Property | Mainnet (`heima`) | Testnet (`paseo`) |
 |---|---|---|
-| `agentkeys_actor_omni` computed deterministically from `(master_wallet)` | `agentkeys whoami` prints it as a new line; CLI also surfaces it in `--verbose` mode of `store`/`read`/`teardown` | Population in the OIDC JWT (broker mint step) — today still operator-provided via `--omni-account` |
-| `--credential-backend=sidecar` flag accepted by CLI surface | `agentkeys --credential-backend=sidecar <cmd>` parses but returns a clear "not yet implemented" error pointing at `--envelope-version=v2` instead | Daemon-side `agentkeys-proxy.sock` HTTP proxy + cap-token flow |
-| `--envelope-version={v1,v2}` flag on the S3 backend | `agentkeys --credential-backend=s3 --envelope-version=v2 store …` writes the v2 envelope shape to the actor_omni-keyed path | Operator opt-in flow + bucket-policy dual-tag rollout |
-| v2 envelope shape (`agentkeys.cred.aad.v2|<actor_omni_hex>|<service>`) | `crates/agentkeys-core/src/s3_backend.rs` — `aad_for_v2` + envelope version byte `0x02` | (none — envelope is final per arch.md §14.4) |
-| Dual-path read: v2 path first, v1 fallback on NotFound | `S3CredentialBackend::read_credential` | Lazy on-access copy v1→v2 (currently read-only fallback; no rewrite on read) |
-| Dual-prefix teardown: wipes both `bots/<wallet>/` AND `bots/<actor_omni_hex>/` | `S3CredentialBackend::teardown_agent` | (none) |
-| Dual-prefix listing: union of v1 + v2 prefixes, dedup'd | `S3CredentialBackend::list_credentials` | (none) |
+| **EVM chain ID** | `212013` (= `LIT deployment year (21) + paraID (2013)`) | equals `HEIMA_PARA_ID` for the paseo runtime — read live from the node via `eth_chainId` |
+| **Substrate WSS** | `wss://rpc.litentry-parachain.litentry.io` (legacy hostname, still active) OR `wss://api-heima.dwellir.com/<DWELLIR_KEY>` | `wss://rpc-paseo.heima.network` (per Heima docs; verify with `eth_chainId` before relying on it) |
+| **EVM JSON-RPC HTTP** | Same host as Substrate, port `9933` on self-hosted Frontier; for the hosted Heima endpoint use `https://rpc-eth.heima.network` if available, otherwise spin up your own RPC node via the steps below | `https://rpc-eth-paseo.heima.network` (verify) |
+| **EVM JSON-RPC WSS** | `wss://rpc-eth.heima.network` (verify availability for your tenant) | `wss://rpc-eth-paseo.heima.network` (verify) |
+| **Block explorer** | [https://heima.statescan.io/#/](https://heima.statescan.io/#/) (Substrate-side); [Polkadot.js Apps](https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Fheima-rpc.n.dwellir.com#/explorer) for live state + extrinsic inspection | [Polkadot.js Apps pointed at the paseo WSS](https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Frpc-paseo.heima.network#/explorer) |
+| **Native gas token** | `HEI` (18 decimals) | `pHEI` (testnet) |
+| **EVM stack** | Frontier (`pallet_evm` index `120` + `pallet_ethereum` index `121`) — full Solidity / EVM-bytecode compatibility | Same |
+| **Address mapping** | `HashedAddressMapping<BlakeTwo256>` — Substrate accounts are derived from EVM addresses by `blake2_256("evm:" \|\| eth_address)`. The operator's EVM wallet IS the on-chain identity; no MetaMask-Substrate dual-account dance | Same |
+| **Source of truth** | [github.com/litentry/heima — parachain/runtime/heima/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/heima/src/lib.rs) (search for `pub ChainId: u64 = 212013`) | [github.com/litentry/heima — parachain/runtime/paseo/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/paseo/src/lib.rs) |
 
-**What this lets you do today**, against the existing PR #87 S3 backend without any chain or sidecar work:
+**Operator workstation env** (add these to `scripts/operator-workstation.env`):
 
 ```bash
-# Mint creds via existing OIDC + STS path
-export AGENTKEYS_BROKER_URL=https://broker.example
-agentkeys init --email you@example.org
+# === HEIMA EVM (stage 1 chain backbone) ===
+HEIMA_NETWORK="${HEIMA_NETWORK:-mainnet}"   # mainnet | paseo
+HEIMA_EVM_CHAIN_ID="${HEIMA_EVM_CHAIN_ID:-212013}"
+HEIMA_EVM_RPC_HTTP="${HEIMA_EVM_RPC_HTTP:-https://rpc-eth.heima.network}"
+HEIMA_EVM_RPC_WSS="${HEIMA_EVM_RPC_WSS:-wss://rpc-eth.heima.network}"
+HEIMA_SUBSTRATE_WSS="${HEIMA_SUBSTRATE_WSS:-wss://rpc.litentry-parachain.litentry.io}"
+HEIMA_EXPLORER="${HEIMA_EXPLORER:-https://heima.statescan.io}"
 
-# See your new actor_omni
-agentkeys whoami
-# session_wallet: 0xabc...
-# agentkeys_actor_omni: a17e...    <-- NEW: stable across K3 rotation
+# Operator's current_master_wallet (Layer 2 per arch.md §6.1) — used as the
+# Solidity-deployment account AND as msg.sender for all stage-1 chain
+# submissions in sovereign mode. This is the wallet the signer derives at
+# stage-3 SIWE; you populate this AFTER §1.4 below.
+HEIMA_DEPLOYER_ADDRESS=""
+HEIMA_DEPLOYER_PRIVATE_KEY=""    # ONLY set when using a hot-key for contract deployment;
+                                  # prefer signer-derived signing in production
+```
 
-# Write under v2 envelope to the actor_omni-keyed S3 path
+**Self-hosting an EVM RPC node** (only needed if the public Heima endpoints aren't usable in your network — e.g., behind a firewall that blocks dwellir.com, or you want sub-100ms latency):
+
+```bash
+# Run the Heima parachain binary with --rpc-port enabled (default Frontier
+# JSON-RPC port is 9933). The README at github.com/litentry/heima covers
+# the build + launch flow. For a one-line dev node:
+docker run -d --name heima-evm \
+  -p 9933:9933 -p 9944:9944 \
+  litentry/heima:latest \
+  --chain heima-rococo --rpc-port 9933 \
+  --rpc-cors all --rpc-external --ws-external
+
+# Confirm EVM chain ID matches arch expectation
+curl -sS -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+  http://localhost:9933 | jq -r '.result'
+# → 0x33c4d (= 212013 in decimal)
+```
+
+The rest of this doc assumes `HEIMA_EVM_RPC_HTTP` and `HEIMA_SUBSTRATE_WSS` are reachable from the operator workstation and from the broker host.
+
+---
+
+## What stage 1 ships (and what's inherited)
+
+| Component | Source | Stage 1 status |
+|---|---|---|
+| Broker host (`broker.<zone>` + signer-only `signer.<zone>`, nginx, certbot, systemd units) | Stage 7 demo §0 prereqs | **Inherited unchanged.** Skip ahead to §0 of this doc to verify it's up. |
+| `agentkeys init --email` / `--oauth2-google` identity ceremony + SIWE round-trip | Stage 7 demo §1, §2 | **Inherited with an addition** — stage 1 inserts the WebAuthn binding ceremony (K11) between identity verify and SIWE. See §1 below. |
+| AWS prereqs (OIDC provider, `agentkeys-data-role` trust policy, bucket policy with PrincipalTag isolation) | [cloud-setup.md](cloud-setup.md) §3-§4 | **Inherited with a one-line policy change**: PrincipalTag key is `agentkeys_actor_omni` (was `agentkeys_user_wallet`) and the resource path keys on `bots/<actor_omni_hex>/` (was `bots/<wallet>/`). See §3 below. |
+| `--credential-backend=s3 --envelope-version=v2` writing to `bots/<actor_omni_hex>/credentials/<service>.enc` | PR #87 + the stage-1-step-1 commit on this branch | **Live now** — works against the existing S3 backend; no chain or sidecar required. See §4 below. |
+| Sidecar daemon (localhost proxy + cap-token cache + host-local policy) | Stage 1 new | **In progress** (see §6 below). Today's stub error from `--credential-backend=sidecar` is the placeholder until the daemon ships. |
+| Heima EVM contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) | Stage 1 new | **In progress** (see §5 below). Demo uses a single all-in-one deploy script. |
+| K11 WebAuthn enforcement for master mutations | Stage 1 new | **In progress** (see §1.3 below). |
+| Per-service workers other than `credentials-service` (memory / audit / email / payment) | Stage 2 + payment-service issue | Out of scope of this doc; see arch.md §15. |
+
+---
+
+## §0 — Prerequisites (inherited from stage 7)
+
+This entire section is **identical** to [stage7-demo-and-verification.md §0](stage7-demo-and-verification.md#0-prerequisites-checklist). Run it once and skip directly to §1 of this doc when complete. The stage-7 §0 walks through:
+
+| Substep | What it sets up | When to skip |
+|---|---|---|
+| §0 (top) | `awsp agentkeys-admin`; `source scripts/operator-workstation.env`; sanity-check `$ACCOUNT_ID`, `$BROKER_HOST`, `$BUCKET` | Skip only if a prior demo session is still warm in your shell |
+| §0 (steps 1-6) | Drop stale aliases; ensure `~/.local/bin` on `$PATH`; `cargo build --release -p agentkeys-cli -p agentkeys-daemon -p agentkeys-mock-server`; install to `~/.local/bin`; verify `command -v agentkeys`; capability-check `--session-id` exists | Skip only if `agentkeys --help \| grep -q -- "--session-id"` returns 0 |
+| §0.1 | Confirm `dev_key_service` is enabled on the broker host (`systemctl is-active agentkeys-{backend,broker,signer}`; both nginx vhosts written; `/etc/agentkeys/dev-key-service.env` exists with mode 0600) | Skip only if you ran `sudo bash scripts/setup-broker-host.sh --yes` in the last hour |
+| §0.2 | Set `$AGENTKEYS_SIGNER_URL` to `https://signer.<zone>`; smoke-test `curl -sS "$AGENTKEYS_SIGNER_URL/healthz"` returns `ok` | Always run — smoke test is two seconds |
+| §0.3 | Reference math for `omni_account = SHA256("agentkeys" \|\| identity_type \|\| identity_value)` | Optional; for understanding only |
+| §0.4 | Run `agentkeys-init-email-demo.sh --session-id alice` (and `--session-id bob`) to get a working session JWT per tenant | **Mandatory** — every step below requires `~/.agentkeys/alice/session.json` to exist |
+
+**Run §0 of the stage-7 doc end-to-end, then come back here.**
+
+What you should have at the end of §0:
+
+- `~/.local/bin/agentkeys` on `$PATH`, version reports the current branch
+- Broker + signer healthy at `https://broker.<zone>` and `https://signer.<zone>`
+- `~/.agentkeys/alice/session.json` (and optionally `bob`) containing a fresh J1 session JWT
+- AWS profile `agentkeys-admin` active; `$ACCOUNT_ID`, `$BROKER_HOST`, `$BUCKET`, `$OIDC_ISSUER`, `$DATA_ROLE_ARN` populated
+- Network reachability to `$HEIMA_EVM_RPC_HTTP` from the workstation (smoke-test below)
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Heima EVM reachability check (stage-1-specific addition to §0)
+curl -sS -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+  "$HEIMA_EVM_RPC_HTTP" \
+  | jq -r '.result' \
+  | xargs -I{} printf 'eth_chainId = %s (decimal = %d, expected = %d)\n' \
+      {} $((16#$(echo {} | sed 's/^0x//'))) "$HEIMA_EVM_CHAIN_ID"
+# → eth_chainId = 0x33c4d (decimal = 212013, expected = 212013)
+```
+
+If the curl errors or the decimal value doesn't match `$HEIMA_EVM_CHAIN_ID`, fix the RPC endpoint first (try `$HEIMA_SUBSTRATE_WSS` via Polkadot.js Apps to confirm the parachain is reachable at all, then debug the EVM endpoint specifically).
+
+---
+
+## §1 — Master device bootstrap (arch.md §9 stages 0–4)
+
+**Inherited from stage 7 §1-§2 with two additions**: stage-2 WebAuthn enrollment (K11) and stage-4 on-chain `SidecarRegistry.register_master_device(...)`.
+
+The end-to-end flow:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Op as Operator
+  participant CLI as agentkeys CLI
+  participant KC as OS Keychain
+  participant Brk as Broker
+  participant PA as Platform authenticator (K11)
+  participant Sig as Signer
+  participant Heima as Heima EVM
+
+  Note over CLI,KC: Stage 0 — K10 generation (local, no network)
+  Op->>CLI: agentkeys init --email alice@demo.example
+  CLI->>KC: persist (D_priv, D_pub) = K10
+
+  Note over CLI,Brk: Stage 1 — identity ceremony (inherited)
+  CLI->>Brk: POST /v1/auth/email/request {email}
+  Brk-->>Op: magic link via SES
+  Op->>Brk: clicks link
+  Brk-->>CLI: {status: "verified", binding_nonce}
+
+  Note over CLI,PA: Stage 2 — WebAuthn enrollment (NEW in v2)
+  CLI->>PA: navigator.credentials.create({challenge: SHA256(binding_nonce \|\| D_pub)})
+  PA-->>CLI: K11 attestation (hardware-attested)
+  CLI->>Brk: POST /v1/auth/bind/<request_id> {attestation, D_pub}
+  Brk-->>CLI: J0 (claims: device_pubkey, webauthn_cred_id)
+
+  Note over CLI,Sig: Stage 3 — derive + link + SIWE → J1 (inherited)
+  CLI->>Sig: POST /dev/derive-address {O_master} (Bearer J0)
+  Sig-->>CLI: {address: initial_master_wallet}
+  CLI->>Brk: POST /v1/wallet/link {evm, initial_master_wallet}
+  CLI->>Brk: POST /v1/auth/wallet/start {address}
+  Brk-->>CLI: {siwe_message}
+  CLI->>Sig: POST /dev/sign-message {O_master, hex(siwe)}
+  Sig-->>CLI: {signature}
+  CLI->>Brk: POST /v1/auth/wallet/verify {sig}
+  Brk-->>CLI: J1 (claims: actor_omni FROZEN, device_pubkey, webauthn_cred_id, wallet)
+  CLI->>KC: persist J1
+
+  Note over CLI,Heima: Stage 4 — on-chain SidecarRegistry binding (NEW in v2)
+  CLI->>PA: WebAuthn get() over SHA256(D_pub \|\| actor_omni \|\| nonce)
+  PA-->>CLI: K11 assertion
+  CLI->>Heima: SidecarRegistry.register_master_device(D_pub_hash, actor_omni, actor_omni, k11_cred_id, attestation, roles=CAP_MINT\|RECOVERY\|SCOPE_MGMT, k11_assertion)
+  Note over Heima: msg.sender = initial_master_wallet (sovereign mode default)
+  Heima-->>CLI: tx receipt + DeviceRegistered event
+```
+
+### §1.1 — Stage 0 + 1 + 3 (inherited from stage 7 §1-§2)
+
+Run the stage-7 init flow exactly as documented in [stage7-demo-and-verification.md §1-§2](stage7-demo-and-verification.md), one tenant at a time:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+export AGENTKEYS_SESSION_ID=alice
+bash scripts/agentkeys-init-email-demo.sh --session-id alice
+# → mints J1 at ~/.agentkeys/alice/session.json
+```
+
+The stage-7 demo's §1-§2 walk through magic-link click, signer-derived wallet, SIWE-verify, and J1 persistence — none of which change in stage 1.
+
+### §1.2 — Stage 2: WebAuthn enrollment (NEW)
+
+Stage 1 inserts a WebAuthn binding ceremony between identity-verify and SIWE. The CLI prompts the platform authenticator (Touch ID on macOS, Hello on Windows, StrongBox on Android via mobile companion app) to generate K11 and bind D_pub atomically inside the WebAuthn challenge.
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# After stage-1 lands the WebAuthn integration in the CLI, the init flow
+# will pause here for biometric confirmation. Today's CLI skips this step
+# and falls back to the v1c pop_sig shape — see arch.md §10.1 Q7 fix.
+agentkeys init --email alice@demo.example
+# CLI prompts:
+#   "Touch the sensor on your YubiKey / look at the camera / press Touch ID"
+#   "[platform authenticator dialog appears]"
+#   "WebAuthn enrollment complete: K11 cred_id = 0x..."
+```
+
+**Fail-open today**: until the WebAuthn integration ships in `agentkeys-cli`, the demo proceeds with `pop_sig` and an empty `k11_cred_id` (a zero hash). Stage-1-complete code rejects this; for now operators flag enrollment as `INCOMPLETE` in the §1.4 registry-write step and re-enroll later.
+
+### §1.3 — Inspect J1 + actor_omni (verifies stage-3 freeze)
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+agentkeys --session-id alice whoami
+# session_wallet:        0x5a0c3df691d55008d88a17e06710b6b28718ec4d
+# agentkeys_actor_omni:  3a4f...   <-- Layer 1 anchor; frozen at first SIWE
+# scope:                 (none — master session)
+
+# Persist actor_omni for the rest of the demo
+export ALICE_WALLET=$(agentkeys --session-id alice whoami --json | jq -r .session_wallet)
+export ALICE_ACTOR_OMNI=$(agentkeys --session-id alice whoami --json | jq -r .agentkeys_actor_omni)
+echo "ALICE_WALLET=$ALICE_WALLET"
+echo "ALICE_ACTOR_OMNI=$ALICE_ACTOR_OMNI"
+```
+
+### §1.4 — Stage 4: on-chain SidecarRegistry binding (NEW)
+
+The CLI signs the `register_master_device` payload with K10, generates a fresh K11 assertion, and submits the transaction to Heima EVM. In sovereign mode (v2 default), `msg.sender` is the operator's `current_master_wallet` (= `initial_master_wallet` at this point — K3 hasn't rotated yet).
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Once the stage-1 chain integration ships, this becomes:
+agentkeys --session-id alice device register \
+  --chain heima \
+  --rpc "$HEIMA_EVM_RPC_HTTP" \
+  --chain-id "$HEIMA_EVM_CHAIN_ID" \
+  --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
+  --roles cap-mint,recovery,scope-mgmt
+
+# Expected output:
+#   K10 sig: 0x...
+#   K11 assertion: 0x... (cred_id: 0x..., counter: 1)
+#   Tx hash:  0x91a8e2... (Heima EVM)
+#   Block:    #1,234,567 — confirmed
+#   Event:    DeviceRegistered(device_pubkey_hash=0x..., operator_omni=0x..., actor_omni=0x..., tier=1, roles=0x07)
+```
+
+Verify the on-chain state via Polkadot.js Apps + the explorer:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Open the tx in Heima Statescan
+open "$HEIMA_EXPLORER/#/extrinsics/0x91a8e2..."
+
+# Or query the SidecarRegistry contract directly via cast (Foundry)
+cast call "$SIDECAR_REGISTRY_ADDRESS" \
+  "device(bytes32)(bytes32,bytes32,uint8,uint8,bytes32,bytes,uint256,uint256)" \
+  "$(cast keccak256 0x$ALICE_DEVICE_PUBKEY)" \
+  --rpc-url "$HEIMA_EVM_RPC_HTTP"
+# Returns: (operator_omni, actor_omni, tier=1, roles=0x07, k11_cred_id, attestation, registered_at, revoked_at=0)
+```
+
+The tx is what makes the device "real" on chain — until it lands, broker cap-mints will reject this K10 with `device_not_registered`.
+
+---
+
+## §2 — AWS prerequisites (inherited from cloud-setup.md with one-line v2 change)
+
+Stage 1's only AWS-side change vs the stage-7 deployment is the PrincipalTag key + S3 prefix. Everything else (OIDC provider, role trust policy, bucket existence, IAM role attachments) is inherited verbatim.
+
+### §2.1 — Inherited unchanged
+
+Run [cloud-setup.md §3 + §4](cloud-setup.md) end-to-end if you haven't already. This provisions:
+
+- `agentkeys-{admin,broker,daemon}` IAM users
+- `agentkeys-data-role` with OIDC trust policy (federated against `$OIDC_ISSUER`)
+- S3 bucket `$BUCKET` with `bots/` prefix structure
+- `agentkeys-mail-*` SES verified identity at the operator's domain
+- OIDC provider registered for `$OIDC_ISSUER` (broker's `/.well-known/jwks.json`)
+
+### §2.2 — v2 bucket policy change (one PrincipalTag rename)
+
+Update the bucket policy to gate on `agentkeys_actor_omni` (stable across K3 rotation) instead of `agentkeys_user_wallet`. The policy template:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+awsp agentkeys-admin
+set -a; source scripts/operator-workstation.env; set +a
+
+aws s3api put-bucket-policy --bucket "$BUCKET" \
+  --policy "$(jq -n --arg bucket "$BUCKET" '{
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "ActorOmniPrefixIsolation",
+        Effect: "Allow",
+        Principal: { AWS: "*" },
+        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+        Resource: [
+          "arn:aws:s3:::\($bucket)",
+          "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_actor_omni}/*"
+        ],
+        Condition: {
+          StringEquals: {
+            "aws:PrincipalTag/agentkeys_actor_omni": "${aws:PrincipalTag/agentkeys_actor_omni}"
+          },
+          StringNotEquals: {
+            "aws:PrincipalTag/agentkeys_actor_omni": ""
+          }
+        }
+      }
+    ]
+  }')"
+```
+
+The bucket policy ALSO has to be set per-data-class once memory / audit / email / payment-audit buckets are provisioned (arch.md §17). For stage 1 we ship `$VAULT_BUCKET` only; the rest land in stage 2.
+
+### §2.3 — OIDC JWT claim addition
+
+The broker mints OIDC JWTs (consumed by STS via `AssumeRoleWithWebIdentity`) with the claim `agentkeys_actor_omni` — this becomes the AWS session tag at `aws:PrincipalTag/agentkeys_actor_omni`. The broker's `/v1/mint-oidc-jwt` endpoint already supports this in the stage-1-step-1 commit; verify by inspecting a minted JWT:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+JWT=$(curl -sS -H "Authorization: Bearer $(jq -r .token ~/.agentkeys/alice/session.json)" \
+  "https://$BROKER_HOST/v1/mint-oidc-jwt" | jq -r .jwt)
+
+# Decode the payload (no signature check, just inspection)
+echo "$JWT" | cut -d. -f2 | base64 -d 2>/dev/null | jq .
+# {
+#   "iss": "https://broker.<zone>/",
+#   "aud": "sts.amazonaws.com",
+#   "agentkeys_actor_omni": "3a4f...",   <-- NEW in v2
+#   "agentkeys_user_wallet": "0x5a0c...", <-- still present for back-compat
+#   "exp": ...,
+#   "https://aws.amazon.com/tags": {
+#     "principal_tags": {
+#       "agentkeys_actor_omni": ["3a4f..."]
+#     }
+#   }
+# }
+```
+
+---
+
+## §3 — Smoke-test v2 envelope writes against S3 (no chain required)
+
+Before deploying any chain contracts, verify the v2 S3 path + envelope works end-to-end against the existing PR #87 backend. This catches any bucket-policy or signer issues early.
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+export AGENTKEYS_SESSION_ID=alice
+
+# Smoke-test v2 path. AGENTKEYS_OMNI_ACCOUNT is the actor_omni from §1.3.
+export AGENTKEYS_OMNI_ACCOUNT="$ALICE_ACTOR_OMNI"
+
 agentkeys --credential-backend=s3 --envelope-version=v2 \
-  --bucket=$AGENTKEYS_BUCKET \
-  --signer-url=$AGENTKEYS_SIGNER_URL \
-  --omni-account=$AGENTKEYS_OMNI_ACCOUNT \
-  store openrouter sk-or-v1-XXX
+  --bucket "$BUCKET" \
+  --signer-url "$AGENTKEYS_SIGNER_URL" \
+  --omni-account "$AGENTKEYS_OMNI_ACCOUNT" \
+  --verbose \
+  store openrouter sk-or-v1-DEMO-FAKE-DO-NOT-USE-IN-PROD
 
-# Read still works — backend tries v2 path first, falls back to v1 on miss
-agentkeys --credential-backend=s3 --envelope-version=v2 read openrouter
+# Verbose output should show:
+# [verbose] PUT s3://...vault.../bots/3a4f.../credentials/openrouter.enc (envelope=V2)
 
-# A pre-migration credential written under --envelope-version=v1 also still reads
-# (dual-envelope decrypt + dual-path lookup, see Part A.4 below)
+# Confirm the object landed at the actor_omni-keyed path
+aws s3 ls "s3://$BUCKET/bots/$ALICE_ACTOR_OMNI/credentials/"
+# 2026-05-18 ...  openrouter.enc
+
+# Round-trip the read
+agentkeys --credential-backend=s3 --envelope-version=v2 \
+  --bucket "$BUCKET" \
+  --signer-url "$AGENTKEYS_SIGNER_URL" \
+  --omni-account "$AGENTKEYS_OMNI_ACCOUNT" \
+  read openrouter
+# sk-or-v1-DEMO-FAKE-DO-NOT-USE-IN-PROD
 ```
 
-**What this does NOT do yet**: the bucket-policy `_v2_omni_keyed` rule still needs to be added per the migration runbook step 4 before v2 writes succeed against a live bucket. Until then, v2 writes will fail with `AccessDenied` because the bucket policy only knows about the v1 `agentkeys_user_wallet` PrincipalTag. The migration runbook step 4 is operator-deployment work, not code.
+If the write fails with `AccessDenied`, the bucket policy in §2.2 didn't take effect — the broker still emits the v2 PrincipalTag but the bucket only allows v1. Re-check the policy with `aws s3api get-bucket-policy --bucket "$BUCKET"`.
+
+This step proves the credential path works end-to-end **without** the sidecar daemon or the chain contracts — useful for isolating problems later.
 
 ---
 
-## Part A — Migration: what breaks in stage 7 demo §0–§5
+## §4 — Deploy Heima EVM contracts (NEW)
 
-### A.1 §1 init flow — adds K10 generation as a new Stage 0 (before email-link)
+Stage 1 ships four Solidity contracts. They live in `crates/agentkeys-chain/contracts/`:
 
-**Stage 7 demo today (§1)**:
-```
-agentkeys init --email alice@example.org
-# CLI does email-link auth, derives wallet via signer, links via SIWE, mints J1
-```
+- `AgentKeysScope.sol` — per-(operator, agent) scope storage; mutations require K10 + K11 sigs
+- `SidecarRegistry.sol` — device-pubkey → (operator_omni, actor_omni, role) binding
+- `K3EpochCounter.sol` — global K3 rotation epoch counter
+- `CredentialAudit.sol` — events for credential ops + payment receipts
 
-**Stage 1 (v2)** — adds two new steps per arch.md §5 stages 0–3:
-```
-# Stage 0 (new) — K10 generation on device, local only
-#   Daemon generates (D_priv, D_pub) = K10 in OS keychain at startup
-#   (no operator-visible step; happens automatically on first launch)
+The deploy uses **Foundry** (recommended — Rust-native, fast, no node-modules) but Hardhat works equally well. Foundry install: `curl -L https://foundry.paradigm.xyz | bash && foundryup`.
 
-# Stage 1 — same as today (email-link / OAuth2)
-agentkeys init --email alice@example.org
+### §4.1 — Fund the deployer wallet
 
-# Stage 2 (new in v2) — WebAuthn binding (master devices only)
-#   CLI prompts Touch ID / Face ID / Windows Hello
-#   Platform authenticator generates K11; commits D_pub atomically
-#   inside WebAuthn challenge per arch.md §5a.1 Q7 fix
-
-# Stage 3 — SIWE → J1 (same as today)
-
-# Stage 4 (new in v2) — On-chain SidecarRegistry binding (meta-tx OR sovereign)
-#   CLI submits SidecarRegistry.register_master_device(...) tx
-```
-
-**Operator impact**:
-- **Existing users**: their current `J1` keeps working for read operations; a one-time **device-registration ceremony** is required before stage 1 features (sidecar proxy, cap-mint, on-chain scope) take effect
-- **New users**: stage 1 ships the full §5 stages 0–3 flow; nothing to migrate
-
-**Migration command** (one-time per existing operator):
 ```bash
-agentkeys device register --upgrade-from-v1
-# Walks through: K10 derive → WebAuthn enrollment → SidecarRegistry write
+# === ON OPERATOR WORKSTATION ===
+# In sovereign mode, the deployer is the operator's current_master_wallet.
+# For demo bring-up against mainnet you need enough HEI to cover the four
+# contract deploys (~2-3 HEI total at typical Heima gas prices).
+
+# OPTION A — sovereign-key deploy via signer (production path)
+# The CLI will sign the deploy tx via signer.derive_address + signer.sign;
+# operator never sees the private key.
+export HEIMA_DEPLOYER_ADDRESS="$ALICE_WALLET"
+
+# OPTION B — hot-key deploy (faster for demo, but exposes a key)
+# Generate a throwaway deployer wallet; fund it from a faucet (paseo) or
+# an exchange withdrawal (mainnet); set the env var.
+cast wallet new --json | jq -r .[0]
+export HEIMA_DEPLOYER_PRIVATE_KEY="0x..."
+
+# Check the balance
+cast balance "$HEIMA_DEPLOYER_ADDRESS" --rpc-url "$HEIMA_EVM_RPC_HTTP"
+# Expected: > 3000000000000000000  (3 HEI)
 ```
 
-If WebAuthn is unavailable (Linux box without TPM, CI agent, etc.), CLI falls back to the v1c `pop_sig` shape per arch.md §5 footnote — same wire shape stage 1 ships will continue to accept this for a release of soak time.
+For paseo testnet, request HEI from the Heima Paseo faucet (URL varies — check `docs.heima.network` for the current faucet). For mainnet, withdraw HEI from any exchange that lists it.
 
-### A.2 §2 provisioning (§5.3 auto-provision) — new `--credential-backend=sidecar`
+### §4.2 — Deploy with Foundry
 
-**Stage 7 demo today (§5.3)**:
-```
-bash scripts/agentkeys-provision-demo.sh --session-id alice openrouter
-# Internally: agentkeys provision uses --credential-backend=s3 by default (PR #87)
-# Stores key at s3://$BUCKET/bots/<master_wallet>/credentials/openrouter.enc
-```
+```bash
+# === ON OPERATOR WORKSTATION ===
+cd crates/agentkeys-chain
 
-**Stage 1**: add new `--credential-backend=sidecar` flag (parallel to existing `s3`/`http`):
-```
-agentkeys --credential-backend=sidecar provision openrouter
-# Internally:
-#   1. Daemon's localhost proxy is the actual storage path (no direct S3 from CLI)
-#   2. CLI signs cap-store request with K10
-#   3. Sends to broker /v1/cap/cred-store
-#   4. Broker co-signs, returns cap
-#   5. CLI sends cap + plaintext to creds-service worker
-#   6. Worker writes to s3://$BUCKET/bots/<actor_omni_hex>/credentials/openrouter.enc
-#      (new path, see A.4)
-```
+# All four contracts deploy via one script. The script reads HEIMA_* env
+# vars from the workstation env file.
+forge script script/DeployAgentKeysV1.s.sol \
+  --rpc-url "$HEIMA_EVM_RPC_HTTP" \
+  --chain-id "$HEIMA_EVM_CHAIN_ID" \
+  --private-key "$HEIMA_DEPLOYER_PRIVATE_KEY" \
+  --broadcast \
+  --verify \
+  --verifier blockscout \
+  --verifier-url "$HEIMA_EXPLORER/api"
 
-**Migration impact**:
-- Default stays `--credential-backend=s3` during stage 1 transition (`#87` path keeps working)
-- Operators opt in to `--credential-backend=sidecar` once their daemon is upgraded
-- Deprecation warning printed when `=s3` is selected after stage 1 ships
-- Default flips to `=sidecar` after one release of soak time (separate follow-up issue)
-
-**Today's incremental state** (per "What landed in this commit" section above): `--credential-backend=sidecar` is wired through the CLI surface, but the daemon-side proxy isn't built yet — selecting it returns a clear "not yet implemented" error pointing operators at `--credential-backend=s3 --envelope-version=v2` as the closest currently-working substitute (same S3 path, same envelope shape, just minus the broker cap-token co-sign + on-chain scope check). This lets operators dry-run their migration steps (path, AAD, bucket policy) before the daemon lands.
-
-### A.3 §0.4 wallet derivation reference — unchanged math, new identifier consumers
-
-**Stage 7 demo today (§0.4)**: derives `ADDR_A = HKDF(K3_v1, O_A)` (master_wallet for Alice).
-
-**Stage 1**: same derivation, but a NEW IDENTIFIER `actor_omni_alice = SHA256("agentkeys"||"evm"||ADDR_A)` becomes the primary on-chain / S3 / PrincipalTag identifier. ADDR_A still exists but is signer-internal except in sovereign chain submissions.
-
-**Operator impact**: a new `agentkeys whoami` field shows `actor_omni` in addition to `session_wallet`. The math reference table in §0.4 should be amended to show:
-
-| What | Where | How it's derived |
-|---|---|---|
-| `actor_omni` | NEW — primary v2 identity | `SHA256("agentkeys" \|\| "evm" \|\| master_wallet)`, frozen at first SIWE-bind |
-| `master_wallet` | Same as today | `HKDF(K3_v[epoch], actor_omni)` — rotates with K3 |
-
-### A.4 S3 prefix migration: `bots/<wallet>/` → `bots/<actor_omni_hex>/`
-
-**Today**: credentials at `s3://$BUCKET/bots/0x<master_wallet>/credentials/<service>.enc`
-
-**Stage 1**: credentials at `s3://$BUCKET/bots/<actor_omni_hex>/credentials/<service>.enc`
-
-**Why**: K3-rotation tolerance. master_wallet rotates with K3 epoch; actor_omni is frozen at first SIWE-bind. Keying S3 paths on actor_omni eliminates path migration on K3 rotation.
-
-**Migration strategy** (per stage 1 issue):
-- Workers do **lazy on-access copy**: on cred read, try new path first; on miss, fall back to old path; if found at old path, copy to new path + delete from old path (or queue for later GC); subsequent reads hit new path
-- **Eager migration tool** (operator-runnable): `agentkeys-migrate-s3-prefix --operator-omni <actor_omni>` walks all blobs at old path, decrypts under K3_v1, re-encrypts under current K3 epoch, writes to new path, deletes from old path. Useful for operators who want to retire old paths early.
-
-**Operator impact**:
-- During the transition: both paths can coexist (lazy migration handles)
-- No data loss; no downtime
-- Old paths become empty after eager migration or natural decay
-
-### A.5 §3 OIDC + STS — AWS PrincipalTag flips from `agentkeys_user_wallet` to `agentkeys_actor_omni`
-
-**Today**: OIDC JWT carries `agentkeys.wallet_address`; STS issues PrincipalTag `agentkeys_user_wallet = <wallet>`; bucket policy scopes via `${aws:PrincipalTag/agentkeys_user_wallet}`.
-
-**Stage 1**: OIDC JWT also carries `agentkeys.actor_omni`; STS issues BOTH tags during a transition window; bucket policy adds a parallel rule scoping via `${aws:PrincipalTag/agentkeys_actor_omni}`.
-
-**Bucket-policy update** (one-time per AWS account):
-```jsonc
-// EXISTING (today's #87 path) — keep during transition
-{
-  "Sid": "AllowDaemonGetOwnObjects_v1_wallet_keyed",
-  "Effect": "Allow",
-  "Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/agentkeys-data-role"},
-  "Action": "s3:GetObject",
-  "Resource": "arn:aws:s3:::$BUCKET/bots/${aws:PrincipalTag/agentkeys_user_wallet}/*"
-},
-// NEW (stage 1 path) — add alongside
-{
-  "Sid": "AllowDaemonGetOwnObjects_v2_omni_keyed",
-  "Effect": "Allow",
-  "Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/agentkeys-data-role"},
-  "Action": "s3:GetObject",
-  "Resource": "arn:aws:s3:::$BUCKET/bots/${aws:PrincipalTag/agentkeys_actor_omni}/*"
-}
+# Output ends with:
+# ===== Deployment summary =====
+# AgentKeysScope:    0xS...
+# SidecarRegistry:   0xR...
+# K3EpochCounter:    0xE...
+# CredentialAudit:   0xA...
+# Gas used:          ~5,200,000
+# Total cost:        2.4 HEI
 ```
 
-Same dual-rule pattern for `s3:ListBucket` (per arch.md §4.4 split) and the new `AllowDaemonPutOwnCredentials` (for credentials/* writes).
+Persist the four contract addresses to `scripts/operator-workstation.env`:
 
-After one release of soak time, the `_v1_wallet_keyed` rule and the `agentkeys_user_wallet` tag emission can be retired.
+```bash
+# === ON OPERATOR WORKSTATION ===
+cat >> scripts/operator-workstation.env <<EOF
 
-**Operator runbook update**: a new section in [cloud-setup.md](cloud-setup.md) §4.4 documents the dual-tag transition window.
-
-### A.6 §5.1 / §5.2 OIDC mint — JWT shape evolves
-
-**Today**: OIDC JWT claims include `wallet_address` (master_wallet) for STS PrincipalTag.
-
-**Stage 1**: claims expand to:
-```jsonc
-{
-  "iss": "https://broker.litentry.org",
-  "sub": "<actor_omni_hex>",     // PRIMARY identity
-  "agentkeys": {
-    "actor_omni":     "<32-byte hex>",
-    "operator_omni":  "<32-byte hex>",
-    "wallet_address": "0x...",      // KEPT for backwards compat during transition window
-    "k3_epoch":       2             // NEW — which K3 generation the JWT was minted under
-  }
-}
+# === Stage 1 chain contracts (deployed $(date +%Y-%m-%d)) ===
+SCOPE_CONTRACT_ADDRESS=0xS...
+SIDECAR_REGISTRY_ADDRESS=0xR...
+K3_EPOCH_COUNTER_ADDRESS=0xE...
+CREDENTIAL_AUDIT_ADDRESS=0xA...
+EOF
 ```
 
-After the transition window, `wallet_address` claim is removed; `actor_omni` becomes the sole AWS PrincipalTag source.
+### §4.3 — Initialize K3EpochCounter
 
-**Operator impact**:
-- Existing tooling that parses `wallet_address` keeps working during transition
-- New tooling should consume `actor_omni` directly
-- The `agentkeys-isolation-demo.sh` script (§4.0) needs an update to query the new tag — separate follow-up
+The K3 epoch counter starts at `current_epoch = 1` and is owned by a signer-governance multisig. For demo bring-up, set the multisig to a single-signer Gnosis Safe (or any 1-of-1 multisig) owned by the broker host's deploy key:
 
-### A.7 §4 cloud-enforced isolation proof — bucket policy supports both PrincipalTags
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Initialize K3EpochCounter with the signer-governance multisig address
+cast send "$K3_EPOCH_COUNTER_ADDRESS" \
+  "set_signer_governance(address)" "$SIGNER_GOVERNANCE_MULTISIG" \
+  --rpc-url "$HEIMA_EVM_RPC_HTTP" \
+  --private-key "$HEIMA_DEPLOYER_PRIVATE_KEY"
 
-The §4 demo proves "Alice's role with PrincipalTag X cannot read Bob's prefix". In stage 1, this proof works for BOTH tag names during the transition. The demo script (`agentkeys-isolation-demo.sh`) gets a new `--tag-version v1|v2` flag; the default tracks the dual-tag window.
+# Verify current_epoch
+cast call "$K3_EPOCH_COUNTER_ADDRESS" \
+  "current_epoch()(uint256)" \
+  --rpc-url "$HEIMA_EVM_RPC_HTTP"
+# 1
+```
 
-### A.8 §0.3 identity ↔ `omni_account` math — agent omni naming unchanged
+The broker reads `K3EpochCounter.current_epoch()` on every cap-mint to verify cap requests carry the correct epoch (defense in depth — workers also re-verify).
 
-Per arch.md §3a + §4: master_omni is unchanged; agent omnis are unchanged (HDKD soft-derive under master_omni with operator-chosen labels). The math in §0.3 reference still applies; nothing to migrate.
+### §4.4 — Smoke-test contracts via Polkadot.js Apps
 
-### A.9 Summary of files that need updates (during stage 1 work)
+The Heima parachain renders EVM events in Polkadot.js Apps under the `ethereum.executed` extrinsic. Open:
 
-| File | Update needed |
-|---|---|
-| [stage7-demo-and-verification.md](stage7-demo-and-verification.md) | Add cross-ref to this migration doc; mark §5.3's `--credential-backend=s3` as deprecated-after-stage-1 |
-| [cloud-setup.md](cloud-setup.md) §4.4 | Add dual-tag transition policy; new bucket-policy snippet |
-| [operator-runbook-stage7.md](operator-runbook-stage7.md) | Replace existing init flow with arch.md §5 stages 0–3 (K10 + WebAuthn + SIWE) |
-| [arch.md §3a](spec/architecture.md) — canonical names | Already has `credential_kek` / `credential_envelope`; add `actor_omni` external-uses row, `K3_epoch` row, `device_pubkey_hash` row |
-| [arch.md §9](spec/architecture.md) — component inventory | Add credentials-service / memory-service / audit-service / email-service workers as new entries |
+```
+https://polkadot.js.org/apps/?rpc=$HEIMA_SUBSTRATE_WSS#/explorer
+```
+
+Recent blocks should show your four deploy txs as `ethereum.transact(...)` extrinsics with `ContractCreated` events. The contract addresses match what `forge script` printed.
 
 ---
 
-## Part B — Stage 1 new-feature demo (end-to-end manual run)
+## §5 — Register the master device on chain (the §1.4 step, now executable)
 
-Once stage 1 ships, an operator can verify all the new features against a staging deployment. Each section is a self-contained step the operator can run.
-
-### B.0 Prerequisites
+With contracts deployed and addresses persisted, the §1.4 device-register call works for real:
 
 ```bash
-# Same as stage 7 §0 prerequisites, plus:
-gh auth status                              # need GH access for ScopeContract / SidecarRegistry deploys
-litentry --version                          # need Litentry-chain CLI tooling (placeholder for now)
-agentkeys --version                         # confirm CLI ≥ stage 1 build
+# === ON OPERATOR WORKSTATION ===
+# Re-source the env file to pick up the contract addresses
+set -a; source scripts/operator-workstation.env; set +a
 
-export OPERATOR_OMNI=<your actor_omni from agentkeys whoami>
-export BUCKET=$BUCKET                       # same as stage 7
-export CHAIN_RPC=https://rpc.litentry.io    # placeholder — actual endpoint per stage 1 issue
+# Run the (stage-1) device-register subcommand
+agentkeys --session-id alice device register \
+  --chain heima \
+  --rpc "$HEIMA_EVM_RPC_HTTP" \
+  --chain-id "$HEIMA_EVM_CHAIN_ID" \
+  --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
+  --roles cap-mint,recovery,scope-mgmt
+
+# Output:
+# Computing K10 device pubkey hash...   ok
+# Generating K11 assertion over (D_pub, actor_omni, nonce)...   ok (cred_id: 0x...)
+# Submitting SidecarRegistry.register_master_device(...)...
+# Tx hash: 0x91a8e2...
+# Awaiting confirmation...   confirmed at block #1,234,567
+# DeviceRegistered event emitted.
+# Persisting registration receipt to ~/.agentkeys/alice/registry-receipt.json
 ```
 
-### B.1 Bootstrap a fresh master device (arch.md §5 stages 0–3 + Stage 4)
+Verify the registry entry via `cast`:
 
 ```bash
-# Stage 0 — implicit, daemon generates K10 on first run
-agentkeys daemon start --foreground &
-# In another shell:
+# === ON OPERATOR WORKSTATION ===
+DEVICE_HASH=$(cat ~/.agentkeys/alice/registry-receipt.json | jq -r .device_pubkey_hash)
+cast call "$SIDECAR_REGISTRY_ADDRESS" \
+  "device(bytes32)(bytes32,bytes32,uint8,uint8,bytes32,bytes,uint256,uint256)" \
+  "$DEVICE_HASH" \
+  --rpc-url "$HEIMA_EVM_RPC_HTTP"
 
-# Stages 1+2+3 — interactive
-agentkeys init --email demo-alice@example.org
-
-# Expected interactive UX:
-#   1. Magic link sent to demo-alice@example.org → click
-#   2. Touch ID / Face ID prompt → enroll K11 (binds D_pub atomically)
-#   3. Signer derives wallet → broker verifies → mints J1
-
-# Stage 4 — automatic post-Stage-3
-# CLI submits SidecarRegistry.register_master_device(...) tx
-# Confirm on-chain:
-agentkeys device list
-# Expected output (single device, all roles):
-#   device_pubkey_hash | actor_omni | tier | roles | k11_cred_id
-#   0x7a3f...          | <yours>    | 1=M  | 0x07  | 0xab12...
+# Returns (formatted):
+#   operator_omni: 0x3a4f...     ← matches $ALICE_ACTOR_OMNI
+#   actor_omni:    0x3a4f...     ← matches $ALICE_ACTOR_OMNI (master self-binding)
+#   tier:          1             ← master-with-K11
+#   roles:         7             ← CAP_MINT | RECOVERY | SCOPE_MGMT
+#   k11_cred_id:   0x...         ← matches the WebAuthn cred from §1.2
+#   attestation:   0x...         ← hardware attestation blob
+#   registered_at: 1715000000
+#   revoked_at:    0             ← active
 ```
 
-Verification:
+---
+
+## §6 — Sidecar daemon (run on the agent machine)
+
+The sidecar daemon is the localhost proxy that injects credentials at request-forward time. The agent process never sees the plaintext key — it talks to `http://localhost:9090/<service>` and the sidecar forwards to the upstream with `Authorization: Bearer <plaintext>` injected.
+
+### §6.1 — Bootstrap a master sidecar
+
 ```bash
-agentkeys whoami
-# Expected:
-#   actor_omni:    <your actor_omni>
-#   master_wallet: 0x...
-#   devices:       1 master device (this one)
+# === ON OPERATOR WORKSTATION ===
+# The master sidecar runs on your laptop — it holds K10 + K11 and is the
+# device that signs master mutations (scope grant/revoke, device add/revoke).
+
+agentkeys-daemon \
+  --session-id alice \
+  --broker-url "https://$BROKER_HOST" \
+  --signer-url "$AGENTKEYS_SIGNER_URL" \
+  --chain-rpc "$HEIMA_EVM_RPC_HTTP" \
+  --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
+  --scope-address "$SCOPE_CONTRACT_ADDRESS" \
+  --epoch-address "$K3_EPOCH_COUNTER_ADDRESS" \
+  --proxy-socket "$XDG_RUNTIME_DIR/agentkeys-proxy-alice.sock" \
+  --policy ~/.config/agentkeys/policy.toml \
+  --foreground
+
+# Output (truncated):
+# [INFO] K10 loaded from OS keychain
+# [INFO] K11 cred_id 0x... registered on chain (verified via SidecarRegistry)
+# [INFO] Current K3 epoch: 1 (from K3EpochCounter)
+# [INFO] Localhost proxy listening at /run/user/501/agentkeys-proxy-alice.sock
+# [INFO] Wrote ~/.config/agentkeys/env (source ~/.config/agentkeys/env to enable)
+# [INFO] SSE stream connected to broker (drop-event listener active)
 ```
 
-### B.2 Inspect the on-chain SidecarRegistry entry
+The daemon writes `~/.config/agentkeys/env` with the localhost proxy URLs:
 
 ```bash
-# Direct chain query (litentry-CLI placeholder — actual command per stage 1 deploy):
-litentry call SidecarRegistry.device "0x7a3f..."
-# Expected: {operator_omni, actor_omni, tier: 1, roles: 0x07, k11_cred_id: 0xab12...}
-```
+# === ON OPERATOR WORKSTATION ===
+cat ~/.config/agentkeys/env
+# export OPENROUTER_API_KEY=local-placeholder-no-real-secret
+# export OPENROUTER_BASE_URL=http://localhost:9090/openrouter
+# export ANTHROPIC_API_KEY=local-placeholder-no-real-secret
+# export ANTHROPIC_BASE_URL=http://localhost:9090/anthropic
 
-### B.3 Add a 2nd master device (per arch.md §5a.3.1) — verify K11 enforcement
-
-On a second laptop / VM (or phone with mobile app):
-```bash
-# Daemon starts; generates K10 locally; CLI displays QR pairing payload
-agentkeys daemon start --pair-as-master
-# First device scans QR; prompts Touch ID for K11 assertion; submits register_master_device tx
-# Confirm on-chain:
-agentkeys device list
-# Expected: 2 devices, threshold=1
-```
-
-### B.4 Create a child agent (`agentkeys agent create`) — verify K11 required
-
-```bash
-agentkeys agent create --label demo-agent-1
-# Expected interactive UX:
-#   1. CLI prompts Touch ID (K11 required — Codex finding #2)
-#   2. Broker derives O_agent_1 = master_omni // "demo-agent-1"
-#   3. Broker mints one-time link_code, signed by K11
-#   4. CLI displays link_code
-
-# On the agent device (e.g., Raspberry Pi):
-agentkeys init --link-code <link_code_from_master>
-# Expected: K10 generated locally; J1_agent minted
-# SidecarRegistry registers agent device with roles=CAP_MINT only (no K11)
-```
-
-### B.5 Grant scope to the agent (K11 required)
-
-```bash
-# On master device:
-agentkeys scope --agent <agent_1_actor_omni> --add openrouter
-# Expected interactive UX:
-#   1. CLI prompts Touch ID
-#   2. K10 + K11 sigs over payload
-#   3. Relay submits ScopeContract.set_scope_with_webauthn(...)
-#   4. Chain confirms (~1-12s)
-
-# Verify:
-agentkeys scope --agent <agent_1_actor_omni> --list
-# Expected: services=["openrouter"], read_only=false
-```
-
-### B.6 Use the sidecar proxy from the agent
-
-```bash
-# On the agent device, daemon is running.
-# Agent's task points its OpenAI/Anthropic client at the daemon localhost:
 source ~/.config/agentkeys/env
-# This sets, e.g., OPENAI_API_BASE=http://localhost:9090/proxy/openrouter
-#                  OPENAI_API_KEY=ak-sidecar (placeholder)
-
-# Agent runs a normal OpenAI-compatible call:
-curl http://localhost:9090/proxy/openrouter/v1/chat/completions \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "openai/gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
-
-# Expected daemon behavior:
-#   1. SO_PEERCRED → verify caller UID
-#   2. Cache miss → mint cap-fetch request, signed by K10
-#   3. Broker verifies + co-signs
-#   4. Daemon forwards cap to creds-service worker
-#   5. Worker decrypts plaintext under K3_v[epoch] KEK
-#   6. Daemon caches plaintext, injects Authorization header
-#   7. Daemon forwards request to openrouter; streams response back to agent
-
-# Daemon logs (audit row):
-journalctl -u agentkeys-daemon | grep proxy
-# Expected: caller=<uid>, service=openrouter, method=POST, path=/v1/chat/completions, status=200
 ```
 
-### B.7 Verify per-actor binding (Codex finding #1 containment)
+### §6.2 — Verify cap-mint works through the sidecar
 
 ```bash
-# On agent_1's device, attempt to mint a cap with a DIFFERENT actor_omni:
-curl http://localhost:9090/proxy/openrouter/v1/chat/completions \
-  -H "X-Agentkeys-Cap-Actor: <agent_2_actor_omni>" \
-  ...
-
-# Expected: broker rejects (D_pub_AGENT_1 is bound to agent_1_actor_omni, NOT agent_2)
-#   HTTP 403 from broker: "cap.agent_omni does not match registered actor for device_pubkey"
+# === ON OPERATOR WORKSTATION ===
+# Pretend to be an agent process: hit the localhost proxy
+curl -sS "$OPENROUTER_BASE_URL/v1/models" \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY"
+# The daemon:
+#   1. SO_PEERCRED gates the caller (curl's uid matches policy allowlist)
+#   2. Cache miss → mint cap: K10-sign POST /v1/cap/cred-fetch at broker
+#   3. Broker reads ScopeContract + SidecarRegistry + K3EpochCounter
+#   4. Broker co-signs cap with K1
+#   5. Daemon forwards cap to credentials-service worker
+#   6. Worker re-verifies on chain (defense in depth)
+#   7. Worker derives KEK via signer mTLS, AES-GCM decrypts blob
+#   8. Worker returns plaintext to daemon
+#   9. Daemon caches plaintext (5 min TTL)
+#  10. Daemon forwards GET /v1/models to api.openrouter.ai with bearer injected
+# → upstream response
 ```
 
-### B.8 Verify K3 epoch enforcement (Codex finding #4)
+You'll see logs of the cap-mint round-trip in the daemon's `--foreground` output.
+
+---
+
+## §7 — Create an agent + grant scope (K11 required)
+
+The full HDKD per-agent omni flow per arch.md §10.2:
 
 ```bash
-# Inspect current K3 epoch on chain:
-litentry call K3EpochCounter.current_epoch
-# Expected: 1 (initial epoch)
-
-# Verify a cap-fetch with manipulated epoch is rejected:
-agentkeys cap mint --service openrouter --k3-epoch 99
-# Expected: broker rejects "epoch 99 > chain epoch 1"
+# === ON OPERATOR WORKSTATION (master) ===
+# Stage A — mint a link code for agent-A
+agentkeys --session-id alice agent create --label agent-A
+# CLI prompts for K11 (master mutation)
+# Output:
+#   Generating K11 assertion over (parent_omni, child_label, request_id)...
+#   Submitting /v1/agent/create to broker...
+#   agent_omni:     0x9c1d...    ← HDKD(O_master, "//agent-A")
+#   parent_omni:    0x3a4f...
+#   link_code:      LC-7Y4P-2X9K-...
+#   link_code_ttl:  600s
 ```
 
-### B.9 Verify actor_omni-keyed S3 path
+Persist the agent's omni:
 
 ```bash
-# List S3 prefix to confirm new path layout:
-aws s3 ls "s3://$BUCKET/bots/$OPERATOR_OMNI/credentials/" --region us-east-1
-# Expected: openrouter.enc (and any other stored creds)
-
-# Old wallet-keyed prefix should be empty for new credentials:
-aws s3 ls "s3://$BUCKET/bots/$(agentkeys whoami --field master_wallet)/credentials/"
-# Expected: empty (or only legacy creds that haven't been lazily migrated)
+# === ON OPERATOR WORKSTATION ===
+export AGENT_A_OMNI=0x9c1d...
+echo "AGENT_A_OMNI=$AGENT_A_OMNI" >> scripts/operator-workstation.env
 ```
 
-### B.10 Verify cap-mint audit trail
+### §7.1 — Bootstrap agent-A on its sandbox
 
 ```bash
-# Query audit chain for recent cap-mints under this operator:
-litentry call CredentialAudit.events --operator-omni $OPERATOR_OMNI --limit 5
-# Expected: list of CapMintedBatch + CredentialUpdated events from B.5–B.9
+# === ON AGENT SANDBOX (VM / container / CI runner) ===
+# Install agentkeys-daemon (same binary as the master; role is decided at init)
+# ... (curl install, package manager, or scp from build host)
+
+# Redeem the link code
+agentkeys-daemon --init-link-code "LC-7Y4P-2X9K-..." \
+  --broker-url "https://$BROKER_HOST" \
+  --signer-url "$AGENTKEYS_SIGNER_URL" \
+  --chain-rpc "$HEIMA_EVM_RPC_HTTP" \
+  --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
+  --proxy-socket /run/agentkeys/agent-a.sock \
+  --foreground
+
+# Output:
+# [INFO] Generating K10 device key...   D_pub_agent = 0x...
+# [INFO] Redeeming link code at broker...   ok
+# [INFO] Broker submitted SidecarRegistry.register_agent_device(...)
+# [INFO] Tx confirmed at block #1,234,890
+# [INFO] Persisting J1_agent at /home/agent/.agentkeys/agent-a/session.json
+# [INFO] Localhost proxy listening at /run/agentkeys/agent-a.sock
 ```
 
-### B.11 Tear down
+### §7.2 — Grant scope from master (K11 required)
 
 ```bash
-agentkeys agent revoke --agent <agent_1_actor_omni>
-# Expected: K11 prompt; ScopeContract.set_scope_with_webauthn(...) revoking all services;
-#   SidecarRegistry.revoke_device(D_pub_AGENT_1, ...); broker pushes drop event
+# === ON OPERATOR WORKSTATION (master) ===
+# Grant agent-A access to openrouter
+agentkeys --session-id alice scope add \
+  --agent "$AGENT_A_OMNI" \
+  --service openrouter \
+  --service anthropic
 
-agentkeys device list
-# Expected: agent_1 device entry shows revoked_at timestamp
+# CLI prompts for K11 (master mutation):
+#   Generating K11 assertion over (operator_omni, agent_omni, services, read_only=false)...
+#   Submitting ScopeContract.set_scope_with_webauthn(...)...
+#   Tx hash: 0xc3d2f1...
+#   Block:    #1,234,920 — confirmed
+#   ScopeUpdated event emitted.
+```
+
+Verify the on-chain scope:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+cast call "$SCOPE_CONTRACT_ADDRESS" \
+  "scope(bytes32,bytes32)(string[],bool,uint256,uint256,uint256,uint256,uint256)" \
+  "$ALICE_ACTOR_OMNI" \
+  "$AGENT_A_OMNI" \
+  --rpc-url "$HEIMA_EVM_RPC_HTTP"
+# services: ["openrouter", "anthropic"]
+# read_only: false
+# payment_k11_threshold: 0
+# max_per_call: 0   ← payment limits (unused for non-payment scope)
+# max_per_period: 0
+# max_total: 0
+# updated_at: 1715001000
+```
+
+### §7.3 — Verify the agent can use openrouter (and can't use brave-search)
+
+```bash
+# === ON AGENT SANDBOX ===
+# In-scope service: openrouter — succeeds
+source ~/.config/agentkeys/env
+curl -sS "$OPENROUTER_BASE_URL/v1/models" \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" | jq '.data | length'
+# 200 (or however many OpenRouter exposes)
+
+# Out-of-scope service: brave-search — fails fast at the broker
+curl -sS "http://localhost:9090/brave-search/api/v1/web" \
+  -H "Authorization: Bearer $BRAVE_API_KEY"
+# {"error": "service brave-search not in scope for actor 0x9c1d... (allowed: openrouter, anthropic)"}
+```
+
+The reject comes from the broker (cap-mint refuses) before any S3 / worker call — chain-anchored scope enforcement.
+
+---
+
+## §8 — Verify chain-level isolation between two operators
+
+To prove the per-actor binding works end-to-end, repeat §1-§7 for a second operator (`bob`) and confirm that bob's K10 can't mint caps under alice's actor_omni.
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Run §1 + §5 for bob
+export AGENTKEYS_SESSION_ID=bob
+bash scripts/agentkeys-init-email-demo.sh --session-id bob
+agentkeys --session-id bob device register \
+  --chain heima \
+  --rpc "$HEIMA_EVM_RPC_HTTP" \
+  --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
+  --roles cap-mint,recovery,scope-mgmt
+
+# Now try to mint a cap using bob's K10 but claiming alice's actor_omni
+# (this is the attack the per-actor binding gate prevents)
+agentkeys --session-id bob --target-actor-omni "$ALICE_ACTOR_OMNI" \
+  internal mint-cap --service openrouter
+# Expected output:
+#   ERROR cap_rejected: per-actor binding mismatch
+#   Device 0x... is bound to actor 0x... (bob's), not requested actor 0x... (alice's)
+#   SidecarRegistry.device[hash(D_pub)].actor_omni != request.agent_omni
+```
+
+This is the Codex finding #1 fix: bob's K10 can mint caps for himself, but cannot mint caps claiming to be alice. The check is done at the broker AND independently re-checked at every worker (defense in depth).
+
+---
+
+## §9 — Teardown (optional)
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Wipe both alice's tenants and roll back her on-chain SidecarRegistry entry.
+
+# Revoke device on chain (master mutation — K11 required)
+agentkeys --session-id alice device revoke --pubkey-hash "$DEVICE_HASH"
+
+# Tear down credentials (wipes the actor_omni-keyed prefix on S3)
+agentkeys --session-id alice teardown "$ALICE_WALLET"
+
+# Wipe local session
+rm -rf ~/.agentkeys/alice
 ```
 
 ---
 
-## Codex-review-driven addendum (2026-05-17)
+## What's still in flight
 
-Three high-severity findings from `/codex:adversarial-review` on the stage 1 plan + arch.md §14 + this doc were folded back into the plan + this doc before implementation begins:
+The flows in §1-§8 describe the **end state** of stage 1. As of the most recent commit on this branch, what's actually shipped vs spec'd:
 
-1. **Cloud-enforced vs host-local enforcement distinction is now explicit.** ScopeContract is the cloud-enforced authority for "what service is in scope". Per-method / per-path / per-spend constraints live in **host-local sidecar config** — bypassable by a compromised sidecar but bounded by cloud-enforced cap-binding (compromised sidecar can drive only the actor's registered services, not siblings). Stage 1 ships both layers; arch.md §14 + the stage 1 plan now mark this split clearly.
-2. **K11 WebAuthn enforcement moves into stage 1.** Stage 1 ships the FULL master-mutation authorization model (K10 + K11). The original plan deferred K11 to stage 2 — that would have created an escalation window where K10-only sig could mutate on-chain scope. Stage 1's ScopeContract.set_scope_with_webauthn(...) REQUIRES K11; bootstrap includes WebAuthn enrollment (arch.md §5 Stage 2).
-3. **S3 path / PrincipalTag migration is dual-read by spec.** Stage 1 migration sequence is now: (a) OIDC JWT emits BOTH v1 (`agentkeys_user_wallet`) AND v2 (`agentkeys_actor_omni`) tags during transition; (b) bucket policy adds v2 rules ALONGSIDE v1 (no removal); (c) credentials-service worker reads BOTH paths AND envelope formats; (d) lazy on-access copy moves blobs from v1 → v2; (e) flag-flip retirements happen only after full release of soak time. No step before the final retirement can break existing #87 flows.
+| Component | Shipped | Spec'd (stage 1 plan) |
+|---|---|---|
+| `actor_omni` computation + helper | ✅ `crates/agentkeys-core/src/actor_omni.rs` | — |
+| `agentkeys whoami` prints `agentkeys_actor_omni` | ✅ | — |
+| `--credential-backend=s3 --envelope-version=v2` writes v2 envelope to actor_omni-keyed path | ✅ | — |
+| Dual-path read + dual-prefix list + dual-prefix teardown | ✅ | — |
+| `--credential-backend=sidecar` flag (returns "not yet implemented") | ✅ stub | Daemon implementation |
+| K11 WebAuthn enrollment in CLI | ⏳ stub (uses v1c pop_sig) | WebAuthn integration via `webauthn-rs` |
+| `agentkeys device register` subcommand | ⏳ not yet | Implementation pending |
+| `agentkeys agent create --label` with K11 prompt | ⏳ not yet | Implementation pending |
+| `agentkeys scope add/remove` with K11 prompt | ⏳ not yet | Implementation pending |
+| Sidecar daemon (`agentkeys-daemon` localhost proxy + cap-mint + cache + SSE drop events) | ⏳ partial (init flow only; no proxy) | Implementation pending |
+| Broker `/v1/cap/*` cap-mint endpoints | ⏳ not yet | Implementation pending |
+| Heima EVM contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) | ⏳ not yet | Solidity sources + Foundry deploy script |
+| OIDC JWT `agentkeys_actor_omni` claim | ⏳ partial (CLI surfaces it; broker mint not yet emitting it) | Broker change |
+| credentials-service worker (Lambda) | ⏳ not yet | Lambda + dual-envelope decrypt (already in `s3_backend.rs` client-side) |
 
-The §A migration sequence above reflects these amendments.
+Operators following this doc end-to-end today will hit "not yet implemented" errors at §1.4, §4 (no contracts), §5 (no device register subcommand), §6 (no daemon), §7 (no scope subcommand with K11). The doc is the **target** flow — track [issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md) for the rolling implementation status.
 
-## What's NOT in this doc
+---
 
-- **K3 rotation flow** (per arch.md §14.7.7). Stage 1 ships the contract and signer hooks; the rotation operational runbook is part of stage 2's deliverable.
-- **Multi-device recovery** (per arch.md §14.7.6). Recovery flow requires the M-of-N quorum + role bitfield enforcement that stage 2 adds. Stage 1 ships K11 enrollment for SINGLE master device per Codex amendment #2; multi-device pairing is stage 2.
-- **Payment service**. Deferred to a separate issue ([issue-payment-service-deferred.md](spec/plans/v2-issues/issue-payment-service-deferred.md)).
+## Cross-references
+
+- **Stage 1 deliverable inventory** — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
+- **Architecture v2 (single source of truth)** — [docs/spec/architecture.md](spec/architecture.md)
+- **Stage 7 demo (parent for inherited §0 prereqs + §1 init + §3 OIDC/STS)** — [docs/stage7-demo-and-verification.md](stage7-demo-and-verification.md)
+- **Cloud setup (parent for AWS IAM, OIDC provider, bucket policy)** — [docs/cloud-setup.md](cloud-setup.md)
+- **Heima EVM source** — [github.com/litentry/heima/parachain/runtime/heima/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/heima/src/lib.rs) (search `pub ChainId: u64 = 212013`)
+- **Polkadot.js Apps for Heima** — [polkadot.js.org/apps](https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Frpc.litentry-parachain.litentry.io#/explorer)
+- **Heima Statescan** — [heima.statescan.io](https://heima.statescan.io/)
 
 ---
 
 ## Revision log
 
-- 2026-05-17 (initial) — Drafted alongside v2 stage 1 issue. Covers all known breaks to stage 7 demo §0–§5 + a complete end-to-end demo of stage 1's new features.
-- 2026-05-18 (incremental implementation 1) — First batch of stage-1 CLI/backend code shipped: `agentkeys_core::actor_omni` helper, v2 envelope shape (`ENVELOPE_VERSION_V2 = 0x02`, AAD v2 = `agentkeys.cred.aad.v2|<actor_omni_hex>|<service>`), dual-path read with v1 fallback, dual-prefix teardown + list, CLI `--envelope-version={v1,v2}` flag, `--credential-backend=sidecar` flag accepted (errors with "not yet implemented" for now), `agentkeys whoami` prints `agentkeys_actor_omni`. New "What landed in this commit" section at the top of this doc enumerates the deliverables. Remaining stage-1 work (chain contracts, sidecar daemon, broker cap-mint endpoints, K11 WebAuthn, OIDC dual-tag, bucket-policy dual-rule) tracked in [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md).
+- 2026-05-17 (initial migration + new-feature demo) — Drafted alongside the v2 stage 1 issue; covered migration breaks to stage 7 demo §0-§5 plus a §1-§11 new-feature demo with a Codex addendum at the end.
+- 2026-05-18 (incremental implementation 1) — Added "What landed in this commit" section for `actor_omni` + v2 envelope + dual-read + CLI flag changes.
+- 2026-05-18 (fresh-start rewrite, Litentry/Heima EVM backbone) — **Full rewrite.** Dropped the stage-7 migration content (the dual-read path in `s3_backend.rs` covers it mechanically; no operator runbook needed). Replaced with a fresh-start guide that explicitly inherits required sections from the stage-7 demo (§0 prereqs, §1 init, §2 SIWE, §3 AWS) and adds the stage-1-specific work (Heima EVM chain backbone, contract deployment via Foundry, on-chain SidecarRegistry binding, sidecar daemon bring-up, K11 master-mutation gates, per-actor binding verification). Chain backbone is Litentry/Heima EVM (mainnet chain ID 212013); deploy via Foundry against `https://rpc-eth.heima.network` (or a self-hosted Frontier node from `litentry/heima:latest`).
