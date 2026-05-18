@@ -97,9 +97,22 @@ if [ "${SKIP_FUND:-0}" = "1" ]; then
   echo "[4/7] Sudo-fund step SKIPPED via SKIP_FUND=1"
 else
   echo "[4/7] Sudo-funding $DEPLOYER_ADDR with $FUND_AMOUNT_HEI pHEI from Alice …"
-  npx --package=@polkadot/api --package=@polkadot/keyring \
-      --package=@polkadot/util-crypto --package=@polkadot/util \
-      -y node "$REPO_ROOT/scripts/heima-paseo-sudo.mjs" \
+  # The .mjs script needs @polkadot/api + friends. The earlier
+  # `npx --package=X -y -- node script.mjs` shape was wrong: npx
+  # --package only puts the package's BIN files on PATH; the script's
+  # `import()` resolves via Node's module resolution algorithm, which
+  # walks UP from the script's location looking for node_modules — and
+  # there's no node_modules in $REPO_ROOT/scripts/ unless we put one
+  # there. So we install the deps into scripts/node_modules once
+  # (idempotent — npm install is a no-op when deps are already
+  # current), then invoke `node` directly. The deps are declared in
+  # scripts/package.json.
+  if [ ! -d "$REPO_ROOT/scripts/node_modules/@polkadot/api" ]; then
+    echo "  installing @polkadot/* into scripts/node_modules (first run only — ~30s) …"
+    npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund \
+      || { echo "  ERROR: npm install --prefix scripts failed" >&2; exit 1; }
+  fi
+  node "$REPO_ROOT/scripts/heima-paseo-sudo.mjs" \
       fund --recipient "$DEPLOYER_ADDR" --amount-hei "$FUND_AMOUNT_HEI"
 
   # Verify the balance landed
