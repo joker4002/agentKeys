@@ -367,7 +367,7 @@ What you should have at the end of §0:
 
 ### §0.0 — One-command demo via `scripts/v2-stage1-demo.sh`
 
-The combined orchestrator at [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-demo.sh) walks the full stage-1 demo in one command. It composes the existing scripts ([`install-agentkeys-cli.sh`](../scripts/install-agentkeys-cli.sh), [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh), [`heima-paseo-bring-up.sh`](../scripts/heima-paseo-bring-up.sh)) — it doesn't reinvent them — so you can still run the underlying scripts individually for finer-grained debugging.
+The combined orchestrator at [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-demo.sh) walks the full stage-1 demo in one command. It composes the existing scripts ([`install-agentkeys-cli.sh`](../scripts/install-agentkeys-cli.sh), [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh), [`heima-bring-up.sh`](../scripts/heima-bring-up.sh)) — it doesn't reinvent them — so you can still run the underlying scripts individually for finer-grained debugging.
 
 **Idempotency model**: each step checks "is this already done?" before doing the work — same `cloud-setup.md`-style pattern (e.g. "if OIDC provider ARN already ends in $BROKER_HOST, skip create"). Re-running the full script is always safe; only steps with missing artifacts execute.
 
@@ -380,7 +380,7 @@ The combined orchestrator at [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-
 | 5 | Chain reachability + chain-id sanity | (always runs — <1s, network-dependent) | curl + `agentkeys chain show` |
 | 6 | Email-init session JWT | `~/.agentkeys/$SESSION_ID/session.json` exists and is <1h old | [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh) |
 | 7 | S3 envelope smoke-test (store + read round-trip) | `s3://$BUCKET/bots/<actor_omni>/credentials/<service>.enc` already exists | `agentkeys store` / `agentkeys read` |
-| 8 | Chain bring-up (deploy contracts) | `SCOPE_CONTRACT_ADDRESS_<PROFILE>` already in env-file | [`heima-paseo-bring-up.sh`](../scripts/heima-paseo-bring-up.sh) |
+| 8 | Chain bring-up (deploy contracts) | `SCOPE_CONTRACT_ADDRESS_<PROFILE>` already in env-file | [`heima-bring-up.sh`](../scripts/heima-bring-up.sh) |
 | 9 | Summary + next-step hints | (always runs — prints contract addresses + next command) | bash |
 
 **Pause points** (where the operator interacts):
@@ -791,7 +791,18 @@ This step proves the credential path works end-to-end **against the dedicated va
 
 ---
 
-## §4.0 — Automated Heima Paseo bring-up via Alice sudo (paseo only)
+## §4.0 — Automated Heima bring-up (mainnet manual-fund OR paseo Alice sudo)
+
+> **As of 2026-05-18: Heima Paseo collators have been halted since 2026-01-15** (block 2,905,430 frozen for 4+ months). **Use `AGENTKEYS_CHAIN=heima` (mainnet) for new demo runs.** Mainnet is alive (12s block time, chain_id 212013 confirmed). The paseo path below works again whenever Heima ops restarts the testnet collators; until then it's reference-only.
+
+The bring-up script [`scripts/heima-bring-up.sh`](../scripts/heima-bring-up.sh) supports both chains:
+
+| Chain | Funding mechanism | Real-money? |
+|---|---|---|
+| `heima-paseo` (testnet) | `pallet_sudo` via Alice (auto-tops-up Alice via `balances.forceSetBalance` if she's drained — see [`scripts/heima-paseo-sudo.mjs`](../scripts/heima-paseo-sudo.mjs)) | No (testnet HEI, no value) |
+| `heima` (mainnet) | Operator transfers HEI from personal wallet to the deployer; the script prints the deployer address + a curl command to verify the balance landed | **Yes — real HEI**. Mainnet deploys also require `MAINNET_CONFIRM=1` env var as a paranoid second gate. |
+
+Both flows share the same idempotency machinery (deployer key persisted at `~/.agentkeys/<chain>-deployer.key`, on-chain `cast code` check to skip already-deployed contracts, env_set to keep `operator-workstation.env` free of duplicates).
 
 Heima Paseo's `pallet_sudo` with Alice as the sudoer lets us automate every manual step §4.1–§4.4 would otherwise require: chasing a faucet, juggling deployer-key env vars, hand-running `cast send` for `K3EpochCounter` init. **One command does the lot.**
 
@@ -806,7 +817,7 @@ Heima Paseo's `pallet_sudo` with Alice as the sudoer lets us automate every manu
 #     RPC URL if unreachable.
 
 export AGENTKEYS_CHAIN=heima-paseo
-bash scripts/heima-paseo-bring-up.sh
+bash scripts/heima-bring-up.sh
 ```
 
 What the script does, in order:
@@ -825,12 +836,12 @@ Re-run with `SKIP_FUND=1` (deployer already funded) or `SKIP_DEPLOY=1` (testing 
 
 ### The two scripts that do the work
 
-#### `scripts/heima-paseo-bring-up.sh` (bash orchestrator)
+#### `scripts/heima-bring-up.sh` (bash orchestrator)
 
 End-to-end recipe; refuses to run against mainnet via the live `eth_chainId` check in step 2. Persists per-chain-profile env vars (`SCOPE_CONTRACT_ADDRESS_HEIMA_PASEO`, etc.) so multiple chains can deploy alongside each other without colliding.
 
 ```bash
-bash scripts/heima-paseo-bring-up.sh
+bash scripts/heima-bring-up.sh
 # [1/7] Checking required tools …
 # [2/7] Reading heima-paseo chain profile …
 # [3/7] Deployer keypair …
@@ -910,7 +921,7 @@ The deploy uses **Foundry** (recommended — Rust-native, fast, no node-modules)
 
 ### §4.1 — Fund the deployer wallet
 
-> **For Heima Paseo: skip this section** — `bash scripts/heima-paseo-bring-up.sh` per §4.0 above does this automatically via Alice's sudo (no faucet, no manual key juggling). The manual recipe below applies to Heima mainnet + Base + Ethereum and any chain without sudo.
+> **For Heima Paseo: skip this section** — `bash scripts/heima-bring-up.sh` per §4.0 above does this automatically via Alice's sudo (no faucet, no manual key juggling). The manual recipe below applies to Heima mainnet + Base + Ethereum and any chain without sudo.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -1320,7 +1331,7 @@ The flows in §1-§8 describe the **end state** of stage 1. As of the most recen
 | `$AGENTKEYS_CHAIN_PROFILE_FILE` operator-custom chain support | ✅ | — |
 | Production-vs-development chain default convention (`heima` for prod, `heima-paseo` for dev) | ✅ pinned in profile JSON via `dev_environment.is_development_default` | — |
 | Heima Paseo `dev_environment.sudo` metadata (Alice as well-known dev sudoer) | ✅ documented in `heima-paseo.json` | Live Paseo RPC URL still needed from Heima dev team (Q13 in heima-open-questions.md) |
-| `scripts/heima-paseo-bring-up.sh` + `scripts/heima-paseo-sudo.mjs` — one-command Paseo bring-up via Alice's sudo | ✅ shipped (see §4.0) | The Solidity contracts + `forge script` referenced are still in flight; the script handles their absence by emitting stub addresses + a clear warning. |
+| `scripts/heima-bring-up.sh` + `scripts/heima-paseo-sudo.mjs` — one-command Paseo bring-up via Alice's sudo | ✅ shipped (see §4.0) | The Solidity contracts + `forge script` referenced are still in flight; the script handles their absence by emitting stub addresses + a clear warning. |
 | K11 WebAuthn enrollment in CLI | ⏳ stub (uses v1c pop_sig) | WebAuthn integration via `webauthn-rs` |
 | `agentkeys device register` subcommand | ⏳ not yet | Implementation pending |
 | `agentkeys agent create --label` with K11 prompt | ⏳ not yet | Implementation pending |
@@ -1356,5 +1367,5 @@ Operators following this doc end-to-end today will hit "not yet implemented" err
 - 2026-05-18 (per-data-class bucket separation) — Provisioned `$VAULT_BUCKET` (= `agentkeys-vault-${ACCOUNT_ID}`) as a dedicated S3 bucket per arch.md §17, separate from `$MAIL_BUCKET` (inbound mail). Added `agentkeys-vault-role` with credentials-only inline policy per arch.md §17.2. 4 new idempotent scripts wire it together: `provision-vault-bucket.sh` + `provision-vault-role.sh` + `apply-vault-bucket-policy.sh` + `cleanup-mail-bucket-policy.sh`. Orchestrator step 7 composes them; step 8 includes a cross-contamination assertion (credential must NOT land in mail bucket). The credentials-service worker (arch.md §15.1) is deferred to stage 2 as [issue #91](https://github.com/litentry/agentKeys/issues/91); the CLI's client-side encrypt + direct PUT path is the stage-1 bridge.
 - 2026-05-18 (chain backbone is pluggable — ChainProfile system) — Generalised the chain backbone from a single hardcoded "Heima" target to a named-profile system per arch.md §22. New `crates/agentkeys-core/src/chain_profile.rs` + 7 built-in profile JSONs under `crates/agentkeys-core/chain-profiles/` (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil). CLI accepts `--chain <name>` + reads `$AGENTKEYS_CHAIN` / `$AGENTKEYS_CHAIN_PROFILE_FILE`. New `agentkeys chain list` + `agentkeys chain show <name>` subcommands. Demo doc §chain-reference replaced with §Chain-backbone-is-pluggable; §0 reachability check + §4 Foundry deploy + §5/§6 daemon bring-up updated to pull chain-specific values (RPC, chain ID, finality tag, gas, explorer) from the active profile via `agentkeys chain show | jq -r .<field>`. Operators with custom chains (Moonbeam, Astar, Polygon, Avalanche, any EVM-compatible substrate / L2 / L1) ship one JSON file and point `$AGENTKEYS_CHAIN_PROFILE_FILE` at it — no recompile, no env var explosion.
 - 2026-05-18 (prod-vs-dev convention + Heima Paseo sudo via Alice) — Documented the operational convention: production chain = `heima` (mainnet, no sudo); development chain = `heima-paseo` (testnet, ships `pallet_sudo` with the well-known Substrate dev account Alice as sudoer). Added typed `dev_environment.sudo` schema to `ChainProfile`; `heima-paseo.json` profile now carries the full Alice sudoer metadata (seed phrase, public key, SS58 address, invocation recipe, warnings). New `ChainProfile::development_default_name()` helper returns `Some("heima-paseo")` for downstream tooling that wants to distinguish "the production default" from "the dev default". Demo doc adds an "Alice + sudo on Heima Paseo (development-environment convenience)" sub-section with concrete recipes (pre-fund deployer, reset K3 epoch, force-register sidecar entry); arch.md §22a.5a adds the same convention + Alice/sudo background. Open questions about Heima Paseo's canonical RPC URL, faucet URL, sudoer SS58 prefix-31 encoding, and Heima mainnet sudo state filed as Q13-Q15 in [heima-open-questions.md §3a](spec/heima-open-questions.md).
-- 2026-05-18 (one-command Paseo bring-up via Alice sudo) — Shipped two scripts that turn the manual §4.1-§4.4 sequence into a single command: `bash scripts/heima-paseo-bring-up.sh`. The orchestrator does tool-sanity-check → resolve chain profile + reachability-check RPC + abort if mainnet → generate or reuse a throwaway EVM deployer → sudo-fund from Alice (100 pHEI default) → Foundry-deploy the four stage-1 contracts → persist addresses to the per-chain-namespaced env file → print summary. Underneath, `scripts/heima-paseo-sudo.mjs` wraps `pallet_sudo` for the three operations stage-1 dev workflows need most: `fund` (sudo.balances.forceTransfer Alice → EVM address, via blake2_256 EVM-to-Substrate mapping), `bootstrap` (sudo wraps `pallet_ethereum.transact` for any EVM contract call), `whoami` (sanity-check the sudoer). Polkadot deps load lazily so `--help` works without them installed; the bring-up script uses `npx --package=@polkadot/api …` to fetch them on demand. Three guardrails (refuses non-paseo `AGENTKEYS_CHAIN`, refuses live `eth_chainId == 212013`, logs every sudo call before signing) keep mainnet safe. New §4.0 added to the demo doc with full recipe, dev-shortcut table (pre-register sidecar entry, force-set scope, fast-forward K3 epoch, parallel multi-tenant funding), and explicit "what sudo CANNOT do" production-safety section.
+- 2026-05-18 (one-command Paseo bring-up via Alice sudo) — Shipped two scripts that turn the manual §4.1-§4.4 sequence into a single command: `bash scripts/heima-bring-up.sh`. The orchestrator does tool-sanity-check → resolve chain profile + reachability-check RPC + abort if mainnet → generate or reuse a throwaway EVM deployer → sudo-fund from Alice (100 pHEI default) → Foundry-deploy the four stage-1 contracts → persist addresses to the per-chain-namespaced env file → print summary. Underneath, `scripts/heima-paseo-sudo.mjs` wraps `pallet_sudo` for the three operations stage-1 dev workflows need most: `fund` (sudo.balances.forceTransfer Alice → EVM address, via blake2_256 EVM-to-Substrate mapping), `bootstrap` (sudo wraps `pallet_ethereum.transact` for any EVM contract call), `whoami` (sanity-check the sudoer). Polkadot deps load lazily so `--help` works without them installed; the bring-up script uses `npx --package=@polkadot/api …` to fetch them on demand. Three guardrails (refuses non-paseo `AGENTKEYS_CHAIN`, refuses live `eth_chainId == 212013`, logs every sudo call before signing) keep mainnet safe. New §4.0 added to the demo doc with full recipe, dev-shortcut table (pre-register sidecar entry, force-set scope, fast-forward K3 epoch, parallel multi-tenant funding), and explicit "what sudo CANNOT do" production-safety section.
 - 2026-05-18 (Heima Paseo canonical RPC URL + chain ID resolved) — Heima dev team confirmed: Paseo RPC URL is `https://rpc.paseo-parachain.heima.network` (HTTP + WSS on the same host serves both EVM JSON-RPC and Substrate-RPC); EVM chain ID is **2013** (= `HEIMA_PARA_ID`; mainnet's 212013 is the year-prefixed version); SS58 prefix is **131** (NOT mainnet's 31); native token is HEI (same symbol as mainnet, NOT `pHEI` as the speculative profile had). Verified live: `eth_chainId` returns `0x7dd`, `system_chain` returns `"Heima-paseo"`, `system_properties` returns `ss58Format=131 tokenSymbol=HEI`, `eth_blockNumber` ~2.9M (live chain). Profile (`heima-paseo.json`) updated with all four values; auto-detect sentinel (`chain_id: 0`) retired; Rust test `heima_paseo_chain_id_zero_signals_auto_detect` renamed to `heima_paseo_chain_id_is_2013` and asserts mainnet-vs-paseo non-collision. Q13 in [heima-open-questions.md](spec/heima-open-questions.md) closed; live verification curl outputs pinned in the answer block for future drift detection.

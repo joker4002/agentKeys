@@ -2,7 +2,7 @@
 # scripts/v2-stage1-demo.sh — one-command v2 stage-1 demo end-to-end.
 #
 # Composes the existing scripts (install-agentkeys-cli.sh,
-# agentkeys-init-email-demo.sh, heima-paseo-bring-up.sh) into a single
+# agentkeys-init-email-demo.sh, heima-bring-up.sh) into a single
 # idempotent flow with clear step boundaries. Each step checks "is this
 # already done?" before doing the work, so re-runs are safe.
 #
@@ -212,11 +212,17 @@ do_step_2() {
   ok "env sourced — REGION=$REGION DOMAIN=$MAIL_DOMAIN BUCKET=$BUCKET"
 
   # Default chain profile if the operator hasn't selected one. We default
-  # to heima-paseo (the development convention per arch.md §22a.1) so
-  # the script is usable out-of-the-box on a fresh laptop.
+  # to heima (mainnet) since Heima Paseo testnet collators have been
+  # halted since 2026-01-15 (block 2,905,430 frozen for months). Mainnet
+  # has no sudo, so the bring-up step's auto-fund-Alice path isn't
+  # available — operators must fund the deployer manually from their
+  # personal wallet, AND the demo's mainnet deploy step requires an
+  # explicit MAINNET_CONFIRM=1 env var. In stub mode (no
+  # crates/agentkeys-chain/ yet), the demo runs with sentinel addresses
+  # and no real chain side-effects regardless.
   if [ -z "${AGENTKEYS_CHAIN:-}" ]; then
-    export AGENTKEYS_CHAIN="heima-paseo"
-    info "AGENTKEYS_CHAIN not set — defaulting to heima-paseo (dev convention)"
+    export AGENTKEYS_CHAIN="heima"
+    info "AGENTKEYS_CHAIN not set — defaulting to heima (mainnet; Paseo is currently halted)"
   fi
 }
 
@@ -488,25 +494,44 @@ do_step_9() {
     return 0
   fi
 
+  local bring_up_env=("AGENTKEYS_CHAIN=$AGENTKEYS_CHAIN" "FUND_AMOUNT_HEI=${FUND_AMOUNT_HEI:-100}")
   case "$AGENTKEYS_CHAIN" in
     heima-paseo)
-      info "using scripts/heima-paseo-bring-up.sh (sudo-funded via Alice)" ;;
+      info "using scripts/heima-bring-up.sh (paseo: sudo-funded via Alice)"
+      warn "Heima Paseo collators have been halted since 2026-01-15 (block 2,905,430). Funding step will hang. Recommend AGENTKEYS_CHAIN=heima (mainnet) instead." ;;
     heima)
-      die "AGENTKEYS_CHAIN=heima (mainnet) — bring-up requires real funding + a dedicated runbook. This script only deploys to test chains (heima-paseo, anvil, base-sepolia, sepolia). For mainnet deploys see docs/v2-stage1-migration-and-demo.md §4." ;;
+      info "using scripts/heima-bring-up.sh (mainnet: manual deployer funding)"
+      warn "Heima MAINNET — real HEI required. If deployer is unfunded, step 4 prints transfer instructions and exits; you fund manually, then re-run." ;;
     *)
-      die "no automated bring-up for AGENTKEYS_CHAIN=$AGENTKEYS_CHAIN yet — only heima-paseo is shipped. See docs/v2-stage1-migration-and-demo.md §4 for manual deploy steps on $AGENTKEYS_CHAIN." ;;
+      die "no automated bring-up for AGENTKEYS_CHAIN=$AGENTKEYS_CHAIN yet — only heima + heima-paseo are wired. See docs/v2-stage1-migration-and-demo.md §4 for manual deploy steps on other chains." ;;
   esac
 
-  if [ "$CONFIRM" = "1" ]; then
-    printf "\n    %sAbout to deploy stage-1 contracts to $AGENTKEYS_CHAIN.%s\n" \
-      "$COLOR_WARN" "$COLOR_RESET" >&2
+  if [ "$CONFIRM" = "1" ] || [ "$AGENTKEYS_CHAIN" = "heima" ]; then
+    printf "\n    %sAbout to run chain bring-up on %s.%s\n" \
+      "$COLOR_WARN" "$AGENTKEYS_CHAIN" "$COLOR_RESET" >&2
+    if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
+      printf "    %sMAINNET — if you intend to actually deploy contracts (not stub-mode),%s\n" \
+        "$COLOR_WARN" "$COLOR_RESET" >&2
+      printf "    %salso export MAINNET_CONFIRM=1. Without it, the deploy substep refuses.%s\n" \
+        "$COLOR_WARN" "$COLOR_RESET" >&2
+    fi
     printf "    Press Enter to proceed, Ctrl-C to abort > " >&2
-    read -r _
+    # `set -e` aborts the script if read returns non-zero (EOF from
+    # /dev/null in CI / piped invocations); `|| true` tolerates that
+    # so the orchestrator continues in non-interactive runs. Interactive
+    # operators still get the prompt; Ctrl-C still aborts via SIGINT.
+    read -r _ || true
   fi
 
-  AGENTKEYS_CHAIN="$AGENTKEYS_CHAIN" FUND_AMOUNT_HEI="${FUND_AMOUNT_HEI:-100}" \
-    bash "$REPO_ROOT/scripts/heima-paseo-bring-up.sh" \
-    || die "heima-paseo-bring-up.sh failed — see output above"
+  # Pass MAINNET_CONFIRM through if set (operator opt-in for the real
+  # mainnet deploy). Stub mode + balance-check skip make the script safe
+  # to run without it; the guard only fires for the actual forge script
+  # broadcast inside heima-bring-up.sh step 5.
+  if [ -n "${MAINNET_CONFIRM:-}" ]; then
+    bring_up_env+=("MAINNET_CONFIRM=$MAINNET_CONFIRM")
+  fi
+  env "${bring_up_env[@]}" bash "$REPO_ROOT/scripts/heima-bring-up.sh" \
+    || die "heima-bring-up.sh failed — see output above"
 
   # Re-source the env file to pick up the freshly-appended contract addresses.
   set -a
