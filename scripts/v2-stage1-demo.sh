@@ -83,7 +83,7 @@ fi
 # Bash-3.2 (macOS default) does NOT support `local -n`, so step counters
 # live as plain globals.
 STEP_NUM=0
-STEP_TOTAL=10
+STEP_TOTAL=14
 CURRENT_STEP_NAME=""
 
 step()    { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
@@ -540,8 +540,87 @@ do_step_9() {
   ok "contracts deployed; addresses appended to $ENV_FILE"
 }
 
-# ─── Step 10: final summary ─────────────────────────────────────────────────
+# ─── Step 10: register operator master device on chain ─────────────────────
+# Uses scripts/heima-device-register.sh — idempotent, no-op if already
+# registered (checks SidecarRegistry.getDevice(deviceKeyHash).registeredAt > 0).
 do_step_10() {
+  step "Register operator master device on SidecarRegistry"
+  local profile_uc registry_addr
+  profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
+  registry_addr=$(eval "echo \${SIDECAR_REGISTRY_ADDRESS_${profile_uc}:-}")
+  if [ -z "$registry_addr" ] || [ "$registry_addr" = "0x0" ]; then
+    info "skipping — no SidecarRegistry address yet (run step 9 chain bring-up first)"
+    return 0
+  fi
+  bash "$REPO_ROOT/scripts/heima-device-register.sh" \
+    --registry-address "$registry_addr" \
+    --roles cap-mint,recovery,scope-mgmt \
+    --session-id "$SESSION_ID" \
+    || die "heima-device-register.sh failed"
+  ok "master device registered (or already on-chain)"
+}
+
+# ─── Step 11: create demo agent device ─────────────────────────────────────
+do_step_11() {
+  step "Create demo agent device (registerAgentDevice)"
+  local label="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
+  local profile_uc registry_addr
+  profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
+  registry_addr=$(eval "echo \${SIDECAR_REGISTRY_ADDRESS_${profile_uc}:-}")
+  if [ -z "$registry_addr" ] || [ "$registry_addr" = "0x0" ]; then
+    info "skipping — no SidecarRegistry address yet"
+    return 0
+  fi
+  bash "$REPO_ROOT/scripts/heima-agent-create.sh" \
+    --label "$label" \
+    --registry-address "$registry_addr" \
+    || die "heima-agent-create.sh failed"
+  ok "agent device '$label' registered (or already on-chain)"
+}
+
+# ─── Step 12: set agent scope ───────────────────────────────────────────────
+do_step_12() {
+  step "Grant agent scope (setScopeWithWebauthn)"
+  local label="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
+  local services="${AGENTKEYS_AGENT_SERVICES:-$SMOKE_TEST_SERVICE}"
+  local profile_uc scope_addr
+  profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
+  scope_addr=$(eval "echo \${SCOPE_CONTRACT_ADDRESS_${profile_uc}:-}")
+  if [ -z "$scope_addr" ] || [ "$scope_addr" = "0x0" ]; then
+    info "skipping — no AgentKeysScope address yet"
+    return 0
+  fi
+  bash "$REPO_ROOT/scripts/heima-scope-set.sh" \
+    --agent "$label" \
+    --services "$services" \
+    --scope-address "$scope_addr" \
+    || die "heima-scope-set.sh failed"
+  ok "scope set for agent '$label' (or already matched)"
+}
+
+# ─── Step 13: append a credential-audit entry ──────────────────────────────
+do_step_13() {
+  step "Append credential audit entry (CredentialAudit.append)"
+  local label="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
+  local service="${SMOKE_TEST_SERVICE:-openrouter}"
+  local profile_uc audit_addr
+  profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
+  audit_addr=$(eval "echo \${CREDENTIAL_AUDIT_ADDRESS_${profile_uc}:-}")
+  if [ -z "$audit_addr" ] || [ "$audit_addr" = "0x0" ]; then
+    info "skipping — no CredentialAudit address yet"
+    return 0
+  fi
+  bash "$REPO_ROOT/scripts/heima-credential-audit.sh" \
+    --actor "$label" \
+    --service "$service" \
+    --op store \
+    --audit-address "$audit_addr" \
+    || die "heima-credential-audit.sh failed"
+  ok "audit entry appended"
+}
+
+# ─── Step 14: final summary ────────────────────────────────────────────────
+do_step_14() {
   step "Summary + next steps"
   local profile_uc registry_addr session_file
   profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
@@ -592,6 +671,10 @@ main() {
   in_scope 8  && do_step_8
   in_scope 9  && do_step_9
   in_scope 10 && do_step_10
+  in_scope 11 && do_step_11
+  in_scope 12 && do_step_12
+  in_scope 13 && do_step_13
+  in_scope 14 && do_step_14
 
   return 0
 }
