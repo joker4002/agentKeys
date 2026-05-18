@@ -343,6 +343,8 @@ If the curl errors or the decimal doesn't match the profile's `chain_id`, fix th
 
 ## §0 — Prerequisites (inherited from stage 7)
 
+> **One-command demo:** if you just want to walk the whole stage-1 demo end-to-end with no copy-paste, run [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-demo.sh) — it composes every shipped step (preflight → CLI build → email-init → S3 smoke test → chain bring-up) into one idempotent flow. Each step has a "skip if already done" check, so re-runs are safe; use `--from-step N` / `--only-step N` to resume after a failure. See [§0.0 below](#00--one-command-demo-via-scriptsv2-stage1-demosh).
+
 This entire section is **identical** to [stage7-demo-and-verification.md §0](stage7-demo-and-verification.md#0-prerequisites-checklist). Run it once and skip directly to §1 of this doc when complete. The stage-7 §0 walks through:
 
 | Substep | What it sets up | When to skip |
@@ -362,6 +364,82 @@ What you should have at the end of §0:
 - Broker + signer healthy at `https://broker.<zone>` and `https://signer.<zone>`
 - `~/.agentkeys/alice/session.json` (and optionally `bob`) containing a fresh J1 session JWT
 - AWS profile `agentkeys-admin` active; `$ACCOUNT_ID`, `$BROKER_HOST`, `$BUCKET`, `$OIDC_ISSUER`, `$DATA_ROLE_ARN` populated
+
+### §0.0 — One-command demo via `scripts/v2-stage1-demo.sh`
+
+The combined orchestrator at [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-demo.sh) walks the full stage-1 demo in one command. It composes the existing scripts ([`install-agentkeys-cli.sh`](../scripts/install-agentkeys-cli.sh), [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh), [`heima-paseo-bring-up.sh`](../scripts/heima-paseo-bring-up.sh)) — it doesn't reinvent them — so you can still run the underlying scripts individually for finer-grained debugging.
+
+**Idempotency model**: each step checks "is this already done?" before doing the work — same `cloud-setup.md`-style pattern (e.g. "if OIDC provider ARN already ends in $BROKER_HOST, skip create"). Re-running the full script is always safe; only steps with missing artifacts execute.
+
+| # | Step | Skip if … | Underlying tool |
+|---|------|-----------|-----------------|
+| 1 | Tool sanity-check | (always runs — <100ms) | bash `command -v` |
+| 2 | Source `scripts/operator-workstation.env` | (always runs — values vary) | bash `set -a` |
+| 3 | AWS profile sanity-check | (always runs — guards against wrong profile) | `aws sts get-caller-identity` |
+| 4 | `agentkeys` CLI build + install | `agentkeys --help` already shows `--session-id` + `--chain` | [`install-agentkeys-cli.sh`](../scripts/install-agentkeys-cli.sh) |
+| 5 | Chain reachability + chain-id sanity | (always runs — <1s, network-dependent) | curl + `agentkeys chain show` |
+| 6 | Email-init session JWT | `~/.agentkeys/$SESSION_ID/session.json` exists and is <1h old | [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh) |
+| 7 | S3 envelope smoke-test (store + read round-trip) | `s3://$BUCKET/bots/<actor_omni>/credentials/<service>.enc` already exists | `agentkeys store` / `agentkeys read` |
+| 8 | Chain bring-up (deploy contracts) | `SCOPE_CONTRACT_ADDRESS_<PROFILE>` already in env-file | [`heima-paseo-bring-up.sh`](../scripts/heima-paseo-bring-up.sh) |
+| 9 | Summary + next-step hints | (always runs — prints contract addresses + next command) | bash |
+
+**Pause points** (where the operator interacts):
+
+- **Step 6**: macOS keychain dialog appears when `agentkeys init` writes the session JWT to the OS keychain. Click "Always Allow" (or Touch ID). The script narrates this in advance; no explicit `read -p` pause needed — the OS modal handles it.
+- **Step 8** (opt-in via `--confirm`): prints "About to deploy stage-1 contracts to $AGENTKEYS_CHAIN. Press Enter to proceed, Ctrl-C to abort". Useful when you're driving from a fresh shell and want a sanity check before the irreversible deploy.
+
+**Quick start**:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Full demo, defaults: session-id=alice, chain=heima-paseo
+bash scripts/v2-stage1-demo.sh
+
+# Second tenant (for isolation proof in §8)
+bash scripts/v2-stage1-demo.sh --session-id bob
+
+# Local dev backbone (anvil, no faucet needed)
+bash scripts/v2-stage1-demo.sh --chain anvil
+
+# Resume after a step failure
+bash scripts/v2-stage1-demo.sh --from-step 6
+
+# Re-run just the envelope smoke test (e.g. after rotating SMOKE_TEST_SECRET)
+bash scripts/v2-stage1-demo.sh --only-step 7
+
+# Pause for confirmation before the chain deploy
+bash scripts/v2-stage1-demo.sh --confirm
+
+# Run with `set -x` (very chatty — for diagnosis)
+bash scripts/v2-stage1-demo.sh --debug
+
+# See all flags + env-var overrides
+bash scripts/v2-stage1-demo.sh --help
+```
+
+**Configurable inputs (no hardcoded values)** — every magic value is overridable:
+
+| Variable | Default | Override how |
+|---|---|---|
+| `SESSION_ID` | `alice` | `--session-id <name>` |
+| `AGENTKEYS_CHAIN` | `heima-paseo` | `--chain <name>` or env |
+| `AGENTKEYS_CHAIN_PROFILE_FILE` | (unset; uses built-in) | env (path to custom JSON profile per arch.md §22a) |
+| `SMOKE_TEST_SERVICE` | `openrouter` | env |
+| `SMOKE_TEST_SECRET` | `sk-or-v1-DEMO-FAKE-DO-NOT-USE-IN-PROD` | env |
+| `FUND_AMOUNT_HEI` | `100` | env (sudo-funded deployer balance on heima-paseo) |
+
+**Debuggability**: every failure prints (a) which step failed, (b) the failing tool's exit output, and (c) the exact resume command (`bash scripts/v2-stage1-demo.sh --only-step <N>`). The `--debug` flag enables `set -x` for verbose tracing of the shell-level flow.
+
+**What this script doesn't do** (matches §1.4 / §6 / §7 status in this doc):
+
+- The on-chain `SidecarRegistry.register_master_device(...)` step (§1.4) — the `agentkeys device register` subcommand is still in flight. The script prints the exact command to run once it ships, with the registry address pre-populated.
+- The sidecar daemon bring-up (§6) — daemon implementation is in-progress.
+- Agent creation + scope grant (§7) — requires K11 WebAuthn integration in CLI.
+- Two-operator isolation proof (§8) — re-run the script with a second `--session-id` to set up both tenants, then follow §8 manually.
+
+If you'd rather run the steps individually (for learning or for finer-grained debugging), the rest of this doc walks each step manually — the script's step boundaries match the doc's section numbers wherever possible.
+
+---
 - Network reachability to `$HEIMA_EVM_RPC_HTTP` from the workstation (smoke-test below)
 
 ```bash
