@@ -510,9 +510,9 @@ do_step_9() {
     printf "\n    %sAbout to run chain bring-up on %s.%s\n" \
       "$COLOR_WARN" "$AGENTKEYS_CHAIN" "$COLOR_RESET" >&2
     if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
-      printf "    %sMAINNET — if you intend to actually deploy contracts (not stub-mode),%s\n" \
+      printf "    %sMAINNET — real HEI will be spent if contracts aren't already deployed.%s\n" \
         "$COLOR_WARN" "$COLOR_RESET" >&2
-      printf "    %salso export MAINNET_CONFIRM=1. Without it, the deploy substep refuses.%s\n" \
+      printf "    %s(Re-runs are idempotent: cast-code check skips redeploy of existing contracts.)%s\n" \
         "$COLOR_WARN" "$COLOR_RESET" >&2
     fi
     printf "    Press Enter to proceed, Ctrl-C to abort > " >&2
@@ -521,24 +521,14 @@ do_step_9() {
     # so the orchestrator continues in non-interactive runs. Interactive
     # operators still get the prompt; Ctrl-C still aborts via SIGINT.
     read -r _ || true
-    # Pressing Enter on the mainnet prompt IS operator consent for
-    # the actual deploy that follows. Auto-propagate as MAINNET_CONFIRM=1
-    # to bring-up.sh so the operator doesn't have to also set the env
-    # var separately. Direct `bash scripts/heima-bring-up.sh` callers
-    # (bypassing the orchestrator) still need to set MAINNET_CONFIRM=1
-    # explicitly — that case has no Press-Enter gate.
-    if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
-      export MAINNET_CONFIRM=1
-    fi
   fi
 
-  # Pass MAINNET_CONFIRM through if set (operator opt-in for the real
-  # mainnet deploy). Stub mode + balance-check skip make the script safe
-  # to run without it; the guard only fires for the actual forge script
-  # broadcast inside heima-bring-up.sh step 5.
-  if [ -n "${MAINNET_CONFIRM:-}" ]; then
-    bring_up_env+=("MAINNET_CONFIRM=$MAINNET_CONFIRM")
-  fi
+  # Mainnet safety is now layered: (1) the Press-Enter prompt above is
+  # operator consent; (2) the chain-id verification inside heima-bring-up.sh
+  # step 2 confirms we're talking to the chain claimed by AGENTKEYS_CHAIN;
+  # (3) the on-chain `cast code` check in step 5 makes re-runs idempotent
+  # so a second invocation can't double-deploy. The previous
+  # MAINNET_CONFIRM=1 env-var gate was redundant — operator dropped it.
   env "${bring_up_env[@]}" bash "$REPO_ROOT/scripts/heima-bring-up.sh" \
     || die "heima-bring-up.sh failed — see output above"
 

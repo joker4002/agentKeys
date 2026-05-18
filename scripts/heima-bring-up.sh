@@ -348,40 +348,56 @@ else
       AUDIT_ADDR="0x0000000000000000000000000000000000000004"
       echo "  (stub addresses never have on-chain code; subsequent runs will detect this and 'redeploy' the same stubs — no real chain side-effect.)"
     else
-      # Mainnet safety: real `forge script ... --broadcast` on Heima
-      # mainnet spends real HEI. Require MAINNET_CONFIRM=1 as a
-      # paranoid second gate so an operator can't accidentally deploy
-      # contracts to production while testing the orchestrator.
-      if [ "$AGENTKEYS_CHAIN" = "heima" ] && [ "${MAINNET_CONFIRM:-0}" != "1" ]; then
-        cat >&2 <<EOM
-[5/7] REFUSING — about to broadcast a real deploy to Heima MAINNET.
-
-  This will:
-    - Spend real HEI from deployer $DEPLOYER_ADDR
-    - Permanently deploy 4 contracts at addresses you'll need to trust
-    - Be irreversible
-
-  If that's truly what you want, re-run with:
-    MAINNET_CONFIRM=1 $0
-  OR for partial control:
-    MAINNET_CONFIRM=1 SKIP_DEPLOY=0 bash scripts/v2-stage1-demo.sh --only-step 9
-
-  For testing the orchestrator without spending HEI, omit
-  crates/agentkeys-chain/ (the script falls back to stub-mode
-  sentinel addresses, no on-chain side effects).
-EOM
-        exit 1
+      # Auto-init forge-std submodule if missing. `git pull` doesn't
+      # populate submodules; without forge-std, `forge build` fails with
+      # an obscure import error. We initialize on-demand here so the
+      # operator doesn't need to know about submodule conventions.
+      if [ ! -f "$CHAIN_DIR/lib/forge-std/src/Test.sol" ]; then
+        echo "  initializing forge-std submodule (first run only) …"
+        ( cd "$REPO_ROOT" && git submodule update --init --recursive --quiet ) \
+          || { echo "  ERROR: git submodule update failed — install git + retry" >&2; exit 1; }
       fi
       cd "$CHAIN_DIR"
+      echo "  invoking: forge script DeployAgentKeysV1.s.sol → $RPC_HTTP (chain $LIVE_CHAIN_ID)"
+      # Run forge in two stages so we can:
+      #   (a) print its output verbatim regardless of success/failure
+      #       (DEPLOY_OUT captured via 2>&1; on success we parse, on
+      #       failure we display the error)
+      #   (b) check its exit code explicitly (bash $() doesn't trigger
+      #       set -e on inner-command non-zero, and the later `grep -oE`
+      #       returning empty would trip pipefail and kill the script
+      #       BEFORE we ever see forge's actual error message)
+      set +e
       DEPLOY_OUT=$(forge script script/DeployAgentKeysV1.s.sol \
         --rpc-url "$RPC_HTTP" \
         --chain-id "$LIVE_CHAIN_ID" \
         --private-key "$DEPLOYER_KEY" \
         --broadcast 2>&1)
-      SCOPE_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'AgentKeysScope:\s+0x[a-fA-F0-9]{40}' | awk '{print $NF}')
-      REGISTRY_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'SidecarRegistry:\s+0x[a-fA-F0-9]{40}' | awk '{print $NF}')
-      EPOCH_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'K3EpochCounter:\s+0x[a-fA-F0-9]{40}' | awk '{print $NF}')
-      AUDIT_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'CredentialAudit:\s+0x[a-fA-F0-9]{40}' | awk '{print $NF}')
+      FORGE_RC=$?
+      set -e
+      if [ "$FORGE_RC" != "0" ]; then
+        echo "  forge script FAILED (exit $FORGE_RC). Output:" >&2
+        echo "------ forge stderr+stdout ------" >&2
+        echo "$DEPLOY_OUT" >&2
+        echo "------ end forge output ------" >&2
+        exit 1
+      fi
+      # Forge succeeded — extract addresses from the deploy-script's
+      # console.log output. `|| true` tolerates a single missing match
+      # without tripping pipefail (then the validation below catches
+      # any genuinely-missing address with a clear error).
+      SCOPE_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'AgentKeysScope:[[:space:]]+0x[a-fA-F0-9]{40}' | awk '{print $NF}' || true)
+      REGISTRY_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'SidecarRegistry:[[:space:]]+0x[a-fA-F0-9]{40}' | awk '{print $NF}' || true)
+      EPOCH_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'K3EpochCounter:[[:space:]]+0x[a-fA-F0-9]{40}' | awk '{print $NF}' || true)
+      AUDIT_ADDR=$(echo "$DEPLOY_OUT" | grep -oE 'CredentialAudit:[[:space:]]+0x[a-fA-F0-9]{40}' | awk '{print $NF}' || true)
+      for pair in "AgentKeysScope:$SCOPE_ADDR" "SidecarRegistry:$REGISTRY_ADDR" "K3EpochCounter:$EPOCH_ADDR" "CredentialAudit:$AUDIT_ADDR"; do
+        n="${pair%%:*}"; a="${pair##*:}"
+        if [ -z "$a" ]; then
+          echo "  ERROR: failed to extract $n address from forge output. Dump:" >&2
+          echo "$DEPLOY_OUT" >&2
+          exit 1
+        fi
+      done
       cd "$REPO_ROOT"
     fi
   fi
