@@ -1,0 +1,27 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+script = "script"
+test = "test"
+# Heima uses Frontier (EVM-compatible). Frontier supports up to Paris EVM
+# at the time of writing — avoid Shanghai+ opcodes (PUSH0 etc.) so the
+# deployed bytecode is forwards-compatible with older Frontier nodes.
+evm_version = "paris"
+solc_version = "0.8.20"
+optimizer = true
+optimizer_runs = 200
+# Match arch.md §6 — events are part of the wire contract; treat them as
+# strictly as we treat function signatures. Don't let solc silently elide
+# unused params from event topics.
+extra_output = ["storageLayout"]
+
+[profile.default.fmt]
+line_length = 100
+tab_width = 4
+bracket_spacing = true
+
+[rpc_endpoints]
+heima = "https://rpc.heima-parachain.heima.network"
+heima_paseo = "https://rpc.paseo-parachain.heima.network"
+anvil = "http://localhost:8545"
