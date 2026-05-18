@@ -164,6 +164,21 @@ shared JSON encoding is the source of truth for the canonical bytes.
   indirection would hurt that. ~360 LOC of cross-script duplication
   is intentional, not slop.
 
+## Iteration 11c — final codex sign-off
+
+**Verdict (third codex pass, post-deslop + stage-2 additions): APPROVED — ready to ship.**
+
+Codex verified:
+
+1. **Deslop wire-compat** — shared `errors.rs` module's `{error, reason}` JSON shape + HTTP status codes match the per-worker inline error types previous commits removed (`f0fa0af^`). Behavior preserved.
+2. **Memory worker per-data-class isolation** — `bots/<actor>/memory/...` path (not `credentials/...`), `$MEMORY_BUCKET` (not `$VAULT_BUCKET`), `$AGENTKEYS_MEMORY_KEK_HEX` (not the creds KEK). No cross-references in `crates/agentkeys-worker-memory/`. Per arch.md §17 a compromise of the creds KEK does NOT unlock memory blobs.
+3. **Device-revoke K11 gating** — script passes non-empty stub bytes when `--master`, empty bytes (`0x`) when `--agent`, matching the on-chain contract gate at `SidecarRegistry.sol:162-164` (`tier == TIER_MASTER && k11Assertion.length == 0` → revert).
+4. **No new must-fix.**
+
+**Final test counts (cargo test --workspace post-deslop, post-clippy)**: 546 tests passed across 42 suites, 0 failures.
+
+**Final on-chain health check** (`AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh`): 13/13 checks pass against Heima mainnet contracts at the addresses in `operator-workstation.env`.
+
 ## Iteration 12 — stage-2 / issue #90 foundation
 
 **Scope**: Multi-device recovery scaffold + memory-service worker per arch.md §15.2 + §17 per-data-class buckets policy.
