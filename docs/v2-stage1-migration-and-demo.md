@@ -588,8 +588,25 @@ agentkeys --session-id alice whoami
 # scope:                 (none — master session)
 
 # Persist actor_omni for the rest of the demo
-export ALICE_WALLET=$(agentkeys --session-id alice whoami --json | jq -r .session_wallet)
-export ALICE_ACTOR_OMNI=$(agentkeys --session-id alice whoami --json | jq -r .agentkeys_actor_omni)
+# NOTE: two CLI quirks to watch for here — the error messages don't
+# make either cause obvious.
+#
+# 1. --json is a TOP-LEVEL flag — it MUST come before `whoami`.
+#    `agentkeys whoami --json` errors with "unexpected argument
+#    '--json' found". Same gotcha for every JSON-emitting subcommand
+#    (read, usage, etc.). Always: agentkeys [--json] <subcmd>.
+#
+# 2. whoami's --signer-url is `#[arg(env = "AGENTKEYS_SIGNER_URL")]`,
+#    so if you've sourced operator-workstation.env, signer_url is
+#    auto-populated and whoami tries to call the signer — which also
+#    needs --omni-account. Chicken-and-egg. Workaround: prefix with
+#    `env -u AGENTKEYS_SIGNER_URL` for these two reads, since
+#    session_wallet + agentkeys_actor_omni are computed locally
+#    without any signer round-trip.
+export ALICE_WALLET=$(env -u AGENTKEYS_SIGNER_URL \
+  agentkeys --session-id alice --json whoami | jq -r .session_wallet)
+export ALICE_ACTOR_OMNI=$(env -u AGENTKEYS_SIGNER_URL \
+  agentkeys --session-id alice --json whoami | jq -r .agentkeys_actor_omni)
 echo "ALICE_WALLET=$ALICE_WALLET"
 echo "ALICE_ACTOR_OMNI=$ALICE_ACTOR_OMNI"
 ```

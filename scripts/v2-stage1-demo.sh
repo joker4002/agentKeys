@@ -317,7 +317,24 @@ do_step_7() {
     return 0
   fi
   local whoami_json wallet actor_omni
-  whoami_json=$(agentkeys --session-id "$SESSION_ID" whoami --json 2>&1) \
+  # NOTE: two CLI quirks bake in here, both worth a comment because the
+  # error messages don't make the cause obvious.
+  #
+  # 1. --json is a TOP-LEVEL flag on the agentkeys CLI (set on `cli.json`
+  #    in main.rs; threaded into CommandContext.json_output). It MUST
+  #    come before the subcommand. `agentkeys whoami --json` errors
+  #    with "unexpected argument '--json' found".
+  #
+  # 2. whoami's --signer-url arg is `#[arg(long, env = "AGENTKEYS_SIGNER_URL"...)]`.
+  #    The operator's operator-workstation.env exports AGENTKEYS_SIGNER_URL,
+  #    so clap auto-populates signer_url and whoami tries to call the
+  #    signer — which requires --omni-account too. Chicken-and-egg: we
+  #    want actor_omni FROM whoami, but whoami wants it as input.
+  #    Workaround: `env -u AGENTKEYS_SIGNER_URL` for this one call
+  #    (the local-only fields session_wallet + agentkeys_actor_omni are
+  #    computed without any signer round-trip).
+  whoami_json=$(env -u AGENTKEYS_SIGNER_URL \
+                  agentkeys --session-id "$SESSION_ID" --json whoami 2>&1) \
     || die "agentkeys whoami failed: $whoami_json — session expired? re-run --only-step 6"
   wallet=$(printf '%s' "$whoami_json" | jq -r '.session_wallet // empty')
   # arch.md canonical name is agentkeys_actor_omni; tolerate the older
@@ -334,12 +351,37 @@ do_step_7() {
     skip "s3://$BUCKET/$s3_key already exists — round-tripping read only"
   else
     info "writing $SMOKE_TEST_SERVICE credential to s3://$BUCKET/$s3_key"
-    agentkeys --session-id "$SESSION_ID" \
-      --credential-backend=s3 --envelope-version=v2 \
-      --bucket "$BUCKET" --signer-url "$BACKEND_URL" \
-      --omni-account "$actor_omni" \
-      store "$SMOKE_TEST_SERVICE" "$SMOKE_TEST_SECRET" \
-      || die "store failed — check bucket policy (see docs/cloud-setup.md §4.4)"
+    local store_out
+    store_out=$(agentkeys --session-id "$SESSION_ID" \
+                  --credential-backend=s3 --envelope-version=v2 \
+                  --bucket "$BUCKET" --signer-url "$BACKEND_URL" \
+                  --omni-account "$actor_omni" \
+                  store "$SMOKE_TEST_SERVICE" "$SMOKE_TEST_SECRET" 2>&1) \
+      || die "store failed (output: $store_out)
+   The CLI maps every AWS SDK error to 'Error: UNREACHABLE — Backend
+   unreachable' (lib.rs L66: BackendError::Transport catch-all), which
+   hides the underlying cause. Common real causes, in order of
+   likelihood — copy-paste the probe to narrow it down:
+
+     1) Caller lacks data-plane perms on the bucket. The agentkeys CLI
+        calls PutObject with the caller's direct IAM creds, but the
+        cloud-setup.md §3.5+§4.4 design only grants s3:PutObject to
+        the assumed agentkeys-data-role (via OIDC AssumeRoleWithWebIdentity).
+        Direct admin-CLI writes get AccessDenied even though the operator
+        is admin. Probe:
+          echo probe | aws s3 cp - s3://$BUCKET/bots/$actor_omni/credentials/probe.txt --region \$REGION
+
+     2) Bucket policy still keyed on agentkeys_user_wallet (v1) but
+        the CLI's v2 envelope tags the session with agentkeys_actor_omni.
+        Fix: run v2-stage1-migration-and-demo.md §2.2 to rename the
+        PrincipalTag key in the bucket policy. Probe:
+          aws s3api get-bucket-policy --bucket \$BUCKET --region \$REGION --query Policy --output text | jq
+
+     3) Bucket region mismatch or signer-url unreachable. Probe:
+          curl -sS \"\$BACKEND_URL/healthz\"
+
+   Skip this step for now (continue with chain steps):
+     bash scripts/v2-stage1-demo.sh --from-step 8 --skip-smoke"
     aws s3 ls "s3://$BUCKET/$s3_key" --region "$REGION" >/dev/null \
       || die "expected object at s3://$BUCKET/$s3_key after store, but it's missing"
   fi
