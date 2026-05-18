@@ -148,11 +148,43 @@ esac
 # never accidentally committed) on first run; reuse it on every
 # subsequent run. Override at any time by exporting HEIMA_DEPLOYER_KEY
 # in your shell. Per-chain key files keep mainnet + paseo keys distinct.
+# Resolution order for the deployer key:
+#   1. $HEIMA_DEPLOYER_KEY env var (raw 0x-prefixed private key)
+#   2. $HEIMA_DEPLOYER_MNEMONIC_FILE pointing at a BIP-39 mnemonic file
+#      (default: ./test-hei in the repo root if it exists)
+#   3. Existing persisted key file at ~/.agentkeys/<chain>-deployer.key
+#   4. Generate a fresh throwaway key, persist it for future re-runs
+#
+# Path 2 (mnemonic file) is the recommended approach for mainnet so
+# the operator can bring their OWN wallet and never have to copy a raw
+# private key around. The .mjs derivation uses ethers' BIP-44 path
+# m/44'/60'/0'/0/0 (same as MetaMask / Foundry / ethers default).
+HEIMA_DEPLOYER_MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
+
 echo "[3/7] Deployer keypair …"
 if [ -n "${HEIMA_DEPLOYER_KEY:-}" ]; then
   DEPLOYER_KEY="$HEIMA_DEPLOYER_KEY"
   DEPLOYER_ADDR=$(cast wallet address --private-key "$DEPLOYER_KEY")
   echo "  reusing HEIMA_DEPLOYER_KEY env var → $DEPLOYER_ADDR"
+elif [ -f "$HEIMA_DEPLOYER_MNEMONIC_FILE" ]; then
+  echo "  deriving deployer from mnemonic at $HEIMA_DEPLOYER_MNEMONIC_FILE …"
+  # Ensure ethers is installed in scripts/node_modules (idempotent).
+  if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
+    echo "  installing ethers into scripts/node_modules (first run only — ~10s) …"
+    npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund \
+      || { echo "  ERROR: npm install --prefix scripts failed" >&2; exit 1; }
+  fi
+  DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$HEIMA_DEPLOYER_MNEMONIC_FILE") \
+    || { echo "  ERROR: mnemonic derivation failed — see stderr above" >&2; exit 1; }
+  DEPLOYER_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
+  DEPLOYER_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
+  # Stash the derived EVM key in the per-chain file so subsequent runs
+  # (or other tools like Foundry) pick it up without re-deriving. mode
+  # 0600 — never world-readable.
+  mkdir -p "$(dirname "$DEPLOYER_KEY_FILE")"
+  (umask 077 && printf '%s\n' "$DEPLOYER_KEY" > "$DEPLOYER_KEY_FILE")
+  chmod 600 "$DEPLOYER_KEY_FILE"
+  echo "  derived EVM address $DEPLOYER_ADDR; cached private key at $DEPLOYER_KEY_FILE (0600)"
 elif [ -f "$DEPLOYER_KEY_FILE" ]; then
   DEPLOYER_KEY=$(cat "$DEPLOYER_KEY_FILE")
   DEPLOYER_ADDR=$(cast wallet address --private-key "$DEPLOYER_KEY" 2>/dev/null) \
@@ -170,6 +202,8 @@ else
   if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
     echo "  This is a fresh address with 0 HEI on Heima mainnet. Fund it from"
     echo "  your personal wallet before re-running (step 4 will instruct)."
+    echo "  TIP: drop a BIP-39 mnemonic at ./test-hei to use your own wallet"
+    echo "       (auto-detected next run; never committed — see .gitignore)."
   else
     echo "  WARNING: paseo-testnet key only — never reuse on mainnet."
   fi
