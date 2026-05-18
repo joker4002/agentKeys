@@ -295,6 +295,31 @@ enum Commands {
         #[command(subcommand)]
         action: ChainAction,
     },
+
+    #[command(
+        about = "K11 (WebAuthn) enrollment + assertion (v2 stage 1 — stub mode)",
+        long_about = "Stage-1 simplification per arch.md §22a: K11 enrollment and assertion produce deterministic stub bytes that satisfy the on-chain `k11Assertion.length != 0` gate without requiring a real WebAuthn authenticator. Stage 2 (issue #90) replaces the stub with `webauthn-rs` + Touch ID / Face ID via the platform authenticator.\n\nSet AGENTKEYS_K11_STUB=1 (the default) to use stub mode; unset or set to 0 to require real WebAuthn (errors out today — feature lands in stage 2).\n\nExamples:\n  agentkeys k11 enroll --operator-omni 0x<64-hex>\n  agentkeys k11 assert --operator-omni 0x<64-hex> --message-hex 0xdeadbeef"
+    )]
+    K11 {
+        #[command(subcommand)]
+        action: K11Action,
+    },
+}
+
+#[derive(Subcommand)]
+enum K11Action {
+    #[command(about = "Enroll a K11 credential for an operator (stub mode in stage 1)")]
+    Enroll {
+        #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
+        operator_omni: String,
+    },
+    #[command(about = "Produce a K11 assertion over a message (stub mode in stage 1)")]
+    Assert {
+        #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
+        operator_omni: String,
+        #[arg(long, help = "Hex-encoded message to sign over (with or without 0x prefix)")]
+        message_hex: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -368,6 +393,41 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
             };
             serde_json::to_string_pretty(&profile)
                 .map_err(|e| anyhow::anyhow!("serialize profile: {e}"))
+        }
+    }
+}
+
+/// `agentkeys k11 enroll/assert` — stage-1 stub mode by default.
+///
+/// Stage-1 simplification per arch.md §22a: deterministic stub bytes
+/// satisfy the on-chain `k11Assertion.length != 0` gate without a real
+/// WebAuthn authenticator. Stage 2 (#90) swaps in `webauthn-rs` + Touch ID.
+///
+/// Stub-mode toggle: `AGENTKEYS_K11_STUB=1` (default). Setting it to `0`
+/// errors out today — real WebAuthn is a stage-2 deliverable.
+async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
+    let stub_mode = std::env::var("AGENTKEYS_K11_STUB")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    if !stub_mode {
+        anyhow::bail!(
+            "real WebAuthn enrollment ships in stage 2 (issue #90). Set AGENTKEYS_K11_STUB=1 \
+             to use the stage-1 deterministic stub, or wait for the webauthn-rs integration."
+        );
+    }
+    match action {
+        K11Action::Enroll { operator_omni } => {
+            let enrollment = agentkeys_cli::k11::enroll(operator_omni)
+                .map_err(|e| anyhow::anyhow!("k11 enroll: {e}"))?;
+            serde_json::to_string_pretty(&enrollment)
+                .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+        }
+        K11Action::Assert { operator_omni, message_hex } => {
+            let msg = hex::decode(message_hex.trim_start_matches("0x"))
+                .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
+            let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
+                .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
+            Ok(format!("0x{}", hex::encode(assertion)))
         }
     }
 }
@@ -491,6 +551,7 @@ async fn main() {
             }
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
+        Commands::K11 { action } => cmd_k11(action).await,
     };
 
     match result {

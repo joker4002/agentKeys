@@ -100,9 +100,33 @@ The companion PRD is at [.omc/prd.json](../.omc/prd.json) (12 stories ordered P0
 
 **Scope**: Run codex critic; fix must-fix findings.
 
+**Codex findings (2026-05-19 review pass, 8 total — 6 must-fix, 2 should-fix)**:
+
+| # | Severity | Where | Fixed in |
+|---|---|---|---|
+| 1 | must-fix | broker cap-mint endpoints accept unauthenticated JSON — anyone with chain-knowledge can mint caps | commit `<this>`: added `verify_session_jwt` extraction, session-omni binding check |
+| 2 | must-fix | broker only calls `isActive` — never verifies device → operator/actor/role binding | commit `<this>`: replaced with full `getDevice` decode + `revoked`/`operator`/`actor`/`roles & CAP_MINT` checks |
+| 3 | must-fix | worker's "independent re-verify" skips device binding, K3 epoch | commit `<this>`: worker now calls `getDevice` + `currentEpoch` independently before any S3 touch |
+| 4 | must-fix | worker honored caps regardless of `payload.op` — fetch-cap accepted at /store | commit `<this>`: each endpoint passes its `expected_op` into `verify_cap`; `check_op` rejects mismatch with 403 cap_op_mismatch |
+| 5 | must-fix | worker's AAD format (`sha256(o\|a\|s\|epoch)`) differed from CLI's (`agentkeys.cred.aad.v2\|<actor>\|<service>`) — round-trip broken | commit `<this>`: worker's `envelope::aad` rewritten to match CLI byte-for-byte; new test `tests/envelope_cross_compat.rs` pins the shape |
+| 6 | must-fix | daemon had `proxy` module but no subcommand wiring — dead code | commit `<this>`: added `--proxy` flag + `run_proxy_mode` that binds Unix socket (0600 perms) + optional TCP via `--proxy-tcp` |
+| 7 | should-fix | broker/worker hardcoded `_HEIMA` env names, bypassing the chain-profile system | commit `<this>`: both now resolve env keys via `AGENTKEYS_CHAIN` → `{NAME}_{PROFILE_UC}` lookup |
+| 8 | should-fix | no CLI `k11 enroll/assert` subcommand surfaces the k11 module | commit `<this>`: added `Commands::K11 { Enroll, Assert }` dispatch through `cmd_k11`; gated on `AGENTKEYS_K11_STUB=1` (default) |
+
+All 8 findings addressed in a single follow-up commit. Cap-payload shape evolved:
+```diff
+- { operator_omni, actor_omni, service, op, k3_epoch, expires_at, nonce }
++ { operator_omni, actor_omni, service, op, device_key_hash, k3_epoch, issued_at, expires_at, nonce }
+```
+Both the broker (sign) and worker (verify) emit/consume the new shape; the
+shared JSON encoding is the source of truth for the canonical bytes.
+
 **Errors + fixes**:
 
-(populated during execution)
+- Cargo.toml: `sha3` was gated by `auth-wallet-sig` feature — broke cap.rs which always needs Keccak256. Fix: promoted `sha3` to mandatory dep, removed `"dep:sha3"` from feature line.
+- Cargo.toml: daemon's `axum`+`tower`+`hyper` were dev-deps only — broke `proxy.rs`. Fix: moved to runtime deps; removed dev-dep duplicates.
+- Worker: AAD mismatch with CLI was the silent bug — only caught by cross-crate test vector. Lesson: every cross-crate format MUST have a vector test, not just unit tests inside each crate.
+- Daemon proxy subcommand: had to do unix-listener accept loop manually since axum 0.7 doesn't ship a hyper-util adapter for UnixListener out of the box. Used `hyper_util::server::conn::auto::Builder` + `tower::Service::call` pattern.
 
 ---
 

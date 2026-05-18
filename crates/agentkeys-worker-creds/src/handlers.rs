@@ -1,10 +1,18 @@
 //! HTTP handlers — wired into a tower service in main.rs.
 //!
 //! Endpoints:
-//!   GET  /healthz                — service ready check (200 if S3 client is up)
-//!   POST /v1/cred/store          — verify cap → encrypt → S3 PUT
-//!   POST /v1/cred/fetch          — verify cap → S3 GET → decrypt → return plaintext
-//!   POST /v1/cred/teardown       — verify cap → S3 DELETE the actor's prefix
+//!   GET  /healthz                — service ready check
+//!   POST /v1/cred/store          — verify cap (store op) → encrypt → S3 PUT
+//!   POST /v1/cred/fetch          — verify cap (fetch op) → S3 GET → decrypt → return
+//!   POST /v1/cred/teardown       — verify cap (teardown op) → S3 DELETE prefix
+//!
+//! Cap verification (each request, before any S3 touch — arch.md §15.1):
+//!   1. broker_sig over Sha256(json(payload))     [verify::verify_signature]
+//!   2. cap.op matches endpoint                    [verify::check_op]
+//!   3. issued_at <= now + 60s skip; expires_at > now [verify::check_freshness]
+//!   4. on-chain getDevice → operator/actor/roles  [verify::check_chain_device]
+//!   5. on-chain isServiceInScope                   [verify::check_chain_scope]
+//!   6. on-chain currentEpoch == cap.k3_epoch       [verify::check_chain_k3_epoch]
 
 use axum::{
     extract::State,
@@ -16,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::envelope;
 use crate::state::SharedWorkerState;
-use crate::verify::{self, CapToken};
+use crate::verify::{self, CapOp, CapToken};
 
 pub fn build_router(state: SharedWorkerState) -> Router {
     Router::new()
@@ -31,6 +39,7 @@ pub fn build_router(state: SharedWorkerState) -> Router {
 pub struct HealthBody {
     pub ok: bool,
     pub vault_bucket: String,
+    pub chain_profile: String,
     pub version: &'static str,
 }
 
@@ -38,6 +47,7 @@ async fn healthz(State(state): State<SharedWorkerState>) -> Json<HealthBody> {
     Json(HealthBody {
         ok: true,
         vault_bucket: state.config.vault_bucket.clone(),
+        chain_profile: state.config.chain_profile.clone(),
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -45,7 +55,7 @@ async fn healthz(State(state): State<SharedWorkerState>) -> Json<HealthBody> {
 #[derive(Debug, Deserialize)]
 pub struct StoreRequest {
     pub cap: CapToken,
-    pub plaintext_b64: String, // base64(stdandard)
+    pub plaintext_b64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,7 +97,7 @@ async fn cred_store(
     State(state): State<SharedWorkerState>,
     Json(req): Json<StoreRequest>,
 ) -> Result<Json<StoreResponse>, (StatusCode, Json<ErrorBody>)> {
-    verify_cap(&state, &req.cap).await?;
+    verify_cap(&state, &req.cap, CapOp::Store).await?;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let plaintext = STANDARD
@@ -100,7 +110,7 @@ async fn cred_store(
         &req.cap.payload.service,
         req.cap.payload.k3_epoch,
     );
-    let envelope = envelope::encrypt(&state.config.kek_hex_stage1, &plaintext, &aad)
+    let env_bytes = envelope::encrypt(&state.config.kek_hex_stage1, &plaintext, &aad)
         .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
@@ -109,14 +119,14 @@ async fn cred_store(
         .put_object()
         .bucket(&state.config.vault_bucket)
         .key(&key)
-        .body(envelope.clone().into())
+        .body(env_bytes.clone().into())
         .send()
         .await
         .map_err(|e| err_502(e.to_string(), "s3_put"))?;
     Ok(Json(StoreResponse {
         ok: true,
         s3_key: key,
-        envelope_size: envelope.len(),
+        envelope_size: env_bytes.len(),
     }))
 }
 
@@ -124,7 +134,7 @@ async fn cred_fetch(
     State(state): State<SharedWorkerState>,
     Json(req): Json<FetchRequest>,
 ) -> Result<Json<FetchResponse>, (StatusCode, Json<ErrorBody>)> {
-    verify_cap(&state, &req.cap).await?;
+    verify_cap(&state, &req.cap, CapOp::Fetch).await?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     let resp = state
@@ -162,7 +172,7 @@ async fn cred_teardown(
     State(state): State<SharedWorkerState>,
     Json(req): Json<TeardownRequest>,
 ) -> Result<Json<TeardownResponse>, (StatusCode, Json<ErrorBody>)> {
-    verify_cap(&state, &req.cap).await?;
+    verify_cap(&state, &req.cap, CapOp::Teardown).await?;
 
     let prefix = s3_prefix(&req.cap.payload.actor_omni);
     let list = state
@@ -198,11 +208,31 @@ async fn cred_teardown(
 async fn verify_cap(
     state: &SharedWorkerState,
     cap: &CapToken,
+    expected_op: CapOp,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
-    verify::check_not_expired(cap)
-        .map_err(|e| err_403(e.to_string(), "cap_expired"))?;
+    verify::check_op(cap, expected_op)
+        .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
+    verify::check_freshness(cap)
+        .map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
+    verify::check_chain_device(
+        &state.http,
+        &state.config.chain_rpc_http,
+        &state.config.registry_contract,
+        cap,
+    )
+    .await
+    .map_err(|e| match e {
+        verify::VerifyError::DeviceInactive => err_403(e.to_string(), "device_inactive"),
+        verify::VerifyError::DeviceMismatch { .. } => {
+            err_403(e.to_string(), "device_binding_mismatch")
+        }
+        verify::VerifyError::DeviceRoleMissing { .. } => {
+            err_403(e.to_string(), "device_role_missing")
+        }
+        _ => err_502(e.to_string(), "chain_rpc"),
+    })?;
     verify::check_chain_scope(
         &state.http,
         &state.config.chain_rpc_http,
@@ -212,6 +242,17 @@ async fn verify_cap(
     .await
     .map_err(|e| match e {
         verify::VerifyError::NotInScope => err_403(e.to_string(), "service_not_in_scope"),
+        _ => err_502(e.to_string(), "chain_rpc"),
+    })?;
+    verify::check_chain_k3_epoch(
+        &state.http,
+        &state.config.chain_rpc_http,
+        &state.config.epoch_contract,
+        cap,
+    )
+    .await
+    .map_err(|e| match e {
+        verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "k3_epoch_mismatch"),
         _ => err_502(e.to_string(), "chain_rpc"),
     })?;
     Ok(())
