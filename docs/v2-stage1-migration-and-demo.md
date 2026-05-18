@@ -609,6 +609,112 @@ This step proves the credential path works end-to-end **without** the sidecar da
 
 ---
 
+## §4.0 — Automated Heima Paseo bring-up via Alice sudo (paseo only)
+
+Heima Paseo's `pallet_sudo` with Alice as the sudoer lets us automate every manual step §4.1–§4.4 would otherwise require: chasing a faucet, juggling deployer-key env vars, hand-running `cast send` for `K3EpochCounter` init. **One command does the lot.**
+
+### The one-command bring-up
+
+```bash
+# Prerequisites (one-time):
+#   - agentkeys CLI built + on $PATH (see §0)
+#   - jq, forge, cast (Foundry), node 20+, npx
+#   - Reachable Heima Paseo RPC (pending Heima dev-team confirmation —
+#     see heima-open-questions.md Q13). The script fails loud with the
+#     RPC URL if unreachable.
+
+export AGENTKEYS_CHAIN=heima-paseo
+bash scripts/heima-paseo-bring-up.sh
+```
+
+What the script does, in order:
+
+| Step | What | Tool used | Time |
+|---|---|---|---|
+| 1 | Tool sanity-check (`agentkeys`, `jq`, `forge`, `cast`, `node`, `npx`) | bash | <1s |
+| 2 | Resolve `heima-paseo` chain profile + reachability-check `$RPC_HTTP` + abort if `eth_chainId == 212013` (mainnet) | `agentkeys chain show` + curl | <1s |
+| 3 | Generate throwaway EVM deployer keypair (or reuse `$HEIMA_PASEO_DEPLOYER_KEY`) | `cast wallet new` | <1s |
+| 4 | Sudo-fund deployer with 100 pHEI from Alice via `sudo.sudo(balances.forceTransfer(...))` | `scripts/heima-paseo-sudo.mjs fund` | ~6s (one Paseo block) |
+| 5 | Foundry-deploy the four stage-1 contracts | `forge script` | ~30s |
+| 6 | Persist contract addresses to `scripts/operator-workstation.env`, namespaced by `HEIMA_PASEO` | bash | <1s |
+| 7 | Print summary + suggested next-step command for `agentkeys device register` | bash | <1s |
+
+Re-run with `SKIP_FUND=1` (deployer already funded) or `SKIP_DEPLOY=1` (testing the funding flow in isolation) to skip individual phases.
+
+### The two scripts that do the work
+
+#### `scripts/heima-paseo-bring-up.sh` (bash orchestrator)
+
+End-to-end recipe; refuses to run against mainnet via the live `eth_chainId` check in step 2. Persists per-chain-profile env vars (`SCOPE_CONTRACT_ADDRESS_HEIMA_PASEO`, etc.) so multiple chains can deploy alongside each other without colliding.
+
+```bash
+bash scripts/heima-paseo-bring-up.sh
+# [1/7] Checking required tools …
+# [2/7] Reading heima-paseo chain profile …
+# [3/7] Deployer keypair …
+# [4/7] Sudo-funding 0x... with 100 pHEI from Alice …
+# [5/7] Foundry-deploying four stage-1 contracts …
+# [6/7] Persisting contract addresses to scripts/operator-workstation.env …
+# [7/7] Demo ready.
+```
+
+#### `scripts/heima-paseo-sudo.mjs` (Node + `@polkadot/api`)
+
+Wraps `pallet_sudo` for the three operations stage-1 dev workflows need most. Polkadot deps are loaded lazily so `--help` works without them installed; the bring-up script fetches them on demand via `npx --package=@polkadot/api ... -y node ...`.
+
+```bash
+node scripts/heima-paseo-sudo.mjs --help
+
+# Three subcommands:
+
+# 1. Fund any EVM address from Alice (translates EVM → Substrate account
+#    via blake2_256("evm:" || eth_address), then sudo.balances.forceTransfer)
+node scripts/heima-paseo-sudo.mjs fund \
+  --recipient 0xYOUR_DEPLOYER \
+  --amount-hei 100
+
+# 2. Sudo-wrap an arbitrary EVM call (sudo.sudo(ethereum.transact(...)))
+#    — useful for bootstrapping K3EpochCounter, force-setting scope,
+#    pre-registering a SidecarRegistry entry for testing, etc.
+node scripts/heima-paseo-sudo.mjs bootstrap \
+  --target $K3_EPOCH_COUNTER_ADDRESS \
+  --calldata 0xABI_ENCODED_set_signer_governance_args
+
+# 3. Sanity-check the sudoer + Alice's balance
+node scripts/heima-paseo-sudo.mjs whoami
+```
+
+The script enforces three guardrails so it cannot run against mainnet:
+- Refuses if `AGENTKEYS_CHAIN != heima-paseo`
+- Refuses if the live `eth_chainId` matches mainnet (212013)
+- Logs every sudo call to stderr before signing so operators can audit before re-running
+
+### Sudo-driven dev shortcuts beyond bring-up
+
+Once the bring-up script has run, you can keep using Alice's sudo to fast-forward through any K11 / K10 ceremony for testing purposes. Each shortcut is paseo-only and has the standard ceremony as the production equivalent:
+
+| Dev shortcut | Sudo command | Production equivalent |
+|---|---|---|
+| Pre-register a fake master device on `SidecarRegistry` to test worker re-verification | `node scripts/heima-paseo-sudo.mjs bootstrap --target $SIDECAR_REGISTRY_ADDRESS --calldata <ABI-encoded register_master_device(...)>` | Operator runs `agentkeys device register` (requires K11) |
+| Pre-set scope for an agent so cap-mint works without going through the K11 grant ceremony | `... --target $SCOPE_CONTRACT_ADDRESS --calldata <ABI-encoded set_scope_with_webauthn(...)>` (sudo bypasses the K11 check) | Operator runs `agentkeys scope add --agent ... --service ...` (requires K11) |
+| Force `K3EpochCounter` to a non-1 starting epoch to exercise K3-rotation paths | `... --target $K3_EPOCH_COUNTER_ADDRESS --calldata <ABI-encoded bump_epoch() called N times>` | Signer-governance multisig calls `K3EpochCounter.bump_epoch()` (one tx per rotation) |
+| Pre-fund every demo tenant (alice + bob + carol + ...) in parallel | repeat `node scripts/heima-paseo-sudo.mjs fund --recipient <addr> --amount-hei 10` per tenant | Each tenant chases the faucet independently |
+
+For CI / integration tests, wrap a sequence of these in a fixture script — the whole "set up a Paseo chain state, run the test, tear down" loop fits in ~10s instead of the ~5min the manual flow takes.
+
+### What sudo CANNOT do (production safety)
+
+| Operation | Why sudo doesn't help |
+|---|---|
+| **Any operation on Heima mainnet (chain_id=212013)** | The script refuses to connect; mainnet has no `pallet_sudo` (or the key is governance-multisig-held per [heima-open-questions.md Q15](spec/heima-open-questions.md)). |
+| **Forge a K11 WebAuthn assertion** | K11 is sealed in the operator's platform authenticator. Sudo can bypass the on-chain `K11` check (because sudo bypasses every origin check) — but the assertion itself is hardware-attested and cannot be fabricated. Sudo-pre-registering a device with `k11_cred_id=0` only works on paseo where the chain-side validator is forgiving; mainnet rejects it. |
+| **Sign as the operator's K10** | K10 is in the operator's OS keychain. Sudo can register a different K10 pubkey on chain (as if Alice were registering a device for the operator), but cannot produce a signature under the operator's real K10. |
+| **Bypass worker-side re-verification** | Workers re-read `SidecarRegistry` + `ScopeContract` + `K3EpochCounter` on every cap. Sudo can pre-populate those tables, but cannot forge a cap-token's K10 signature without the K10 itself. |
+
+In short: sudo on paseo lets you skip the operator-presence checks the protocol normally enforces, but cannot forge the cryptographic primitives the workers verify. Production safety is preserved because mainnet doesn't ship sudo.
+
+---
+
 ## §4 — Deploy Heima EVM contracts (NEW)
 
 Stage 1 ships four Solidity contracts. They live in `crates/agentkeys-chain/contracts/`:
@@ -621,6 +727,8 @@ Stage 1 ships four Solidity contracts. They live in `crates/agentkeys-chain/cont
 The deploy uses **Foundry** (recommended — Rust-native, fast, no node-modules) but Hardhat works equally well. Foundry install: `curl -L https://foundry.paradigm.xyz | bash && foundryup`.
 
 ### §4.1 — Fund the deployer wallet
+
+> **For Heima Paseo: skip this section** — `bash scripts/heima-paseo-bring-up.sh` per §4.0 above does this automatically via Alice's sudo (no faucet, no manual key juggling). The manual recipe below applies to Heima mainnet + Base + Ethereum and any chain without sudo.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -1030,6 +1138,7 @@ The flows in §1-§8 describe the **end state** of stage 1. As of the most recen
 | `$AGENTKEYS_CHAIN_PROFILE_FILE` operator-custom chain support | ✅ | — |
 | Production-vs-development chain default convention (`heima` for prod, `heima-paseo` for dev) | ✅ pinned in profile JSON via `dev_environment.is_development_default` | — |
 | Heima Paseo `dev_environment.sudo` metadata (Alice as well-known dev sudoer) | ✅ documented in `heima-paseo.json` | Live Paseo RPC URL still needed from Heima dev team (Q13 in heima-open-questions.md) |
+| `scripts/heima-paseo-bring-up.sh` + `scripts/heima-paseo-sudo.mjs` — one-command Paseo bring-up via Alice's sudo | ✅ shipped (see §4.0) | The Solidity contracts + `forge script` referenced are still in flight; the script handles their absence by emitting stub addresses + a clear warning. |
 | K11 WebAuthn enrollment in CLI | ⏳ stub (uses v1c pop_sig) | WebAuthn integration via `webauthn-rs` |
 | `agentkeys device register` subcommand | ⏳ not yet | Implementation pending |
 | `agentkeys agent create --label` with K11 prompt | ⏳ not yet | Implementation pending |
@@ -1063,3 +1172,4 @@ Operators following this doc end-to-end today will hit "not yet implemented" err
 - 2026-05-18 (fresh-start rewrite, Litentry/Heima EVM backbone) — **Full rewrite.** Dropped the stage-7 migration content (the dual-read path in `s3_backend.rs` covers it mechanically; no operator runbook needed). Replaced with a fresh-start guide that explicitly inherits required sections from the stage-7 demo (§0 prereqs, §1 init, §2 SIWE, §3 AWS) and adds the stage-1-specific work (Heima EVM chain backbone, contract deployment via Foundry, on-chain SidecarRegistry binding, sidecar daemon bring-up, K11 master-mutation gates, per-actor binding verification). Chain backbone is Litentry/Heima EVM (mainnet chain ID 212013); deploy via Foundry against `https://rpc-eth.heima.network` (or a self-hosted Frontier node from `litentry/heima:latest`).
 - 2026-05-18 (chain backbone is pluggable — ChainProfile system) — Generalised the chain backbone from a single hardcoded "Heima" target to a named-profile system per arch.md §22. New `crates/agentkeys-core/src/chain_profile.rs` + 7 built-in profile JSONs under `crates/agentkeys-core/chain-profiles/` (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil). CLI accepts `--chain <name>` + reads `$AGENTKEYS_CHAIN` / `$AGENTKEYS_CHAIN_PROFILE_FILE`. New `agentkeys chain list` + `agentkeys chain show <name>` subcommands. Demo doc §chain-reference replaced with §Chain-backbone-is-pluggable; §0 reachability check + §4 Foundry deploy + §5/§6 daemon bring-up updated to pull chain-specific values (RPC, chain ID, finality tag, gas, explorer) from the active profile via `agentkeys chain show | jq -r .<field>`. Operators with custom chains (Moonbeam, Astar, Polygon, Avalanche, any EVM-compatible substrate / L2 / L1) ship one JSON file and point `$AGENTKEYS_CHAIN_PROFILE_FILE` at it — no recompile, no env var explosion.
 - 2026-05-18 (prod-vs-dev convention + Heima Paseo sudo via Alice) — Documented the operational convention: production chain = `heima` (mainnet, no sudo); development chain = `heima-paseo` (testnet, ships `pallet_sudo` with the well-known Substrate dev account Alice as sudoer). Added typed `dev_environment.sudo` schema to `ChainProfile`; `heima-paseo.json` profile now carries the full Alice sudoer metadata (seed phrase, public key, SS58 address, invocation recipe, warnings). New `ChainProfile::development_default_name()` helper returns `Some("heima-paseo")` for downstream tooling that wants to distinguish "the production default" from "the dev default". Demo doc adds an "Alice + sudo on Heima Paseo (development-environment convenience)" sub-section with concrete recipes (pre-fund deployer, reset K3 epoch, force-register sidecar entry); arch.md §22a.5a adds the same convention + Alice/sudo background. Open questions about Heima Paseo's canonical RPC URL, faucet URL, sudoer SS58 prefix-31 encoding, and Heima mainnet sudo state filed as Q13-Q15 in [heima-open-questions.md §3a](spec/heima-open-questions.md).
+- 2026-05-18 (one-command Paseo bring-up via Alice sudo) — Shipped two scripts that turn the manual §4.1-§4.4 sequence into a single command: `bash scripts/heima-paseo-bring-up.sh`. The orchestrator does tool-sanity-check → resolve chain profile + reachability-check RPC + abort if mainnet → generate or reuse a throwaway EVM deployer → sudo-fund from Alice (100 pHEI default) → Foundry-deploy the four stage-1 contracts → persist addresses to the per-chain-namespaced env file → print summary. Underneath, `scripts/heima-paseo-sudo.mjs` wraps `pallet_sudo` for the three operations stage-1 dev workflows need most: `fund` (sudo.balances.forceTransfer Alice → EVM address, via blake2_256 EVM-to-Substrate mapping), `bootstrap` (sudo wraps `pallet_ethereum.transact` for any EVM contract call), `whoami` (sanity-check the sudoer). Polkadot deps load lazily so `--help` works without them installed; the bring-up script uses `npx --package=@polkadot/api …` to fetch them on demand. Three guardrails (refuses non-paseo `AGENTKEYS_CHAIN`, refuses live `eth_chainId == 212013`, logs every sudo call before signing) keep mainnet safe. New §4.0 added to the demo doc with full recipe, dev-shortcut table (pre-register sidecar entry, force-set scope, fast-forward K3 epoch, parallel multi-tenant funding), and explicit "what sudo CANNOT do" production-safety section.
