@@ -530,7 +530,7 @@ do_step_10() {
   printf "  chain profile       : %s\n"   "$AGENTKEYS_CHAIN" >&2
   printf "  SidecarRegistry     : %s\n"   "${registry_addr:-(not deployed)}" >&2
   printf "  smoke-test service  : %s @ s3://%s/bots/<actor_omni>/credentials/%s.enc\n" \
-    "$SMOKE_TEST_SERVICE" "$BUCKET" "$SMOKE_TEST_SERVICE" >&2
+    "$SMOKE_TEST_SERVICE" "${VAULT_BUCKET:-$BUCKET}" "$SMOKE_TEST_SERVICE" >&2
   printf "\n  Next manual steps (not yet automated — pending stage-1 CLI work):\n" >&2
   if [ -n "$registry_addr" ] && [ "$registry_addr" != "0x0" ]; then
     printf "    agentkeys --session-id %s --chain %s device register \\\\\n" \

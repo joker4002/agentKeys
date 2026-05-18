@@ -134,10 +134,21 @@ fi
 export HEIMA_PASEO_DEPLOYER_KEY="$DEPLOYER_KEY"
 
 # 4. Sudo-fund from Alice -------------------------------------------------
-# Idempotency: skip funding if the deployer already has >= 1 HEI. Re-fund
+# Idempotency: skip funding if the deployer already has >= 1 HEI, or if
+# we're in stub mode (no contracts to deploy → no gas needed). Re-fund
 # only when balance is below the threshold (chain reset, drained, etc.).
+#
+# Stub-mode auto-skip: if crates/agentkeys-chain/ doesn't exist, step 5
+# emits sentinel 0x1-0x4 addresses without ever submitting a tx — so
+# funding the deployer is wasted (and on a low-Alice testnet like Paseo
+# today, where Alice is drained to <1 HEI, requesting 100 HEI would
+# submit a tx that no validator can include because Alice can't cover
+# the value).
 if [ "${SKIP_FUND:-0}" = "1" ]; then
   echo "[4/7] Sudo-fund step SKIPPED via SKIP_FUND=1"
+elif [ ! -d "$REPO_ROOT/crates/agentkeys-chain" ]; then
+  echo "[4/7] Sudo-fund step SKIPPED — stub mode (no crates/agentkeys-chain). Deployer needs no gas for sentinel addresses."
+  echo "       Set SKIP_FUND=0 explicitly + provide crates/agentkeys-chain/ to enable real funding."
 else
   CURRENT_BAL_HEX=$(curl -sS -H 'Content-Type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBalance\",\"params\":[\"$DEPLOYER_ADDR\",\"latest\"],\"id\":1}" \
