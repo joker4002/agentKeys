@@ -140,6 +140,30 @@ shared JSON encoding is the source of truth for the canonical bytes.
 - All cargo tests pass workspace-wide.
 - Codex pass-1 + pass-2 reviews landed (8 + 7 findings respectively, all addressed in commits `cff03d0` + `89ec55c`).
 
+## Iteration 11b — deslop pass + clippy fixes
+
+**Scope**: Bounded cleanup pass on the changed-file set per Ralph Step 7.5 (no scope expansion).
+
+**What landed**:
+- New `crates/agentkeys-worker-creds/src/errors.rs` module exporting
+  shared `ErrorBody` + `ApiError` types + `err_400/err_403/err_500/err_502`
+  helpers. Both worker-creds and worker-memory (which deps on
+  worker-creds as a lib) now use it; ~28 lines of duplicate boilerplate
+  removed; cross-worker wire-shape stays consistent.
+- Clippy fixes: `.chars().last() == Some('1')` → `.ends_with('1')`
+  (3 call sites in broker + worker); removed 3 redundant closures in
+  memory handler error mappers; promoted `CapCache` + `CachedCap` to
+  `pub` to fix the proxy state visibility warning.
+
+**Errors + fixes**:
+- ai-slop-cleaner skill flagged the heima-*.sh script duplication
+  (color helpers, log functions, master-key resolution boilerplate
+  repeated across 6 scripts) but I left it alone: per the
+  operator-readability principle in `docs/cloud-setup.md` style, each
+  operator-facing script should be readable in isolation. Bash `source`
+  indirection would hurt that. ~360 LOC of cross-script duplication
+  is intentional, not slop.
+
 ## Iteration 12 — stage-2 / issue #90 foundation
 
 **Scope**: Multi-device recovery scaffold + memory-service worker per arch.md §15.2 + §17 per-data-class buckets policy.
