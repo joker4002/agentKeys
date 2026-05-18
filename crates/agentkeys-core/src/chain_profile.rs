@@ -89,6 +89,11 @@ pub struct ChainProfile {
     pub finality: FinalityConfig,
     pub gas: GasConfig,
     pub deploy: DeployConfig,
+    /// Present for dev/test chains; absent for production. See
+    /// `DevEnvironment` doc-comment for the convention around
+    /// `is_development_default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_environment: Option<DevEnvironment>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,6 +211,60 @@ pub struct DeployConfig {
     pub default_test_key: Option<String>,
 }
 
+/// Per-profile development-environment metadata. Populated for testnet /
+/// local-dev profiles; absent for production chains.
+///
+/// The `is_development_default` flag identifies the canonical chain
+/// AgentKeys operators should use when bringing up a fresh dev/test
+/// deployment. Per convention (arch.md §22a): production default is
+/// `heima` mainnet, development default is `heima-paseo` testnet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevEnvironment {
+    /// `true` for the canonical development chain (heima-paseo). Callers
+    /// pick the dev default by scanning all built-in profiles for the
+    /// one with this flag set.
+    #[serde(default)]
+    pub is_development_default: bool,
+    /// Optional Substrate-sudo metadata (`pallet_sudo` configuration).
+    /// Testnets typically expose sudo backed by the well-known dev Alice
+    /// key; production chains do not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sudo: Option<SudoConfig>,
+}
+
+/// Substrate `pallet_sudo` metadata. The sudoer is one account that can
+/// call `sudo.sudo(call)` to execute any extrinsic with root origin —
+/// bypassing every other origin check. Testnet convenience; never in
+/// production.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SudoConfig {
+    /// `true` if the runtime ships `pallet_sudo`.
+    pub enabled: bool,
+    /// Human-readable label for the sudoer (e.g. "alice" for the
+    /// well-known Substrate dev account).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sudoer_alias: String,
+    /// SURI seed phrase for the sudoer, when known. For Alice this is
+    /// the well-known dev phrase published in `subkey` docs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sudoer_seed_phrase: String,
+    /// Sudoer public key in hex (`0x...`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sudoer_public_key: String,
+    /// Sudoer's SS58 address under the generic prefix 42 (re-encode for
+    /// chain-specific prefix via `subkey` / `polkadot-js`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sudoer_ss58_generic: String,
+    /// Free-form note explaining how to invoke sudo (Polkadot.js Apps,
+    /// subxt, @polkadot/api, …) for this chain.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sudo_via: String,
+    /// Operator-facing warnings (e.g. "anyone can sign as Alice; testnet
+    /// only"). Surfaced in CLI verbose output before any sudo-related op.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
 impl ChainProfile {
     /// Load one of the built-in profiles by name. Names are case-insensitive.
     ///
@@ -273,6 +332,26 @@ impl ChainProfile {
     /// List built-in profile names — handy for `agentkeys chain list` output.
     pub fn list_builtin_names() -> Vec<&'static str> {
         BUILTIN_PROFILES.iter().map(|(n, _)| *n).collect()
+    }
+
+    /// Find the canonical development-default profile across all built-ins
+    /// (the one with `dev_environment.is_development_default == true`).
+    /// Per arch.md §22a: this is `heima-paseo`. Used by tooling that wants
+    /// to differentiate "the production default" (`DEFAULT_PROFILE`) from
+    /// "the dev default" (this method).
+    pub fn development_default_name() -> Option<&'static str> {
+        for (name, json) in BUILTIN_PROFILES {
+            if let Ok(p) = serde_json::from_str::<ChainProfile>(json) {
+                if p.dev_environment
+                    .as_ref()
+                    .map(|d| d.is_development_default)
+                    .unwrap_or(false)
+                {
+                    return Some(name);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -395,5 +474,46 @@ mod tests {
         // downstream callers should treat 0 as "not yet resolved".
         let p = ChainProfile::load_builtin("heima-paseo").unwrap();
         assert_eq!(p.chain_id, 0, "heima-paseo chain_id is auto-detect sentinel");
+    }
+
+    #[test]
+    fn heima_paseo_is_development_default_with_alice_sudo() {
+        let p = ChainProfile::load_builtin("heima-paseo").unwrap();
+        let dev = p.dev_environment.as_ref().expect("heima-paseo carries dev metadata");
+        assert!(dev.is_development_default, "heima-paseo is THE dev default");
+        let sudo = dev.sudo.as_ref().expect("heima-paseo carries sudo config");
+        assert!(sudo.enabled);
+        assert_eq!(sudo.sudoer_alias, "alice");
+        // Pin the well-known Alice public key — guards against accidental
+        // edits substituting a different dev account.
+        assert_eq!(
+            sudo.sudoer_public_key,
+            "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
+        );
+        assert!(
+            sudo.sudoer_seed_phrase.contains("//Alice"),
+            "Alice seed phrase must derive via //Alice"
+        );
+        assert!(!sudo.warnings.is_empty(), "sudo warnings must surface to operators");
+    }
+
+    #[test]
+    fn development_default_name_returns_heima_paseo() {
+        // Per arch.md §22a, heima-paseo is the canonical dev default.
+        // Adding a second dev-default profile would break this — that's
+        // the intended behavior (you can have one production default and
+        // one dev default, no more).
+        assert_eq!(ChainProfile::development_default_name(), Some("heima-paseo"));
+    }
+
+    #[test]
+    fn production_chains_carry_no_dev_environment() {
+        for name in &["heima", "base", "base-sepolia", "ethereum", "sepolia"] {
+            let p = ChainProfile::load_builtin(name).unwrap();
+            assert!(
+                p.dev_environment.is_none(),
+                "{name} is production-shaped; must NOT have dev_environment metadata"
+            );
+        }
     }
 }

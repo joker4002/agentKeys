@@ -15,7 +15,18 @@
 
 ## Chain backbone — pluggable per arch.md §22
 
-AgentKeys's chain layer is **pluggable**: the four stage-1 contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) are plain Solidity, deployable to any EVM-compatible chain. The default backbone is **Litentry/Heima** but you can switch to Base, Ethereum, Sepolia, a local Anvil node, or any operator-custom EVM chain with one flag.
+AgentKeys's chain layer is **pluggable**: the four stage-1 contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) are plain Solidity, deployable to any EVM-compatible chain.
+
+**Default conventions:**
+
+| Environment | Default chain | CLI flag / env var |
+|---|---|---|
+| **Production** | `heima` (Litentry/Heima mainnet, chain ID 212013) | Built-in default; no flag needed. `export AGENTKEYS_CHAIN=heima` for explicitness. |
+| **Development / testing** | `heima-paseo` (Heima Paseo testnet — `pallet_sudo` enabled with Alice as sudoer for dev convenience) | `export AGENTKEYS_CHAIN=heima-paseo` or `agentkeys --chain heima-paseo <cmd>` |
+| **Local unit / integration tests** | `anvil` (local Foundry node, instant finality, zero gas) | `export AGENTKEYS_CHAIN=anvil` |
+| **Cross-chain demo / multi-tenant** | per-tenant chain via `--chain <name>` | Built-in supports `heima`, `heima-paseo`, `base`, `base-sepolia`, `ethereum`, `sepolia`, `anvil`; custom chains via `AGENTKEYS_CHAIN_PROFILE_FILE`. |
+
+You can switch to Base, Ethereum, Sepolia, a local Anvil node, or any operator-custom EVM chain with one flag.
 
 ### Selecting a chain backbone
 
@@ -70,13 +81,86 @@ agentkeys chain show
 
 | Profile | Chain ID | Chain kind | Default block tag | Gas token | Notes |
 |---|---|---|---|---|---|
-| `heima` | 212013 | substrate-frontier | `latest` (instant finality) | HEI | Default. Heima parachain mainnet — Substrate + Frontier; HashedAddressMapping makes EVM accounts first-class on-chain identities. |
-| `heima-paseo` | auto-detect | substrate-frontier | `latest` | pHEI | Heima Paseo testnet. Chain ID encoded as `0` in the profile (sentinel for "call `eth_chainId` at startup"). |
+| `heima` | 212013 | substrate-frontier | `latest` (instant finality) | HEI | **Production default.** Heima parachain mainnet — Substrate + Frontier; HashedAddressMapping makes EVM accounts first-class on-chain identities. No sudo. |
+| `heima-paseo` | auto-detect | substrate-frontier | `latest` | pHEI | **Development default.** Heima Paseo testnet. Chain ID encoded as `0` in the profile (sentinel for "call `eth_chainId` at startup"). Ships `pallet_sudo` with **Alice** as sudoer — see §"Alice + sudo on Heima Paseo" below. RPC URL pending Heima dev-team confirmation (see [heima-open-questions.md Q13](spec/heima-open-questions.md)). |
 | `base` | 8453 | optimism-l2 | `safe` (5-10 min L1 batch) | ETH | Coinbase L2. Tiered finality — use `safe` for cap-mint, `finalized` for high-value payments. |
 | `base-sepolia` | 84532 | optimism-l2 | `safe` | ETH | Base testnet. Faucet: coinbase.com/faucets/base-ethereum-sepolia-faucet |
 | `ethereum` | 1 | ethereum-l1 | `finalized` (~12.8 min) | ETH | Highest finality assurance; default tag is `finalized` because Ethereum mainnet gas is expensive. |
 | `sepolia` | 11155111 | ethereum-l1 | `finalized` | SepoliaETH | Ethereum testnet. Faucet: alchemy.com/faucets/ethereum-sepolia |
 | `anvil` | 31337 | local-dev | `latest` (instant) | ETH | Local Foundry dev node. Default test key + zero gas — use for tests + demo bring-up before pointing at a live chain. |
+
+### Alice + sudo on Heima Paseo (development-environment convenience)
+
+Heima Paseo's runtime ships `pallet_sudo` with the **well-known Substrate dev account Alice** as the sudoer. This is standard Substrate-testnet practice — Alice's keypair is intentionally public (every Substrate developer knows the seed phrase) so that anyone running a dev workflow can immediately have a god-mode account on the testnet for unblocking common bring-up tasks.
+
+```
+Alice's well-known dev key:
+  Seed phrase: bottom drive obey lake curtain smoke basket hold race lonely fit walk//Alice
+  Public key:  0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d
+  SS58 (generic prefix 42): 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+  SS58 on Heima (prefix 31): (re-encode of same pubkey — confirm with Kai per Q14)
+```
+
+**The chain profile surfaces this via `dev_environment.sudo`:**
+
+```bash
+agentkeys --chain heima-paseo chain show | jq '.dev_environment'
+# {
+#   "is_development_default": true,
+#   "sudo": {
+#     "enabled": true,
+#     "sudoer_alias": "alice",
+#     "sudoer_seed_phrase": "bottom drive obey lake curtain smoke basket hold race lonely fit walk//Alice",
+#     "sudoer_public_key": "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
+#     "sudoer_ss58_generic": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+#     "sudo_via": "polkadot.js apps Developer → Sudo, OR subxt CLI, OR @polkadot/api JS — NOT Foundry/cast (sudo is a Substrate extrinsic, not an EVM tx) ...",
+#     "warnings": [
+#       "Anyone can sign as Alice — these dev keys are public. Use only on Paseo testnet, never on mainnet.",
+#       "Sudoer details + invocation recipe still need confirmation from Heima dev team (see Q14 in heima-open-questions.md)."
+#     ]
+#   }
+# }
+```
+
+**What you'd use Alice's sudo for during stage-1 dev bring-up:**
+
+| Task | Sudo recipe | Production equivalent |
+|---|---|---|
+| Pre-fund your contract-deployer wallet from Alice | `sudo.sudo(balances.forceTransfer(Alice → $DEPLOYER, 10 HEI))` via Polkadot.js Apps | Operator buys / withdraws HEI from a CEX |
+| Reset `K3EpochCounter` for K3-rotation testing | `sudo.sudo(system.setStorage(K3EpochCounter::current_epoch → N))` | Signer-governance multisig calls `K3EpochCounter.bump_epoch()` |
+| Force-bootstrap a `SidecarRegistry` entry without going through K11 ceremony | `sudo.sudo(ethereum.transact(...registerMasterDevice(...)...))` | Operator runs `agentkeys device register` with K11 |
+| Whitelist a test EVM account for special privileges | depends on runtime hooks | n/a on mainnet |
+
+**How to call sudo (Substrate-side, NOT Foundry):**
+
+```bash
+# Option 1: Polkadot.js Apps (easiest)
+# Open https://polkadot.js.org/apps/?rpc=<heima-paseo-substrate-wss>#/sudo
+# Pick the call to wrap (e.g., balances.forceTransfer); submit.
+
+# Option 2: subxt CLI (Rust)
+subxt tx sudo sudo --call '...' --suri "//Alice" --url wss://<paseo-substrate-wss>
+
+# Option 3: @polkadot/api (JavaScript)
+import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
+const api = await ApiPromise.create({ provider: new WsProvider('wss://<paseo-substrate-wss>') });
+const alice = new Keyring({ type: 'sr25519' }).addFromUri('//Alice');
+await api.tx.sudo.sudo(api.tx.balances.forceTransfer(alice.address, deployer, amount)).signAndSend(alice);
+```
+
+**What Alice + sudo do NOT do:**
+
+- They do NOT run on Heima mainnet (`heima` profile) — production has no sudo. The `dev_environment` field is absent from the `heima` profile by design.
+- They do NOT replace the K10 / K11 device-key ceremonies. AgentKeys CLI flows (`agentkeys device register`, `agentkeys scope add`, etc.) still go through the normal cap-mint + on-chain ceremony. Sudo is a per-runtime root-bypass, not an AgentKeys auth path.
+- They do NOT work via Foundry / `cast` / web3.js. Sudo is a Substrate extrinsic; only Substrate-aware toolchains (Polkadot.js Apps, subxt, @polkadot/api, subkey) can construct it.
+
+**Open questions** (need confirmation from Heima dev team — see [heima-open-questions.md §3a](spec/heima-open-questions.md)):
+
+- The canonical Heima Paseo HTTP + WSS RPC URL (the two speculative URLs in the `heima-paseo` profile fail SSL as of 2026-05-18).
+- The Heima Paseo EVM chain ID (likely encoded as `HEIMA_PARA_ID` in the paseo runtime — the profile's `chain_id: 0` is an auto-detect sentinel).
+- Confirmation that Alice is actually the sudoer (vs a Heima-specific override).
+- Heima Paseo's faucet URL.
+- Heima mainnet sudo state — confirmed absent OR governance-multisig-held.
 
 ### Operator-custom chain profiles
 
@@ -944,6 +1028,8 @@ The flows in §1-§8 describe the **end state** of stage 1. As of the most recen
 | `--chain <name>` flag + `ChainProfile::resolve` (7 built-in profiles: heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil) | ✅ `crates/agentkeys-core/src/chain_profile.rs` + `chain-profiles/*.json` | — |
 | `agentkeys chain list` + `agentkeys chain show <name>` subcommands | ✅ | — |
 | `$AGENTKEYS_CHAIN_PROFILE_FILE` operator-custom chain support | ✅ | — |
+| Production-vs-development chain default convention (`heima` for prod, `heima-paseo` for dev) | ✅ pinned in profile JSON via `dev_environment.is_development_default` | — |
+| Heima Paseo `dev_environment.sudo` metadata (Alice as well-known dev sudoer) | ✅ documented in `heima-paseo.json` | Live Paseo RPC URL still needed from Heima dev team (Q13 in heima-open-questions.md) |
 | K11 WebAuthn enrollment in CLI | ⏳ stub (uses v1c pop_sig) | WebAuthn integration via `webauthn-rs` |
 | `agentkeys device register` subcommand | ⏳ not yet | Implementation pending |
 | `agentkeys agent create --label` with K11 prompt | ⏳ not yet | Implementation pending |
@@ -976,3 +1062,4 @@ Operators following this doc end-to-end today will hit "not yet implemented" err
 - 2026-05-18 (incremental implementation 1) — Added "What landed in this commit" section for `actor_omni` + v2 envelope + dual-read + CLI flag changes.
 - 2026-05-18 (fresh-start rewrite, Litentry/Heima EVM backbone) — **Full rewrite.** Dropped the stage-7 migration content (the dual-read path in `s3_backend.rs` covers it mechanically; no operator runbook needed). Replaced with a fresh-start guide that explicitly inherits required sections from the stage-7 demo (§0 prereqs, §1 init, §2 SIWE, §3 AWS) and adds the stage-1-specific work (Heima EVM chain backbone, contract deployment via Foundry, on-chain SidecarRegistry binding, sidecar daemon bring-up, K11 master-mutation gates, per-actor binding verification). Chain backbone is Litentry/Heima EVM (mainnet chain ID 212013); deploy via Foundry against `https://rpc-eth.heima.network` (or a self-hosted Frontier node from `litentry/heima:latest`).
 - 2026-05-18 (chain backbone is pluggable — ChainProfile system) — Generalised the chain backbone from a single hardcoded "Heima" target to a named-profile system per arch.md §22. New `crates/agentkeys-core/src/chain_profile.rs` + 7 built-in profile JSONs under `crates/agentkeys-core/chain-profiles/` (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil). CLI accepts `--chain <name>` + reads `$AGENTKEYS_CHAIN` / `$AGENTKEYS_CHAIN_PROFILE_FILE`. New `agentkeys chain list` + `agentkeys chain show <name>` subcommands. Demo doc §chain-reference replaced with §Chain-backbone-is-pluggable; §0 reachability check + §4 Foundry deploy + §5/§6 daemon bring-up updated to pull chain-specific values (RPC, chain ID, finality tag, gas, explorer) from the active profile via `agentkeys chain show | jq -r .<field>`. Operators with custom chains (Moonbeam, Astar, Polygon, Avalanche, any EVM-compatible substrate / L2 / L1) ship one JSON file and point `$AGENTKEYS_CHAIN_PROFILE_FILE` at it — no recompile, no env var explosion.
+- 2026-05-18 (prod-vs-dev convention + Heima Paseo sudo via Alice) — Documented the operational convention: production chain = `heima` (mainnet, no sudo); development chain = `heima-paseo` (testnet, ships `pallet_sudo` with the well-known Substrate dev account Alice as sudoer). Added typed `dev_environment.sudo` schema to `ChainProfile`; `heima-paseo.json` profile now carries the full Alice sudoer metadata (seed phrase, public key, SS58 address, invocation recipe, warnings). New `ChainProfile::development_default_name()` helper returns `Some("heima-paseo")` for downstream tooling that wants to distinguish "the production default" from "the dev default". Demo doc adds an "Alice + sudo on Heima Paseo (development-environment convenience)" sub-section with concrete recipes (pre-fund deployer, reset K3 epoch, force-register sidecar entry); arch.md §22a.5a adds the same convention + Alice/sudo background. Open questions about Heima Paseo's canonical RPC URL, faucet URL, sudoer SS58 prefix-31 encoding, and Heima mainnet sudo state filed as Q13-Q15 in [heima-open-questions.md §3a](spec/heima-open-questions.md).

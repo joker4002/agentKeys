@@ -1319,7 +1319,7 @@ The architecture is intentionally pluggable on six axes. Each axis has a default
 
 The chain layer is the most commonly-switched pluggable surface (operators frequently move between testnets / staging chains / production chains; some operators run multiple chains in parallel for tenant-isolation reasons). v2 ships a named-profile system so the cost of switching is one flag, not a recompile.
 
-### 22a.1 Resolution order
+### 22a.1 Resolution order + production-vs-development convention
 
 Every chain-aware component (CLI, daemon, broker, workers) resolves the active profile via `ChainProfile::resolve(...)` in this order — first match wins:
 
@@ -1327,6 +1327,16 @@ Every chain-aware component (CLI, daemon, broker, workers) resolves the active p
 2. `--chain <name>` CLI flag → load a built-in by name
 3. `$AGENTKEYS_CHAIN` env var → load a built-in by name
 4. Built-in default → `heima`
+
+**Convention:**
+
+| Environment | Default profile | Why |
+|---|---|---|
+| **Production** | `heima` (Litentry/Heima mainnet, chain ID 212013) | No sudo; chain submissions in sovereign mode bind to operator's `current_master_wallet`; production-grade finality via parachain GRANDPA. The built-in default. |
+| **Development** | `heima-paseo` (Heima Paseo testnet) | `pallet_sudo` enabled with the well-known Substrate dev account **Alice** as the sudoer. Anyone can sign as Alice and call `sudo.sudo(call)` for testnet bring-up convenience (pre-fund deployer, force-bump K3 epoch, etc.). Found programmatically via `ChainProfile::development_default_name()`. |
+| **Local tests** | `anvil` | Local Foundry node; instant finality; zero gas. Used for CI + unit/integration tests. |
+
+The development-vs-production split is encoded directly in the profile JSON via the optional `dev_environment` field. Production-shaped profiles (`heima`, `base`, `ethereum`, …) omit it; testnets / local-dev profiles set `dev_environment.is_development_default = true` (only `heima-paseo` carries this flag among built-ins). The `dev_environment.sudo` sub-object documents the Substrate sudoer for the chain, surfaced to operators via `agentkeys chain show <name> | jq .dev_environment`. See §22a.5a below for the full Alice/sudo background.
 
 ### 22a.2 Profile schema
 
@@ -1407,6 +1417,36 @@ The `chain_kind` enum is read by chain-aware components to pick the right finali
 | `optimism-l2` | Block-tag-based with tiered finality: `latest` sequencer (~2s) → `safe` L1-posted (~5-10 min) → `finalized` Ethereum-signed (~15-20 min) | EIP-1559; default to `safe` to avoid sequencer reorg windows | Base, Optimism, Mode, Zora |
 | `arbitrum` | Similar to OP-stack but with Arbitrum-specific gas model | Pre-2316 nitro gas; some calls deferred to L1 | Arbitrum, Arbitrum Nova |
 | `local-dev` | Instant finality | Zero-gas; ships default test key | Anvil, Hardhat |
+
+### 22a.5a Alice + sudo on dev-default chains (heima-paseo)
+
+The `heima-paseo` profile carries `dev_environment.sudo` metadata documenting that the Heima Paseo runtime ships `pallet_sudo` with the well-known Substrate dev account **Alice** as the sudoer. This is standard Substrate testnet practice — Alice's keypair is intentionally public so any developer can immediately have a god-mode account on the testnet for unblocking common bring-up tasks. Production chains (`heima`, `base`, `ethereum`) carry no sudo metadata by design.
+
+Alice's well-known dev key (subkey docs):
+
+| Property | Value |
+|---|---|
+| Seed phrase | `bottom drive obey lake curtain smoke basket hold race lonely fit walk//Alice` |
+| Public key | `0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d` |
+| SS58 (generic prefix 42) | `5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY` |
+| SS58 on Heima (prefix 31) | re-encode of the same pubkey under prefix 31 — needs confirmation from Heima dev team |
+
+**What Alice + sudo do for AgentKeys dev workflows:**
+
+- Pre-fund a contract deployer wallet without chasing faucet tokens (`sudo.sudo(balances.forceTransfer(Alice → deployer, X HEI))`).
+- Force-set `K3EpochCounter.current_epoch` to a non-1 value for K3-rotation testing.
+- Force-register a `SidecarRegistry` entry without going through the K11 ceremony, for testing worker re-verification under controlled inputs.
+- Force-deploy or upgrade contracts as if the runtime owner.
+
+**What Alice + sudo do NOT do:**
+
+- They do NOT run on Heima mainnet (`heima` profile). Production has no sudo — confirmed absent or held by a governance multisig (pending [heima-open-questions.md Q15](plans/v2-issues/../../spec/heima-open-questions.md#q15-heima-mainnet--confirm-sudo-is-not-in-the-runtime)).
+- They do NOT replace AgentKeys's K10 / K11 ceremonies. `agentkeys device register`, `agentkeys scope add`, etc. still go through the normal cap-mint + on-chain ceremony on Paseo too. Sudo is a Substrate root-bypass, not an AgentKeys auth path.
+- They do NOT work via Foundry / `cast` / web3.js. Sudo is a Substrate extrinsic; only Substrate-aware toolchains (Polkadot.js Apps, subxt, @polkadot/api, subkey) can construct it.
+
+**The Substrate↔EVM bridge for sudo:** when you want sudo to call an EVM contract function (e.g., bootstrap `SidecarRegistry` from Alice as if msg.sender were the runtime root), the sudo extrinsic wraps `pallet_ethereum.transact(...)` — the Substrate-side primitive that submits an EVM transaction. This is the only mechanism that lets a Substrate root sign bypass interact with the Frontier EVM side.
+
+Full background (educational + open questions for the Heima dev team) lives in [heima-open-questions.md §3a](heima-open-questions.md#3a-chain-backbone--evm-paseo-sudo-added-2026-05-18-after-heima-dev-info-handoff).
 
 ### 22a.6 Explorer integration target
 
