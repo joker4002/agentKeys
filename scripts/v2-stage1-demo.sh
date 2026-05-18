@@ -83,7 +83,7 @@ fi
 # Bash-3.2 (macOS default) does NOT support `local -n`, so step counters
 # live as plain globals.
 STEP_NUM=0
-STEP_TOTAL=9
+STEP_TOTAL=10
 CURRENT_STEP_NAME=""
 
 step()    { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
@@ -309,8 +309,21 @@ do_step_6() {
   ok "session JWT persisted at $session_file"
 }
 
-# ─── Step 7: capture wallet + actor_omni, smoke-test S3 envelope ────────────
+# ─── Step 7: ensure v2 bucket policy is applied ─────────────────────────────
 do_step_7() {
+  step "Ensure v2 bucket policy is applied"
+  # Idempotency: the underlying script already checks if the v2 markers
+  # (Sid AllowDataRolePutOwnCredentialsV2 + tag key agentkeys_actor_omni)
+  # are present and skips if so. We delegate the check there so the
+  # criterion lives in one place.
+  bash "$REPO_ROOT/scripts/bucket-policy-v2-migrate.sh" \
+    || die "bucket-policy-v2-migrate.sh failed — see output above. The policy migration
+   needs admin perms; check `aws sts get-caller-identity` reports
+   agentkeys-admin, not agentkeys-broker / agentkeys-daemon."
+}
+
+# ─── Step 8: capture wallet + actor_omni, smoke-test S3 envelope ────────────
+do_step_8() {
   step "Smoke-test S3 envelope (store + read)"
   if [ "$SKIP_SMOKE" = "1" ]; then
     skip "--skip-smoke set"
@@ -351,10 +364,26 @@ do_step_7() {
     skip "s3://$BUCKET/$s3_key already exists — round-tripping read only"
   else
     info "writing $SMOKE_TEST_SERVICE credential to s3://$BUCKET/$s3_key"
+    # The CLI's S3 backend engages the OIDC AssumeRoleWithWebIdentity
+    # path ONLY when both --broker-url AND AGENTKEYS_DATA_ROLE_ARN are
+    # set (crates/agentkeys-cli/src/lib.rs:420 mint_s3_credentials).
+    # Without them, the SDK falls back to the caller's direct IAM creds
+    # (admin) which the v2 bucket policy correctly denies — only the
+    # assumed agentkeys-data-role has s3:PutObject on credentials/*.
+    #
+    # The env file declares DATA_ROLE_ARN; the CLI reads it as
+    # AGENTKEYS_DATA_ROLE_ARN. Bridge the rename here so the env file
+    # stays compatible with both names.
+    : "${AGENTKEYS_DATA_ROLE_ARN:=${DATA_ROLE_ARN:-}}"
+    [ -z "${AGENTKEYS_DATA_ROLE_ARN:-}" ] && die "DATA_ROLE_ARN not in operator-workstation.env — required for OIDC AssumeRole"
+    export AGENTKEYS_DATA_ROLE_ARN
+    local broker_url="${OIDC_ISSUER:?OIDC_ISSUER required for --broker-url}"
     local store_out
     store_out=$(agentkeys --session-id "$SESSION_ID" \
                   --credential-backend=s3 --envelope-version=v2 \
-                  --bucket "$BUCKET" --signer-url "$BACKEND_URL" \
+                  --bucket "$BUCKET" \
+                  --broker-url "$broker_url" \
+                  --signer-url "$BACKEND_URL" \
                   --omni-account "$actor_omni" \
                   store "$SMOKE_TEST_SERVICE" "$SMOKE_TEST_SECRET" 2>&1) \
       || die "store failed (output: $store_out)
@@ -386,10 +415,17 @@ do_step_7() {
       || die "expected object at s3://$BUCKET/$s3_key after store, but it's missing"
   fi
   info "reading $SMOKE_TEST_SERVICE credential back"
+  # Same OIDC AssumeRole plumbing as the write — keep --broker-url +
+  # AGENTKEYS_DATA_ROLE_ARN engaged so the read goes through the same
+  # tagged session.
+  : "${AGENTKEYS_DATA_ROLE_ARN:=${DATA_ROLE_ARN:-}}"; export AGENTKEYS_DATA_ROLE_ARN
+  local broker_url="${OIDC_ISSUER:?OIDC_ISSUER required for --broker-url}"
   local round_trip
   round_trip=$(agentkeys --session-id "$SESSION_ID" \
                  --credential-backend=s3 --envelope-version=v2 \
-                 --bucket "$BUCKET" --signer-url "$BACKEND_URL" \
+                 --bucket "$BUCKET" \
+                 --broker-url "$broker_url" \
+                 --signer-url "$BACKEND_URL" \
                  --omni-account "$actor_omni" \
                  read "$SMOKE_TEST_SERVICE" 2>&1) \
     || die "read failed: $round_trip"
@@ -400,8 +436,8 @@ do_step_7() {
   fi
 }
 
-# ─── Step 8: chain bring-up (contracts) ─────────────────────────────────────
-do_step_8() {
+# ─── Step 9: chain bring-up (contracts) ─────────────────────────────────────
+do_step_9() {
   step "Chain backbone bring-up ($AGENTKEYS_CHAIN)"
   if [ "$SKIP_DEPLOY" = "1" ]; then
     skip "--skip-deploy set"
@@ -448,8 +484,8 @@ do_step_8() {
   ok "contracts deployed; addresses appended to $ENV_FILE"
 }
 
-# ─── Step 9: final summary ──────────────────────────────────────────────────
-do_step_9() {
+# ─── Step 10: final summary ─────────────────────────────────────────────────
+do_step_10() {
   step "Summary + next steps"
   local profile_uc registry_addr session_file
   profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
@@ -484,21 +520,22 @@ main() {
     "$SESSION_ID" "${AGENTKEYS_CHAIN:-(unset, will default to heima-paseo)}" >&2
   printf "  steps %d..%d (of %d)\n\n" "$FROM_STEP" "$TO_STEP" "$STEP_TOTAL" >&2
 
-  in_scope 1 && do_step_1
-  in_scope 2 && do_step_2
+  in_scope 1  && do_step_1
+  in_scope 2  && do_step_2
   # Steps 3+ require operator-workstation.env to be sourced — re-source
   # for partial-runs that start at step >= 3.
   if [ "$FROM_STEP" -ge 3 ] && [ -f "$ENV_FILE" ]; then
     set -a; . "$ENV_FILE"; set +a
     : "${AGENTKEYS_CHAIN:=heima-paseo}"; export AGENTKEYS_CHAIN
   fi
-  in_scope 3 && do_step_3
-  in_scope 4 && do_step_4
-  in_scope 5 && do_step_5
-  in_scope 6 && do_step_6
-  in_scope 7 && do_step_7
-  in_scope 8 && do_step_8
-  in_scope 9 && do_step_9
+  in_scope 3  && do_step_3
+  in_scope 4  && do_step_4
+  in_scope 5  && do_step_5
+  in_scope 6  && do_step_6
+  in_scope 7  && do_step_7
+  in_scope 8  && do_step_8
+  in_scope 9  && do_step_9
+  in_scope 10 && do_step_10
 
   return 0
 }
