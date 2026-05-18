@@ -521,6 +521,15 @@ do_step_9() {
     # so the orchestrator continues in non-interactive runs. Interactive
     # operators still get the prompt; Ctrl-C still aborts via SIGINT.
     read -r _ || true
+    # Pressing Enter on the mainnet prompt IS operator consent for
+    # the actual deploy that follows. Auto-propagate as MAINNET_CONFIRM=1
+    # to bring-up.sh so the operator doesn't have to also set the env
+    # var separately. Direct `bash scripts/heima-bring-up.sh` callers
+    # (bypassing the orchestrator) still need to set MAINNET_CONFIRM=1
+    # explicitly — that case has no Press-Enter gate.
+    if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
+      export MAINNET_CONFIRM=1
+    fi
   fi
 
   # Pass MAINNET_CONFIRM through if set (operator opt-in for the real
