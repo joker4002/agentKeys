@@ -46,8 +46,14 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_PROXY_SESSION_JWT")]
     proxy_session_jwt: Option<String>,
 
+    // backend is required for all non-proxy modes (pairing, recover,
+    // MCP stdio, etc.). Proxy mode bypasses it via run_proxy_mode + the
+    // explicit `args.proxy` early-return in main(). Marking it Optional
+    // so `agentkeys-daemon --proxy ...` doesn't fail clap parsing when
+    // AGENTKEYS_BACKEND is unset; the non-proxy branches still .expect
+    // it (with a clear error message).
     #[arg(long, env = "AGENTKEYS_BACKEND")]
-    backend: String,
+    backend: Option<String>,
 
     #[arg(long, env = "AGENTKEYS_SESSION")]
     session: Option<String>,
@@ -135,7 +141,15 @@ async fn main() -> anyhow::Result<()> {
     // 1. Apply kernel hardening
     let _hardening_report = hardening::apply_hardening()?;
 
-    let backend = Arc::new(MockHttpClient::new(&args.backend));
+    // Non-proxy modes require --backend (clap made it Optional so that
+    // --proxy doesn't need it; we re-validate here).
+    let backend_url = args.backend.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--backend (or AGENTKEYS_BACKEND env) required for non-proxy modes \
+             (pair, recover, MCP stdio, init). For cap-token proxy mode pass --proxy."
+        )
+    })?;
+    let backend = Arc::new(MockHttpClient::new(&backend_url));
 
     if let Some(ref broker_url) = args.broker_url {
         info!(broker_url = %broker_url, "broker URL configured; AWS-cred mints will route through broker");
@@ -177,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             // RECOVER VIA MASTER APPROVAL — resolve --parent here, not at
             // startup (codex P3).
-            let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
+            let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref()).await?;
             let result = pairing::run_recover_flow(
                 &*backend,
                 agent_identity,
@@ -312,7 +326,7 @@ async fn main() -> anyhow::Result<()> {
                     // --session / --recover --method paths don't crash startup.
                     // `--parent` binds the pair request to a specific master so
                     // the backend refuses approval from any other master.
-                    let parent_wallet = resolve_parent_if_set(&args.backend, args.parent.as_deref()).await?;
+                    let parent_wallet = resolve_parent_if_set(&backend_url, args.parent.as_deref()).await?;
                     let result = pairing::run_pair_flow(
                         &*backend,
                         args.pair_timeout,
@@ -362,7 +376,11 @@ async fn run_signer_flow_init(args: &Args) -> anyhow::Result<init_flow::InitResu
             "agentkeys-daemon --init-email/--init-oauth2-google requires --broker-url (or AGENTKEYS_BROKER_URL)"
         )
     })?;
-    let signer_url = args.signer_url.clone().unwrap_or_else(|| args.backend.clone());
+    let signer_url = args.signer_url.clone().unwrap_or_else(|| {
+        args.backend.clone().expect(
+            "--signer-url or --backend (or AGENTKEYS_SIGNER_URL/AGENTKEYS_BACKEND env) required for signer-flow init"
+        )
+    });
     let poll_timeout = Duration::from_secs(args.init_poll_timeout_seconds);
 
     if let Some(ref email) = args.init_email {

@@ -672,4 +672,46 @@ mod tests {
         let s = format!("0x{}", "A".repeat(64));
         assert_eq!(normalize_hex32(&s).unwrap(), "a".repeat(64));
     }
+
+    #[test]
+    fn cap_error_unauthorized_returns_401() {
+        let resp = CapError::Unauthorized("missing".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn cap_error_operator_mismatch_returns_403() {
+        let resp = CapError::OperatorMismatch.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn cap_error_device_role_missing_returns_403() {
+        let resp = CapError::DeviceRoleMissing.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn cap_error_device_revoked_returns_403() {
+        let resp = CapError::DeviceRevoked.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn cap_error_service_not_in_scope_returns_403() {
+        let resp = CapError::ServiceNotInScope.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn cap_error_chain_rpc_returns_502() {
+        let resp = CapError::ChainRpc("RPC unreachable".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn cap_error_invalid_input_returns_400() {
+        let resp = CapError::InvalidInput("bad omni".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }
