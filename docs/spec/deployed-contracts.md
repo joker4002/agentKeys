@@ -6,12 +6,36 @@ Same addresses are mirrored into [`scripts/operator-workstation.env`](../../scri
 
 ## Heima mainnet (chain_id = 212013)
 
-| Contract | Address | Bytecode | Explorer |
-|---|---|---|---|
-| `AgentKeysScope` | [`0x14C23B5D1cE20c094af643a20e6b0972dAD12aa8`](https://heima.statescan.io/address/0x14C23B5D1cE20c094af643a20e6b0972dAD12aa8) | 3146 bytes | statescan |
-| `SidecarRegistry` | [`0x76D574a107727bE87fc1422661A030FEFda70786`](https://heima.statescan.io/address/0x76D574a107727bE87fc1422661A030FEFda70786) | 3301 bytes | statescan |
-| `K3EpochCounter` | [`0x8396dEc50ff755d6DE7728DABB00Be2eFBCdf4dF`](https://heima.statescan.io/address/0x8396dEc50ff755d6DE7728DABB00Be2eFBCdf4dF) | 687 bytes | statescan |
-| `CredentialAudit` | [`0x1801ded1a4FBD8c9224Ab18B9EcbB293B8674c06`](https://heima.statescan.io/address/0x1801ded1a4FBD8c9224Ab18B9EcbB293B8674c06) | 1421 bytes | statescan |
+| Contract | Address | Bytecode |
+|---|---|---|
+| `AgentKeysScope` | `0x14C23B5D1cE20c094af643a20e6b0972dAD12aa8` | 3146 bytes |
+| `SidecarRegistry` | `0x76D574a107727bE87fc1422661A030FEFda70786` | 3301 bytes |
+| `K3EpochCounter` | `0x8396dEc50ff755d6DE7728DABB00Be2eFBCdf4dF` | 687 bytes |
+| `CredentialAudit` | `0x1801ded1a4FBD8c9224Ab18B9EcbB293B8674c06` | 1421 bytes |
+
+**Explorer note**: [`heima.statescan.io`](https://heima.statescan.io/) is a Substrate-side explorer — it indexes pallet extrinsics + events but does NOT decode EVM contract calls or bytecode. Verifying EVM contracts on Heima today goes via direct RPC, not the explorer. The recipes:
+
+```bash
+# Bytecode presence (eth_getCode):
+curl -sS -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"eth_getCode","params":["0x14C23B5D1cE20c094af643a20e6b0972dAD12aa8","latest"],"id":1}' \
+  https://rpc.heima-parachain.heima.network | jq -r '.result' | head -c 40
+# → non-"0x" output = contract bytecode present
+
+# View function (cast call, zero gas):
+cast call 0x76D574a107727bE87fc1422661A030FEFda70786 "ROLE_CAP_MINT()(uint8)" \
+  --rpc-url https://rpc.heima-parachain.heima.network
+# → 1
+```
+
+Or run the one-shot health check:
+
+```bash
+AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh
+# → 13 checks across all 4 contracts; exits 0 on all-pass
+```
+
+Future stage-2/3 work: agentkeys-specific indexing on top of Litentry's fork of `subscan-essentials` ([backend](https://github.com/litentry/subscan-essentials) + [UI](https://github.com/litentry/subscan-essentials-ui-react)) per arch.md §22a.6 — this will surface contract calls/events at the explorer level. Until that ships, RPC is the source of truth.
 
 **Deploy metadata**:
 - Deployer wallet (EVM): `0xdE644936D5B7d5d42032fd08bbA42Fbbfd6663Bc`

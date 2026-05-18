@@ -1333,7 +1333,7 @@ The flows in §1-§8 describe the **end state** of stage 1. As of the most recen
 | Heima Paseo `dev_environment.sudo` metadata (Alice as well-known dev sudoer) | ✅ documented in `heima-paseo.json` | Live Paseo RPC URL still needed from Heima dev team (Q13 in heima-open-questions.md) |
 | `scripts/heima-bring-up.sh` + `scripts/heima-paseo-sudo.mjs` — one-command Paseo bring-up via Alice's sudo | ✅ shipped (see §4.0) | The Solidity contracts + `forge script` referenced are still in flight; the script handles their absence by emitting stub addresses + a clear warning. |
 | K11 WebAuthn enrollment in CLI | ⏳ stub (uses v1c pop_sig) | WebAuthn integration via `webauthn-rs` |
-| `agentkeys device register` subcommand | ⏳ not yet | Implementation pending |
+| `agentkeys device register` (Rust CLI subcommand) / `scripts/heima-device-register.sh` (stage-1 entry) | ✅ **shipped** — bash entry submits real `registerMasterDevice(...)` tx on Heima mainnet via `cast send`. Idempotent (checks `registeredAt > 0` on chain), env-var-resolves registry address, dry-run mode for inputs preview. Live-verified: tx `0x8f1d7cca5710c2859b4f8b942c36df41d3c6b8b02a862d1f506285a6176c988b` in block 9620483 registered the operator's master device (tier=1, roles=7, isActive=true). | Rust CLI subcommand is a future polish — same logic, embedded entry point |
 | `agentkeys agent create --label` with K11 prompt | ⏳ not yet | Implementation pending |
 | `agentkeys scope add/remove` with K11 prompt | ⏳ not yet | Implementation pending |
 | Sidecar daemon (`agentkeys-daemon` localhost proxy + cap-mint + cache + SSE drop events) | ⏳ partial (init flow only; no proxy) | Implementation pending |
