@@ -3,7 +3,6 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
@@ -11,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::SharedMemoryWorkerState;
 use agentkeys_worker_creds::envelope;
+use agentkeys_worker_creds::errors::{err_400, err_403, err_500, err_502, ApiError};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken};
 
 pub fn build_router(state: SharedMemoryWorkerState) -> Router {
@@ -74,16 +74,10 @@ pub struct TeardownResponse {
     pub keys_deleted: usize,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ErrorBody {
-    pub error: String,
-    pub reason: &'static str,
-}
-
 async fn memory_put(
     State(state): State<SharedMemoryWorkerState>,
     Json(req): Json<PutRequest>,
-) -> Result<Json<PutResponse>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<Json<PutResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -116,7 +110,7 @@ async fn memory_put(
 async fn memory_get(
     State(state): State<SharedMemoryWorkerState>,
     Json(req): Json<GetRequest>,
-) -> Result<Json<GetResponse>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<Json<GetResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
@@ -151,7 +145,7 @@ async fn memory_get(
 async fn memory_teardown(
     State(state): State<SharedMemoryWorkerState>,
     Json(req): Json<TeardownRequest>,
-) -> Result<Json<TeardownResponse>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<Json<TeardownResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Teardown).await?;
 
     let prefix = s3_prefix(&req.cap.payload.actor_omni);
@@ -189,7 +183,7 @@ async fn verify_cap(
     state: &SharedMemoryWorkerState,
     cap: &CapToken,
     expected_op: CapOp,
-) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+) -> Result<(), ApiError> {
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
     verify::check_op(cap, expected_op)
@@ -203,7 +197,7 @@ async fn verify_cap(
         cap,
     )
     .await
-    .map_err(|e| err_403_or_502(e))?;
+    .map_err(err_403_or_502)?;
     verify::check_chain_scope(
         &state.http,
         &state.config.chain_rpc_http,
@@ -211,7 +205,7 @@ async fn verify_cap(
         cap,
     )
     .await
-    .map_err(|e| err_403_or_502(e))?;
+    .map_err(err_403_or_502)?;
     verify::check_chain_k3_epoch(
         &state.http,
         &state.config.chain_rpc_http,
@@ -219,11 +213,11 @@ async fn verify_cap(
         cap,
     )
     .await
-    .map_err(|e| err_403_or_502(e))?;
+    .map_err(err_403_or_502)?;
     Ok(())
 }
 
-fn err_403_or_502(e: verify::VerifyError) -> (StatusCode, Json<ErrorBody>) {
+fn err_403_or_502(e: verify::VerifyError) -> ApiError {
     match e {
         verify::VerifyError::DeviceInactive
         | verify::VerifyError::DeviceMismatch { .. }
@@ -250,19 +244,6 @@ fn s3_prefix(actor_omni: &str) -> String {
         "bots/{}/memory/",
         actor_omni.trim_start_matches("0x").to_lowercase()
     )
-}
-
-fn err_400(msg: String, reason: &'static str) -> (StatusCode, Json<ErrorBody>) {
-    (StatusCode::BAD_REQUEST, Json(ErrorBody { error: msg, reason }))
-}
-fn err_403(msg: String, reason: &'static str) -> (StatusCode, Json<ErrorBody>) {
-    (StatusCode::FORBIDDEN, Json(ErrorBody { error: msg, reason }))
-}
-fn err_500(msg: String, reason: &'static str) -> (StatusCode, Json<ErrorBody>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error: msg, reason }))
-}
-fn err_502(msg: String, reason: &'static str) -> (StatusCode, Json<ErrorBody>) {
-    (StatusCode::BAD_GATEWAY, Json(ErrorBody { error: msg, reason }))
 }
 
 #[cfg(test)]

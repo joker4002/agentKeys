@@ -19,6 +19,7 @@
 //! replaces with mTLS-derived KEK from the signer enclave.
 
 pub mod envelope;
+pub mod errors;
 pub mod handlers;
 pub mod state;
 pub mod verify;

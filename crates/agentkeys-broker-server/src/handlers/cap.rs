@@ -384,7 +384,7 @@ fn parse_device_entry(raw: &str) -> Result<DeviceEntry, CapError> {
     // Take last 2 hex chars (uint8) of the roles word.
     let roles = u8::from_str_radix(&roles_hex[62..64], 16).unwrap_or(0);
     let registered_at = u64::from_str_radix(&registered_hex[48..64], 16).unwrap_or(0);
-    let revoked = revoked_hex.trim_start_matches('0').chars().last() == Some('1');
+    let revoked = revoked_hex.trim_start_matches('0').ends_with('1');
     Ok(DeviceEntry {
         operator_omni,
         actor_omni,
@@ -469,11 +469,7 @@ fn strip_0x_lc(s: &str) -> String {
 }
 
 fn parse_bool_result(s: &str) -> bool {
-    s.trim_start_matches("0x")
-        .trim_start_matches('0')
-        .chars()
-        .last()
-        == Some('1')
+    s.trim_start_matches("0x").trim_start_matches('0').ends_with('1')
 }
 
 fn parse_u64_result(s: &str) -> Result<u64, CapError> {

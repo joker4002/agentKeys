@@ -37,12 +37,12 @@ use tokio::sync::RwLock;
 /// In-memory cap-token cache. Key = `(operator_omni, actor_omni, service, op)`.
 /// Value = (cached_response_json, fetched_at, expires_at).
 #[derive(Debug, Default)]
-struct CapCache {
+pub struct CapCache {
     entries: HashMap<String, CachedCap>,
 }
 
 #[derive(Debug, Clone)]
-struct CachedCap {
+pub struct CachedCap {
     body: serde_json::Value,
     fetched_at: Instant,
     expires_at_unix: u64,

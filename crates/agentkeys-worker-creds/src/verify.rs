@@ -251,7 +251,7 @@ fn parse_device_entry(raw: &str) -> Result<OnChainDevice, VerifyError> {
     let actor_omni = hex[64..128].to_lowercase();
     let roles = u8::from_str_radix(&hex[(4 * 64 + 62)..(4 * 64 + 64)], 16).unwrap_or(0);
     let registered_at = u64::from_str_radix(&hex[(5 * 64 + 48)..(5 * 64 + 64)], 16).unwrap_or(0);
-    let revoked = hex[6 * 64..7 * 64].trim_start_matches('0').chars().last() == Some('1');
+    let revoked = hex[6 * 64..7 * 64].trim_start_matches('0').ends_with('1');
     Ok(OnChainDevice {
         operator_omni,
         actor_omni,
@@ -264,9 +264,7 @@ fn parse_device_entry(raw: &str) -> Result<OnChainDevice, VerifyError> {
 fn parse_bool(raw: &str) -> bool {
     raw.trim_start_matches("0x")
         .trim_start_matches('0')
-        .chars()
-        .last()
-        == Some('1')
+        .ends_with('1')
 }
 
 fn parse_u64(raw: &str) -> Result<u64, VerifyError> {
