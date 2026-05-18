@@ -406,7 +406,7 @@ sequenceDiagram
   participant Chain as Chain
 
   Note over CLI,KC: Stage 0 — generate K10 locally (no network)
-  Op->>CLI: agentkeys init --email alice@x.com
+  Op->>CLI: agentkeys init --email demo-1@bots.litentry.org
   CLI->>KC: persist (D_priv, D_pub) = K10
 
   Note over CLI,Brk: Stage 1 — identity ceremony (master only)
@@ -515,7 +515,7 @@ The agent's `pop_sig` is sufficient on its own (no WebAuthn equivalent) because 
 ```
 ON NEW MASTER:
 1. Stage 0: generate fresh (D_priv', D_pub') = K10' at daemon startup
-2. CLI: agentkeys init --email alice@x.com  (or any identity)
+2. CLI: agentkeys init --email demo-1@bots.litentry.org  (or any identity at an SES-verified domain)
 3. Run stages 1–3 per §9 — WebAuthn enrollment binds NEW K11' on new hardware
 4. Cross-device confirmation: broker observes pre-existing K11_old; requires
    WebAuthn get() against K11_old (push notification to existing master)

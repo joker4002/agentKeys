@@ -284,12 +284,42 @@ export AGENTKEYS_CHAIN=base-sepolia
 RPC_HTTP=$(agentkeys chain show | jq -r .rpc.http)
 EXPECTED_CHAIN_ID=$(agentkeys chain show | jq -r .chain_id)
 
-curl -sS -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-  "$RPC_HTTP" | jq -r '.result' | \
-  xargs -I{} printf 'eth_chainId = %s (decimal %d, expected %d)\n' \
-    {} $((16#$(echo {} | sed 's/^0x//'))) "$EXPECTED_CHAIN_ID"
-# → eth_chainId = 0x14a34 (decimal 84532, expected 84532)
+hex=$(curl -sS -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+        "$RPC_HTTP" | jq -r '.result')
+dec=$((hex))   # bash/zsh parse the "0x..." prefix natively in arithmetic context
+verdict=$([ "$dec" = "$EXPECTED_CHAIN_ID" ] && echo OK || echo MISMATCH)
+printf 'eth_chainId = %s (decimal %d, expected %d) [%s]\n' \
+  "$hex" "$dec" "$EXPECTED_CHAIN_ID" "$verdict"
+# → eth_chainId = 0x14a34 (decimal 84532, expected 84532) [OK]
+```
+
+> **Why this shape and not a one-line `xargs`:** an earlier version of this
+> snippet piped through `xargs -I{} printf ... $((16#$(echo {} | sed ...)))`
+> — that's a trap because `$((...))` is expanded by the **outer** shell
+> *before* xargs substitutes `{}`, so zsh sees the literal `{` and bails
+> with "bad math expression: illegal character". Also, do **not** name the
+> verdict variable `status` — `$status` is read-only in zsh (alias for `$?`).
+> The for-loop form above sidesteps both pitfalls.
+
+To check both Heima networks at once:
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+for spec in "heima:212013:https://rpc.heima-parachain.heima.network" \
+            "heima-paseo:2013:https://rpc.paseo-parachain.heima.network"; do
+  IFS=: read -r name expected url <<<"$spec"
+  hex=$(curl -sS -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+    "$url" | jq -r '.result')
+  dec=$((hex))
+  verdict=$([ "$dec" = "$expected" ] && echo OK || echo MISMATCH)
+  printf '%-12s eth_chainId=%-8s decimal=%-7d expected=%-7d [%s]\n' \
+    "$name" "$hex" "$dec" "$expected" "$verdict"
+done
+# Expected:
+#   heima        eth_chainId=0x33c2d  decimal=212013  expected=212013  [OK]
+#   heima-paseo  eth_chainId=0x7dd    decimal=2013    expected=2013    [OK]
 ```
 
 If the curl errors or the decimal doesn't match the profile's `chain_id`, fix the RPC endpoint first. For Heima specifically, try Polkadot.js Apps against the `substrate_wss` to confirm the parachain is reachable at all; for Base / Ethereum / Sepolia try a different public RPC (chainlist.org has the full list).
@@ -345,15 +375,31 @@ RPC_HTTP=$(agentkeys chain show | jq -r .rpc.http)
 EXPECTED_CHAIN_ID=$(agentkeys chain show | jq -r .chain_id)
 echo "Using chain $AGENTKEYS_CHAIN at $RPC_HTTP (chain_id=$EXPECTED_CHAIN_ID)"
 
-curl -sS -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-  "$RPC_HTTP" | jq -r '.result' | \
-  xargs -I{} printf 'eth_chainId = %s (decimal %d, expected %d)\n' \
-    {} $((16#$(echo {} | sed 's/^0x//'))) "$EXPECTED_CHAIN_ID"
-# → eth_chainId = 0x33c4d (decimal 212013, expected 212013)   for heima
-# → eth_chainId = 0x14a34 (decimal 84532,  expected 84532)    for base-sepolia
-# → eth_chainId = 0x7a69  (decimal 31337,  expected 31337)    for anvil
+hex=$(curl -sS -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+        "$RPC_HTTP" | jq -r '.result')
+dec=$((hex))   # bash/zsh parse "0x..." natively in arithmetic context
+verdict=$([ "$dec" = "$EXPECTED_CHAIN_ID" ] && echo OK || echo MISMATCH)
+printf 'eth_chainId = %s (decimal %d, expected %d) [%s]\n' \
+  "$hex" "$dec" "$EXPECTED_CHAIN_ID" "$verdict"
+# → eth_chainId = 0x33c2d (decimal 212013, expected 212013) [OK]   for heima
+# → eth_chainId = 0x7dd   (decimal 2013,   expected 2013)   [OK]   for heima-paseo
+# → eth_chainId = 0x14a34 (decimal 84532,  expected 84532)  [OK]   for base-sepolia
+# → eth_chainId = 0x7a69  (decimal 31337,  expected 31337)  [OK]   for anvil
 ```
+
+> **Two pitfalls to avoid** in this snippet — both real failures from
+> earlier doc revisions:
+>
+> 1. `xargs -I{} printf ... $((16#$(echo {} | sed ...)))` looks tidy but is
+>    broken: `$((...))` is expanded by the **outer** shell *before* xargs
+>    substitutes `{}`, so zsh sees the literal `{` and bails with `bad math
+>    expression: illegal character: {`. The for-loop / direct `$((hex))`
+>    form above sidesteps it — `0x...` parses natively in arithmetic
+>    context, no `16#` prefix needed.
+> 2. Do **not** name the verdict variable `status` — `$status` is read-only
+>    in zsh (an alias for `$?`). The script will die with `read-only
+>    variable: status` on assignment.
 
 If the curl errors or the decimal doesn't match the profile's `chain_id`, fix the RPC endpoint first. For Heima specifically, try Polkadot.js Apps against `agentkeys chain show | jq -r .rpc.substrate_wss` to confirm the parachain is reachable at all, then debug the EVM endpoint. For Base / Ethereum, pick a different public RPC from [chainlist.org](https://chainlist.org/) and point a custom profile at it via `AGENTKEYS_CHAIN_PROFILE_FILE`.
 
@@ -377,7 +423,7 @@ sequenceDiagram
   participant Heima as Heima EVM
 
   Note over CLI,KC: Stage 0 — K10 generation (local, no network)
-  Op->>CLI: agentkeys init --email alice@demo.example
+  Op->>CLI: agentkeys init --email demo-1@bots.litentry.org
   CLI->>KC: persist (D_priv, D_pub) = K10
 
   Note over CLI,Brk: Stage 1 — identity ceremony (inherited)
@@ -434,7 +480,18 @@ Stage 1 inserts a WebAuthn binding ceremony between identity-verify and SIWE. Th
 # After stage-1 lands the WebAuthn integration in the CLI, the init flow
 # will pause here for biometric confirmation. Today's CLI skips this step
 # and falls back to the v1c pop_sig shape — see arch.md §10.1 Q7 fix.
-agentkeys init --email alice@demo.example
+#
+# DO NOT invoke `agentkeys init --email` directly — use the automated
+# wrapper from §1.1 (`scripts/agentkeys-init-email-demo.sh`). The wrapper
+# routes to an SES-verified `demo-N@bots.litentry.org` alias, polls the
+# S3 inbound prefix for the magic link, and POSTs the verify call for
+# you. Placeholder domains like `@demo.example` or `@example.com` are
+# RFC 2606 reserved (undeliverable), so the broker accepts the request
+# but the magic link is sent into the void and the CLI polls forever.
+#
+# The equivalent un-automated invocation would look like this — shown
+# for reference only, NOT for copy-paste:
+agentkeys init --email demo-1@bots.litentry.org
 # CLI prompts:
 #   "Touch the sensor on your YubiKey / look at the camera / press Touch ID"
 #   "[platform authenticator dialog appears]"
