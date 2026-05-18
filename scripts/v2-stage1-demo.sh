@@ -309,17 +309,39 @@ do_step_6() {
   ok "session JWT persisted at $session_file"
 }
 
-# ─── Step 7: ensure v2 bucket policy is applied ─────────────────────────────
+# ─── Step 7: provision vault infrastructure (arch.md §17 per-data-class) ────
 do_step_7() {
-  step "Ensure v2 bucket policy is applied"
-  # Idempotency: the underlying script already checks if the v2 markers
-  # (Sid AllowDataRolePutOwnCredentialsV2 + tag key agentkeys_actor_omni)
-  # are present and skips if so. We delegate the check there so the
-  # criterion lives in one place.
-  bash "$REPO_ROOT/scripts/bucket-policy-v2-migrate.sh" \
-    || die "bucket-policy-v2-migrate.sh failed — see output above. The policy migration
-   needs admin perms; check `aws sts get-caller-identity` reports
-   agentkeys-admin, not agentkeys-broker / agentkeys-daemon."
+  step "Provision vault infra (bucket + role + policy)"
+  # Per arch.md §17 (per-data-class buckets) + §17.2 (per-bucket IAM
+  # role): credentials and email MUST live in separate S3 buckets with
+  # separate IAM roles, so a bug widening one role doesn't widen all
+  # data classes. This step composes four idempotent sub-scripts:
+  #
+  #   1. provision-vault-bucket.sh    — create $VAULT_BUCKET if missing,
+  #                                      block public access, default SSE-S3.
+  #   2. provision-vault-role.sh       — create agentkeys-vault-role with
+  #                                      OIDC trust + credentials-only inline.
+  #   3. apply-vault-bucket-policy.sh  — apply v2 PrincipalTag policy to
+  #                                      the vault bucket.
+  #   4. cleanup-mail-bucket-policy.sh — revert $MAIL_BUCKET policy to
+  #                                      email-only (drop stray credentials
+  #                                      grants from the pre-split migration).
+  #
+  # Each one checks "is this already done?" before acting; re-running
+  # the orchestrator is a no-op once all four are clean.
+  info "[7.1/7.4] vault bucket"
+  bash "$REPO_ROOT/scripts/provision-vault-bucket.sh" \
+    || die "provision-vault-bucket.sh failed — see output above"
+  info "[7.2/7.4] vault role"
+  bash "$REPO_ROOT/scripts/provision-vault-role.sh" >/dev/null \
+    || die "provision-vault-role.sh failed — see output above"
+  info "[7.3/7.4] vault bucket policy"
+  bash "$REPO_ROOT/scripts/apply-vault-bucket-policy.sh" \
+    || die "apply-vault-bucket-policy.sh failed — see output above"
+  info "[7.4/7.4] mail bucket policy cleanup"
+  bash "$REPO_ROOT/scripts/cleanup-mail-bucket-policy.sh" \
+    || die "cleanup-mail-bucket-policy.sh failed — see output above"
+  ok "vault infra ready: bucket=$VAULT_BUCKET role=$VAULT_ROLE_ARN"
 }
 
 # ─── Step 8: capture wallet + actor_omni, smoke-test S3 envelope ────────────
@@ -359,29 +381,29 @@ do_step_8() {
   info "session_wallet      = $wallet"
   info "agentkeys_actor_omni = $actor_omni"
 
+  # Target the dedicated vault bucket (arch.md §17 per-data-class).
+  # The CLI's S3 backend engages OIDC AssumeRoleWithWebIdentity ONLY
+  # when both --broker-url AND AGENTKEYS_DATA_ROLE_ARN are set
+  # (crates/agentkeys-cli/src/lib.rs:420 mint_s3_credentials). The CLI
+  # reads the env var name AGENTKEYS_DATA_ROLE_ARN but we point it at
+  # the VAULT role — the var name is the CLI's contract; the actual
+  # role is per-data-class. Eventually the CLI will take an explicit
+  # `--data-class vault` flag and read the matching role var, but for
+  # stage 1 we re-use AGENTKEYS_DATA_ROLE_ARN with vault as the value.
+  local vault_bucket="${VAULT_BUCKET:?VAULT_BUCKET required (operator-workstation.env)}"
+  local vault_role="${VAULT_ROLE_ARN:?VAULT_ROLE_ARN required (operator-workstation.env)}"
+  local broker_url="${OIDC_ISSUER:?OIDC_ISSUER required for --broker-url}"
+  export AGENTKEYS_DATA_ROLE_ARN="$vault_role"
+
   local s3_key="bots/$actor_omni/credentials/$SMOKE_TEST_SERVICE.enc"
-  if aws s3 ls "s3://$BUCKET/$s3_key" --region "$REGION" >/dev/null 2>&1; then
-    skip "s3://$BUCKET/$s3_key already exists — round-tripping read only"
+  if aws s3 ls "s3://$vault_bucket/$s3_key" --region "$REGION" >/dev/null 2>&1; then
+    skip "s3://$vault_bucket/$s3_key already exists — round-tripping read only"
   else
-    info "writing $SMOKE_TEST_SERVICE credential to s3://$BUCKET/$s3_key"
-    # The CLI's S3 backend engages the OIDC AssumeRoleWithWebIdentity
-    # path ONLY when both --broker-url AND AGENTKEYS_DATA_ROLE_ARN are
-    # set (crates/agentkeys-cli/src/lib.rs:420 mint_s3_credentials).
-    # Without them, the SDK falls back to the caller's direct IAM creds
-    # (admin) which the v2 bucket policy correctly denies — only the
-    # assumed agentkeys-data-role has s3:PutObject on credentials/*.
-    #
-    # The env file declares DATA_ROLE_ARN; the CLI reads it as
-    # AGENTKEYS_DATA_ROLE_ARN. Bridge the rename here so the env file
-    # stays compatible with both names.
-    : "${AGENTKEYS_DATA_ROLE_ARN:=${DATA_ROLE_ARN:-}}"
-    [ -z "${AGENTKEYS_DATA_ROLE_ARN:-}" ] && die "DATA_ROLE_ARN not in operator-workstation.env — required for OIDC AssumeRole"
-    export AGENTKEYS_DATA_ROLE_ARN
-    local broker_url="${OIDC_ISSUER:?OIDC_ISSUER required for --broker-url}"
+    info "writing $SMOKE_TEST_SERVICE credential to s3://$vault_bucket/$s3_key"
     local store_out
     store_out=$(agentkeys --session-id "$SESSION_ID" \
                   --credential-backend=s3 --envelope-version=v2 \
-                  --bucket "$BUCKET" \
+                  --bucket "$vault_bucket" \
                   --broker-url "$broker_url" \
                   --signer-url "$BACKEND_URL" \
                   --omni-account "$actor_omni" \
@@ -411,19 +433,29 @@ do_step_8() {
 
    Skip this step for now (continue with chain steps):
      bash scripts/v2-stage1-demo.sh --from-step 8 --skip-smoke"
-    aws s3 ls "s3://$BUCKET/$s3_key" --region "$REGION" >/dev/null \
-      || die "expected object at s3://$BUCKET/$s3_key after store, but it's missing"
+    aws s3 ls "s3://$vault_bucket/$s3_key" --region "$REGION" >/dev/null \
+      || die "expected object at s3://$vault_bucket/$s3_key after store, but it's missing"
   fi
-  info "reading $SMOKE_TEST_SERVICE credential back"
-  # Same OIDC AssumeRole plumbing as the write — keep --broker-url +
-  # AGENTKEYS_DATA_ROLE_ARN engaged so the read goes through the same
-  # tagged session.
-  : "${AGENTKEYS_DATA_ROLE_ARN:=${DATA_ROLE_ARN:-}}"; export AGENTKEYS_DATA_ROLE_ARN
-  local broker_url="${OIDC_ISSUER:?OIDC_ISSUER required for --broker-url}"
+
+  # Cross-contamination assertion: the credential MUST live in the
+  # vault bucket only — NOT in the mail bucket. This is the
+  # arch.md §17 invariant ("per-data-class buckets") expressed as a
+  # runtime test. If the policy / env vars regress and credentials
+  # land in the mail bucket again, this catches it.
+  if aws s3 ls "s3://$MAIL_BUCKET/$s3_key" --region "$REGION" >/dev/null 2>&1; then
+    die "ARCH VIOLATION (arch.md §17): credential blob ALSO landed in s3://$MAIL_BUCKET/$s3_key.
+   Per-data-class bucket separation is broken. Likely cause: the CLI
+   silently fell back to the mail bucket (env var AGENTKEYS_BUCKET=
+   pointing at MAIL_BUCKET instead of VAULT_BUCKET), or the smoke-test
+   script regressed and re-used \$BUCKET. Investigate before continuing."
+  fi
+  ok "cross-contamination check: credential is in vault, NOT in mail (arch.md §17 invariant)"
+
+  info "reading $SMOKE_TEST_SERVICE credential back from vault bucket"
   local round_trip
   round_trip=$(agentkeys --session-id "$SESSION_ID" \
                  --credential-backend=s3 --envelope-version=v2 \
-                 --bucket "$BUCKET" \
+                 --bucket "$vault_bucket" \
                  --broker-url "$broker_url" \
                  --signer-url "$BACKEND_URL" \
                  --omni-account "$actor_omni" \

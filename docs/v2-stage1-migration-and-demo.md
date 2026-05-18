@@ -667,40 +667,31 @@ Run [cloud-setup.md §3 + §4](cloud-setup.md) end-to-end if you haven't already
 
 ### §2.2 — v2 bucket policy change (one PrincipalTag rename)
 
-Update the bucket policy to gate on `agentkeys_actor_omni` (stable across K3 rotation) instead of `agentkeys_user_wallet`. The policy template:
+Stage 1 provisions a **dedicated vault bucket + IAM role** for credentials per arch.md §17 (per-data-class buckets) + §17.2 (per-bucket IAM role). Credentials must NOT share a bucket with inbound mail — S3 exposes encryption / lifecycle / replication / CloudTrail at the bucket level only, so folding data classes collapses blast radii. The four idempotent scripts that do this:
+
+| # | Script | What it does | Idempotency marker |
+|---|---|---|---|
+| 1 | [`scripts/provision-vault-bucket.sh`](../scripts/provision-vault-bucket.sh) | Create `$VAULT_BUCKET` (`agentkeys-vault-${ACCOUNT_ID}`), block public access, default SSE-S3 | `s3api head-bucket` returns 200 |
+| 2 | [`scripts/provision-vault-role.sh`](../scripts/provision-vault-role.sh) | Create `agentkeys-vault-role` (OIDC trust + 3-statement inline for `bots/<actor_omni>/credentials/*` only) | `iam get-role` returns 200 |
+| 3 | [`scripts/apply-vault-bucket-policy.sh`](../scripts/apply-vault-bucket-policy.sh) | Apply v2 PrincipalTag policy to `$VAULT_BUCKET` (gates on `agentkeys_actor_omni` via the `Null` operator) | `Sid VaultPolicyV2` present |
+| 4 | [`scripts/cleanup-mail-bucket-policy.sh`](../scripts/cleanup-mail-bucket-policy.sh) | Revert `$MAIL_BUCKET` policy to email-only (drop any stray credentials grants from the pre-split migration) | No `credentials` substring in policy |
+
+The orchestrator in §0.0 calls all four as step 7. Or you can run them manually:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
 awsp agentkeys-admin
 set -a; source scripts/operator-workstation.env; set +a
 
-aws s3api put-bucket-policy --bucket "$BUCKET" \
-  --policy "$(jq -n --arg bucket "$BUCKET" '{
-    Version: "2012-10-17",
-    Statement: [
-      {
-        Sid: "ActorOmniPrefixIsolation",
-        Effect: "Allow",
-        Principal: { AWS: "*" },
-        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
-        Resource: [
-          "arn:aws:s3:::\($bucket)",
-          "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_actor_omni}/*"
-        ],
-        Condition: {
-          StringEquals: {
-            "aws:PrincipalTag/agentkeys_actor_omni": "${aws:PrincipalTag/agentkeys_actor_omni}"
-          },
-          StringNotEquals: {
-            "aws:PrincipalTag/agentkeys_actor_omni": ""
-          }
-        }
-      }
-    ]
-  }')"
+bash scripts/provision-vault-bucket.sh        # → creates s3://$VAULT_BUCKET
+bash scripts/provision-vault-role.sh          # → creates agentkeys-vault-role
+bash scripts/apply-vault-bucket-policy.sh     # → vault bucket gets v2 policy
+bash scripts/cleanup-mail-bucket-policy.sh    # → mail bucket policy reverts to email-only
 ```
 
-The bucket policy ALSO has to be set per-data-class once memory / audit / email / payment-audit buckets are provisioned (arch.md §17). For stage 1 we ship `$VAULT_BUCKET` only; the rest land in stage 2.
+**Why not the design doc's `Principal: { AWS: "*" }` shape with `StringNotEquals` tag-presence check?** cloud-setup.md §4.3 warns negated string operators on missing context keys evaluate as TRUE — a JWT carrying no tags claim would silently bypass the check. The scripts above use `Principal: $vault_role_arn` + `Null: { "aws:PrincipalTag/agentkeys_actor_omni": "false" }` (the safer §4.4 pattern). Same isolation guarantee, no false-allow on missing tags.
+
+The bucket policy ALSO has to be set per-data-class once memory / audit / email / payment-audit buckets are provisioned. For stage 1 we ship `$VAULT_BUCKET` only; the rest land in stage 2. **The credentials-service WORKER (arch.md §15.1) — Lambda + mTLS to signer for encrypt/decrypt — is deferred to stage 2 (tracked in [issue #91](https://github.com/litentry/agentKeys/issues/91)).** Today the CLI does client-side encrypt + direct S3 PUT through the OIDC-assumed `agentkeys-vault-role`; the worker will take over the encrypt/decrypt step without changing the envelope shape.
 
 ### §2.3 — OIDC JWT claim addition
 
@@ -736,36 +727,67 @@ Before deploying any chain contracts, verify the v2 S3 path + envelope works end
 ```bash
 # === ON OPERATOR WORKSTATION ===
 export AGENTKEYS_SESSION_ID=alice
-
-# Smoke-test v2 path. AGENTKEYS_OMNI_ACCOUNT is the actor_omni from §1.3.
+# AGENTKEYS_OMNI_ACCOUNT is the actor_omni from §1.3.
 export AGENTKEYS_OMNI_ACCOUNT="$ALICE_ACTOR_OMNI"
 
+# Point the CLI at the dedicated VAULT bucket + role (arch.md §17).
+# AGENTKEYS_DATA_ROLE_ARN is the CLI's env-var contract for "the role
+# my session should AssumeRoleWithWebIdentity into" — we set it to
+# the VAULT role for credentials operations (when stage 2 ships the
+# memory-service, that data class will use AGENTKEYS_MEMORY_ROLE_ARN
+# or an equivalent per-class arg).
+export AGENTKEYS_DATA_ROLE_ARN="$VAULT_ROLE_ARN"
+
 agentkeys --credential-backend=s3 --envelope-version=v2 \
-  --bucket "$BUCKET" \
+  --bucket "$VAULT_BUCKET" \
+  --broker-url "$OIDC_ISSUER" \
   --signer-url "$AGENTKEYS_SIGNER_URL" \
   --omni-account "$AGENTKEYS_OMNI_ACCOUNT" \
   --verbose \
   store openrouter sk-or-v1-DEMO-FAKE-DO-NOT-USE-IN-PROD
 
 # Verbose output should show:
-# [verbose] PUT s3://...vault.../bots/3a4f.../credentials/openrouter.enc (envelope=V2)
+# [verbose] PUT s3://agentkeys-vault-.../bots/3a4f.../credentials/openrouter.enc (envelope=V2)
 
-# Confirm the object landed at the actor_omni-keyed path
-aws s3 ls "s3://$BUCKET/bots/$ALICE_ACTOR_OMNI/credentials/"
+# Confirm the object landed at the actor_omni-keyed path in the VAULT bucket
+aws s3 ls "s3://$VAULT_BUCKET/bots/$ALICE_ACTOR_OMNI/credentials/"
 # 2026-05-18 ...  openrouter.enc
+
+# Cross-contamination check (arch.md §17 invariant): credential must
+# NOT also be in the mail bucket. If this list is non-empty, the
+# per-data-class separation has regressed.
+aws s3 ls "s3://$MAIL_BUCKET/bots/$ALICE_ACTOR_OMNI/credentials/" 2>/dev/null \
+  | head -1 \
+  && echo "ARCH VIOLATION: credential leaked into mail bucket" \
+  || echo "ok — credential only in vault, not in mail"
 
 # Round-trip the read
 agentkeys --credential-backend=s3 --envelope-version=v2 \
-  --bucket "$BUCKET" \
+  --bucket "$VAULT_BUCKET" \
+  --broker-url "$OIDC_ISSUER" \
   --signer-url "$AGENTKEYS_SIGNER_URL" \
   --omni-account "$AGENTKEYS_OMNI_ACCOUNT" \
   read openrouter
 # sk-or-v1-DEMO-FAKE-DO-NOT-USE-IN-PROD
 ```
 
-If the write fails with `AccessDenied`, the bucket policy in §2.2 didn't take effect — the broker still emits the v2 PrincipalTag but the bucket only allows v1. Re-check the policy with `aws s3api get-bucket-policy --bucket "$BUCKET"`.
+If the write fails with `AccessDenied` or `Backend unreachable`, the most likely cause is the broker host hasn't been redeployed with the v2 OIDC-JWT shape — the JWT must carry `agentkeys_actor_omni` in `principal_tags` for STS to tag the assumed session. Verify with:
 
-This step proves the credential path works end-to-end **without** the sidecar daemon or the chain contracts — useful for isolating problems later.
+```bash
+SESSION_TOKEN=$(jq -r .token ~/.agentkeys/alice/session.json)
+JWT=$(curl -sS -X POST -H "Authorization: Bearer $SESSION_TOKEN" \
+  https://$BROKER_HOST/v1/mint-oidc-jwt | jq -r .jwt)
+# Decode payload with base64url padding (macOS base64 needs padding):
+payload=$(echo "$JWT" | cut -d. -f2)
+pad=$(( (4 - ${#payload} % 4) % 4 ))
+printf '%s%s' "$payload" "$(printf '=%.0s' $(seq 1 $pad))" | base64 -d | jq '.["https://aws.amazon.com/tags"]'
+# Expect principal_tags AND transitive_tag_keys to include
+# agentkeys_actor_omni. If only agentkeys_user_wallet is there, the
+# broker is on the pre-v2 code; redeploy via:
+#   ssh $BROKER_HOST 'bash /path/to/agentKeys/scripts/setup-broker-host.sh --ref claude/stupefied-darwin-cfafd6'
+```
+
+This step proves the credential path works end-to-end **against the dedicated vault bucket** — useful for isolating problems before the chain contracts or sidecar daemon land.
 
 ---
 
@@ -1306,8 +1328,9 @@ The flows in §1-§8 describe the **end state** of stage 1. As of the most recen
 | Sidecar daemon (`agentkeys-daemon` localhost proxy + cap-mint + cache + SSE drop events) | ⏳ partial (init flow only; no proxy) | Implementation pending |
 | Broker `/v1/cap/*` cap-mint endpoints | ⏳ not yet | Implementation pending |
 | Heima EVM contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) | ⏳ not yet | Solidity sources + Foundry deploy script |
-| OIDC JWT `agentkeys_actor_omni` claim | ⏳ partial (CLI surfaces it; broker mint not yet emitting it) | Broker change |
-| credentials-service worker (Lambda) | ⏳ not yet | Lambda + dual-envelope decrypt (already in `s3_backend.rs` client-side) |
+| OIDC JWT `agentkeys_actor_omni` claim (broker `/v1/mint-oidc-jwt`) | ✅ shipped (`handlers/oidc.rs build_oidc_jwt_claims`; emits both v1 + v2 tag keys in `principal_tags` + `transitive_tag_keys`) | Re-deploy the remote broker via `bash scripts/setup-broker-host.sh --ref <branch>` to pick up the change |
+| Per-data-class bucket separation (`$VAULT_BUCKET` distinct from `$MAIL_BUCKET`, `agentkeys-vault-role` distinct from `agentkeys-data-role`) per arch.md §17 | ✅ shipped | `scripts/provision-vault-bucket.sh` + `scripts/provision-vault-role.sh` + `scripts/apply-vault-bucket-policy.sh` + `scripts/cleanup-mail-bucket-policy.sh`; orchestrator step 7 |
+| credentials-service worker (Lambda + mTLS to signer) | ⏳ **DEFERRED to stage 2** — tracked in [issue #91](https://github.com/litentry/agentKeys/issues/91) | Today the CLI does client-side encrypt + direct S3 PUT through the OIDC-assumed `agentkeys-vault-role`. The worker (arch.md §15.1) will take over the encrypt/decrypt step without changing the envelope shape. |
 
 Operators following this doc end-to-end today will hit "not yet implemented" errors at §1.4, §4 (no contracts), §5 (no device register subcommand), §6 (no daemon), §7 (no scope subcommand with K11). The doc is the **target** flow — track [issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md) for the rolling implementation status.
 
@@ -1330,6 +1353,7 @@ Operators following this doc end-to-end today will hit "not yet implemented" err
 - 2026-05-17 (initial migration + new-feature demo) — Drafted alongside the v2 stage 1 issue; covered migration breaks to stage 7 demo §0-§5 plus a §1-§11 new-feature demo with a Codex addendum at the end.
 - 2026-05-18 (incremental implementation 1) — Added "What landed in this commit" section for `actor_omni` + v2 envelope + dual-read + CLI flag changes.
 - 2026-05-18 (fresh-start rewrite, Litentry/Heima EVM backbone) — **Full rewrite.** Dropped the stage-7 migration content (the dual-read path in `s3_backend.rs` covers it mechanically; no operator runbook needed). Replaced with a fresh-start guide that explicitly inherits required sections from the stage-7 demo (§0 prereqs, §1 init, §2 SIWE, §3 AWS) and adds the stage-1-specific work (Heima EVM chain backbone, contract deployment via Foundry, on-chain SidecarRegistry binding, sidecar daemon bring-up, K11 master-mutation gates, per-actor binding verification). Chain backbone is Litentry/Heima EVM (mainnet chain ID 212013); deploy via Foundry against `https://rpc-eth.heima.network` (or a self-hosted Frontier node from `litentry/heima:latest`).
+- 2026-05-18 (per-data-class bucket separation) — Provisioned `$VAULT_BUCKET` (= `agentkeys-vault-${ACCOUNT_ID}`) as a dedicated S3 bucket per arch.md §17, separate from `$MAIL_BUCKET` (inbound mail). Added `agentkeys-vault-role` with credentials-only inline policy per arch.md §17.2. 4 new idempotent scripts wire it together: `provision-vault-bucket.sh` + `provision-vault-role.sh` + `apply-vault-bucket-policy.sh` + `cleanup-mail-bucket-policy.sh`. Orchestrator step 7 composes them; step 8 includes a cross-contamination assertion (credential must NOT land in mail bucket). The credentials-service worker (arch.md §15.1) is deferred to stage 2 as [issue #91](https://github.com/litentry/agentKeys/issues/91); the CLI's client-side encrypt + direct PUT path is the stage-1 bridge.
 - 2026-05-18 (chain backbone is pluggable — ChainProfile system) — Generalised the chain backbone from a single hardcoded "Heima" target to a named-profile system per arch.md §22. New `crates/agentkeys-core/src/chain_profile.rs` + 7 built-in profile JSONs under `crates/agentkeys-core/chain-profiles/` (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil). CLI accepts `--chain <name>` + reads `$AGENTKEYS_CHAIN` / `$AGENTKEYS_CHAIN_PROFILE_FILE`. New `agentkeys chain list` + `agentkeys chain show <name>` subcommands. Demo doc §chain-reference replaced with §Chain-backbone-is-pluggable; §0 reachability check + §4 Foundry deploy + §5/§6 daemon bring-up updated to pull chain-specific values (RPC, chain ID, finality tag, gas, explorer) from the active profile via `agentkeys chain show | jq -r .<field>`. Operators with custom chains (Moonbeam, Astar, Polygon, Avalanche, any EVM-compatible substrate / L2 / L1) ship one JSON file and point `$AGENTKEYS_CHAIN_PROFILE_FILE` at it — no recompile, no env var explosion.
 - 2026-05-18 (prod-vs-dev convention + Heima Paseo sudo via Alice) — Documented the operational convention: production chain = `heima` (mainnet, no sudo); development chain = `heima-paseo` (testnet, ships `pallet_sudo` with the well-known Substrate dev account Alice as sudoer). Added typed `dev_environment.sudo` schema to `ChainProfile`; `heima-paseo.json` profile now carries the full Alice sudoer metadata (seed phrase, public key, SS58 address, invocation recipe, warnings). New `ChainProfile::development_default_name()` helper returns `Some("heima-paseo")` for downstream tooling that wants to distinguish "the production default" from "the dev default". Demo doc adds an "Alice + sudo on Heima Paseo (development-environment convenience)" sub-section with concrete recipes (pre-fund deployer, reset K3 epoch, force-register sidecar entry); arch.md §22a.5a adds the same convention + Alice/sudo background. Open questions about Heima Paseo's canonical RPC URL, faucet URL, sudoer SS58 prefix-31 encoding, and Heima mainnet sudo state filed as Q13-Q15 in [heima-open-questions.md §3a](spec/heima-open-questions.md).
 - 2026-05-18 (one-command Paseo bring-up via Alice sudo) — Shipped two scripts that turn the manual §4.1-§4.4 sequence into a single command: `bash scripts/heima-paseo-bring-up.sh`. The orchestrator does tool-sanity-check → resolve chain profile + reachability-check RPC + abort if mainnet → generate or reuse a throwaway EVM deployer → sudo-fund from Alice (100 pHEI default) → Foundry-deploy the four stage-1 contracts → persist addresses to the per-chain-namespaced env file → print summary. Underneath, `scripts/heima-paseo-sudo.mjs` wraps `pallet_sudo` for the three operations stage-1 dev workflows need most: `fund` (sudo.balances.forceTransfer Alice → EVM address, via blake2_256 EVM-to-Substrate mapping), `bootstrap` (sudo wraps `pallet_ethereum.transact` for any EVM contract call), `whoami` (sanity-check the sudoer). Polkadot deps load lazily so `--help` works without them installed; the bring-up script uses `npx --package=@polkadot/api …` to fetch them on demand. Three guardrails (refuses non-paseo `AGENTKEYS_CHAIN`, refuses live `eth_chainId == 212013`, logs every sudo call before signing) keep mainnet safe. New §4.0 added to the demo doc with full recipe, dev-shortcut table (pre-register sidecar entry, force-set scope, fast-forward K3 epoch, parallel multi-tenant funding), and explicit "what sudo CANNOT do" production-safety section.
