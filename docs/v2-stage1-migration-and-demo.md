@@ -143,7 +143,35 @@ docker run -d --name heima-evm \
 curl -sS -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
   http://localhost:9933 | jq -r '.result'
-# → 0x33c4d (= 212013 decimal)
+# → 0x33c2d (= 212013 decimal)
+```
+
+Verified live 2026-05-18 against `https://rpc.heima-parachain.heima.network` — `eth_chainId` returns `0x33c2d`, `system_chain` returns `"Heima"`, `eth_blockNumber` is the current head. Authoritative reference: [docs.heima.network](https://docs.heima.network/) + [chain-list.com/heima](https://chain-list.com/heima) + [dwellir.com/networks/heima](https://www.dwellir.com/networks/heima).
+
+### Explorer — current state + future agentkeys integration
+
+The shipped Heima profile points `explorer.url` at [`heima.statescan.io`](https://heima.statescan.io/) (Substrate-side, used today for raw extrinsic + event inspection).
+
+For **agentkeys-specific** explorer surfaces — e.g., "list every `ScopeUpdated` event for operator X", "show all `SidecarRegistry.DeviceRegistered` for a given actor_omni", "trace one cap-mint from broker tx through worker re-verify" — we'll need custom indexing on top of a forkable explorer codebase. The Litentry org has already forked the Subscan-essentials stack and made it open-source:
+
+| Repo | Purpose | Where stage-1 indexing lands |
+|---|---|---|
+| [`github.com/litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials) | Backend (Go) — chain indexer, extrinsic + event extractor, REST API | New per-pallet/contract indexers: `pallet_evm` event decode for `AgentKeysScope.ScopeUpdated`, `SidecarRegistry.DeviceRegistered`/`DeviceRevoked`, `K3EpochCounter.K3Rotated`, `CredentialAudit.*`. Cross-index by `actor_omni` so operators can filter "show events for my actor". |
+| [`github.com/litentry/subscan-essentials-ui-react`](https://github.com/litentry/subscan-essentials-ui-react) | Frontend (React) — list views, detail pages, search | New routes: `/agentkeys/scope/<actor_omni>`, `/agentkeys/registry/<device_pubkey>`, `/agentkeys/audit/<operator_omni>`. Render block-explorer-style links to the underlying tx + event payloads. |
+
+These integrations are **out of scope for stage 1** (workers + sidecar + chain contracts ship first; explorer indexing is a stage-2/3 deliverable). But pinning the integration target in the profile JSON (`explorer.subscan_source` field) means the project lifecycle is explicit: when the explorer work happens, it lands in those two repos, not a third-party hosted explorer.
+
+The profile JSON now exposes this pointer so any downstream tool (a CLI `agentkeys explore <event>` subcommand, a future operator dashboard, a stage-2 reporting tool) can discover the canonical explorer source without re-encoding the integration target:
+
+```bash
+agentkeys chain show heima | jq '.explorer.subscan_source'
+# {
+#   "backend_repo":  "https://github.com/litentry/subscan-essentials",
+#   "frontend_repo": "https://github.com/litentry/subscan-essentials-ui-react",
+#   "note": "Litentry forks of subscan-essentials. Future agentkeys-specific
+#           indexing + UI for ScopeContract / SidecarRegistry / K3EpochCounter
+#           events lands here (per arch.md §22a integration note)."
+# }
 ```
 
 Then point a custom profile at it:

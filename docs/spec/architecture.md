@@ -1408,7 +1408,20 @@ The `chain_kind` enum is read by chain-aware components to pick the right finali
 | `arbitrum` | Similar to OP-stack but with Arbitrum-specific gas model | Pre-2316 nitro gas; some calls deferred to L1 | Arbitrum, Arbitrum Nova |
 | `local-dev` | Instant finality | Zero-gas; ships default test key | Anvil, Hardhat |
 
-### 22a.6 Cap-mint freshness across chains
+### 22a.6 Explorer integration target
+
+Each profile carries an optional `explorer.subscan_source` pointer at the open-source explorer codebase that hosts (or will host) agentkeys-specific event indexing. The shipped `heima` profile points at the Litentry-forked Subscan stack:
+
+| Repo | Purpose |
+|---|---|
+| [`github.com/litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials) | Backend (Go) — chain indexer + REST API. Stage-2/3 work adds per-contract decoders for `AgentKeysScope.ScopeUpdated`, `SidecarRegistry.DeviceRegistered`/`DeviceRevoked`/`DeviceKeyRotated`, `K3EpochCounter.K3Rotated`, `CredentialAudit.*` — all cross-indexed by `actor_omni` so operators can filter by their own omni. |
+| [`github.com/litentry/subscan-essentials-ui-react`](https://github.com/litentry/subscan-essentials-ui-react) | Frontend (React) — list + detail views. Stage-2/3 work adds routes `/agentkeys/scope/<actor_omni>`, `/agentkeys/registry/<device_pubkey>`, `/agentkeys/audit/<operator_omni>`. |
+
+These integrations are **stage-2/3 deliverables** (workers + sidecar + chain contracts ship first; explorer indexing follows). Pinning the integration target in the profile JSON means: when explorer work begins, it lands in those two repos, not a third-party hosted explorer. The profile field is the canonical pointer downstream tools (CLI `agentkeys explore` subcommand, operator dashboards, audit reporters) use to discover where to plug in.
+
+Other chain profiles can populate `subscan_source` with their own explorer codebase as integrations land (Etherscan / Blockscout for Ethereum / Base; chain-specific forks for others).
+
+### 22a.7 Cap-mint freshness across chains
 
 Because workers re-verify on-chain scope independently of the broker (defense in depth per §15), they need a consistent view of "the chain". The `default_block_tag` + `confirmation_seconds` in the profile bound how stale a worker's chain read can be:
 

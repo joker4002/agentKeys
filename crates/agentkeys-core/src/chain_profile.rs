@@ -124,6 +124,25 @@ pub struct ExplorerLinks {
     pub url: String,
     pub tx_url_template: String,
     pub address_url_template: String,
+    /// Optional pointer at the open-source explorer codebase, when one is
+    /// available. Stage 1 uses it to track *where* to land agentkeys-
+    /// specific indexing + display for ScopeContract / SidecarRegistry /
+    /// K3EpochCounter events. Heima ships forks of subscan-essentials
+    /// (backend + frontend) under github.com/litentry that are the
+    /// natural integration target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscan_source: Option<SubscanSource>,
+}
+
+/// Pointer to the open-source explorer codebase for a chain. Set per-chain
+/// in the profile JSON when the operator (or AgentKeys project) plans to
+/// land custom indexing for the on-chain stage-1 contracts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscanSource {
+    pub backend_repo: String,
+    pub frontend_repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 impl ExplorerLinks {
