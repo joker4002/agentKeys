@@ -13,48 +13,126 @@
 
 ---
 
-## Litentry/Heima EVM — chain reference
+## Chain backbone — pluggable per arch.md §22
 
-Everything stage 1 puts on chain (scope, sidecar registry, K3 epoch counter, credential audit) lives on Heima. Reference values used throughout this doc:
+AgentKeys's chain layer is **pluggable**: the four stage-1 contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) are plain Solidity, deployable to any EVM-compatible chain. The default backbone is **Litentry/Heima** but you can switch to Base, Ethereum, Sepolia, a local Anvil node, or any operator-custom EVM chain with one flag.
 
-| Property | Mainnet (`heima`) | Testnet (`paseo`) |
-|---|---|---|
-| **EVM chain ID** | `212013` (= `LIT deployment year (21) + paraID (2013)`) | equals `HEIMA_PARA_ID` for the paseo runtime — read live from the node via `eth_chainId` |
-| **Substrate WSS** | `wss://rpc.litentry-parachain.litentry.io` (legacy hostname, still active) OR `wss://api-heima.dwellir.com/<DWELLIR_KEY>` | `wss://rpc-paseo.heima.network` (per Heima docs; verify with `eth_chainId` before relying on it) |
-| **EVM JSON-RPC HTTP** | Same host as Substrate, port `9933` on self-hosted Frontier; for the hosted Heima endpoint use `https://rpc-eth.heima.network` if available, otherwise spin up your own RPC node via the steps below | `https://rpc-eth-paseo.heima.network` (verify) |
-| **EVM JSON-RPC WSS** | `wss://rpc-eth.heima.network` (verify availability for your tenant) | `wss://rpc-eth-paseo.heima.network` (verify) |
-| **Block explorer** | [https://heima.statescan.io/#/](https://heima.statescan.io/#/) (Substrate-side); [Polkadot.js Apps](https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Fheima-rpc.n.dwellir.com#/explorer) for live state + extrinsic inspection | [Polkadot.js Apps pointed at the paseo WSS](https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Frpc-paseo.heima.network#/explorer) |
-| **Native gas token** | `HEI` (18 decimals) | `pHEI` (testnet) |
-| **EVM stack** | Frontier (`pallet_evm` index `120` + `pallet_ethereum` index `121`) — full Solidity / EVM-bytecode compatibility | Same |
-| **Address mapping** | `HashedAddressMapping<BlakeTwo256>` — Substrate accounts are derived from EVM addresses by `blake2_256("evm:" \|\| eth_address)`. The operator's EVM wallet IS the on-chain identity; no MetaMask-Substrate dual-account dance | Same |
-| **Source of truth** | [github.com/litentry/heima — parachain/runtime/heima/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/heima/src/lib.rs) (search for `pub ChainId: u64 = 212013`) | [github.com/litentry/heima — parachain/runtime/paseo/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/paseo/src/lib.rs) |
+### Selecting a chain backbone
 
-**Operator workstation env** (add these to `scripts/operator-workstation.env`):
+Every chain-aware operation accepts `--chain <name>`. Resolution order (first match wins):
+
+| Source | How |
+|---|---|
+| 1. `AGENTKEYS_CHAIN_PROFILE_FILE` env var | Point at a custom JSON file for chains AgentKeys doesn't ship by default |
+| 2. `--chain <name>` CLI flag | One built-in profile name per command |
+| 3. `AGENTKEYS_CHAIN` env var | Set once for the shell session |
+| 4. Built-in default | `heima` |
+
+Built-in profiles ship as JSON files embedded in the `agentkeys` binary at compile time (see `crates/agentkeys-core/chain-profiles/`). Each profile bundles chain ID, RPC endpoints, block explorer URL, native token symbol, finality model, and gas config — everything the CLI / daemon / broker / workers need to know about that chain.
 
 ```bash
-# === HEIMA EVM (stage 1 chain backbone) ===
-HEIMA_NETWORK="${HEIMA_NETWORK:-mainnet}"   # mainnet | paseo
-HEIMA_EVM_CHAIN_ID="${HEIMA_EVM_CHAIN_ID:-212013}"
-HEIMA_EVM_RPC_HTTP="${HEIMA_EVM_RPC_HTTP:-https://rpc-eth.heima.network}"
-HEIMA_EVM_RPC_WSS="${HEIMA_EVM_RPC_WSS:-wss://rpc-eth.heima.network}"
-HEIMA_SUBSTRATE_WSS="${HEIMA_SUBSTRATE_WSS:-wss://rpc.litentry-parachain.litentry.io}"
-HEIMA_EXPLORER="${HEIMA_EXPLORER:-https://heima.statescan.io}"
+# === ON OPERATOR WORKSTATION ===
+# Enumerate built-in profiles
+agentkeys chain list
+# heima
+# heima-paseo
+# base
+# base-sepolia
+# ethereum
+# sepolia
+# anvil
 
-# Operator's current_master_wallet (Layer 2 per arch.md §6.1) — used as the
-# Solidity-deployment account AND as msg.sender for all stage-1 chain
-# submissions in sovereign mode. This is the wallet the signer derives at
-# stage-3 SIWE; you populate this AFTER §1.4 below.
-HEIMA_DEPLOYER_ADDRESS=""
-HEIMA_DEPLOYER_PRIVATE_KEY=""    # ONLY set when using a hot-key for contract deployment;
-                                  # prefer signer-derived signing in production
+# Inspect a specific profile
+agentkeys chain show base
+# {
+#   "name": "base",
+#   "display_name": "Base Mainnet (Coinbase L2)",
+#   "chain_id": 8453,
+#   "chain_kind": "optimism-l2",
+#   "rpc": { "http": "https://mainnet.base.org", "wss": "wss://base-rpc.publicnode.com" },
+#   "explorer": { "url": "https://basescan.org", ... },
+#   "token": { "symbol": "ETH", "decimals": 18 },
+#   "finality": { "default_block_tag": "safe", "confirmation_seconds": 600, ... },
+#   ...
+# }
+
+# Switch chains for one command
+agentkeys --chain ethereum chain show
+# (prints the ethereum profile with --verbose tracing if -v is set)
+
+# Switch chains for the whole session
+export AGENTKEYS_CHAIN=base
+agentkeys chain show
+# (now resolves to base by default)
 ```
 
-**Self-hosting an EVM RPC node** (only needed if the public Heima endpoints aren't usable in your network — e.g., behind a firewall that blocks dwellir.com, or you want sub-100ms latency):
+### Built-in profiles
+
+| Profile | Chain ID | Chain kind | Default block tag | Gas token | Notes |
+|---|---|---|---|---|---|
+| `heima` | 212013 | substrate-frontier | `latest` (instant finality) | HEI | Default. Heima parachain mainnet — Substrate + Frontier; HashedAddressMapping makes EVM accounts first-class on-chain identities. |
+| `heima-paseo` | auto-detect | substrate-frontier | `latest` | pHEI | Heima Paseo testnet. Chain ID encoded as `0` in the profile (sentinel for "call `eth_chainId` at startup"). |
+| `base` | 8453 | optimism-l2 | `safe` (5-10 min L1 batch) | ETH | Coinbase L2. Tiered finality — use `safe` for cap-mint, `finalized` for high-value payments. |
+| `base-sepolia` | 84532 | optimism-l2 | `safe` | ETH | Base testnet. Faucet: coinbase.com/faucets/base-ethereum-sepolia-faucet |
+| `ethereum` | 1 | ethereum-l1 | `finalized` (~12.8 min) | ETH | Highest finality assurance; default tag is `finalized` because Ethereum mainnet gas is expensive. |
+| `sepolia` | 11155111 | ethereum-l1 | `finalized` | SepoliaETH | Ethereum testnet. Faucet: alchemy.com/faucets/ethereum-sepolia |
+| `anvil` | 31337 | local-dev | `latest` (instant) | ETH | Local Foundry dev node. Default test key + zero gas — use for tests + demo bring-up before pointing at a live chain. |
+
+### Operator-custom chain profiles
+
+Add a JSON file matching the schema below, point `AGENTKEYS_CHAIN_PROFILE_FILE` at it, and every chain-aware operation uses it:
 
 ```bash
-# Run the Heima parachain binary with --rpc-port enabled (default Frontier
-# JSON-RPC port is 9933). The README at github.com/litentry/heima covers
-# the build + launch flow. For a one-line dev node:
+cat > /etc/agentkeys/moonbeam.json <<EOF
+{
+  "name": "moonbeam",
+  "display_name": "Moonbeam (Polkadot smart-contract parachain)",
+  "chain_id": 1284,
+  "chain_kind": "substrate-frontier",
+  "rpc": {
+    "http": "https://rpc.api.moonbeam.network",
+    "wss": "wss://wss.api.moonbeam.network",
+    "substrate_wss": "wss://wss.api.moonbeam.network"
+  },
+  "explorer": {
+    "url": "https://moonscan.io",
+    "tx_url_template": "https://moonscan.io/tx/{tx_hash}",
+    "address_url_template": "https://moonscan.io/address/{address}"
+  },
+  "token": {"symbol": "GLMR", "decimals": 18},
+  "finality": {
+    "default_block_tag": "latest",
+    "confirmation_blocks": 1,
+    "confirmation_seconds": 12,
+    "notes": "Moonbeam is also Substrate + Frontier; same finality model as Heima but slower block time (~12s)."
+  },
+  "gas": {"model": "eip1559", "max_priority_fee_gwei": 1, "max_fee_gwei": 100},
+  "deploy": {"deployer_env_var": "AGENTKEYS_MOONBEAM_DEPLOYER_KEY", "foundry_chain_arg": "moonbeam"}
+}
+EOF
+
+export AGENTKEYS_CHAIN_PROFILE_FILE=/etc/agentkeys/moonbeam.json
+agentkeys chain show
+# (prints the moonbeam profile)
+```
+
+The `chain_kind` enum is `substrate-frontier | ethereum-l1 | optimism-l2 | arbitrum | local-dev`. The broker / daemon / workers use `chain_kind` to pick the right finality strategy (block-tag-based for OP-stack and Ethereum L1; confirmation-time-based for Substrate parachains). All four are contracts-portable — same Solidity, same ABI.
+
+### Why named profiles instead of individual env vars
+
+The previous draft of this doc shipped `HEIMA_EVM_CHAIN_ID`, `HEIMA_EVM_RPC_HTTP`, `HEIMA_EVM_RPC_WSS`, `HEIMA_SUBSTRATE_WSS`, `HEIMA_EXPLORER` as separate env vars. That:
+
+- locks the operator into one chain per deployment
+- requires renaming every env var when switching to Base or Ethereum
+- makes the broker / worker / daemon read 5+ vars at startup, each with its own validation
+
+A single named profile collapses all of that into `AGENTKEYS_CHAIN=base` (or `--chain base`). Every component reads the same profile via `ChainProfile::resolve(...)` and gets a typed struct, not a bag of strings. Operators with custom chains write one JSON file instead of editing five env vars per chain. The migration cost is zero — the env-var pattern from the previous draft maps 1:1 onto a profile JSON; the `agentkeys` CLI ships the seven most common chains out of the box.
+
+### Self-hosting an EVM RPC node (optional)
+
+Useful if the public Heima endpoints aren't usable in your network — firewall blocks dwellir.com / heima.network, or you want sub-100ms latency. The `litentry/heima:latest` Docker image runs a full Frontier node with the EVM RPC enabled:
+
+```bash
 docker run -d --name heima-evm \
   -p 9933:9933 -p 9944:9944 \
   litentry/heima:latest \
@@ -65,10 +143,36 @@ docker run -d --name heima-evm \
 curl -sS -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
   http://localhost:9933 | jq -r '.result'
-# → 0x33c4d (= 212013 in decimal)
+# → 0x33c4d (= 212013 decimal)
 ```
 
-The rest of this doc assumes `HEIMA_EVM_RPC_HTTP` and `HEIMA_SUBSTRATE_WSS` are reachable from the operator workstation and from the broker host.
+Then point a custom profile at it:
+
+```bash
+cat > ~/.agentkeys/heima-local.json <<EOF
+$(agentkeys chain show heima | jq '.rpc.http = "http://localhost:9933" | .rpc.wss = "ws://localhost:9933"')
+EOF
+export AGENTKEYS_CHAIN_PROFILE_FILE=~/.agentkeys/heima-local.json
+```
+
+### Reachability check (run once before §1)
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+# Use whichever chain you'll demo against; this example uses base-sepolia.
+export AGENTKEYS_CHAIN=base-sepolia
+RPC_HTTP=$(agentkeys chain show | jq -r .rpc.http)
+EXPECTED_CHAIN_ID=$(agentkeys chain show | jq -r .chain_id)
+
+curl -sS -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+  "$RPC_HTTP" | jq -r '.result' | \
+  xargs -I{} printf 'eth_chainId = %s (decimal %d, expected %d)\n' \
+    {} $((16#$(echo {} | sed 's/^0x//'))) "$EXPECTED_CHAIN_ID"
+# → eth_chainId = 0x14a34 (decimal 84532, expected 84532)
+```
+
+If the curl errors or the decimal doesn't match the profile's `chain_id`, fix the RPC endpoint first. For Heima specifically, try Polkadot.js Apps against the `substrate_wss` to confirm the parachain is reachable at all; for Base / Ethereum / Sepolia try a different public RPC (chainlist.org has the full list).
 
 ---
 
@@ -112,17 +216,26 @@ What you should have at the end of §0:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# Heima EVM reachability check (stage-1-specific addition to §0)
+# Chain backbone reachability check (stage-1-specific addition to §0).
+# Pick the chain you want to demo against — heima for production, anvil for
+# local dev, base-sepolia / sepolia / heima-paseo for shared testnets.
+export AGENTKEYS_CHAIN="${AGENTKEYS_CHAIN:-heima}"
+
+RPC_HTTP=$(agentkeys chain show | jq -r .rpc.http)
+EXPECTED_CHAIN_ID=$(agentkeys chain show | jq -r .chain_id)
+echo "Using chain $AGENTKEYS_CHAIN at $RPC_HTTP (chain_id=$EXPECTED_CHAIN_ID)"
+
 curl -sS -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-  "$HEIMA_EVM_RPC_HTTP" \
-  | jq -r '.result' \
-  | xargs -I{} printf 'eth_chainId = %s (decimal = %d, expected = %d)\n' \
-      {} $((16#$(echo {} | sed 's/^0x//'))) "$HEIMA_EVM_CHAIN_ID"
-# → eth_chainId = 0x33c4d (decimal = 212013, expected = 212013)
+  "$RPC_HTTP" | jq -r '.result' | \
+  xargs -I{} printf 'eth_chainId = %s (decimal %d, expected %d)\n' \
+    {} $((16#$(echo {} | sed 's/^0x//'))) "$EXPECTED_CHAIN_ID"
+# → eth_chainId = 0x33c4d (decimal 212013, expected 212013)   for heima
+# → eth_chainId = 0x14a34 (decimal 84532,  expected 84532)    for base-sepolia
+# → eth_chainId = 0x7a69  (decimal 31337,  expected 31337)    for anvil
 ```
 
-If the curl errors or the decimal value doesn't match `$HEIMA_EVM_CHAIN_ID`, fix the RPC endpoint first (try `$HEIMA_SUBSTRATE_WSS` via Polkadot.js Apps to confirm the parachain is reachable at all, then debug the EVM endpoint specifically).
+If the curl errors or the decimal doesn't match the profile's `chain_id`, fix the RPC endpoint first. For Heima specifically, try Polkadot.js Apps against `agentkeys chain show | jq -r .rpc.substrate_wss` to confirm the parachain is reachable at all, then debug the EVM endpoint. For Base / Ethereum, pick a different public RPC from [chainlist.org](https://chainlist.org/) and point a custom profile at it via `AGENTKEYS_CHAIN_PROFILE_FILE`.
 
 ---
 
@@ -232,11 +345,10 @@ The CLI signs the `register_master_device` payload with K10, generates a fresh K
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
-# Once the stage-1 chain integration ships, this becomes:
-agentkeys --session-id alice device register \
-  --chain heima \
-  --rpc "$HEIMA_EVM_RPC_HTTP" \
-  --chain-id "$HEIMA_EVM_CHAIN_ID" \
+# All chain-related flags resolve from the chain profile — you just pass
+# --chain <name> (or set AGENTKEYS_CHAIN once for the session) and the
+# RPC URL, chain ID, gas model are auto-pulled.
+agentkeys --session-id alice --chain "$AGENTKEYS_CHAIN" device register \
   --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
   --roles cap-mint,recovery,scope-mgmt
 
@@ -424,20 +536,27 @@ For paseo testnet, request HEI from the Heima Paseo faucet (URL varies — check
 
 ### §4.2 — Deploy with Foundry
 
+The deploy script pulls every chain-specific value (RPC URL, chain ID, deployer-key env var, foundry chain arg) from the active chain profile — no hardcoded chain assumptions in the script itself.
+
 ```bash
 # === ON OPERATOR WORKSTATION ===
 cd crates/agentkeys-chain
 
-# All four contracts deploy via one script. The script reads HEIMA_* env
-# vars from the workstation env file.
+# Pull chain-specific values from the active profile
+RPC_HTTP=$(agentkeys chain show | jq -r .rpc.http)
+CHAIN_ID=$(agentkeys chain show | jq -r .chain_id)
+DEPLOYER_ENV_VAR=$(agentkeys chain show | jq -r .deploy.deployer_env_var)
+EXPLORER_URL=$(agentkeys chain show | jq -r .explorer.url)
+DEPLOYER_KEY="${!DEPLOYER_ENV_VAR}"   # bash indirection: read the env var named in the profile
+
 forge script script/DeployAgentKeysV1.s.sol \
-  --rpc-url "$HEIMA_EVM_RPC_HTTP" \
-  --chain-id "$HEIMA_EVM_CHAIN_ID" \
-  --private-key "$HEIMA_DEPLOYER_PRIVATE_KEY" \
+  --rpc-url "$RPC_HTTP" \
+  --chain-id "$CHAIN_ID" \
+  --private-key "$DEPLOYER_KEY" \
   --broadcast \
   --verify \
   --verifier blockscout \
-  --verifier-url "$HEIMA_EXPLORER/api"
+  --verifier-url "$EXPLORER_URL/api"
 
 # Output ends with:
 # ===== Deployment summary =====
@@ -449,18 +568,28 @@ forge script script/DeployAgentKeysV1.s.sol \
 # Total cost:        2.4 HEI
 ```
 
-Persist the four contract addresses to `scripts/operator-workstation.env`:
+Persist the four contract addresses to `scripts/operator-workstation.env`, namespaced by chain profile so you can deploy the same contracts to multiple chains side-by-side (useful for staging vs prod):
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
+PROFILE_NAME=$(agentkeys chain show | jq -r .name | tr 'a-z-' 'A-Z_')
+
 cat >> scripts/operator-workstation.env <<EOF
 
-# === Stage 1 chain contracts (deployed $(date +%Y-%m-%d)) ===
-SCOPE_CONTRACT_ADDRESS=0xS...
-SIDECAR_REGISTRY_ADDRESS=0xR...
-K3_EPOCH_COUNTER_ADDRESS=0xE...
-CREDENTIAL_AUDIT_ADDRESS=0xA...
+# === Stage 1 chain contracts on ${PROFILE_NAME} (deployed $(date +%Y-%m-%d)) ===
+SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME}=0xS...
+SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME}=0xR...
+K3_EPOCH_COUNTER_ADDRESS_${PROFILE_NAME}=0xE...
+CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME}=0xA...
 EOF
+
+# Helpers that downstream sections use — re-derive these every time you
+# switch AGENTKEYS_CHAIN so the right contract addresses get picked up.
+PROFILE_NAME=$(agentkeys chain show | jq -r .name | tr 'a-z-' 'A-Z_')
+SCOPE_CONTRACT_ADDRESS=$(eval echo \$SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME})
+SIDECAR_REGISTRY_ADDRESS=$(eval echo \$SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME})
+K3_EPOCH_COUNTER_ADDRESS=$(eval echo \$K3_EPOCH_COUNTER_ADDRESS_${PROFILE_NAME})
+CREDENTIAL_AUDIT_ADDRESS=$(eval echo \$CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME})
 ```
 
 ### §4.3 — Initialize K3EpochCounter
@@ -556,12 +685,14 @@ The sidecar daemon is the localhost proxy that injects credentials at request-fo
 # === ON OPERATOR WORKSTATION ===
 # The master sidecar runs on your laptop — it holds K10 + K11 and is the
 # device that signs master mutations (scope grant/revoke, device add/revoke).
+# The --chain flag picks the chain profile; chain RPC + chain ID + finality
+# config are pulled from the profile automatically.
 
 agentkeys-daemon \
   --session-id alice \
+  --chain "$AGENTKEYS_CHAIN" \
   --broker-url "https://$BROKER_HOST" \
   --signer-url "$AGENTKEYS_SIGNER_URL" \
-  --chain-rpc "$HEIMA_EVM_RPC_HTTP" \
   --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
   --scope-address "$SCOPE_CONTRACT_ADDRESS" \
   --epoch-address "$K3_EPOCH_COUNTER_ADDRESS" \
@@ -649,11 +780,12 @@ echo "AGENT_A_OMNI=$AGENT_A_OMNI" >> scripts/operator-workstation.env
 # Install agentkeys-daemon (same binary as the master; role is decided at init)
 # ... (curl install, package manager, or scp from build host)
 
-# Redeem the link code
+# Redeem the link code; the agent inherits its parent operator's chain choice
+# via the same --chain flag (or AGENTKEYS_CHAIN env var)
 agentkeys-daemon --init-link-code "LC-7Y4P-2X9K-..." \
+  --chain "$AGENTKEYS_CHAIN" \
   --broker-url "https://$BROKER_HOST" \
   --signer-url "$AGENTKEYS_SIGNER_URL" \
-  --chain-rpc "$HEIMA_EVM_RPC_HTTP" \
   --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
   --proxy-socket /run/agentkeys/agent-a.sock \
   --foreground
@@ -781,6 +913,9 @@ The flows in §1-§8 describe the **end state** of stage 1. As of the most recen
 | `--credential-backend=s3 --envelope-version=v2` writes v2 envelope to actor_omni-keyed path | ✅ | — |
 | Dual-path read + dual-prefix list + dual-prefix teardown | ✅ | — |
 | `--credential-backend=sidecar` flag (returns "not yet implemented") | ✅ stub | Daemon implementation |
+| `--chain <name>` flag + `ChainProfile::resolve` (7 built-in profiles: heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil) | ✅ `crates/agentkeys-core/src/chain_profile.rs` + `chain-profiles/*.json` | — |
+| `agentkeys chain list` + `agentkeys chain show <name>` subcommands | ✅ | — |
+| `$AGENTKEYS_CHAIN_PROFILE_FILE` operator-custom chain support | ✅ | — |
 | K11 WebAuthn enrollment in CLI | ⏳ stub (uses v1c pop_sig) | WebAuthn integration via `webauthn-rs` |
 | `agentkeys device register` subcommand | ⏳ not yet | Implementation pending |
 | `agentkeys agent create --label` with K11 prompt | ⏳ not yet | Implementation pending |
@@ -812,3 +947,4 @@ Operators following this doc end-to-end today will hit "not yet implemented" err
 - 2026-05-17 (initial migration + new-feature demo) — Drafted alongside the v2 stage 1 issue; covered migration breaks to stage 7 demo §0-§5 plus a §1-§11 new-feature demo with a Codex addendum at the end.
 - 2026-05-18 (incremental implementation 1) — Added "What landed in this commit" section for `actor_omni` + v2 envelope + dual-read + CLI flag changes.
 - 2026-05-18 (fresh-start rewrite, Litentry/Heima EVM backbone) — **Full rewrite.** Dropped the stage-7 migration content (the dual-read path in `s3_backend.rs` covers it mechanically; no operator runbook needed). Replaced with a fresh-start guide that explicitly inherits required sections from the stage-7 demo (§0 prereqs, §1 init, §2 SIWE, §3 AWS) and adds the stage-1-specific work (Heima EVM chain backbone, contract deployment via Foundry, on-chain SidecarRegistry binding, sidecar daemon bring-up, K11 master-mutation gates, per-actor binding verification). Chain backbone is Litentry/Heima EVM (mainnet chain ID 212013); deploy via Foundry against `https://rpc-eth.heima.network` (or a self-hosted Frontier node from `litentry/heima:latest`).
+- 2026-05-18 (chain backbone is pluggable — ChainProfile system) — Generalised the chain backbone from a single hardcoded "Heima" target to a named-profile system per arch.md §22. New `crates/agentkeys-core/src/chain_profile.rs` + 7 built-in profile JSONs under `crates/agentkeys-core/chain-profiles/` (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil). CLI accepts `--chain <name>` + reads `$AGENTKEYS_CHAIN` / `$AGENTKEYS_CHAIN_PROFILE_FILE`. New `agentkeys chain list` + `agentkeys chain show <name>` subcommands. Demo doc §chain-reference replaced with §Chain-backbone-is-pluggable; §0 reachability check + §4 Foundry deploy + §5/§6 daemon bring-up updated to pull chain-specific values (RPC, chain ID, finality tag, gas, explorer) from the active profile via `agentkeys chain show | jq -r .<field>`. Operators with custom chains (Moonbeam, Astar, Polygon, Avalanche, any EVM-compatible substrate / L2 / L1) ship one JSON file and point `$AGENTKEYS_CHAIN_PROFILE_FILE` at it — no recompile, no env var explosion.

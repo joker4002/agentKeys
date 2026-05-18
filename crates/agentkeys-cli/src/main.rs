@@ -58,6 +58,13 @@ struct Cli {
 
     #[arg(
         long,
+        env = "AGENTKEYS_CHAIN",
+        help = "v2 stage 1 — which EVM chain backbone to talk to. Built-in profiles: heima (default), heima-paseo, base, base-sepolia, ethereum, sepolia, anvil. Operator-custom chains: set $AGENTKEYS_CHAIN_PROFILE_FILE to a JSON file path. Run `agentkeys chain list` to enumerate built-ins; `agentkeys chain show <name>` to inspect one."
+    )]
+    chain: Option<String>,
+
+    #[arg(
+        long,
         env = "AGENTKEYS_BUCKET",
         help = "S3 bucket holding bots/<wallet>/credentials/<service>.enc. Required when --credential-backend=s3."
     )]
@@ -279,6 +286,26 @@ enum Commands {
         #[command(subcommand)]
         action: SignerAction,
     },
+
+    #[command(
+        about = "Inspect available EVM chain profiles (v2 stage 1)",
+        long_about = "AgentKeys's chain layer is pluggable per arch.md §22. Each named profile bundles chain ID, RPC endpoints, explorer URL, finality model, and gas config. Use --chain <name> on the top-level CLI to select one for any chain-aware operation (device register, scope grant, contract deploy). The 'list' subcommand prints all built-ins; 'show' dumps one profile's full JSON.\n\nOperator-custom chains: ship your own JSON and point at it via $AGENTKEYS_CHAIN_PROFILE_FILE.\n\nExamples:\n  agentkeys chain list\n  agentkeys chain show heima\n  agentkeys --chain base chain show"
+    )]
+    Chain {
+        #[command(subcommand)]
+        action: ChainAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChainAction {
+    #[command(about = "List built-in chain profile names")]
+    List,
+    #[command(about = "Print one profile's full JSON (omit name to use the resolved profile)")]
+    Show {
+        #[arg(help = "Profile name (heima | heima-paseo | base | base-sepolia | ethereum | sepolia | anvil)")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -329,6 +356,22 @@ enum InboxAction {
     },
 }
 
+async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
+    use agentkeys_core::chain_profile::ChainProfile;
+    match action {
+        ChainAction::List => Ok(ChainProfile::list_builtin_names().join("\n")),
+        ChainAction::Show { name } => {
+            let profile = match name {
+                Some(n) => ChainProfile::load_builtin(n)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+                None => ctx.chain_profile()?.clone(),
+            };
+            serde_json::to_string_pretty(&profile)
+                .map_err(|e| anyhow::anyhow!("serialize profile: {e}"))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -351,6 +394,7 @@ async fn main() {
         .with_session_id(cli.session_id.clone())
         .with_credential_backend(cred_kind)
         .with_envelope_version(envelope_version)
+        .with_chain_profile_name(cli.chain.clone())
         .with_data_bucket(cli.bucket.clone())
         .with_signer_url(cli.signer_url.clone())
         .with_omni_account(cli.omni_account.clone());
@@ -446,6 +490,7 @@ async fn main() {
                 cmd_signer_sign(&ctx, signer_url, omni_account, message).await
             }
         },
+        Commands::Chain { action } => cmd_chain(&ctx, action).await,
     };
 
     match result {

@@ -1,0 +1,35 @@
+{
+  "name": "heima-paseo",
+  "display_name": "Heima Paseo testnet",
+  "chain_id": 0,
+  "chain_kind": "substrate-frontier",
+  "rpc": {
+    "http": "https://rpc-eth-paseo.heima.network",
+    "wss": "wss://rpc-eth-paseo.heima.network",
+    "substrate_wss": "wss://rpc-paseo.heima.network"
+  },
+  "explorer": {
+    "url": "https://heima-paseo.statescan.io",
+    "tx_url_template": "https://heima-paseo.statescan.io/#/extrinsics/{tx_hash}",
+    "address_url_template": "https://heima-paseo.statescan.io/#/accounts/{address}"
+  },
+  "token": {
+    "symbol": "pHEI",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "latest",
+    "confirmation_blocks": 1,
+    "confirmation_seconds": 6,
+    "notes": "Paseo testnet chain_id equals HEIMA_PARA_ID at runtime; the operator MUST verify via eth_chainId before relying on the embedded value (which is intentionally 0 — meaning 'auto-detect from node'). Auto-detection lives in ChainProfile::detect_chain_id."
+  },
+  "gas": {
+    "model": "eip1559",
+    "max_priority_fee_gwei": 1,
+    "max_fee_gwei": 10
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_HEIMA_PASEO_DEPLOYER_KEY",
+    "foundry_chain_arg": "heima-paseo"
+  }
+}

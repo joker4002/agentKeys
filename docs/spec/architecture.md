@@ -1303,7 +1303,7 @@ The architecture is intentionally pluggable on six axes. Each axis has a default
 | **Auth method** | `email-link` + `oauth2_google` + `wallet_sig` (SIWE) | passkey-as-identity, OAuth2/Apple, OAuth2/GitHub, custom OIDC | Trait-implementing plugin in [`crates/agentkeys-broker-server/src/plugins/auth/`](../../crates/agentkeys-broker-server/src/plugins/auth/); enabled via `BROKER_AUTH_METHODS` env var |
 | **Signer backend** | TEE worker (AMD SEV-SNP / Intel TDX / AWS Nitro) with attested mTLS | Threshold-MPC signer; HSM-backed; FROST | Replaces the binary behind `signer.<zone>` URL; wire shape pinned by [`signer-protocol.md`](signer-protocol.md) |
 | **Audit destination** | Tier C direct-write (default) / Tier A hosted relay / Tier B self-hosted relay | TEE-attested append-only log; AWS CloudTrail | Trait surface in audit-service worker; per-operator config |
-| **Chain layer** | Litentry parachain | EVM L2 fallback (Optimism, Base); permissioned chain (Hyperledger, Quorum, Aliyun BaaS) | Contract ABI is portable across EVM-compatible chains; deployment target is a per-environment env var |
+| **Chain layer** | Litentry/Heima parachain (built-in profile `heima`, chain ID 212013) | Any EVM-compatible chain (Base, Ethereum, Optimism, Arbitrum, Moonbeam, Astar, permissioned substrates like Aliyun BaaS / Hyperledger / Quorum) | **Named chain profiles** — `crates/agentkeys-core/src/chain_profile.rs` ships 7 built-ins (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil); operator-custom chains via `$AGENTKEYS_CHAIN_PROFILE_FILE` JSON. CLI `--chain <name>`; daemon / broker / workers all read the same profile. See §22a below. |
 | **Worker runtime** | AWS Lambda + API Gateway | axum microservice (vendor-neutral); Cloudflare Worker (edge); Tencent SCF (China) | Worker shape per §15 is uniform across runtimes |
 | **Payment rail** | Per mode: P-1 service-pool / P-2 escrow / P-3 direct | Mode + upstream (Stripe, USDC, SOL, fiat) | Per-mode plugins layer on the §15.5 wire shape |
 
@@ -1312,6 +1312,116 @@ The architecture is intentionally pluggable on six axes. Each axis has a default
 - A China-deployment operator point chain at a permissioned substrate without touching the rest.
 - A self-hosted operator skip the hosted-relay entirely (tier B + sovereign mode + self-hosted workers is a complete v2 stack).
 - The signer TEE vendor swap (AMD ↔ Intel ↔ AWS) with zero daemon/CLI/worker code change — only attestation pin changes.
+
+---
+
+## 22a. Chain profiles — how to switch between EVM backbones
+
+The chain layer is the most commonly-switched pluggable surface (operators frequently move between testnets / staging chains / production chains; some operators run multiple chains in parallel for tenant-isolation reasons). v2 ships a named-profile system so the cost of switching is one flag, not a recompile.
+
+### 22a.1 Resolution order
+
+Every chain-aware component (CLI, daemon, broker, workers) resolves the active profile via `ChainProfile::resolve(...)` in this order — first match wins:
+
+1. `$AGENTKEYS_CHAIN_PROFILE_FILE` env var → load a JSON file (for operator-custom chains)
+2. `--chain <name>` CLI flag → load a built-in by name
+3. `$AGENTKEYS_CHAIN` env var → load a built-in by name
+4. Built-in default → `heima`
+
+### 22a.2 Profile schema
+
+One profile bundles everything a component needs to know about a chain. The schema (Rust `ChainProfile` struct + serde-json wire format):
+
+```jsonc
+{
+  "name": "base",                                // unique slug
+  "display_name": "Base Mainnet (Coinbase L2)",  // operator-facing
+  "chain_id": 8453,                              // EIP-155 / eth_chainId
+  "chain_kind": "optimism-l2",                   // substrate-frontier | ethereum-l1 | optimism-l2 | arbitrum | local-dev
+  "rpc": {
+    "http": "https://mainnet.base.org",
+    "wss": "wss://base-rpc.publicnode.com",
+    "substrate_wss": null                        // only set for substrate-frontier
+  },
+  "explorer": {
+    "url": "https://basescan.org",
+    "tx_url_template": "https://basescan.org/tx/{tx_hash}",
+    "address_url_template": "https://basescan.org/address/{address}"
+  },
+  "token": { "symbol": "ETH", "decimals": 18 },
+  "finality": {
+    "default_block_tag": "safe",                 // latest | safe | finalized
+    "confirmation_blocks": 0,
+    "confirmation_seconds": 600,
+    "notes": "Base has tiered finality. 'latest' = sequencer (~2s, reorgs); 'safe' = L1 batch posted (~5-10 min); 'finalized' = Ethereum sign-off (~15-20 min)."
+  },
+  "gas": {
+    "model": "eip1559",                          // eip1559 | legacy
+    "max_priority_fee_gwei": 1,
+    "max_fee_gwei": 50
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_BASE_DEPLOYER_KEY",  // env var holding hot-key for Foundry deploys
+    "foundry_chain_arg": "base",                        // forge script --chain <arg>
+    "faucet_url": null,                                 // populated on testnets
+    "default_test_key": null                            // populated on local-dev
+  }
+}
+```
+
+### 22a.3 Built-in profiles
+
+Seven profiles ship embedded in the binary via `include_str!`. Adding a new built-in is a one-file change under `crates/agentkeys-core/chain-profiles/<name>.json` plus one entry in the `BUILTIN_PROFILES` slice:
+
+| Profile | Chain ID | Kind | Default block tag | Notes |
+|---|---|---|---|---|
+| `heima` | 212013 | substrate-frontier | `latest` | Default. Litentry/Heima mainnet — HashedAddressMapping makes EVM accounts first-class on-chain identities. |
+| `heima-paseo` | auto-detect (0 sentinel) | substrate-frontier | `latest` | Heima Paseo testnet. |
+| `base` | 8453 | optimism-l2 | `safe` (5-10 min L1) | Coinbase L2. |
+| `base-sepolia` | 84532 | optimism-l2 | `safe` | Base testnet. |
+| `ethereum` | 1 | ethereum-l1 | `finalized` (~12.8 min) | Highest-cost, highest-assurance chain. |
+| `sepolia` | 11155111 | ethereum-l1 | `finalized` | Ethereum testnet. |
+| `anvil` | 31337 | local-dev | `latest` (instant) | Local Foundry node for tests + demo bring-up. Ships default test key. |
+
+### 22a.4 Operator-custom chains
+
+For chains AgentKeys doesn't ship by default (Moonbeam, Astar, Polygon, Avalanche, Arbitrum, BSC, Aliyun BaaS, permissioned Quorum, …), write a JSON file matching the schema and point `$AGENTKEYS_CHAIN_PROFILE_FILE` at it:
+
+```bash
+export AGENTKEYS_CHAIN_PROFILE_FILE=/etc/agentkeys/moonbeam.json
+agentkeys chain show
+# (prints the moonbeam profile)
+agentkeys device register --registry-address 0x...   # uses moonbeam
+```
+
+No recompile. All four contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) are plain Solidity, deployable on any EVM-compatible chain via Foundry / Hardhat.
+
+### 22a.5 What `chain_kind` controls at runtime
+
+The `chain_kind` enum is read by chain-aware components to pick the right finality + gas + signing strategy:
+
+| `chain_kind` | Finality strategy | Gas strategy | Notes |
+|---|---|---|---|
+| `substrate-frontier` | Time-based (parachain relay-chain GRANDPA finality, ~6s) — wait `confirmation_seconds` | EIP-1559; also exposes `substrate_wss` for Polkadot.js Apps + Substrate-side extrinsic inspection | Heima, Moonbeam, Astar, any Frontier-based parachain |
+| `ethereum-l1` | Block-tag-based (`safe` / `finalized` tags signed by validators) | EIP-1559; high gas — default to `finalized` for cap-mint | Ethereum mainnet, Sepolia |
+| `optimism-l2` | Block-tag-based with tiered finality: `latest` sequencer (~2s) → `safe` L1-posted (~5-10 min) → `finalized` Ethereum-signed (~15-20 min) | EIP-1559; default to `safe` to avoid sequencer reorg windows | Base, Optimism, Mode, Zora |
+| `arbitrum` | Similar to OP-stack but with Arbitrum-specific gas model | Pre-2316 nitro gas; some calls deferred to L1 | Arbitrum, Arbitrum Nova |
+| `local-dev` | Instant finality | Zero-gas; ships default test key | Anvil, Hardhat |
+
+### 22a.6 Cap-mint freshness across chains
+
+Because workers re-verify on-chain scope independently of the broker (defense in depth per §15), they need a consistent view of "the chain". The `default_block_tag` + `confirmation_seconds` in the profile bound how stale a worker's chain read can be:
+
+| Chain | Worst-case cap-mint latency (scope-grant ack → first cap usable) |
+|---|---|
+| `anvil` | <1s (instant finality) |
+| `heima` | ~6s (parachain block + GRANDPA) |
+| `base` | ~5-10 min (waits for `safe`, which is L1 batch posting) |
+| `ethereum` | ~12.8 min (waits for `finalized`, which is 2-epoch finalization) |
+
+Operators choosing Ethereum mainnet as the chain backbone for stage-1 contracts accept higher cap-mint latency in exchange for the strongest chain-security floor. Operators choosing Base or Heima get sub-10-minute (or sub-10-second) cap-mint freshness at the cost of weaker (but still adequate per Codex review) finality.
+
+For payment caps specifically (per §15.5), the operator can override the per-call block tag — e.g., default to `safe` for routine payments but require `finalized` for payments above `payment_k11_threshold`. This is enforced at the worker level using `cap.required_block_tag` field.
 
 ---
 

@@ -1,6 +1,7 @@
 pub mod actor_omni;
 pub mod auth_request;
 pub mod backend;
+pub mod chain_profile;
 pub mod init_flow;
 pub mod mock_client;
 pub mod otp;

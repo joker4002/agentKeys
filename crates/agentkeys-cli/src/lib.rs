@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use agentkeys_core::actor_omni::actor_omni_hex;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
+use agentkeys_core::chain_profile::ChainProfile;
 use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
 use agentkeys_core::s3_backend::{S3CredentialBackend, WriteEnvelope};
@@ -182,6 +183,13 @@ pub struct CommandContext {
     /// `V2` per-operator post-migration. Reads always accept both formats
     /// — only writes care about this flag.
     pub envelope_version: EnvelopeVersionFlag,
+    /// v2 stage 1: which EVM chain backbone to talk to. Resolved per
+    /// `ChainProfile::resolve` order — CLI `--chain` flag wins over
+    /// `$AGENTKEYS_CHAIN` env over the built-in default `heima`.
+    /// `None` means "not yet resolved" — call `chain_profile()` to
+    /// materialize. Cached after first resolution.
+    pub chain_profile_cli_name: Option<String>,
+    cached_chain_profile: std::sync::OnceLock<ChainProfile>,
 }
 
 impl CommandContext {
@@ -204,12 +212,46 @@ impl CommandContext {
             signer_url: std::env::var("AGENTKEYS_SIGNER_URL").ok().filter(|s| !s.is_empty()),
             omni_account: std::env::var("AGENTKEYS_OMNI_ACCOUNT").ok().filter(|s| !s.is_empty()),
             envelope_version: EnvelopeVersionFlag::V1,
+            chain_profile_cli_name: None,
+            cached_chain_profile: std::sync::OnceLock::new(),
         }
     }
 
     pub fn with_envelope_version(mut self, v: EnvelopeVersionFlag) -> Self {
         self.envelope_version = v;
         self
+    }
+
+    pub fn with_chain_profile_name(mut self, name: Option<String>) -> Self {
+        self.chain_profile_cli_name = name.filter(|s| !s.is_empty());
+        self.cached_chain_profile = std::sync::OnceLock::new();
+        self
+    }
+
+    /// Resolve the chain profile per the documented precedence
+    /// (`--chain` > `$AGENTKEYS_CHAIN` > `$AGENTKEYS_CHAIN_PROFILE_FILE` >
+    /// built-in default `heima`). Cached after first call so verbose
+    /// output doesn't print the resolution debug string twice.
+    pub fn chain_profile(&self) -> Result<&ChainProfile> {
+        if let Some(p) = self.cached_chain_profile.get() {
+            return Ok(p);
+        }
+        let env_name = std::env::var("AGENTKEYS_CHAIN").ok();
+        let env_file = std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE").ok();
+        let (profile, why) = ChainProfile::resolve(
+            self.chain_profile_cli_name.as_deref(),
+            env_name.as_deref(),
+            env_file.as_deref(),
+        )
+        .map_err(|e| anyhow!("failed to resolve chain profile: {e}"))?;
+        if self.verbose {
+            eprintln!(
+                "[verbose] chain profile: {} (chain_id={}) — {}",
+                profile.name, profile.chain_id, why
+            );
+        }
+        let _ = self.cached_chain_profile.set(profile);
+        Ok(self.cached_chain_profile.get().unwrap())
     }
 
     pub fn with_broker_url(mut self, broker_url: Option<String>) -> Self {
