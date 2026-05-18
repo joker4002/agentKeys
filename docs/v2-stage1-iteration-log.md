@@ -134,6 +134,20 @@ shared JSON encoding is the source of truth for the canonical bytes.
 
 **Scope**: Re-run the full orchestrator end-to-end on heima mainnet; verify idempotency + update doc tables.
 
+**End-state**:
+- `docs/v2-stage1-migration-and-demo.md` "What's still in flight" table updated; every prior `⏳ not yet` is now `✅ shipped` with file/contract/tx references.
+- `scripts/v2-stage1-demo.sh` end-to-end now wraps 15 steps: 1-9 install + email + SIWE + OIDC + vault provisioning + envelope smoke + chain deploy; 10-13 device-register + agent-create + scope-set + audit-append; 14 K11 stub enrollment; 15 summary.
+- All cargo tests pass workspace-wide.
+- Codex pass-1 + pass-2 reviews landed (8 + 7 findings respectively, all addressed in commits `cff03d0` + `89ec55c`).
+
+## Iteration 12 — stage-2 / issue #90 foundation
+
+**Scope**: Multi-device recovery scaffold + memory-service worker per arch.md §15.2 + §17 per-data-class buckets policy.
+
+**Deliverables shipped in this iteration**:
+- `scripts/heima-device-revoke.sh` — wraps `SidecarRegistry.revokeDevice(deviceKeyHash, k11Assertion)`. Supports `--agent <label>` / `--device-key-hash 0x...` / `--master` modes. K11 stub bytes for master revokes (agent revokes pass empty bytes per the contract). Idempotency via `getDevice.revoked` + `registeredAt > 0` checks. Post-tx verifies `isActive == false`.
+- `crates/agentkeys-worker-memory` — new crate per arch.md §15.2. Reuses `agentkeys_worker_creds`'s envelope + verify modules; only the S3 path prefix (`bots/<actor>/memory/...`) and bucket name (`$MEMORY_BUCKET`) differ. Tracks issue #90's memory-service-worker task.
+
 **Errors + fixes**:
 
-(populated during execution)
+(populated during stage-2 execution)

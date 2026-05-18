@@ -277,6 +277,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-worker-memory"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-worker-creds",
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "base64",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
