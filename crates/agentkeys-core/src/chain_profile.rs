@@ -468,12 +468,16 @@ mod tests {
     }
 
     #[test]
-    fn heima_paseo_chain_id_zero_signals_auto_detect() {
-        // chain_id = 0 in heima-paseo profile means "call eth_chainId at
-        // startup". The auto-detection logic isn't in this module, but
-        // downstream callers should treat 0 as "not yet resolved".
+    fn heima_paseo_chain_id_is_2013() {
+        // Heima Paseo's EVM chain ID is 2013 (= HEIMA_PARA_ID; mainnet's
+        // 212013 prefixes the year). Verified live 2026-05-18 against
+        // https://rpc.paseo-parachain.heima.network — eth_chainId
+        // returns 0x7dd. Pin this so a future "let's auto-detect"
+        // refactor doesn't silently swap to the wrong chain.
         let p = ChainProfile::load_builtin("heima-paseo").unwrap();
-        assert_eq!(p.chain_id, 0, "heima-paseo chain_id is auto-detect sentinel");
+        assert_eq!(p.chain_id, 2013);
+        let mainnet = ChainProfile::load_builtin("heima").unwrap();
+        assert_ne!(p.chain_id, mainnet.chain_id, "paseo and mainnet must not collide");
     }
 
     #[test]

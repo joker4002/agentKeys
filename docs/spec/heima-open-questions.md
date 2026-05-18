@@ -285,26 +285,44 @@ Sudo is **standard practice on testnets** — it gives the chain operator (or an
 
 **Tooling note:** `sudo.sudo(...)` is a Substrate-side extrinsic, NOT an EVM transaction. Calling it requires Substrate-side signing — either via Polkadot.js Apps (Developer → Sudo tab), `subxt` (Rust), `@polkadot/api` (JS), or `subkey`. Foundry / `cast` / web3.js cannot construct sudo extrinsics because they only know Ethereum-style RLP-encoded transactions. The crossover gotcha for our use case: when we want sudo to "do something to the EVM side" (e.g., call a Solidity function as if msg.sender were the contract owner), the sudo extrinsic wraps `pallet_ethereum.transact(...)` — which is the Substrate-side primitive that submits an EVM transaction. That's the bridge.
 
-### Q13. What's the canonical Heima Paseo RPC URL?
+### Q13. What's the canonical Heima Paseo RPC URL? ✅ RESOLVED 2026-05-18
 
 > **Wanted:** a single HTTP + WSS endpoint that responds to both EVM JSON-RPC (`eth_chainId`, `eth_blockNumber`) and Substrate-RPC (`system_chain`, `system_properties`, `sudo_*` extrinsics via Polkadot.js Apps).
->
-> **Status (2026-05-18):** the Heima mainnet URL is confirmed live at `https://rpc.heima-parachain.heima.network`. Two speculative Paseo URLs both fail SSL:
-> - `https://rpc.heima-parachain-paseo.heima.network` → `SSL_ERROR_SYSCALL`
-> - `https://rpc-paseo.heima.network` → `SSL_ERROR_SYSCALL`
->
-> The `crates/agentkeys-core/chain-profiles/heima-paseo.json` profile currently lists `https://rpc-eth-paseo.heima.network` (unverified) and `chain_id: 0` (sentinel for "auto-detect via `eth_chainId` at startup").
 
-**Kai / Heima dev answer:**
+**Heima dev team answer (2026-05-18 handoff):**
+
 ```
-Paseo HTTP RPC URL:        _______
-Paseo WSS RPC URL:         _______
-Paseo Substrate WSS URL:   _______ (same as above? separate?)
-Paseo EVM chain ID:        _______  (= HEIMA_PARA_ID on paseo runtime — what is its value?)
-Paseo SS58 prefix:         _______  (mainnet uses 31; paseo same or different?)
-Paseo faucet URL:          _______
-Paseo block explorer URL:  _______  (Statescan deployed for Paseo too?)
+Paseo HTTP RPC URL:        https://rpc.paseo-parachain.heima.network
+Paseo WSS RPC URL:         wss://rpc.paseo-parachain.heima.network   (same host)
+Paseo Substrate WSS URL:   wss://rpc.paseo-parachain.heima.network   (same host)
+Paseo EVM chain ID:        2013  (= HEIMA_PARA_ID — mainnet's 212013
+                                  prefixes the deployment year; paseo
+                                  skips the prefix)
+Paseo SS58 prefix:         131   (NOT the 31 used by mainnet, NOT the
+                                  generic 42 — re-encode any pasted
+                                  pubkey under prefix 131 for paseo,
+                                  or use //Alice as a SURI directly)
+Paseo faucet URL:          (still pending; sudo via Alice covers most
+                            cases — see Q14 and §4.0 of the demo doc)
+Paseo block explorer URL:  https://heima-paseo.statescan.io  (per the
+                            existing profile pattern — verify once a
+                            tx is on chain)
 ```
+
+**Live verification (run 2026-05-18 from operator workstation):**
+
+```
+$ curl -sS -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+    https://rpc.paseo-parachain.heima.network
+{"jsonrpc":"2.0","id":1,"result":"0x7dd"}        # 0x7dd = 2013 decimal
+
+$ curl ... method:system_chain         → "Heima-paseo"
+$ curl ... method:system_properties    → {"ss58Format":131,"tokenDecimals":18,"tokenSymbol":"HEI"}
+$ curl ... method:eth_blockNumber      → 0x2c5556  (~2.9M blocks; live chain)
+```
+
+These values landed in `crates/agentkeys-core/chain-profiles/heima-paseo.json` in the 2026-05-18 commit. The `chain_id: 0` auto-detect sentinel was retired — now hard-pinned to `2013`.
 
 ### Q14. Heima Paseo sudo — confirm the sudoer + how to invoke
 
@@ -358,7 +376,7 @@ Date sudo will be removed (if planned):  _______
 | Q10 | TEE worker stability / rewrite status | ✅🛠🚫 | | | |
 | Q11 | Open-source posture of AgentKeys API | ✅🛠🚫 | | | |
 | Q12 | Rate limits, fees, testnet, mainnet | ✅🛠🚫 | | | |
-| Q13 | Canonical Heima Paseo RPC URL (HTTP + WSS) | ✅🛠🚫 | | | added 2026-05-18; blocks updating `heima-paseo.json` profile |
+| Q13 | Canonical Heima Paseo RPC URL (HTTP + WSS) | ✅ resolved | | Heima dev | 2026-05-18: `rpc.paseo-parachain.heima.network`, chain_id 2013, ss58 prefix 131, token HEI 18 decimals. Profile updated. |
 | Q14 | Heima Paseo sudo — Alice as sudoer + invocation recipe | ✅🛠🚫 | | | added 2026-05-18; unblocks dev-bring-up pre-funding flow |
 | Q15 | Heima mainnet — sudo removed OR governance-multisig-held | ✅🛠🚫 | | | added 2026-05-18; security gate on production chain |
 
