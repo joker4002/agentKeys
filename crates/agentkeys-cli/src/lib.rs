@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod k11;
+
 use agentkeys_core::actor_omni::actor_omni_hex;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::chain_profile::ChainProfile;

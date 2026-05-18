@@ -83,7 +83,7 @@ fi
 # Bash-3.2 (macOS default) does NOT support `local -n`, so step counters
 # live as plain globals.
 STEP_NUM=0
-STEP_TOTAL=14
+STEP_TOTAL=15
 CURRENT_STEP_NAME=""
 
 step()    { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
@@ -619,8 +619,46 @@ do_step_13() {
   ok "audit entry appended"
 }
 
-# ─── Step 14: final summary ────────────────────────────────────────────────
+# ─── Step 14: K11 enrollment (stage-1 stub) ────────────────────────────────
 do_step_14() {
+  step "K11 enrollment (stage-1 stub — real WebAuthn lands in stage 2 / #90)"
+  local profile_uc registry_addr master_addr operator_omni
+  profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
+  registry_addr=$(eval "echo \${SIDECAR_REGISTRY_ADDRESS_${profile_uc}:-}")
+  master_addr=$(eval "echo \${HEIMA_DEPLOYER_ADDR_${profile_uc}:-}")
+  if [ -z "$master_addr" ] || [ -z "$registry_addr" ]; then
+    info "skipping — master address or registry not yet set (run earlier steps first)"
+    return 0
+  fi
+  local master_lc
+  master_lc=$(printf '%s' "$master_addr" | tr '[:upper:]' '[:lower:]')
+  operator_omni=$(printf 'agentkeysevm%s' "$master_lc" | shasum -a 256 | awk '{print $1}')
+  local enrollment_file="$HOME/.agentkeys/k11/${operator_omni}.json"
+  if [ -f "$enrollment_file" ]; then
+    ok "K11 enrollment already exists at $enrollment_file (stage-1 stub)"
+  else
+    info "writing stage-1 K11 stub enrollment for operator_omni=0x$operator_omni"
+    mkdir -p "$(dirname "$enrollment_file")"
+    # cred_id = sha256("agentkeys-k11-stub-cred:0x$omni")
+    # cose    = sha256("agentkeys-k11-stub-cose:0x$omni")
+    local cred_id cose ts
+    cred_id=$(printf 'agentkeys-k11-stub-cred:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    cose=$(printf 'agentkeys-k11-stub-cose:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    ts=$(date +%s)
+    (umask 077 && jq -n \
+      --arg op "0x$operator_omni" \
+      --arg cid "$cred_id" \
+      --arg cose "$cose" \
+      --arg ts "$ts" \
+      '{operator_omni:$op, credential_id_hex:$cid, cose_pubkey_hex:$cose, enrolled_at_unix:($ts|tonumber), mode:"stage1-stub"}' \
+      > "$enrollment_file")
+    chmod 600 "$enrollment_file"
+    ok "K11 stub enrollment written ($enrollment_file)"
+  fi
+}
+
+# ─── Step 15: final summary ────────────────────────────────────────────────
+do_step_15() {
   step "Summary + next steps"
   local profile_uc registry_addr session_file
   profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
@@ -675,6 +713,7 @@ main() {
   in_scope 12 && do_step_12
   in_scope 13 && do_step_13
   in_scope 14 && do_step_14
+  in_scope 15 && do_step_15
 
   return 0
 }

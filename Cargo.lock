@@ -94,12 +94,15 @@ dependencies = [
  "aws-credential-types",
  "axum",
  "clap",
+ "hex",
  "predicates",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "thiserror",
  "tokio",
 ]
 
@@ -150,6 +153,8 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
  "libc",
  "rand",
  "reqwest",
@@ -158,6 +163,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower 0.4.13",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
 ]
@@ -241,6 +247,33 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agentkeys-worker-creds"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "agentkeys-types",
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "base64",
+ "clap",
+ "hex",
+ "p256 0.13.2",
+ "pkcs8 0.10.2",
+ "rand_core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ use tracing::info;
 
 mod hardening;
 mod pairing;
+mod proxy;
 mod session;
 
 #[derive(Parser)]
