@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/v2-stage1-demo.sh — one-command v2 stage-1 demo end-to-end.
+# harness/v2-stage1-demo.sh — one-command v2 stage-1 demo end-to-end.
 #
 # Composes the existing scripts (install-agentkeys-cli.sh,
 # agentkeys-init-email-demo.sh, heima-bring-up.sh) into a single
@@ -65,13 +65,13 @@
 #   done and have idempotent skip-checks anyway).
 #
 # Usage examples:
-#   bash scripts/v2-stage1-demo.sh                              # full demo, defaults
-#   bash scripts/v2-stage1-demo.sh --session-id bob             # second tenant
-#   bash scripts/v2-stage1-demo.sh --chain anvil                # local-dev backbone
-#   bash scripts/v2-stage1-demo.sh --from-step 5                # skip preflight, start at email init
-#   bash scripts/v2-stage1-demo.sh --only-step 7                # re-run the envelope smoke test
-#   bash scripts/v2-stage1-demo.sh --skip-deploy                # everything but chain deploy
-#   AGENTKEYS_CHAIN=heima bash scripts/v2-stage1-demo.sh        # mainnet (refused on step 8)
+#   bash harness/v2-stage1-demo.sh                              # full demo, defaults
+#   bash harness/v2-stage1-demo.sh --session-id bob             # second tenant
+#   bash harness/v2-stage1-demo.sh --chain anvil                # local-dev backbone
+#   bash harness/v2-stage1-demo.sh --from-step 5                # skip preflight, start at email init
+#   bash harness/v2-stage1-demo.sh --only-step 7                # re-run the envelope smoke test
+#   bash harness/v2-stage1-demo.sh --skip-deploy                # everything but chain deploy
+#   AGENTKEYS_CHAIN=heima bash harness/v2-stage1-demo.sh        # mainnet (refused on step 8)
 
 set -euo pipefail
 
@@ -105,7 +105,7 @@ die()     { printf "    ${COLOR_ERR}fail${COLOR_RESET}  %s\n" "$1" >&2
             if [ "$STEP_NUM" -gt 0 ]; then
               printf "          (failed during step %d/%d: %s)\n" \
                 "$STEP_NUM" "$STEP_TOTAL" "$CURRENT_STEP_NAME" >&2
-              printf "          retry just this step: bash scripts/v2-stage1-demo.sh --only-step %d\n" \
+              printf "          retry just this step: bash harness/v2-stage1-demo.sh --only-step %d\n" \
                 "$STEP_NUM" >&2
             fi
             exit 1 ; }
@@ -476,7 +476,7 @@ do_step_8() {
           curl -sS \"\$BACKEND_URL/healthz\"
 
    Skip this step for now (continue with chain steps):
-     bash scripts/v2-stage1-demo.sh --from-step 8 --skip-smoke"
+     bash harness/v2-stage1-demo.sh --from-step 8 --skip-smoke"
     aws s3 ls "s3://$vault_bucket/$s3_key" --region "$REGION" >/dev/null \
       || die "expected object at s3://$vault_bucket/$s3_key after store, but it's missing"
   fi
@@ -753,9 +753,9 @@ do_step_15() {
     printf "  Rust CLI subcommands wrapping the same flows arrive in stage 2 (#90).\n\n" >&2
   fi
   printf "  Re-run individual phases (idempotent):\n" >&2
-  printf "    bash scripts/v2-stage1-demo.sh --only-step 5     # re-check chain reachability\n" >&2
-  printf "    bash scripts/v2-stage1-demo.sh --only-step 7     # re-run envelope smoke test\n" >&2
-  printf "    bash scripts/v2-stage1-demo.sh --from-step 6     # restart from email init\n\n" >&2
+  printf "    bash harness/v2-stage1-demo.sh --only-step 5     # re-check chain reachability\n" >&2
+  printf "    bash harness/v2-stage1-demo.sh --only-step 7     # re-run envelope smoke test\n" >&2
+  printf "    bash harness/v2-stage1-demo.sh --from-step 6     # restart from email init\n\n" >&2
 }
 
 # ─── Run ────────────────────────────────────────────────────────────────────

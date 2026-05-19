@@ -56,7 +56,7 @@ Future stage-2/3 work: agentkeys-specific indexing on top of Litentry's fork of 
 Currently halted (block 2,905,430 frozen since 2026-01-15; 4+ months). No stage-1 contracts deployed yet. When collators come back online, run:
 
 ```bash
-AGENTKEYS_CHAIN=heima-paseo bash scripts/v2-stage1-demo.sh --only-step 9
+AGENTKEYS_CHAIN=heima-paseo bash harness/v2-stage1-demo.sh --only-step 9
 ```
 
 …to deploy + auto-fund via Alice sudo. This doc will be updated with the live testnet addresses once that lands.
@@ -80,7 +80,7 @@ The script reads addresses from `operator-workstation.env`, so changing `AGENTKE
 
 ## Re-deploy / replace
 
-Re-running `bash scripts/v2-stage1-demo.sh --only-step 9` is **idempotent**: step 5 calls `cast code` on each stored address and skips the deploy if all four already have on-chain bytecode. Re-deploys only fire when:
+Re-running `bash harness/v2-stage1-demo.sh --only-step 9` is **idempotent**: step 5 calls `cast code` on each stored address and skips the deploy if all four already have on-chain bytecode. Re-deploys only fire when:
 
 - Stored address in `operator-workstation.env` is the `0x0` sentinel or absent
 - OR the stored address has no bytecode on-chain (chain reset, address corrupted)

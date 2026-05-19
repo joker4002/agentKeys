@@ -8,11 +8,11 @@ The companion PRD is at [.omc/prd.json](../.omc/prd.json) (12 stories ordered P0
 
 ## Iteration A — live runtime debug pass (2026-05-19 follow-up)
 
-After the first set of iterations 1-12 landed the scripts, **a fresh run of `bash scripts/v2-stage1-demo.sh --from-step 12` on Heima mainnet surfaced real bugs that the unit tests didn't catch**. This section documents every error encountered + the underlying fix, in the order they came up.
+After the first set of iterations 1-12 landed the scripts, **a fresh run of `bash harness/v2-stage1-demo.sh --from-step 12` on Heima mainnet surfaced real bugs that the unit tests didn't catch**. This section documents every error encountered + the underlying fix, in the order they came up.
 
 ### Error A.1 — `getScope` ABI decode mismatch (heima-scope-set.sh + heima-scope-revoke.sh)
 
-**Symptom**: re-running `bash scripts/v2-stage1-demo.sh --only-step 12` submitted a new `setScopeWithWebauthn` tx every time instead of short-circuiting. Idempotency check printed `"scope not yet set (or differs) → proceeding"` even when the scope WAS already set on-chain.
+**Symptom**: re-running `bash harness/v2-stage1-demo.sh --only-step 12` submitted a new `setScopeWithWebauthn` tx every time instead of short-circuiting. Idempotency check printed `"scope not yet set (or differs) → proceeding"` even when the scope WAS already set on-chain.
 
 **Diagnosis** (probed directly with `cast call`):
 ```bash
@@ -38,11 +38,11 @@ $ cast call ... "getScope(...)((bytes32[],bool,...))" ...
 
 **Verify**:
 ```bash
-$ bash scripts/v2-stage1-demo.sh --only-step 12   # first run
+$ bash harness/v2-stage1-demo.sh --only-step 12   # first run
 ==> [step 12/15] Grant agent scope (setScopeWithWebauthn)
 …
     ok   scope set — txhash 0x99a4…06c8 (block 9621848)
-$ bash scripts/v2-stage1-demo.sh --only-step 12   # second run — no new tx
+$ bash harness/v2-stage1-demo.sh --only-step 12   # second run — no new tx
 ==> [step 12/15] Grant agent scope (setScopeWithWebauthn)
 …
 ==> Idempotency check: scope already set?
@@ -51,13 +51,13 @@ $ bash scripts/v2-stage1-demo.sh --only-step 12   # second run — no new tx
 
 ### Error A.2 — step counter always shows `[step 1/15]` regardless of which step actually runs
 
-**Symptom**: `bash scripts/v2-stage1-demo.sh --only-step 12` printed `==> [step 1/15] Grant agent scope…` — confusing operator-facing output.
+**Symptom**: `bash harness/v2-stage1-demo.sh --only-step 12` printed `==> [step 1/15] Grant agent scope…` — confusing operator-facing output.
 
 **Diagnosis**: `STEP_NUM=0` initialized at module-load time; `step()` does `STEP_NUM=$((STEP_NUM+1))` on each call. With `--only-step N` the dispatcher skips steps 1..N-1 (their `do_step_X` calls never fire), so the counter never reaches N before the surviving step calls `step "..."` and lands on 1.
 
 **Fix**: pre-seed `STEP_NUM=$((FROM_STEP - 1))` after argument parsing so the first `step()` call lands on the correct step number.
 
-**Where**: `scripts/v2-stage1-demo.sh:162` (after the `--only-step` collapse to FROM_STEP/TO_STEP, before the `in_scope` helper).
+**Where**: `harness/v2-stage1-demo.sh:162` (after the `--only-step` collapse to FROM_STEP/TO_STEP, before the `in_scope` helper).
 
 ### Error A.3 — stale "today this errors with 'unrecognized subcommand device'" text in step 15 summary
 
@@ -65,7 +65,7 @@ $ bash scripts/v2-stage1-demo.sh --only-step 12   # second run — no new tx
 
 **Fix**: replaced the summary block with a list of the shipped bash entries (device-register, agent-create, scope-set, credential-audit, scope-revoke, device-revoke) + a pointer to stage 2 (#90) for the Rust CLI subcommand wrappers.
 
-**Where**: `scripts/v2-stage1-demo.sh:639-647` (`do_step_15` summary printf block).
+**Where**: `harness/v2-stage1-demo.sh:639-647` (`do_step_15` summary printf block).
 
 ### Step 13 idempotency note
 
@@ -77,8 +77,8 @@ If we want demo-step-level idempotency, the fix is to use a sentinel `payload_ha
 
 After all 3 fixes (A.1, A.2, A.3):
 ```bash
-$ bash scripts/v2-stage1-demo.sh --from-step 12   # first run → all 4 steps green
-$ bash scripts/v2-stage1-demo.sh --from-step 12   # second run from scratch shell
+$ bash harness/v2-stage1-demo.sh --from-step 12   # first run → all 4 steps green
+$ bash harness/v2-stage1-demo.sh --from-step 12   # second run from scratch shell
   step 12 → skip (idempotent)
   step 13 → +1 audit entry (append-only by contract; intentional)
   step 14 → "K11 enrollment already exists" skip
@@ -95,7 +95,7 @@ All 4 steps print correct `[step N/15]` counter and pass green.
 - A transient RPC error from cast call could also produce malformed output that breaks the parser silently.
 
 **Fix (3 places)**:
-- `scripts/v2-stage1-demo.sh:177`: added `python3` to the prereq tool list in step 1 sanity-check.
+- `harness/v2-stage1-demo.sh:177`: added `python3` to the prereq tool list in step 1 sanity-check.
 - `scripts/heima-scope-set.sh:160-175`: pre-check `command -v python3` and `die` if missing; removed `2>/dev/null || true`; added explicit `PARSE_RC=$?` check post-invocation that `die`s with the raw cast output included.
 - `scripts/heima-scope-revoke.sh:90-105`: same fix pattern.
 
@@ -104,7 +104,7 @@ Now: missing python3 → loud failure at step 1, NOT silent re-submission. Parse
 ### Verified after codex fix
 
 ```bash
-$ bash scripts/v2-stage1-demo.sh --from-step 12   # second-pass post-codex-fix
+$ bash harness/v2-stage1-demo.sh --from-step 12   # second-pass post-codex-fix
   step 12 → skip scope already matches  (idempotent ✓)
   step 13 → +1 audit entry              (append-only by contract ✓)
   step 14 → K11 enrollment already exists
@@ -187,7 +187,7 @@ $ target/debug/agentkeys k11 enroll --webauthn --operator-omni 0xaa…aa
 | 3 | `a2ade7c` | APPROVED | `set +e` / `set -e` bracketing makes PARSE_RC inspection reachable; happy path unchanged |
 
 Final test pass:
-- `bash scripts/v2-stage1-demo.sh --from-step 12` on Heima mainnet → exit 0, step 12 logs skip (idempotent), steps 13/14/15 green
+- `bash harness/v2-stage1-demo.sh --from-step 12` on Heima mainnet → exit 0, step 12 logs skip (idempotent), steps 13/14/15 green
 - `AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh` → 13/13 checks pass
 
 Deslop pass: no-op. The python3 parser blocks in `heima-scope-{set,revoke}.sh` decode different subsets of the Scope struct (set: all 8 fields for config-equality check; revoke: only services + exists for "is the scope empty" check). Extracting would be over-abstraction and break the operator-readability principle for these scripts (each runnable + readable in isolation).
@@ -236,7 +236,7 @@ No runtime errors. Live test from operator master (`0xdE644…3Bc`) → fresh ad
 
 ## Iteration 5 — wire into v2-stage1-demo orchestrator (US-006)
 
-**Scope**: Compose all four new scripts into `scripts/v2-stage1-demo.sh` as steps 10-13; ensure idempotent end-to-end re-run.
+**Scope**: Compose all four new scripts into `harness/v2-stage1-demo.sh` as steps 10-13; ensure idempotent end-to-end re-run.
 
 **Errors + fixes**:
 
@@ -324,7 +324,7 @@ shared JSON encoding is the source of truth for the canonical bytes.
 
 **End-state**:
 - `docs/v2-stage1-migration-and-demo.md` "What's still in flight" table updated; every prior `⏳ not yet` is now `✅ shipped` with file/contract/tx references.
-- `scripts/v2-stage1-demo.sh` end-to-end now wraps 15 steps: 1-9 install + email + SIWE + OIDC + vault provisioning + envelope smoke + chain deploy; 10-13 device-register + agent-create + scope-set + audit-append; 14 K11 stub enrollment; 15 summary.
+- `harness/v2-stage1-demo.sh` end-to-end now wraps 15 steps: 1-9 install + email + SIWE + OIDC + vault provisioning + envelope smoke + chain deploy; 10-13 device-register + agent-create + scope-set + audit-append; 14 K11 stub enrollment; 15 summary.
 - All cargo tests pass workspace-wide.
 - Codex pass-1 + pass-2 reviews landed (8 + 7 findings respectively, all addressed in commits `cff03d0` + `89ec55c`).
 

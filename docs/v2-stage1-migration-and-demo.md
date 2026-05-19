@@ -343,7 +343,7 @@ If the curl errors or the decimal doesn't match the profile's `chain_id`, fix th
 
 ## §0 — Prerequisites (inherited from stage 7)
 
-> **One-command demo:** if you just want to walk the whole stage-1 demo end-to-end with no copy-paste, run [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-demo.sh) — it composes every shipped step (preflight → CLI build → email-init → S3 smoke test → chain bring-up) into one idempotent flow. Each step has a "skip if already done" check, so re-runs are safe; use `--from-step N` / `--only-step N` to resume after a failure. See [§0.0 below](#00--one-command-demo-via-scriptsv2-stage1-demosh).
+> **One-command demo:** if you just want to walk the whole stage-1 demo end-to-end with no copy-paste, run [`harness/v2-stage1-demo.sh`](../harness/v2-stage1-demo.sh) — it composes every shipped step (preflight → CLI build → email-init → S3 smoke test → chain bring-up) into one idempotent flow. Each step has a "skip if already done" check, so re-runs are safe; use `--from-step N` / `--only-step N` to resume after a failure. See [§0.0 below](#00--one-command-demo-via-scriptsv2-stage1-demosh).
 
 This entire section is **identical** to [stage7-demo-and-verification.md §0](stage7-demo-and-verification.md#0-prerequisites-checklist). Run it once and skip directly to §1 of this doc when complete. The stage-7 §0 walks through:
 
@@ -365,9 +365,9 @@ What you should have at the end of §0:
 - `~/.agentkeys/alice/session.json` (and optionally `bob`) containing a fresh J1 session JWT
 - AWS profile `agentkeys-admin` active; `$ACCOUNT_ID`, `$BROKER_HOST`, `$BUCKET`, `$OIDC_ISSUER`, `$DATA_ROLE_ARN` populated
 
-### §0.0 — One-command demo via `scripts/v2-stage1-demo.sh`
+### §0.0 — One-command demo via `harness/v2-stage1-demo.sh`
 
-The combined orchestrator at [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-demo.sh) walks the full stage-1 demo in one command. It composes the existing scripts ([`install-agentkeys-cli.sh`](../scripts/install-agentkeys-cli.sh), [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh), [`heima-bring-up.sh`](../scripts/heima-bring-up.sh)) — it doesn't reinvent them — so you can still run the underlying scripts individually for finer-grained debugging.
+The combined orchestrator at [`harness/v2-stage1-demo.sh`](../harness/v2-stage1-demo.sh) walks the full stage-1 demo in one command. It composes the existing scripts ([`install-agentkeys-cli.sh`](../scripts/install-agentkeys-cli.sh), [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh), [`heima-bring-up.sh`](../scripts/heima-bring-up.sh)) — it doesn't reinvent them — so you can still run the underlying scripts individually for finer-grained debugging.
 
 **Idempotency model**: each step checks "is this already done?" before doing the work — same `cloud-setup.md`-style pattern (e.g. "if OIDC provider ARN already ends in $BROKER_HOST, skip create"). Re-running the full script is always safe; only steps with missing artifacts execute.
 
@@ -393,28 +393,28 @@ The combined orchestrator at [`scripts/v2-stage1-demo.sh`](../scripts/v2-stage1-
 ```bash
 # === ON OPERATOR WORKSTATION ===
 # Full demo, defaults: session-id=alice, chain=heima-paseo
-bash scripts/v2-stage1-demo.sh
+bash harness/v2-stage1-demo.sh
 
 # Second tenant (for isolation proof in §8)
-bash scripts/v2-stage1-demo.sh --session-id bob
+bash harness/v2-stage1-demo.sh --session-id bob
 
 # Local dev backbone (anvil, no faucet needed)
-bash scripts/v2-stage1-demo.sh --chain anvil
+bash harness/v2-stage1-demo.sh --chain anvil
 
 # Resume after a step failure
-bash scripts/v2-stage1-demo.sh --from-step 6
+bash harness/v2-stage1-demo.sh --from-step 6
 
 # Re-run just the envelope smoke test (e.g. after rotating SMOKE_TEST_SECRET)
-bash scripts/v2-stage1-demo.sh --only-step 7
+bash harness/v2-stage1-demo.sh --only-step 7
 
 # Pause for confirmation before the chain deploy
-bash scripts/v2-stage1-demo.sh --confirm
+bash harness/v2-stage1-demo.sh --confirm
 
 # Run with `set -x` (very chatty — for diagnosis)
-bash scripts/v2-stage1-demo.sh --debug
+bash harness/v2-stage1-demo.sh --debug
 
 # See all flags + env-var overrides
-bash scripts/v2-stage1-demo.sh --help
+bash harness/v2-stage1-demo.sh --help
 ```
 
 **Configurable inputs (no hardcoded values)** — every magic value is overridable:
@@ -428,7 +428,7 @@ bash scripts/v2-stage1-demo.sh --help
 | `SMOKE_TEST_SECRET` | `sk-or-v1-DEMO-FAKE-DO-NOT-USE-IN-PROD` | env |
 | `FUND_AMOUNT_HEI` | `100` | env (sudo-funded deployer balance on heima-paseo) |
 
-**Debuggability**: every failure prints (a) which step failed, (b) the failing tool's exit output, and (c) the exact resume command (`bash scripts/v2-stage1-demo.sh --only-step <N>`). The `--debug` flag enables `set -x` for verbose tracing of the shell-level flow.
+**Debuggability**: every failure prints (a) which step failed, (b) the failing tool's exit output, and (c) the exact resume command (`bash harness/v2-stage1-demo.sh --only-step <N>`). The `--debug` flag enables `set -x` for verbose tracing of the shell-level flow.
 
 **What this script doesn't do** (matches §1.4 / §6 / §7 status in this doc):
 
@@ -1344,7 +1344,7 @@ The flows in §1-§8 describe the **end state** of stage 1. As of the most recen
 | Per-data-class bucket separation (`$VAULT_BUCKET` distinct from `$MAIL_BUCKET`, `agentkeys-vault-role` distinct from `agentkeys-data-role`) per arch.md §17 | ✅ shipped | `scripts/provision-vault-bucket.sh` + `scripts/provision-vault-role.sh` + `scripts/apply-vault-bucket-policy.sh` + `scripts/cleanup-mail-bucket-policy.sh`; orchestrator step 7 |
 | credentials-service worker (Lambda + mTLS to signer) | ⏳ **DEFERRED to stage 2** — tracked in [issue #91](https://github.com/litentry/agentKeys/issues/91) | Today the CLI does client-side encrypt + direct S3 PUT through the OIDC-assumed `agentkeys-vault-role`. The worker (arch.md §15.1) will take over the encrypt/decrypt step without changing the envelope shape. |
 
-Operators following this doc end-to-end today get the full stage-1 flow via the bash entries in `scripts/v2-stage1-demo.sh` (steps 9-15 orchestrate contract deploy → device register → agent create → scope grant → audit append → K11 stub enrollment). The Rust CLI subcommands wrapping those same flows ship in stage 2 (#90); the bash entries are the canonical stage-1 surface and remain supported through stage 2 for ops scripting.
+Operators following this doc end-to-end today get the full stage-1 flow via the bash entries in `harness/v2-stage1-demo.sh` (steps 9-15 orchestrate contract deploy → device register → agent create → scope grant → audit append → K11 stub enrollment). The Rust CLI subcommands wrapping those same flows ship in stage 2 (#90); the bash entries are the canonical stage-1 surface and remain supported through stage 2 for ops scripting.
 
 Per-iteration error → fix log: [`docs/v2-stage1-iteration-log.md`](v2-stage1-iteration-log.md).
 
