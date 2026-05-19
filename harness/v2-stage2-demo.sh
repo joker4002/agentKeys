@@ -1,98 +1,90 @@
 #!/usr/bin/env bash
-# harness/v2-stage2-demo.sh — one-command v2 stage-2 demo end-to-end.
+# harness/v2-stage2-demo.sh — single source of truth for v2 stage-2 on
+# Heima Mainnet (or any chain via AGENTKEYS_CHAIN).
 #
-# Builds on v2-stage1-demo.sh's output (operator + primary master are
-# registered + scope grant flow works) and adds the stage-2 hardening
-# story:
-#   - on-chain P-256 verifier deployed + wired into SidecarRegistry +
-#     AgentKeysScope (replaces the stage-1 `length != 0` gate)
-#   - companion daemon brought up as a 2nd master device
-#   - M-of-N recovery threshold raised to 2
-#   - revoke-master flow demonstrated (dry-run by default; real run with
-#     --revoke-master)
+# Idempotent end-to-end: build → forge test → deploy contracts (if not
+# already deployed) → bootstrap primary master (if not registered) →
+# spin up companion daemon → register companion as 2nd master → set
+# recoveryThreshold = 2 → sanity-check recovery script → summary.
 #
-# Each step is idempotent. Re-runs skip already-done work via on-chain
-# `cast call` lookups + filesystem checks.
+# Every step pre-checks "is this already done?" and skips when the work
+# is a no-op. Re-runs are safe.
 #
 # Pause points (where the operator must interact, --webauthn mode only):
-#   - Touch ID prompt for COMPANION K11 enrollment (step 3)
-#   - Touch ID prompt for PRIMARY K11 during device-add (step 5)
-#   - Touch ID prompt for PRIMARY K11 during set-threshold (step 6)
-#   - Touch ID prompts for BOTH masters during recovery (step 7, only if
-#     --revoke-master)
+#   - Touch ID prompt for COMPANION K11 enrollment (step 5)
+#   - Touch ID prompt for PRIMARY K11 during device-add (step 6)
+#   - Touch ID prompt for PRIMARY K11 during set-threshold (step 7)
+#   - Touch ID prompts for BOTH masters during recovery (step 8, only
+#     if --revoke-master <hash> is passed)
+#
+# Default chain: heima (Mainnet). Override via AGENTKEYS_CHAIN env var.
 #
 # Modes:
 #   --stub (default)      use deterministic K11 stub bytes; CI/no-touchid
-#                         friendly; demonstrates the script flow without
-#                         real platform-authenticator interaction.
-#   --webauthn            use REAL WebAuthn ceremonies (Touch ID prompts).
+#                         friendly; on-chain ops in steps 4, 6, 7, 8 are
+#                         skipped because they need a real K11 sig.
+#   --webauthn            use REAL WebAuthn ceremonies (Touch ID prompts)
+#                         and submit real on-chain mutations.
 #
 # Step gating:
 #   --from-step N         start at step N
 #   --to-step N           stop after step N
 #   --only-step N         run exactly step N
-#   --revoke-master HASH  execute the M-of-N revoke at step 7 against HASH
-#                         (default: dry-run only)
-#   --skip-build          assume agentkeys/agentkeys-daemon binaries are current
+#   --revoke-master HASH  execute the M-of-N revoke at step 8 against HASH
+#   --skip-build          assume agentkeys / agentkeys-daemon binaries are current
+#   --redeploy            force a fresh contract deploy even if addresses exist
 #   --help                this message
 #
 # Examples:
-#   bash harness/v2-stage2-demo.sh                       # full demo, stub mode
-#   bash harness/v2-stage2-demo.sh --webauthn            # with real Touch ID
-#   bash harness/v2-stage2-demo.sh --only-step 4         # just start companion
-#   bash harness/v2-stage2-demo.sh --from-step 5         # skip preflight + companion start
+#   bash harness/v2-stage2-demo.sh                       # full demo, stub mode, Heima
+#   bash harness/v2-stage2-demo.sh --webauthn            # with real Touch ID, full E2E
 #   AGENTKEYS_CHAIN=anvil bash harness/v2-stage2-demo.sh # local dev backbone
 
 set -euo pipefail
 
-# ─── Color helpers ──────────────────────────────────────────────────────────
+# ─── Colors ──────────────────────────────────────────────────────────
 if [ -t 2 ]; then
-  COLOR_HEAD='\033[1;36m'; COLOR_OK='\033[1;32m'; COLOR_SKIP='\033[1;33m'
-  COLOR_WARN='\033[1;33m'; COLOR_ERR='\033[1;31m'; COLOR_DIM='\033[2m'
-  COLOR_RESET='\033[0m'
+  C_HEAD='\033[1;36m'; C_OK='\033[1;32m'; C_SKIP='\033[1;33m'
+  C_WARN='\033[1;33m'; C_ERR='\033[1;31m'; C_DIM='\033[2m'; C_RESET='\033[0m'
 else
-  COLOR_HEAD=''; COLOR_OK=''; COLOR_SKIP=''; COLOR_WARN=''; COLOR_ERR=''
-  COLOR_DIM=''; COLOR_RESET=''
+  C_HEAD=''; C_OK=''; C_SKIP=''; C_WARN=''; C_ERR=''; C_DIM=''; C_RESET=''
 fi
 
 STEP_NUM=0
-STEP_TOTAL=8
+STEP_TOTAL=9
 CURRENT_STEP_NAME=""
 
-step()    { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
-            printf "${COLOR_HEAD}==> [step %d/%d] %s${COLOR_RESET}\n" \
-              "$STEP_NUM" "$STEP_TOTAL" "$1" >&2 ; }
-ok()      { printf "    ${COLOR_OK}ok${COLOR_RESET}    %s\n" "$1" >&2 ; }
-info()    { printf "    ${COLOR_DIM}info${COLOR_RESET}  %s\n" "$1" >&2 ; }
-skip()    { printf "    ${COLOR_SKIP}skip${COLOR_RESET}  %s\n" "$1" >&2 ; }
-warn()    { printf "    ${COLOR_WARN}warn${COLOR_RESET}  %s\n" "$1" >&2 ; }
-die()     { printf "    ${COLOR_ERR}fail${COLOR_RESET}  %s\n" "$1" >&2
-            if [ "$STEP_NUM" -gt 0 ]; then
-              printf "          (failed at step %d/%d: %s)\n" \
-                "$STEP_NUM" "$STEP_TOTAL" "$CURRENT_STEP_NAME" >&2
-            fi
-            exit 1 ; }
+step() { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
+         printf "${C_HEAD}==> [step %d/%d] %s${C_RESET}\n" \
+           "$STEP_NUM" "$STEP_TOTAL" "$1" >&2 ; }
+ok()   { printf "    ${C_OK}ok${C_RESET}    %s\n" "$1" >&2 ; }
+info() { printf "    ${C_DIM}info${C_RESET}  %s\n" "$1" >&2 ; }
+skip() { printf "    ${C_SKIP}skip${C_RESET}  %s\n" "$1" >&2 ; }
+warn() { printf "    ${C_WARN}warn${C_RESET}  %s\n" "$1" >&2 ; }
+die()  { printf "    ${C_ERR}fail${C_RESET}  %s\n" "$1" >&2
+         [ "$STEP_NUM" -gt 0 ] && printf "          (step %d/%d: %s)\n" \
+           "$STEP_NUM" "$STEP_TOTAL" "$CURRENT_STEP_NAME" >&2
+         exit 1 ; }
 
-# ─── Args ─────────────────────────────────────────────────────────────────
+# ─── Args ────────────────────────────────────────────────────────────
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
 SKIP_BUILD=0
 USE_WEBAUTHN=0
+REDEPLOY=0
 REVOKE_TARGET=""
 COMPANION_PORT="${AGENTKEYS_COMPANION_PORT:-9091}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-step)     FROM_STEP="$2"; shift 2 ;;
-    --from-step=*)   FROM_STEP="${1#*=}"; shift ;;
     --to-step)       TO_STEP="$2"; shift 2 ;;
-    --to-step=*)     TO_STEP="${1#*=}"; shift ;;
     --only-step)     ONLY_STEP="$2"; shift 2 ;;
-    --only-step=*)   ONLY_STEP="${1#*=}"; shift ;;
     --skip-build)    SKIP_BUILD=1; shift ;;
     --webauthn)      USE_WEBAUTHN=1; shift ;;
     --stub)          USE_WEBAUTHN=0; shift ;;
+    --redeploy)      REDEPLOY=1; shift ;;
     --revoke-master) REVOKE_TARGET="$2"; shift 2 ;;
     --companion-port) COMPANION_PORT="$2"; shift 2 ;;
     --help|-h)
@@ -107,24 +99,49 @@ if [ -n "$ONLY_STEP" ]; then FROM_STEP="$ONLY_STEP"; TO_STEP="$ONLY_STEP"; fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Bring in operator-workstation.env if present (for SIDECAR_REGISTRY_ADDRESS_*).
-if [ -f "$REPO_ROOT/scripts/operator-workstation.env" ]; then
-  set -a; . "$REPO_ROOT/scripts/operator-workstation.env"; set +a
-fi
-
-AGENTKEYS_CHAIN="${AGENTKEYS_CHAIN:-heima-paseo}"
+AGENTKEYS_CHAIN="${AGENTKEYS_CHAIN:-heima}"
 PROFILE_NAME_UC=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
-SESSION_ID="${SESSION_ID:-alice}"
-OPERATOR_OMNI="${OPERATOR_OMNI:-}"
 
-should_run_step() {
-  local n="$1"
-  [ "$n" -ge "$FROM_STEP" ] && [ "$n" -le "$TO_STEP" ]
+ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+[ -f "$ENV_FILE" ] || die "missing $ENV_FILE — run scripts/setup-dev-env.sh first"
+set -a; . "$ENV_FILE"; set +a
+
+DEPLOYER_KEY_FILE="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/heima-deployer.key}"
+
+should_run_step() { [ "$1" -ge "$FROM_STEP" ] && [ "$1" -le "$TO_STEP" ]; }
+
+# Idempotent env_set: replaces existing KEY=value line or appends.
+env_set() {
+  local key="$1" val="$2" file="$3"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    # sed -i differs between macOS and GNU. Use portable form.
+    sed -i.bak "s|^${key}=.*|${key}=${val}|" "$file" && rm -f "$file.bak"
+  else
+    echo "${key}=${val}" >> "$file"
+  fi
 }
 
-# ─── Step 1: Build CLI + daemon binaries ──────────────────────────────────
+# Resolve deployer key (raw hex or mnemonic) → MASTER_KEY.
+resolve_master_key() {
+  if [ ! -f "$DEPLOYER_KEY_FILE" ]; then return 1; fi
+  local raw
+  raw=$(cat "$DEPLOYER_KEY_FILE" | tr -d '\n[:space:]')
+  if [ "${#raw}" = "66" ] && [ "${raw:0:2}" = "0x" ]; then
+    echo "$raw"
+  elif [ "${#raw}" = "64" ]; then
+    echo "0x$raw"
+  else
+    # Mnemonic
+    if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
+      npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund >/dev/null 2>&1
+    fi
+    node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$DEPLOYER_KEY_FILE" | jq -r .privateKey
+  fi
+}
+
+# ─── Step 1: Build CLI + daemon binaries ─────────────────────────────
 if should_run_step 1; then
-  step "Build agentkeys CLI + agentkeys-daemon"
+  step "Build agentkeys CLI + agentkeys-daemon (release)"
   if [ "$SKIP_BUILD" = 1 ] && [ -x "$REPO_ROOT/target/release/agentkeys" ] \
      && [ -x "$REPO_ROOT/target/release/agentkeys-daemon" ]; then
     skip "release binaries present (--skip-build)"
@@ -136,72 +153,174 @@ if should_run_step 1; then
   fi
 fi
 
-# ─── Step 2: Run forge test suite (verify contracts compile + pass) ───────
+AGENTKEYS_BIN="$REPO_ROOT/target/release/agentkeys"
+DAEMON_BIN="$REPO_ROOT/target/release/agentkeys-daemon"
+[ -x "$AGENTKEYS_BIN" ] || die "missing $AGENTKEYS_BIN (run from-step 1)"
+[ -x "$DAEMON_BIN" ] || die "missing $DAEMON_BIN (run from-step 1)"
+
+PROFILE_JSON=$("$AGENTKEYS_BIN" chain show "$AGENTKEYS_CHAIN")
+RPC_HTTP=$(echo "$PROFILE_JSON" | jq -r .rpc.http)
+
+# ─── Step 2: Run forge tests ─────────────────────────────────────────
 if should_run_step 2; then
-  step "Run forge tests (contracts + verifiers)"
-  if [ ! -d "$REPO_ROOT/crates/agentkeys-chain" ]; then
-    skip "no crates/agentkeys-chain — stub mode demo"
+  step "Run forge test suite (P256 + K11 + AgentKeysV1)"
+  pushd "$REPO_ROOT/crates/agentkeys-chain" >/dev/null
+  if forge test 2>&1 | tail -5 | grep -q "passed; 0 failed"; then
+    ok "all forge tests pass"
   else
-    pushd "$REPO_ROOT/crates/agentkeys-chain" >/dev/null
-    if forge test 2>&1 | tail -5 | grep -q "passed; 0 failed"; then
-      ok "all forge tests pass"
-    else
-      die "forge test failed (run \`forge test\` in crates/agentkeys-chain to see details)"
-    fi
-    popd >/dev/null
+    die "forge test failed (run \`forge test\` in crates/agentkeys-chain to inspect)"
   fi
+  popd >/dev/null
 fi
 
-# ─── Step 3: Verify primary master is registered (from stage-1 demo) ──────
+# ─── Step 3: Deploy stage-2 contracts (if not already deployed) ──────
 if should_run_step 3; then
-  step "Verify primary master exists on chain (stage-1 prerequisite)"
-  REGISTRY="$(eval echo \"\${SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:-}\")"
-  if [ -z "$REGISTRY" ] || [ "$REGISTRY" = "0x0" ]; then
-    warn "no SidecarRegistry address in operator-workstation.env for $AGENTKEYS_CHAIN"
-    info "run: bash harness/v2-stage1-demo.sh first (or --skip-build --from-step 4 to bypass this check)"
-    skip "no chain state to inspect — proceeding under stub assumption"
-  else
-    info "registry = $REGISTRY"
-    ok "registry reachable — primary master assumed registered"
+  step "Deploy stage-2 contracts to $AGENTKEYS_CHAIN (idempotent)"
+
+  has_all=1
+  for var in P256_VERIFIER K11_VERIFIER SIDECAR_REGISTRY SCOPE_CONTRACT \
+             K3_EPOCH_COUNTER CREDENTIAL_AUDIT; do
+    eval "addr=\${${var}_ADDRESS_${PROFILE_NAME_UC}:-}"
+    if [ -z "$addr" ] || [ "$addr" = "0x0" ]; then has_all=0; fi
+  done
+
+  if [ "$REDEPLOY" = 1 ]; then
+    info "--redeploy forced; deploying fresh contracts"
+    has_all=0
+  fi
+
+  if [ "$has_all" = 1 ]; then
+    # Verify each address actually has code on chain.
+    all_present=1
+    for var in P256_VERIFIER K11_VERIFIER SIDECAR_REGISTRY SCOPE_CONTRACT \
+               K3_EPOCH_COUNTER CREDENTIAL_AUDIT; do
+      eval "addr=\${${var}_ADDRESS_${PROFILE_NAME_UC}}"
+      code=$(cast code "$addr" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "0x")
+      if [ "${#code}" -le 4 ]; then
+        all_present=0
+        warn "$var = $addr has no code on chain"
+        break
+      fi
+    done
+    if [ "$all_present" = 1 ]; then
+      skip "all 6 contracts already deployed on $AGENTKEYS_CHAIN"
+    else
+      has_all=0
+    fi
+  fi
+
+  if [ "$has_all" = 0 ]; then
+    MASTER_KEY=$(resolve_master_key) || die "could not resolve deployer key from $DEPLOYER_KEY_FILE"
+    MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
+    info "deployer = $MASTER_ADDR"
+    BAL=$(cast balance "$MASTER_ADDR" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "0")
+    info "balance  = $BAL wei (~$(echo "scale=4; $BAL / 1000000000000000000" | bc 2>/dev/null || echo "?") native)"
+    # 6-contract deploy uses ~0.05 native; require ≥ 0.1 for headroom.
+    if [ -n "$BAL" ] && [ "$BAL" != "0" ] && [ "$(echo "$BAL < 50000000000000000" | bc 2>/dev/null || echo 0)" = "1" ]; then
+      die "deployer balance too low (< 0.05 native) — fund $MASTER_ADDR first"
+    fi
+
+    info "forge script script/DeployAgentKeysV1.s.sol …"
+    pushd "$REPO_ROOT/crates/agentkeys-chain" >/dev/null
+    DEPLOY_OUT=$(forge script script/DeployAgentKeysV1.s.sol \
+      --rpc-url "$RPC_HTTP" \
+      --private-key "$MASTER_KEY" \
+      --broadcast --slow --evm-version london 2>&1) \
+      || { echo "$DEPLOY_OUT" >&2; die "forge script failed"; }
+    popd >/dev/null
+
+    BCAST="$REPO_ROOT/crates/agentkeys-chain/broadcast/DeployAgentKeysV1.s.sol/$(cast chain-id --rpc-url "$RPC_HTTP")/run-latest.json"
+    [ -f "$BCAST" ] || die "broadcast file not found at $BCAST"
+
+    P256=$(jq -r '.transactions[] | select(.contractName=="P256Verifier") | .contractAddress' "$BCAST")
+    K11=$(jq -r '.transactions[] | select(.contractName=="K11Verifier") | .contractAddress' "$BCAST")
+    SIDECAR=$(jq -r '.transactions[] | select(.contractName=="SidecarRegistry") | .contractAddress' "$BCAST")
+    SCOPE=$(jq -r '.transactions[] | select(.contractName=="AgentKeysScope") | .contractAddress' "$BCAST")
+    EPOCH=$(jq -r '.transactions[] | select(.contractName=="K3EpochCounter") | .contractAddress' "$BCAST")
+    AUDIT=$(jq -r '.transactions[] | select(.contractName=="CredentialAudit") | .contractAddress' "$BCAST")
+
+    env_set "P256_VERIFIER_ADDRESS_${PROFILE_NAME_UC}" "$P256" "$ENV_FILE"
+    env_set "K11_VERIFIER_ADDRESS_${PROFILE_NAME_UC}" "$K11" "$ENV_FILE"
+    env_set "SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}" "$SIDECAR" "$ENV_FILE"
+    env_set "SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME_UC}" "$SCOPE" "$ENV_FILE"
+    env_set "K3_EPOCH_COUNTER_ADDRESS_${PROFILE_NAME_UC}" "$EPOCH" "$ENV_FILE"
+    env_set "CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME_UC}" "$AUDIT" "$ENV_FILE"
+
+    # Re-source so subsequent steps see fresh addresses.
+    set -a; . "$ENV_FILE"; set +a
+
+    ok "deployed:"
+    echo "    P256Verifier     = $P256" >&2
+    echo "    K11Verifier      = $K11" >&2
+    echo "    SidecarRegistry  = $SIDECAR" >&2
+    echo "    AgentKeysScope   = $SCOPE" >&2
+    echo "    K3EpochCounter   = $EPOCH" >&2
+    echo "    CredentialAudit  = $AUDIT" >&2
   fi
 fi
 
-# ─── Step 4: Enroll companion K11 + start companion daemon ────────────────
-COMPANION_BIN="$REPO_ROOT/target/release/agentkeys-daemon"
+# Re-source env so the latest addresses are visible regardless of step gating.
+set -a; . "$ENV_FILE"; set +a
+eval "REGISTRY=\${SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:-}"
+
+# ─── Step 4: Bootstrap primary master on new SidecarRegistry ─────────
 if should_run_step 4; then
+  step "Bootstrap primary master on new SidecarRegistry (idempotent)"
+  if [ -z "$REGISTRY" ] || [ "$REGISTRY" = "0x0" ]; then
+    die "no SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC} — run step 3 first"
+  fi
+
+  # Need primary K11 enrolled at rp_id=localhost. If not, prompt the operator.
+  MASTER_KEY=$(resolve_master_key) || die "could not resolve master key"
+  MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY" | tr '[:upper:]' '[:lower:]')
+  OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR" | shasum -a 256 | awk '{print $1}')
+  K11_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json"
+
+  if [ ! -f "$K11_FILE" ] || [ "$(jq -r .mode "$K11_FILE" 2>/dev/null)" != "webauthn" ]; then
+    if [ "$USE_WEBAUTHN" = 1 ]; then
+      info "enrolling primary K11 (Touch ID prompt incoming)…"
+      "$AGENTKEYS_BIN" k11 enroll --webauthn --rp-id localhost \
+        --operator-omni "0x$OPERATOR_OMNI" >/dev/null \
+        || die "primary K11 enrollment failed"
+      ok "primary K11 enrolled"
+    else
+      skip "no primary K11 at $K11_FILE — re-run with --webauthn to enroll"
+    fi
+  else
+    ok "primary K11 already enrolled (mode=webauthn)"
+  fi
+
+  if [ -f "$K11_FILE" ] && [ "$(jq -r .mode "$K11_FILE" 2>/dev/null)" = "webauthn" ]; then
+    info "running scripts/heima-register-first-master.sh …"
+    if ! bash "$REPO_ROOT/scripts/heima-register-first-master.sh" 2>&1 | tail -5 >&2; then
+      die "register-first-master failed"
+    fi
+  else
+    skip "skipping registerFirstMasterDevice (no usable K11)"
+  fi
+fi
+
+# ─── Step 5: Enroll companion K11 + start companion daemon ───────────
+if should_run_step 5; then
   step "Start companion daemon (rp_id=companion.localhost)"
 
-  if [ -z "$OPERATOR_OMNI" ]; then
-    # Derive operator omni from local mnemonic if present, else use a
-    # placeholder so the script flow exercises the harness without a
-    # real chain.
-    MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-    if [ -f "$MNEMONIC_FILE" ] && [ -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
-      DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-      MASTER_ADDR=$(echo "$DERIV_JSON" | jq -r .address | tr '[:upper:]' '[:lower:]')
-      OPERATOR_OMNI="0x$(printf 'agentkeysevm%s' "$MASTER_ADDR" | shasum -a 256 | awk '{print $1}')"
-      info "derived operator_omni = $OPERATOR_OMNI"
-    else
-      OPERATOR_OMNI="0x$(printf 'demo-operator' | shasum -a 256 | awk '{print $1}')"
-      info "no mnemonic — using placeholder operator_omni = $OPERATOR_OMNI"
-    fi
-  fi
+  MASTER_KEY=$(resolve_master_key) || die "could not resolve master key"
+  MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY" | tr '[:upper:]' '[:lower:]')
+  OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR" | shasum -a 256 | awk '{print $1}')
 
-  COMP_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI#0x}--companion.localhost.json"
+  COMP_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}--companion.localhost.json"
   if [ "$USE_WEBAUTHN" = "1" ]; then
     if [ -f "$COMP_FILE" ]; then
-      skip "companion K11 already enrolled at $COMP_FILE"
+      ok "companion K11 already enrolled at $COMP_FILE"
     else
-      info "running companion K11 enrollment (Touch ID prompt incoming)…"
-      "$REPO_ROOT/target/release/agentkeys" k11 enroll \
-        --webauthn \
-        --rp-id companion.localhost \
-        --operator-omni "$OPERATOR_OMNI" >/dev/null \
+      info "enrolling companion K11 (Touch ID prompt at companion.localhost)…"
+      "$AGENTKEYS_BIN" k11 enroll --webauthn --rp-id companion.localhost \
+        --operator-omni "0x$OPERATOR_OMNI" >/dev/null \
         || die "companion K11 enrollment failed"
-      ok "companion K11 enrolled to $COMP_FILE"
+      ok "companion K11 enrolled at $COMP_FILE"
     fi
   else
-    info "stub mode — skipping real K11 enrollment; companion daemon will run without a usable K11"
+    info "stub mode — skipping companion K11 enrollment"
   fi
 
   # Stop any pre-existing companion daemon on this port (idempotency).
@@ -212,125 +331,97 @@ if should_run_step 4; then
     sleep 1
   fi
 
-  if [ ! -x "$COMPANION_BIN" ]; then
-    die "missing $COMPANION_BIN — run with --from-step 1 to build"
-  fi
-
   COMP_LOG="/tmp/agentkeys-companion-$$.log"
-  info "starting: $COMPANION_BIN --master-companion --companion-bind 127.0.0.1:$COMPANION_PORT"
-  "$COMPANION_BIN" --master-companion \
+  info "starting: $DAEMON_BIN --master-companion --companion-bind 127.0.0.1:$COMPANION_PORT"
+  "$DAEMON_BIN" --master-companion \
     --companion-bind "127.0.0.1:$COMPANION_PORT" \
-    --companion-operator-omni "$OPERATOR_OMNI" \
+    --companion-operator-omni "0x$OPERATOR_OMNI" \
     >"$COMP_LOG" 2>&1 &
   COMP_PID=$!
   sleep 1
-
   if ! kill -0 "$COMP_PID" 2>/dev/null; then
     cat "$COMP_LOG" >&2 || true
-    die "companion daemon failed to start (see $COMP_LOG)"
+    die "companion daemon failed to start (log: $COMP_LOG)"
   fi
-
   for _ in 1 2 3 4 5; do
     if curl -sSf "http://127.0.0.1:$COMPANION_PORT/v1/companion/whoami" >/dev/null 2>&1; then
-      ok "companion daemon listening on 127.0.0.1:$COMPANION_PORT (pid $COMP_PID, log $COMP_LOG)"
+      ok "companion daemon listening on 127.0.0.1:$COMPANION_PORT (pid $COMP_PID)"
       break
     fi
     sleep 1
   done
-
-  WHOAMI=$(curl -sS "http://127.0.0.1:$COMPANION_PORT/v1/companion/whoami") \
-    || die "companion /v1/companion/whoami failed"
-  info "whoami: $WHOAMI"
-  # Write companion details to a known location so subsequent steps can read.
-  echo "$WHOAMI" > /tmp/agentkeys-companion-whoami.json
   echo "$COMP_PID" > /tmp/agentkeys-companion.pid
 fi
 
-# ─── Step 5: Register companion as 2nd master (heima-device-add.sh) ────────
-if should_run_step 5; then
-  step "Register companion as 2nd master device"
-
-  REGISTRY="$(eval echo \"\${SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:-}\")"
-  if [ -z "$REGISTRY" ] || [ "$REGISTRY" = "0x0" ]; then
-    skip "no chain — verifying script existence only"
-    if [ -x "$REPO_ROOT/scripts/heima-device-add.sh" ]; then
-      ok "scripts/heima-device-add.sh is executable"
-    else
-      die "scripts/heima-device-add.sh missing or not executable"
-    fi
-  elif [ "$USE_WEBAUTHN" = "1" ] && [ -z "${SKIP_DEVICE_ADD:-}" ]; then
-    info "submitting real registerAdditionalMasterDevice tx…"
-    bash "$REPO_ROOT/scripts/heima-device-add.sh" \
-      --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -10 >&2 \
-      || warn "device-add failed (chain may already have the 2nd master — re-runs are idempotent)"
-  else
-    info "stub mode — verifying script existence + dry-run"
-    if [ -x "$REPO_ROOT/scripts/heima-device-add.sh" ]; then
-      ok "scripts/heima-device-add.sh is executable"
-      bash "$REPO_ROOT/scripts/heima-device-add.sh" --help 2>&1 | head -1 >&2 || true
-    else
-      die "scripts/heima-device-add.sh missing or not executable"
-    fi
-    skip "real tx requires --webauthn"
-  fi
-fi
-
-# ─── Step 6: Set recoveryThreshold = 2 ────────────────────────────────────
+# ─── Step 6: Register companion as 2nd master device ─────────────────
 if should_run_step 6; then
-  step "Set recoveryThreshold = 2 (require both masters for revoke)"
-  REGISTRY="$(eval echo \"\${SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:-}\")"
-  if [ -z "$REGISTRY" ] || [ "$REGISTRY" = "0x0" ]; then
-    skip "no chain"
-  else
-    if [ "$USE_WEBAUTHN" = "1" ]; then
-      bash "$REPO_ROOT/scripts/heima-set-recovery-threshold.sh" --threshold 2 2>&1 | tail -5 >&2 \
-        || warn "set-threshold failed (re-runs are idempotent — may already be set)"
-    else
-      info "stub mode — would run heima-set-recovery-threshold.sh --threshold 2"
-      skip "skipping real K11 ceremony"
+  step "Register companion as 2nd master (heima-device-add.sh)"
+  if [ "$USE_WEBAUTHN" = "1" ]; then
+    if ! bash "$REPO_ROOT/scripts/heima-device-add.sh" \
+         --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -5 >&2; then
+      warn "device-add failed (already-registered re-runs return non-zero — check log)"
     fi
+  else
+    skip "stub mode — would call heima-device-add.sh (real K11 ceremony required)"
   fi
 fi
 
-# ─── Step 7: Demonstrate M-of-N recovery (revoke target master) ───────────
+# ─── Step 7: Set recoveryThreshold = 2 ───────────────────────────────
 if should_run_step 7; then
-  step "M-of-N recovery — revoke a master device"
-  REGISTRY="$(eval echo \"\${SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:-}\")"
-  if [ -z "$REGISTRY" ] || [ "$REGISTRY" = "0x0" ]; then
-    skip "no chain — skipping recovery test"
-  elif [ -z "$REVOKE_TARGET" ]; then
-    info "no --revoke-master <hash> given — sanity-checking recovery script existence"
+  step "Set recoveryThreshold = 2 on $AGENTKEYS_CHAIN"
+  if [ "$USE_WEBAUTHN" = "1" ]; then
+    if ! bash "$REPO_ROOT/scripts/heima-set-recovery-threshold.sh" --threshold 2 2>&1 | tail -5 >&2; then
+      warn "set-threshold failed (re-runs are idempotent)"
+    fi
+  else
+    skip "stub mode — would call heima-set-recovery-threshold.sh --threshold 2"
+  fi
+fi
+
+# ─── Step 8: M-of-N recovery flow (dry-run or real) ──────────────────
+if should_run_step 8; then
+  step "M-of-N recovery flow"
+  if [ -n "$REVOKE_TARGET" ]; then
+    if [ "$USE_WEBAUTHN" = 1 ]; then
+      info "executing real revokeMasterDevice against $REVOKE_TARGET"
+      bash "$REPO_ROOT/scripts/heima-recovery.sh" \
+        --target-device-key-hash "$REVOKE_TARGET" \
+        --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -5 >&2 \
+        || die "recovery failed"
+      ok "master revoked"
+    else
+      skip "--revoke-master only honoured with --webauthn"
+    fi
+  else
+    info "no --revoke-master <hash> — sanity-checking recovery script existence"
     if [ -x "$REPO_ROOT/scripts/heima-recovery.sh" ]; then
       ok "scripts/heima-recovery.sh is executable"
       bash "$REPO_ROOT/scripts/heima-recovery.sh" --help 2>&1 | head -1 >&2 || true
     else
-      die "scripts/heima-recovery.sh missing or not executable"
+      die "scripts/heima-recovery.sh missing"
     fi
-    skip "real run requires a target master hash + live chain (pass --revoke-master <hash>)"
-  else
-    info "executing recovery against $REVOKE_TARGET"
-    bash "$REPO_ROOT/scripts/heima-recovery.sh" \
-      --target-device-key-hash "$REVOKE_TARGET" \
-      --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -10 >&2 \
-      || die "recovery failed"
-    ok "master revoked"
+    skip "real revoke requires --revoke-master <hash> + --webauthn"
   fi
 fi
 
-# ─── Step 8: Cleanup + summary ────────────────────────────────────────────
-if should_run_step 8; then
-  step "Cleanup + summary"
+# ─── Step 9: Cleanup + summary ───────────────────────────────────────
+if should_run_step 9; then
+  step "Summary"
   if [ -f /tmp/agentkeys-companion.pid ]; then
     COMP_PID=$(cat /tmp/agentkeys-companion.pid)
     if kill -0 "$COMP_PID" 2>/dev/null; then
-      info "companion daemon still running at pid $COMP_PID — leaving up for inspection"
-      info "stop it with: kill $COMP_PID"
+      info "companion daemon still running at pid $COMP_PID — stop with: kill $COMP_PID"
     fi
   fi
-  printf "${COLOR_OK}\n=== v2 stage-2 demo complete ===${COLOR_RESET}\n" >&2
-  printf "  Chain:         %s\n" "$AGENTKEYS_CHAIN" >&2
-  printf "  Operator:      %s\n" "$OPERATOR_OMNI" >&2
-  printf "  Companion URL: http://127.0.0.1:%s\n" "$COMPANION_PORT" >&2
-  printf "  Mode:          %s\n" "$([ "$USE_WEBAUTHN" = 1 ] && echo "WebAuthn (real Touch ID)" || echo "stub (CI)")" >&2
+  printf "${C_OK}\n=== v2 stage-2 demo complete ===${C_RESET}\n" >&2
+  printf "  Chain:           %s\n" "$AGENTKEYS_CHAIN" >&2
+  printf "  Mode:            %s\n" "$([ "$USE_WEBAUTHN" = 1 ] && echo "WebAuthn (real Touch ID)" || echo "stub (CI)")" >&2
+  printf "  P256Verifier:    %s\n" "${P256_VERIFIER_ADDRESS_HEIMA:-unset}" >&2
+  printf "  K11Verifier:     %s\n" "${K11_VERIFIER_ADDRESS_HEIMA:-unset}" >&2
+  printf "  SidecarRegistry: %s\n" "${SIDECAR_REGISTRY_ADDRESS_HEIMA:-unset}" >&2
+  printf "  AgentKeysScope:  %s\n" "${SCOPE_CONTRACT_ADDRESS_HEIMA:-unset}" >&2
+  printf "  K3EpochCounter:  %s\n" "${K3_EPOCH_COUNTER_ADDRESS_HEIMA:-unset}" >&2
+  printf "  CredentialAudit: %s\n" "${CREDENTIAL_AUDIT_ADDRESS_HEIMA:-unset}" >&2
+  printf "  Companion URL:   http://127.0.0.1:%s\n" "$COMPANION_PORT" >&2
   printf "\n" >&2
 fi
