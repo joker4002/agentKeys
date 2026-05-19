@@ -12,8 +12,8 @@
 //! gates on `k11Assertion.length != 0` only (no P-256 verify); the stub
 //! provides exactly that.
 //!
-//! Stage 2 (#90) replaces this module with real webauthn-rs integration
-//! + Touch ID prompt + on-chain assertion verification via the
+//! Stage 2 (#90) replaces this module with real webauthn-rs integration,
+//! Touch ID prompt, and on-chain assertion verification via the
 //! EIP-7212 P-256 precompile.
 
 use std::fs;
@@ -42,7 +42,7 @@ pub enum K11Error {
     InvalidOperatorOmni(String),
 }
 
-pub fn enrollment_path(operator_omni: &str) -> PathBuf {
+fn enrollment_path(operator_omni: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     Path::new(&home)
         .join(".agentkeys")
@@ -82,12 +82,6 @@ pub fn enroll(operator_omni: &str) -> Result<K11Enrollment, K11Error> {
         fs::set_permissions(&path, perms).map_err(|e| K11Error::Io(e.to_string()))?;
     }
     Ok(enrollment)
-}
-
-pub fn load_enrollment(operator_omni: &str) -> Result<K11Enrollment, K11Error> {
-    let path = enrollment_path(operator_omni);
-    let bytes = fs::read(&path).map_err(|e| K11Error::Io(format!("read {path:?}: {e}")))?;
-    serde_json::from_slice(&bytes).map_err(|e| K11Error::Serde(e.to_string()))
 }
 
 /// Produce a stage-1 stub assertion. Non-empty (the contract gate is

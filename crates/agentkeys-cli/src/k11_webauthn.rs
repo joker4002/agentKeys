@@ -292,10 +292,9 @@ async fn enroll_webauthn_inner(operator_omni: &str) -> Result<WebauthnEnrollment
         .route("/", get(serve_enroll_page))
         .route("/finish", post({
             let tx = tx.clone();
-            move |State(ctx): State<Arc<ServerCtx>>, Json(body): Json<EnrollPost>| {
+            move |_: State<Arc<ServerCtx>>, Json(body): Json<EnrollPost>| {
                 let tx = tx.clone();
                 async move {
-                    let _ = ctx; // suppress unused warning; ctx is for parity with assert handler
                     if let Some(sender) = tx.lock().await.take() {
                         let _ = sender.send(body);
                     }
@@ -371,10 +370,9 @@ async fn assert_webauthn_inner(
         .route("/", get(serve_assert_page))
         .route("/finish", post({
             let tx = tx.clone();
-            move |State(ctx): State<Arc<ServerCtx>>, Json(body): Json<AssertPost>| {
+            move |_: State<Arc<ServerCtx>>, Json(body): Json<AssertPost>| {
                 let tx = tx.clone();
                 async move {
-                    let _ = ctx;
                     if let Some(sender) = tx.lock().await.take() {
                         let _ = sender.send(body);
                     }
@@ -669,8 +667,11 @@ fn extract_attested_credential(att_obj_bytes: &[u8]) -> Result<AttestedCredentia
     let mut y: Option<Vec<u8>> = None;
     for (k, v) in cose_map {
         if let Some(i) = k.as_integer() {
-            // ciborium 0.2 `Integer` is Clone but NOT Copy; can't `*i`.
-            // Clone-then-try_from is the supported path.
+            // ciborium 0.2: clippy claims Integer is Copy + Into<i128>, but
+            // rustc rejects `*i` with E0614 "cannot be dereferenced" and
+            // there's no public &Integer→i128 path. clone-then-try_from
+            // is the only working form. Silence the two lints below.
+            #[allow(clippy::clone_on_copy, clippy::unnecessary_fallible_conversions)]
             let lab: i128 = match i128::try_from(i.clone()) {
                 Ok(n) => n,
                 Err(_) => continue,
@@ -956,7 +957,7 @@ mod tests {
             client_data_json: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.create","challenge":"BAD","origin":"http://localhost:1234"}"#,
             ),
-            attestation_object: URL_SAFE_NO_PAD.encode(&[0xa0u8]), // empty CBOR map; we won't reach the parser
+            attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]), // empty CBOR map; we won't reach the parser
         };
         let err = finalize_enroll("0xabc", "GOOD", "http://localhost:1234", &post).unwrap_err();
         assert!(matches!(err, WebauthnError::ChallengeMismatch { .. }));
@@ -969,7 +970,7 @@ mod tests {
             client_data_json: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.get","challenge":"GOOD","origin":"http://localhost:1234"}"#,
             ),
-            attestation_object: URL_SAFE_NO_PAD.encode(&[0xa0u8]),
+            attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]),
         };
         let err = finalize_enroll("0xabc", "GOOD", "http://localhost:1234", &post).unwrap_err();
         assert!(matches!(err, WebauthnError::TypeMismatch { .. }));
@@ -982,7 +983,7 @@ mod tests {
             client_data_json: URL_SAFE_NO_PAD.encode(
                 br#"{"type":"webauthn.create","challenge":"GOOD","origin":"http://evil:1234"}"#,
             ),
-            attestation_object: URL_SAFE_NO_PAD.encode(&[0xa0u8]),
+            attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]),
         };
         let err = finalize_enroll("0xabc", "GOOD", "http://localhost:1234", &post).unwrap_err();
         assert!(matches!(err, WebauthnError::OriginMismatch { .. }));
