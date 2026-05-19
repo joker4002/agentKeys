@@ -954,30 +954,57 @@ pub fn load_enrollment_with_rp(
 // ─── HTML handlers (one-shot ceremony pages) ──────────────────────────
 
 async fn serve_enroll_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
+    let is_companion = ctx.rp_id.contains("companion");
+    let role_label = if is_companion { "COMPANION MASTER" } else { "PRIMARY MASTER" };
+    let role_tagline = if is_companion {
+        "Bind a SECOND platform passkey for M-of-N recovery quorum."
+    } else {
+        "Bind a platform passkey for master-tier authorisation."
+    };
+    let role_accent = if is_companion { "#a855f7" } else { "#0a84ff" };
+    let role_emoji = if is_companion { "🛡️" } else { "🔑" };
+    // Short, human-readable name shown by macOS in the Touch ID dialog
+    // ("Use Touch ID to sign in to 'localhost' with your passkey for ..."
+    // — macOS displays user.name there, NOT the full omni hex).
+    let user_name_short = if is_companion {
+        "AgentKeys Companion Master"
+    } else {
+        "AgentKeys Primary Master"
+    };
     let html = format!(
         r##"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>AgentKeys — K11 enrollment</title>
+<html lang="en"><head><meta charset="utf-8"><title>AgentKeys — Enroll {role_label}</title>
 {shared_css}
+<style>
+  .card {{ border-top: 4px solid {role_accent}; }}
+  .role-badge {{
+    display: inline-flex; align-items: center; gap: 0.4em;
+    background: {role_accent}; color: white;
+    padding: 0.35em 0.75em; border-radius: 6px;
+    font-size: 0.85em; font-weight: 600; letter-spacing: 0.04em;
+    margin-bottom: 0.5em;
+  }}
+  button.primary {{ background: {role_accent}; }}
+</style>
 </head><body>
 <main class="card">
   <header>
-    <div class="brand">
-      <span class="dot"></span>
-      <span class="brand-name">AgentKeys</span>
-    </div>
+    <div class="role-badge"><span>{role_emoji}</span> {role_label}</div>
     <h1>K11 enrollment</h1>
-    <p class="sub">Bind a platform passkey for master-tier authorisation.</p>
+    <p class="sub">{role_tagline}</p>
   </header>
   <section class="kv">
     <dt>Operator</dt>
     <dd><code class="hex">{omni}</code></dd>
+    <dt>RP ID</dt>
+    <dd><code class="hex">{rp_id_display}</code></dd>
     <dt>Authenticator</dt>
     <dd>Platform (Touch ID / Windows Hello / Secure Enclave)</dd>
     <dt>Algorithm</dt>
     <dd>ECDSA P-256 / SHA-256 (ES256)</dd>
   </section>
   <p id="status" class="status">Press the button below. macOS will prompt for Touch ID.</p>
-  <button id="go" class="primary">Start enrollment</button>
+  <button id="go" class="primary">Enroll as {role_label}</button>
 </main>
 <script>
 const challenge = "{challenge}";
@@ -1009,9 +1036,15 @@ document.getElementById('go').onclick = async () => {{
       publicKey: {{
         rp: {{ id: "{rp_id_js}", name: "AgentKeys" }},
         user: {{
-          id: hexToBytes(omni),       // 32 raw bytes (within WebAuthn 64-byte cap)
-          name: omni,                  // display name — no byte limit
-          displayName: "agentkeys-master"
+          // user.id: 32 raw bytes derived from operator_omni (WebAuthn caps
+          // id at 64 bytes; the 66-byte UTF-8 hex string would be rejected).
+          id: hexToBytes(omni),
+          // user.name: shown by macOS in the Touch ID dialog ("Use Touch ID
+          // to sign in to ... with your passkey for <NAME>"). Keep it short
+          // and human-readable; append a 10-char omni prefix for disambig
+          // across operators.
+          name: "{user_name_short} (" + omni.substring(0, 10) + "…)",
+          displayName: "{user_name_short}"
         }},
         challenge: b64urlDecode(challenge),
         // ES256-only: the on-chain verifier (when EIP-7212 P-256 ships on
@@ -1059,6 +1092,12 @@ document.getElementById('go').onclick = async () => {{
         challenge = ctx.challenge_b64url,
         shared_css = SHARED_CSS,
         rp_id_js = ctx.rp_id,
+        rp_id_display = ctx.rp_id,
+        role_label = role_label,
+        role_tagline = role_tagline,
+        role_accent = role_accent,
+        role_emoji = role_emoji,
+        user_name_short = user_name_short,
     );
     Html(html)
 }
