@@ -661,6 +661,17 @@ function b64urlEncode(buf) {{
   return btoa(String.fromCharCode(...new Uint8Array(buf)))
     .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }}
+// operator_omni is a 32-byte SHA-256 digest in 0x-prefixed hex form.
+// WebAuthn caps user.id at 64 bytes — the UTF-8-encoded hex string is
+// 66 bytes which the browser rejects. Decode to the raw 32 bytes.
+function hexToBytes(hex) {{
+  const clean = hex.replace(/^0x/i, '');
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {{
+    out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  }}
+  return out;
+}}
 document.getElementById('go').onclick = async () => {{
   const status = document.getElementById('status');
   try {{
@@ -668,11 +679,16 @@ document.getElementById('go').onclick = async () => {{
       publicKey: {{
         rp: {{ id: "localhost", name: "AgentKeys" }},
         user: {{
-          id: new TextEncoder().encode(omni),
-          name: omni,
+          id: hexToBytes(omni),       // 32 raw bytes (within WebAuthn 64-byte cap)
+          name: omni,                  // display name — no byte limit
           displayName: "agentkeys-master"
         }},
         challenge: b64urlDecode(challenge),
+        // ES256-only: the on-chain verifier (when EIP-7212 P-256 ships on
+        // Heima) only knows P-256/SHA-256. RS256 keys would be unverifiable.
+        // Chromium logs a warning about "missing RS256 default" — safe to
+        // ignore for our platform-authenticator-only target (Touch ID,
+        // Windows Hello, Secure Enclave all support ES256 natively).
         pubKeyCredParams: [{{ alg: -7, type: "public-key" }}],
         authenticatorSelection: {{
           authenticatorAttachment: "platform",
