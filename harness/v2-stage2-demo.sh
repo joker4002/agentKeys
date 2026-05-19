@@ -190,15 +190,37 @@ if should_run_step 3; then
   fi
 
   if [ "$has_all" = 1 ]; then
-    # Verify each address actually has code on chain.
+    # Verify each address has code on chain. Heima's RPC occasionally hits
+    # TLS-handshake-EOF transients — distinguish RPC failure from genuine
+    # "no code at address":
+    #   - cast code returns "0x" → genuinely no contract → can redeploy
+    #   - cast code returns "" + nonzero exit → RPC failure → retry, then
+    #     abort (don't redeploy when we're not sure)
+    #   - cast code returns "0x6080..." → has contract → skip
     all_present=1
     for var in P256_VERIFIER K11_VERIFIER SIDECAR_REGISTRY SCOPE_CONTRACT \
                K3_EPOCH_COUNTER CREDENTIAL_AUDIT; do
       eval "addr=\${${var}_ADDRESS_${PROFILE_NAME_UC}}"
-      code=$(cast code "$addr" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "0x")
+      code=""
+      rpc_failed=1
+      for attempt in 1 2 3 4 5 6 7 8; do
+        set +e
+        code=$(cast code "$addr" --rpc-url "$RPC_HTTP" 2>/dev/null)
+        rc=$?
+        set -e
+        if [ "$rc" = "0" ]; then
+          rpc_failed=0
+          break
+        fi
+        info "RPC error reading code at $addr (attempt $attempt/8) — retrying in 3s"
+        sleep 3
+      done
+      if [ "$rpc_failed" = "1" ]; then
+        die "could not verify contract code at $addr after 8 RPC attempts (heima RPC may be down)"
+      fi
       if [ "${#code}" -le 4 ]; then
         all_present=0
-        warn "$var = $addr has no code on chain"
+        warn "$var = $addr has no code on chain (will redeploy)"
         break
       fi
     done
@@ -213,10 +235,17 @@ if should_run_step 3; then
     MASTER_KEY=$(resolve_master_key) || die "could not resolve deployer key from $DEPLOYER_KEY_FILE"
     MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
     info "deployer = $MASTER_ADDR"
-    BAL=$(cast balance "$MASTER_ADDR" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "0")
+    BAL=""
+    for attempt in 1 2 3 4 5; do
+      BAL=$(cast balance "$MASTER_ADDR" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "")
+      # Real balance, not the RPC-error empty case.
+      if [ -n "$BAL" ] && [ "$BAL" != "0" ]; then break; fi
+      sleep 2
+    done
+    [ -n "$BAL" ] || die "could not read balance from $RPC_HTTP after 5 attempts"
     info "balance  = $BAL wei (~$(echo "scale=4; $BAL / 1000000000000000000" | bc 2>/dev/null || echo "?") native)"
-    # 6-contract deploy uses ~0.05 native; require ≥ 0.1 for headroom.
-    if [ -n "$BAL" ] && [ "$BAL" != "0" ] && [ "$(echo "$BAL < 50000000000000000" | bc 2>/dev/null || echo 0)" = "1" ]; then
+    # 6-contract deploy uses ~0.05 native; require ≥ 0.05 for headroom.
+    if [ "$(echo "$BAL < 50000000000000000" | bc 2>/dev/null || echo 0)" = "1" ]; then
       die "deployer balance too low (< 0.05 native) — fund $MASTER_ADDR first"
     fi
 
@@ -292,7 +321,7 @@ if should_run_step 4; then
 
   if [ -f "$K11_FILE" ] && [ "$(jq -r .mode "$K11_FILE" 2>/dev/null)" = "webauthn" ]; then
     info "running scripts/heima-register-first-master.sh …"
-    if ! bash "$REPO_ROOT/scripts/heima-register-first-master.sh" 2>&1 | tail -5 >&2; then
+    if ! bash "$REPO_ROOT/harness/scripts/heima-register-first-master.sh" 2>&1 | tail -5 >&2; then
       die "register-first-master failed"
     fi
   else
@@ -357,7 +386,7 @@ fi
 if should_run_step 6; then
   step "Register companion as 2nd master (heima-device-add.sh)"
   if [ "$USE_WEBAUTHN" = "1" ]; then
-    if ! bash "$REPO_ROOT/scripts/heima-device-add.sh" \
+    if ! bash "$REPO_ROOT/harness/scripts/heima-device-add.sh" \
          --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -5 >&2; then
       warn "device-add failed (already-registered re-runs return non-zero — check log)"
     fi
@@ -370,7 +399,7 @@ fi
 if should_run_step 7; then
   step "Set recoveryThreshold = 2 on $AGENTKEYS_CHAIN"
   if [ "$USE_WEBAUTHN" = "1" ]; then
-    if ! bash "$REPO_ROOT/scripts/heima-set-recovery-threshold.sh" --threshold 2 2>&1 | tail -5 >&2; then
+    if ! bash "$REPO_ROOT/harness/scripts/heima-set-recovery-threshold.sh" --threshold 2 2>&1 | tail -5 >&2; then
       warn "set-threshold failed (re-runs are idempotent)"
     fi
   else
@@ -384,7 +413,7 @@ if should_run_step 8; then
   if [ -n "$REVOKE_TARGET" ]; then
     if [ "$USE_WEBAUTHN" = 1 ]; then
       info "executing real revokeMasterDevice against $REVOKE_TARGET"
-      bash "$REPO_ROOT/scripts/heima-recovery.sh" \
+      bash "$REPO_ROOT/harness/scripts/heima-recovery.sh" \
         --target-device-key-hash "$REVOKE_TARGET" \
         --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -5 >&2 \
         || die "recovery failed"
@@ -394,9 +423,9 @@ if should_run_step 8; then
     fi
   else
     info "no --revoke-master <hash> — sanity-checking recovery script existence"
-    if [ -x "$REPO_ROOT/scripts/heima-recovery.sh" ]; then
+    if [ -x "$REPO_ROOT/harness/scripts/heima-recovery.sh" ]; then
       ok "scripts/heima-recovery.sh is executable"
-      bash "$REPO_ROOT/scripts/heima-recovery.sh" --help 2>&1 | head -1 >&2 || true
+      bash "$REPO_ROOT/harness/scripts/heima-recovery.sh" --help 2>&1 | head -1 >&2 || true
     else
       die "scripts/heima-recovery.sh missing"
     fi
