@@ -49,8 +49,8 @@
 #   --skip-deploy         skip the chain bring-up (contract deploy)
 #   --confirm             pause for Enter before chain deploy
 #   --debug               enable `set -x` (very chatty)
-#   --webauthn            use REAL WebAuthn ceremony for K11 enroll (step 14)
-#                         and master-mutation K11 assertions (step 12 scope-set).
+#   --webauthn            use REAL WebAuthn ceremony for K11 enroll (step 11)
+#                         and master-mutation K11 assertions (step 13 scope-set).
 #                         Opens the operator's default browser and prompts
 #                         Touch ID (macOS) / Windows Hello / platform passkey.
 #                         Without this flag, K11 uses deterministic stub bytes
@@ -140,7 +140,8 @@ ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
 # Resolve agentkeys binary — prefer workspace-local builds (operator just
 # built / is iterating). Falls back to PATH (installed via
 # install-agentkeys-cli.sh). Defends against stale ~/.local/bin/agentkeys
-# missing the k11 subcommand. Step 14 + step 12's helper invoke this.
+# missing the k11 subcommand. Step 11 (K11 enroll) + step 13 (scope-set
+# helper, via --webauthn) invoke this.
 if [ -x "$REPO_ROOT/target/release/agentkeys" ]; then
   AGENTKEYS_BIN="$REPO_ROOT/target/release/agentkeys"
 elif [ -x "$REPO_ROOT/target/debug/agentkeys" ]; then
@@ -148,7 +149,7 @@ elif [ -x "$REPO_ROOT/target/debug/agentkeys" ]; then
 elif command -v agentkeys >/dev/null 2>&1; then
   AGENTKEYS_BIN="$(command -v agentkeys)"
 else
-  AGENTKEYS_BIN=""  # step 1 (install) will build it; resolver re-checked at step 12/14.
+  AGENTKEYS_BIN=""  # step 1 (install) will build it; resolver re-checked at step 11/13.
 fi
 export AGENTKEYS_BIN
 
@@ -597,8 +598,8 @@ do_step_10() {
   ok "master device registered (or already on-chain)"
 }
 
-# ─── Step 11: create demo agent device ─────────────────────────────────────
-do_step_11() {
+# ─── Step 12: create demo agent device ─────────────────────────────────────
+do_step_12() {
   step "Create demo agent device (registerAgentDevice)"
   local label="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
   local profile_uc registry_addr
@@ -615,8 +616,8 @@ do_step_11() {
   ok "agent device '$label' registered (or already on-chain)"
 }
 
-# ─── Step 12: set agent scope ───────────────────────────────────────────────
-do_step_12() {
+# ─── Step 13: set agent scope ───────────────────────────────────────────────
+do_step_13() {
   step "Grant agent scope (setScopeWithWebauthn)"
   local label="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
   local services="${AGENTKEYS_AGENT_SERVICES:-$SMOKE_TEST_SERVICE}"
@@ -636,8 +637,8 @@ do_step_12() {
   ok "scope set for agent '$label' (or already matched)"
 }
 
-# ─── Step 13: append a credential-audit entry ──────────────────────────────
-do_step_13() {
+# ─── Step 14: append a credential-audit entry ──────────────────────────────
+do_step_14() {
   step "Append credential audit entry (CredentialAudit.append)"
   local label="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
   local service="${SMOKE_TEST_SERVICE:-openrouter}"
@@ -657,7 +658,7 @@ do_step_13() {
   ok "audit entry appended"
 }
 
-# ─── Step 14: K11 enrollment ───────────────────────────────────────────────
+# ─── Step 11: K11 enrollment (must precede master-mutation steps) ───────────────────────────────────────────────
 # --webauthn → real ceremony: `agentkeys k11 enroll --webauthn` opens the
 #              browser, prompts Touch ID (macOS) / Windows Hello (Windows),
 #              persists real attested credential to ~/.agentkeys/k11/<omni>.json
@@ -665,7 +666,7 @@ do_step_13() {
 # default    → CI-friendly stub: writes deterministic bytes that satisfy
 #              the on-chain `k11Assertion.length != 0` gate. Stub WARN
 #              fires on AGENTKEYS_CHAIN=heima per arch.md §22b.1.
-do_step_14() {
+do_step_11() {
   local mode_label
   if [ "$WEBAUTHN_MODE" = "1" ]; then
     mode_label="real WebAuthn — Touch ID prompt"
