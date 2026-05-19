@@ -1066,28 +1066,69 @@ document.getElementById('go').onclick = async () => {{
 async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     let cred_id = ctx.allow_credential_b64url.as_deref().unwrap_or("");
     let msg_hex = ctx.message_hex.as_deref().unwrap_or("");
+    // Distinguish primary from companion in the UI: the operator may be
+    // about to tap Touch ID for either role and the macOS prompt itself
+    // doesn't say which credential — so we surface it here loudly.
+    let is_companion = ctx.rp_id.contains("companion");
+    let role_label = if is_companion { "COMPANION MASTER" } else { "PRIMARY MASTER" };
+    let role_tagline = if is_companion {
+        "Second device authorizing an M-of-N quorum operation."
+    } else {
+        "Original device authorizing a master-mutation."
+    };
+    let role_accent = if is_companion { "#a855f7" } else { "#0a84ff" }; // purple vs blue
+    let role_emoji = if is_companion { "🛡️" } else { "🔑" };
     let html = format!(
         r##"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>AgentKeys — K11 assertion</title>
+<html lang="en"><head><meta charset="utf-8"><title>AgentKeys — {role_label}</title>
 {shared_css}
+<style>
+  .card {{ border-top: 4px solid {role_accent}; }}
+  .role-badge {{
+    display: inline-flex; align-items: center; gap: 0.4em;
+    background: {role_accent}; color: white;
+    padding: 0.35em 0.75em; border-radius: 6px;
+    font-size: 0.85em; font-weight: 600; letter-spacing: 0.04em;
+    margin-bottom: 0.5em;
+  }}
+  .role-badge .emoji {{ font-size: 1.1em; }}
+  button.primary {{ background: {role_accent}; }}
+  .rp-callout {{
+    background: rgba(0,0,0,0.04);
+    border: 1px solid rgba(0,0,0,0.08);
+    border-left: 3px solid {role_accent};
+    border-radius: 6px;
+    padding: 0.6em 0.8em;
+    margin: 0 0 1em 0;
+    font-size: 0.9em;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    .rp-callout {{ background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1); }}
+  }}
+  .rp-callout strong {{ color: {role_accent}; }}
+</style>
 </head><body>
 <main class="card">
   <header>
-    <div class="brand">
-      <span class="dot"></span>
-      <span class="brand-name">AgentKeys</span>
-    </div>
+    <div class="role-badge"><span class="emoji">{role_emoji}</span> {role_label}</div>
     <h1>K11 assertion</h1>
-    <p class="sub">Sign a master-mutation payload with the bound passkey.</p>
+    <p class="sub">{role_tagline}</p>
+    <div class="rp-callout">
+      About to sign with the passkey bound to <strong>{rp_id_display}</strong>.
+      Make sure the Touch ID prompt shows this RP — if it shows the OTHER one,
+      cancel and check which browser tab is focused.
+    </div>
   </header>
   <section class="kv">
     <dt>Operator</dt>
     <dd><code class="hex">{omni}</code></dd>
-    <dt>Message <span class="kv-meta">SHA-256 = challenge</span></dt>
+    <dt>RP ID</dt>
+    <dd><code class="hex">{rp_id_display}</code></dd>
+    <dt>Challenge <span class="kv-meta">32-byte commitment</span></dt>
     <dd><code class="hex msg">0x{msg}</code></dd>
   </section>
   <p id="status" class="status">Press the button below. macOS will prompt for Touch ID.</p>
-  <button id="go" class="primary">Sign with Touch ID</button>
+  <button id="go" class="primary">Sign as {role_label}</button>
 </main>
 {shared_css_extra}
 <script>
@@ -1149,6 +1190,11 @@ document.getElementById('go').onclick = async () => {{
         shared_css = SHARED_CSS,
         shared_css_extra = "",
         rp_id_js = ctx.rp_id,
+        rp_id_display = ctx.rp_id,
+        role_label = role_label,
+        role_tagline = role_tagline,
+        role_accent = role_accent,
+        role_emoji = role_emoji,
     );
     Html(html)
 }
