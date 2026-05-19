@@ -149,47 +149,75 @@ echo "    max_per_period   = $MAX_PER_PERIOD" >&2
 echo "    max_total        = $MAX_TOTAL" >&2
 echo "    period_seconds   = $PERIOD_SECONDS" >&2
 
-# Idempotency: read existing scope. If the stored config matches, skip.
+# Idempotency: read existing scope via getScope. Note: AgentKeysScope.getScope
+# returns a single Scope struct, not a flat tuple — declare it as
+# `((bytes32[],bool,uint128,uint128,uint128,uint32,uint64,bool))` (struct
+# wrapped in outer parens) so cast decodes correctly. Otherwise cast errors
+# with "ABI decoding failed: buffer overrun" and the idempotency block
+# silently never matches.
 log "Idempotency check: scope already set?"
 EXISTING_SCOPE=$(cast call "$SCOPE_CONTRACT" \
-  "getScope(bytes32,bytes32)(bytes32[],bool,uint128,uint128,uint128,uint32,uint64,bool)" \
+  "getScope(bytes32,bytes32)((bytes32[],bool,uint128,uint128,uint128,uint32,uint64,bool))" \
   "0x$OPERATOR_OMNI" "$ACTOR_OMNI" \
   --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
 
 if [ "$EXISTING_SCOPE" != "ERR" ] && [ -n "$EXISTING_SCOPE" ]; then
-  # cast returns one value per line for tuple returns.
-  # Line layout (per getScope ABI):
-  #   1: services (bytes32[] tuple in [a,b,c] form)
-  #   2: readOnly  (bool)
-  #   3: maxPerCall (uint128)
-  #   4: maxPerPeriod
-  #   5: maxTotal
-  #   6: periodSeconds
-  #   7: updatedAt
-  #   8: exists
-  EX_EXISTS=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '8p' | tr -d '[:space:]')
-  if [ "$EX_EXISTS" = "true" ]; then
-    EX_SERVICES=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '1p' | tr -d '[:space:]')
-    EX_READ_ONLY=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '2p' | tr -d '[:space:]')
-    EX_MAX_CALL=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '3p' | awk '{print $1}')
-    EX_MAX_PERIOD=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '4p' | awk '{print $1}')
-    EX_MAX_TOTAL=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '5p' | awk '{print $1}')
-    EX_PERIOD_S=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '6p' | awk '{print $1}')
+  # cast prints the struct on a single line:
+  #   "([0xhash1, 0xhash2], false, 0, 0, 0, 0, 1779149808 [1.779e9], true)"
+  # The trailing `[1.779e9]` is cast's scientific-notation annotation on
+  # large uints — strip it. Parse via python3 because the services-array
+  # can contain commas which confuse naive shell `IFS=,` splits.
+  PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE" 2>/dev/null || true
+import sys, re
+raw = sys.argv[1].strip()
+m = re.match(r"\((.*)\)$", raw, re.DOTALL)
+if not m:
+    sys.exit(1)
+inner = m.group(1).strip()
+arr_match = re.match(r"^\[([^\]]*)\]\s*,\s*(.*)$", inner, re.DOTALL)
+if not arr_match:
+    sys.exit(1)
+services_inner = arr_match.group(1).strip()
+rest = arr_match.group(2)
+parts = [p.strip() for p in rest.split(",")]
+clean = [p.split()[0] if p else "" for p in parts]
+if len(clean) < 7:
+    sys.exit(1)
+# Normalize services array to canonical "[a,b,c]" with no spaces
+hashes = [h.strip().lower() for h in services_inner.split(",") if h.strip()]
+print("[" + ",".join(hashes) + "]")
+print(clean[0])  # readOnly
+print(clean[1])  # maxPerCall
+print(clean[2])  # maxPerPeriod
+print(clean[3])  # maxTotal
+print(clean[4])  # periodSeconds
+print(clean[5])  # updatedAt (unused)
+print(clean[6])  # exists
+PYEOF
+)
+  if [ -n "$PARSED" ]; then
+    EX_SERVICES=$(printf '%s\n' "$PARSED" | sed -n '1p')
+    EX_READ_ONLY=$(printf '%s\n' "$PARSED" | sed -n '2p')
+    EX_MAX_CALL=$(printf '%s\n' "$PARSED" | sed -n '3p')
+    EX_MAX_PERIOD=$(printf '%s\n' "$PARSED" | sed -n '4p')
+    EX_MAX_TOTAL=$(printf '%s\n' "$PARSED" | sed -n '5p')
+    EX_PERIOD_S=$(printf '%s\n' "$PARSED" | sed -n '6p')
+    EX_EXISTS=$(printf '%s\n' "$PARSED" | sed -n '8p')
 
-    # Normalize ex_services and our SERVICES_ARG: lowercase, no spaces.
-    NORM_EX=$(printf '%s' "$EX_SERVICES" | tr '[:upper:]' '[:lower:]')
-    NORM_NEW=$(printf '%s' "$SERVICES_ARG" | tr '[:upper:]' '[:lower:]')
-    if [ "$NORM_EX" = "$NORM_NEW" ] && \
-       [ "$EX_READ_ONLY" = "$READ_ONLY" ] && \
-       [ "$EX_MAX_CALL" = "$MAX_PER_CALL" ] && \
-       [ "$EX_MAX_PERIOD" = "$MAX_PER_PERIOD" ] && \
-       [ "$EX_MAX_TOTAL" = "$MAX_TOTAL" ] && \
-       [ "$EX_PERIOD_S" = "$PERIOD_SECONDS" ]; then
-      skip "scope already matches requested config — no-op"
-      echo "{\"ok\":true,\"skipped\":\"already-set\",\"agent\":\"$LABEL\",\"actor_omni\":\"$ACTOR_OMNI\"}"
-      exit 0
+    if [ "$EX_EXISTS" = "true" ]; then
+      NORM_NEW=$(printf '%s' "$SERVICES_ARG" | tr '[:upper:]' '[:lower:]')
+      if [ "$EX_SERVICES" = "$NORM_NEW" ] && \
+         [ "$EX_READ_ONLY" = "$READ_ONLY" ] && \
+         [ "$EX_MAX_CALL" = "$MAX_PER_CALL" ] && \
+         [ "$EX_MAX_PERIOD" = "$MAX_PER_PERIOD" ] && \
+         [ "$EX_MAX_TOTAL" = "$MAX_TOTAL" ] && \
+         [ "$EX_PERIOD_S" = "$PERIOD_SECONDS" ]; then
+        skip "scope already matches requested config — no-op"
+        echo "{\"ok\":true,\"skipped\":\"already-set\",\"agent\":\"$LABEL\",\"actor_omni\":\"$ACTOR_OMNI\"}"
+        exit 0
+      fi
+      ok "scope exists but differs → will overwrite (existing services=$EX_SERVICES vs new=$NORM_NEW)"
     fi
-    ok "scope exists but differs → will overwrite"
   fi
 fi
 ok "scope not yet set (or differs) → proceeding"

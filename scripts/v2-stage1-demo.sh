@@ -159,6 +159,11 @@ if [ -n "$ONLY_STEP" ]; then
   TO_STEP="$ONLY_STEP"
 fi
 
+# Pre-seed STEP_NUM so the first step() call increments to FROM_STEP
+# (rather than always landing on 1, which was a UX bug when using
+# --from-step N or --only-step N).
+STEP_NUM=$((FROM_STEP - 1))
+
 # Determine whether a given step number is in scope.
 in_scope() {
   local n="$1"
@@ -672,14 +677,15 @@ do_step_15() {
   printf "  SidecarRegistry     : %s\n"   "${registry_addr:-(not deployed)}" >&2
   printf "  smoke-test service  : %s @ s3://%s/bots/<actor_omni>/credentials/%s.enc\n" \
     "$SMOKE_TEST_SERVICE" "${VAULT_BUCKET:-$BUCKET}" "$SMOKE_TEST_SERVICE" >&2
-  printf "\n  Next manual steps (not yet automated — pending stage-1 CLI work):\n" >&2
+  printf "\n  Stage-1 chain actions (bash entries — all shipped):\n" >&2
   if [ -n "$registry_addr" ] && [ "$registry_addr" != "0x0" ]; then
-    printf "    agentkeys --session-id %s --chain %s device register \\\\\n" \
-      "$SESSION_ID" "$AGENTKEYS_CHAIN" >&2
-    printf "      --registry-address %s \\\\\n" "$registry_addr" >&2
-    printf "      --roles cap-mint,recovery,scope-mgmt\n" >&2
-    printf "    (today this errors with 'unrecognized subcommand device' — see\n" >&2
-    printf "     docs/v2-stage1-migration-and-demo.md §1.4 stub-status)\n\n" >&2
+    printf "    bash scripts/heima-device-register.sh --roles cap-mint,recovery,scope-mgmt\n" >&2
+    printf "    bash scripts/heima-agent-create.sh    --label demo-agent\n" >&2
+    printf "    bash scripts/heima-scope-set.sh       --agent demo-agent --services openrouter\n" >&2
+    printf "    bash scripts/heima-credential-audit.sh --actor demo-agent --service openrouter --op store\n" >&2
+    printf "    bash scripts/heima-scope-revoke.sh    --agent demo-agent      # teardown\n" >&2
+    printf "    bash scripts/heima-device-revoke.sh   --agent demo-agent      # recovery scaffold\n\n" >&2
+    printf "  Rust CLI subcommands wrapping the same flows arrive in stage 2 (#90).\n\n" >&2
   fi
   printf "  Re-run individual phases (idempotent):\n" >&2
   printf "    bash scripts/v2-stage1-demo.sh --only-step 5     # re-check chain reachability\n" >&2

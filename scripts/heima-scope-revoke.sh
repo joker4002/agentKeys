@@ -81,20 +81,42 @@ echo "    scope         = $SCOPE_CONTRACT" >&2
 echo "    operator_omni = 0x$OPERATOR_OMNI" >&2
 echo "    actor_omni    = $ACTOR_OMNI" >&2
 
-# Idempotency: read current scope; if exists==false or services empty, already revoked.
+# Idempotency: read current scope. Same struct-of-tuple ABI fix as heima-scope-set.sh
+# — cast needs the outer parens to decode the Scope struct correctly. Without them
+# cast errors with "ABI decoding failed: buffer overrun" and we silently fall
+# through to the cast-send branch.
 log "Idempotency check …"
 EXISTING_SCOPE=$(cast call "$SCOPE_CONTRACT" \
-  "getScope(bytes32,bytes32)(bytes32[],bool,uint128,uint128,uint128,uint32,uint64,bool)" \
+  "getScope(bytes32,bytes32)((bytes32[],bool,uint128,uint128,uint128,uint32,uint64,bool))" \
   "0x$OPERATOR_OMNI" "$ACTOR_OMNI" \
   --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
 if [ "$EXISTING_SCOPE" != "ERR" ] && [ -n "$EXISTING_SCOPE" ]; then
-  EX_EXISTS=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '8p' | tr -d '[:space:]')
-  EX_SERVICES=$(printf '%s\n' "$EXISTING_SCOPE" | sed -n '1p' | tr -d '[:space:]')
-  if [ "$EX_EXISTS" != "true" ] || [ "$EX_SERVICES" = "[]" ]; then
-    skip "scope already revoked or never set"
-    rm -f "$HOME/.agentkeys/agents/${LABEL}.scope.json"
-    echo "{\"ok\":true,\"skipped\":\"already-revoked\",\"agent\":\"$LABEL\"}"
-    exit 0
+  PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE" 2>/dev/null || true
+import sys, re
+raw = sys.argv[1].strip()
+m = re.match(r"\((.*)\)$", raw, re.DOTALL)
+if not m: sys.exit(1)
+inner = m.group(1).strip()
+arr_match = re.match(r"^\[([^\]]*)\]\s*,\s*(.*)$", inner, re.DOTALL)
+if not arr_match: sys.exit(1)
+services_inner = arr_match.group(1).strip()
+rest = arr_match.group(2)
+parts = [p.strip().split()[0] if p.strip() else "" for p in rest.split(",")]
+if len(parts) < 7: sys.exit(1)
+hashes = [h.strip() for h in services_inner.split(",") if h.strip()]
+print("[" + ",".join(hashes) + "]")
+print(parts[-1])  # exists
+PYEOF
+)
+  if [ -n "$PARSED" ]; then
+    EX_SERVICES=$(printf '%s\n' "$PARSED" | sed -n '1p')
+    EX_EXISTS=$(printf '%s\n' "$PARSED" | sed -n '2p')
+    if [ "$EX_EXISTS" != "true" ] || [ "$EX_SERVICES" = "[]" ]; then
+      skip "scope already revoked or never set"
+      rm -f "$HOME/.agentkeys/agents/${LABEL}.scope.json"
+      echo "{\"ok\":true,\"skipped\":\"already-revoked\",\"agent\":\"$LABEL\"}"
+      exit 0
+    fi
   fi
 fi
 ok "scope is live → revoking"

@@ -6,13 +6,96 @@ The companion PRD is at [.omc/prd.json](../.omc/prd.json) (12 stories ordered P0
 
 ---
 
+## Iteration A — live runtime debug pass (2026-05-19 follow-up)
+
+After the first set of iterations 1-12 landed the scripts, **a fresh run of `bash scripts/v2-stage1-demo.sh --from-step 12` on Heima mainnet surfaced real bugs that the unit tests didn't catch**. This section documents every error encountered + the underlying fix, in the order they came up.
+
+### Error A.1 — `getScope` ABI decode mismatch (heima-scope-set.sh + heima-scope-revoke.sh)
+
+**Symptom**: re-running `bash scripts/v2-stage1-demo.sh --only-step 12` submitted a new `setScopeWithWebauthn` tx every time instead of short-circuiting. Idempotency check printed `"scope not yet set (or differs) → proceeding"` even when the scope WAS already set on-chain.
+
+**Diagnosis** (probed directly with `cast call`):
+```bash
+$ cast call 0x14C2…aa8 \
+    "getScope(bytes32,bytes32)(bytes32[],bool,uint128,uint128,uint128,uint32,uint64,bool)" \
+    0x941c…bef2 0x82a0…7268 --rpc-url $RPC
+Error: could not decode output; did you specify the wrong function return data type?
+Context:
+- ABI decoding failed: buffer overrun while deserializing
+```
+
+The function returns a **single `Scope` struct**, not a flat tuple. Cast's `(bytes32[],bool,uint128,...)` signature expects 8 separate return values; the contract returns 1 (a wrapped struct). Cast aborts; `cast call` returns empty in the `2>&1 || echo ERR` wrapper; the `if [ -n "$EXISTING_SCOPE" ]` branch never entered; idempotency check silently falls through.
+
+**Fix**: wrap the struct in outer parens — `((bytes32[],bool,uint128,uint128,uint128,uint32,uint64,bool))`. Verified:
+```bash
+$ cast call ... "getScope(...)((bytes32[],bool,...))" ...
+([0x9d7e…e901], false, 0, 0, 0, 0, 1779149808 [1.779e9], true)
+```
+
+**Where**: `scripts/heima-scope-set.sh:155` + `scripts/heima-scope-revoke.sh:87`.
+
+**Bonus fix**: cast prints the struct on a single line — the previous parse used `sed -n '1p'` / `sed -n '8p'` to extract fields, which only worked if cast printed line-per-field (which it does NOT for `(struct)` returns). Replaced with an inline `python3` parser that strips the outer parens, extracts the services array, and splits the remaining 7 fields on commas. Also strips cast's `[1.779e9]` scientific-notation annotations.
+
+**Verify**:
+```bash
+$ bash scripts/v2-stage1-demo.sh --only-step 12   # first run
+==> [step 12/15] Grant agent scope (setScopeWithWebauthn)
+…
+    ok   scope set — txhash 0x99a4…06c8 (block 9621848)
+$ bash scripts/v2-stage1-demo.sh --only-step 12   # second run — no new tx
+==> [step 12/15] Grant agent scope (setScopeWithWebauthn)
+…
+==> Idempotency check: scope already set?
+    skip scope already matches requested config — no-op
+```
+
+### Error A.2 — step counter always shows `[step 1/15]` regardless of which step actually runs
+
+**Symptom**: `bash scripts/v2-stage1-demo.sh --only-step 12` printed `==> [step 1/15] Grant agent scope…` — confusing operator-facing output.
+
+**Diagnosis**: `STEP_NUM=0` initialized at module-load time; `step()` does `STEP_NUM=$((STEP_NUM+1))` on each call. With `--only-step N` the dispatcher skips steps 1..N-1 (their `do_step_X` calls never fire), so the counter never reaches N before the surviving step calls `step "..."` and lands on 1.
+
+**Fix**: pre-seed `STEP_NUM=$((FROM_STEP - 1))` after argument parsing so the first `step()` call lands on the correct step number.
+
+**Where**: `scripts/v2-stage1-demo.sh:162` (after the `--only-step` collapse to FROM_STEP/TO_STEP, before the `in_scope` helper).
+
+### Error A.3 — stale "today this errors with 'unrecognized subcommand device'" text in step 15 summary
+
+**Symptom**: step 15 printed "Next manual steps (not yet automated — pending stage-1 CLI work): agentkeys ... device register" with a note that the subcommand "today errors with 'unrecognized subcommand device'." Reality: the bash entries (`scripts/heima-*.sh`) DID ship and are wired into steps 10-13.
+
+**Fix**: replaced the summary block with a list of the shipped bash entries (device-register, agent-create, scope-set, credential-audit, scope-revoke, device-revoke) + a pointer to stage 2 (#90) for the Rust CLI subcommand wrappers.
+
+**Where**: `scripts/v2-stage1-demo.sh:639-647` (`do_step_15` summary printf block).
+
+### Step 13 idempotency note
+
+Step 13 (`CredentialAudit.append`) is intentionally NOT idempotent — the on-chain contract is append-only. Each demo re-run adds a fresh audit entry; `entryCount` monotonically increments. This is correct contract semantics (the demo is showing "an audit entry was appended", not "exactly one audit entry exists").
+
+If we want demo-step-level idempotency, the fix is to use a sentinel `payload_hash` (e.g. `keccak("demo-marker:" || session-id)`) and pre-scan `getEntries(operator, 0, entryCount)` for that marker. Deferring this; the current design exercises the audit-append path end-to-end which is the whole point of the demo step.
+
+### Verified idempotent re-run
+
+After all 3 fixes (A.1, A.2, A.3):
+```bash
+$ bash scripts/v2-stage1-demo.sh --from-step 12   # first run → all 4 steps green
+$ bash scripts/v2-stage1-demo.sh --from-step 12   # second run from scratch shell
+  step 12 → skip (idempotent)
+  step 13 → +1 audit entry (append-only by contract; intentional)
+  step 14 → "K11 enrollment already exists" skip
+  step 15 → summary print (no on-chain action)
+```
+
+All 4 steps print correct `[step N/15]` counter and pass green.
+
+---
+
 ## Iteration 1 — funding helper script (US-001)
 
 **Scope**: Ship `scripts/heima-fund-account.sh` so downstream agent/scope scripts can mint fresh test wallets without baking the deployer key into anything.
 
 **Errors + fixes**:
 
-(populated during execution)
+No runtime errors. Live test from operator master (`0xdE644…3Bc`) → fresh address: funded with 1 HEI, re-run skips with `recipient already has 1 HEI (≥ 1)`.
 
 ---
 
