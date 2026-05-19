@@ -106,7 +106,7 @@ fi
 [ -z "$SCOPE_CONTRACT" ] && die "--scope-address required (or set \$SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME_UC:-HEIMA})"
 if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
   case "$(printf '%s' "$SCOPE_CONTRACT" | tr '[:upper:]' '[:lower:]')" in
-    0x000000000000000000000000000000000000000[0-9a-f])
+    0x000000000000000000000000000000000000000[1-4])
       die "AgentKeysScope address $SCOPE_CONTRACT is the operator-workstation.env sentinel — run bash scripts/heima-bring-up.sh first." ;;
   esac
 fi

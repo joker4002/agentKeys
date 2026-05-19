@@ -80,7 +80,7 @@ fi
 # silently target the zero-prefix address and emit confusing failures.
 if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
   case "$(printf '%s' "$REGISTRY" | tr '[:upper:]' '[:lower:]')" in
-    0x000000000000000000000000000000000000000[0-9a-f])
+    0x000000000000000000000000000000000000000[1-4])
       die "SidecarRegistry address $REGISTRY is the operator-workstation.env sentinel (pre-deploy). Run 'bash scripts/heima-bring-up.sh' first to deploy the real contracts." ;;
   esac
 fi

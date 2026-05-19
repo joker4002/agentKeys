@@ -85,7 +85,7 @@ fi
 [ -z "$REGISTRY" ] && die "--registry-address required"
 if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
   case "$(printf '%s' "$REGISTRY" | tr '[:upper:]' '[:lower:]')" in
-    0x000000000000000000000000000000000000000[0-9a-f])
+    0x000000000000000000000000000000000000000[1-4])
       die "SidecarRegistry address $REGISTRY is the operator-workstation.env sentinel — run bash scripts/heima-bring-up.sh first." ;;
   esac
 fi

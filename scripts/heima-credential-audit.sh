@@ -75,7 +75,7 @@ fi
 [ -z "$AUDIT_CONTRACT" ] && die "--audit-address required"
 if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
   case "$(printf '%s' "$AUDIT_CONTRACT" | tr '[:upper:]' '[:lower:]')" in
-    0x000000000000000000000000000000000000000[0-9a-f])
+    0x000000000000000000000000000000000000000[1-4])
       die "CredentialAudit address $AUDIT_CONTRACT is the operator-workstation.env sentinel — run bash scripts/heima-bring-up.sh first." ;;
   esac
 fi
