@@ -56,6 +56,11 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_COMPANION_K11_CRED_ID")]
     companion_k11_cred_id: Option<String>,
 
+    /// WebAuthn RP ID the companion is bound to. Defaults to "companion.localhost".
+    /// Demo bumps to "companion-v2.localhost" when prior companion is revoked.
+    #[arg(long, env = "AGENTKEYS_COMPANION_RP_ID")]
+    companion_rp_id: Option<String>,
+
     /// Unix-socket path for `--proxy` mode. Default resolves to
     /// `$XDG_RUNTIME_DIR/agentkeys-proxy.sock` or `~/.agentkeys/...`.
     #[arg(long, env = "AGENTKEYS_PROXY_SOCKET")]
@@ -533,6 +538,7 @@ async fn run_companion_mode(args: Args) -> anyhow::Result<()> {
         operator_omni,
         device_key_hash,
         k11_cred_id,
+        rp_id: args.companion_rp_id.clone(),
     };
     companion::run(companion_args).await
 }

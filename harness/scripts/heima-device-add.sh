@@ -90,12 +90,16 @@ COMPANION_INFO=$(curl -sS "$COMPANION_URL/v1/companion/whoami") \
 COMP_OPERATOR_OMNI=$(echo "$COMPANION_INFO" | jq -r .operator_omni)
 COMP_DEVICE_KEY_HASH=$(echo "$COMPANION_INFO" | jq -r .device_key_hash)
 COMP_K11_CRED_ID=$(echo "$COMPANION_INFO" | jq -r .k11_cred_id)
+COMP_RP_ID=$(echo "$COMPANION_INFO" | jq -r .rp_id)
 ok "companion operator_omni = $COMP_OPERATOR_OMNI"
 ok "companion device_key_hash = $COMP_DEVICE_KEY_HASH"
+ok "companion rp_id          = $COMP_RP_ID"
 
-# Load the companion's K11 pubkey from disk (~/.agentkeys/k11/<omni>--companion.localhost.json).
+# Load the companion's K11 pubkey from disk — file path is derived from
+# the rp_id the daemon was started with, so this works for any version
+# (companion.localhost, companion-v2.localhost, etc.).
 COMP_OMNI_NOPREFIX="${COMP_OPERATOR_OMNI#0x}"
-COMP_K11_FILE="$HOME/.agentkeys/k11/${COMP_OMNI_NOPREFIX}--companion.localhost.json"
+COMP_K11_FILE="$HOME/.agentkeys/k11/${COMP_OMNI_NOPREFIX}--${COMP_RP_ID}.json"
 if [ -f "$COMP_K11_FILE" ]; then
   COMP_COSE_HEX=$(jq -r .cose_pubkey_hex "$COMP_K11_FILE")
   COMP_COSE_NOPREFIX="${COMP_COSE_HEX#0x}"

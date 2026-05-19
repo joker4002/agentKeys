@@ -35,13 +35,14 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 const DEFAULT_BIND: &str = "127.0.0.1:9091";
-pub const COMPANION_RP_ID: &str = "companion.localhost";
+pub const DEFAULT_COMPANION_RP_ID: &str = "companion.localhost";
 
 #[derive(Clone)]
 pub struct CompanionState {
     pub operator_omni: String,
     pub device_key_hash: String,
     pub k11_cred_id: String,
+    pub rp_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,7 +50,7 @@ pub struct WhoAmIResponse {
     pub operator_omni: String,
     pub device_key_hash: String,
     pub k11_cred_id: String,
-    pub rp_id: &'static str,
+    pub rp_id: String,
     pub role: &'static str,
 }
 
@@ -70,6 +71,7 @@ pub async fn run(args: CompanionArgs) -> anyhow::Result<()> {
         operator_omni: args.operator_omni,
         device_key_hash: args.device_key_hash,
         k11_cred_id: args.k11_cred_id,
+        rp_id: args.rp_id.unwrap_or_else(|| DEFAULT_COMPANION_RP_ID.to_string()),
     };
 
     let app = Router::new()
@@ -92,7 +94,7 @@ async fn whoami(State(state): State<Arc<CompanionState>>) -> Json<WhoAmIResponse
         operator_omni: state.operator_omni.clone(),
         device_key_hash: state.device_key_hash.clone(),
         k11_cred_id: state.k11_cred_id.clone(),
-        rp_id: COMPANION_RP_ID,
+        rp_id: state.rp_id.clone(),
         role: "CAP_MINT|RECOVERY",
     })
 }
@@ -130,7 +132,7 @@ async fn approve(
     let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_for_chain(
         &state.operator_omni,
         challenge,
-        COMPANION_RP_ID,
+        &state.rp_id,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("webauthn: {e}")))?;
@@ -144,4 +146,9 @@ pub struct CompanionArgs {
     pub operator_omni: String,
     pub device_key_hash: String,
     pub k11_cred_id: String,
+    /// WebAuthn RP ID. Defaults to "companion.localhost". The demo bumps
+    /// to "companion-v2.localhost" / etc. when the prior companion is
+    /// revoked, so a fresh K11 credential can be enrolled at a distinct
+    /// effective domain.
+    pub rp_id: Option<String>,
 }

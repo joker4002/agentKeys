@@ -337,13 +337,42 @@ if should_run_step 5; then
   MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY" | tr '[:upper:]' '[:lower:]')
   OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR" | shasum -a 256 | awk '{print $1}')
 
+  # Find an active companion across versions (companion.localhost, then
+  # companion-v2/v3/…). If none active, enroll a fresh version. This makes
+  # the demo idempotent across runs where the companion was previously
+  # revoked (e.g. as part of the M-of-N quorum test).
+  COMPANION_RP_TAG="companion"
   COMP_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}--companion.localhost.json"
   if [ "$USE_WEBAUTHN" = "1" ]; then
-    if [ -f "$COMP_FILE" ]; then
-      ok "companion K11 already enrolled at $COMP_FILE"
-    else
-      info "enrolling companion K11 (Touch ID prompt at companion.localhost)…"
-      "$AGENTKEYS_BIN" k11 enroll --webauthn --rp-id companion.localhost \
+    FOUND_ACTIVE=0
+    for try_tag in companion companion-v2 companion-v3 companion-v4 companion-v5; do
+      f="$HOME/.agentkeys/k11/${OPERATOR_OMNI}--${try_tag}.localhost.json"
+      [ -f "$f" ] || continue
+      cose=$(jq -r .cose_pubkey_hex "$f" 2>/dev/null) || continue
+      hash=$(cast keccak "$cose")
+      active=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$hash" --rpc-url "$RPC_HTTP" 2>/dev/null || echo false)
+      if [ "$active" = "true" ]; then
+        COMPANION_RP_TAG="$try_tag"
+        COMP_FILE="$f"
+        FOUND_ACTIVE=1
+        ok "found active companion at rp_id=${try_tag}.localhost"
+        break
+      else
+        info "$try_tag K11 file exists but device $hash is not active on chain"
+      fi
+    done
+    if [ "$FOUND_ACTIVE" = "0" ]; then
+      # Pick the lowest version with no K11 file yet.
+      for try_tag in companion companion-v2 companion-v3 companion-v4 companion-v5; do
+        f="$HOME/.agentkeys/k11/${OPERATOR_OMNI}--${try_tag}.localhost.json"
+        if [ ! -f "$f" ]; then
+          COMPANION_RP_TAG="$try_tag"
+          COMP_FILE="$f"
+          break
+        fi
+      done
+      info "enrolling fresh companion K11 (Touch ID prompt at ${COMPANION_RP_TAG}.localhost)…"
+      "$AGENTKEYS_BIN" k11 enroll --webauthn --rp-id "${COMPANION_RP_TAG}.localhost" \
         --operator-omni "0x$OPERATOR_OMNI" >/dev/null \
         || die "companion K11 enrollment failed"
       ok "companion K11 enrolled at $COMP_FILE"
@@ -351,6 +380,7 @@ if should_run_step 5; then
   else
     info "stub mode — skipping companion K11 enrollment"
   fi
+  COMPANION_RP_ID="${COMPANION_RP_TAG}.localhost"
 
   # Stop any pre-existing companion daemon on this port (idempotency).
   PRE_PID=$(lsof -ti tcp:"$COMPANION_PORT" 2>/dev/null || true)
@@ -376,12 +406,13 @@ if should_run_step 5; then
   fi
 
   COMP_LOG="/tmp/agentkeys-companion-$$.log"
-  info "starting: $DAEMON_BIN --master-companion --companion-bind 127.0.0.1:$COMPANION_PORT"
+  info "starting: $DAEMON_BIN --master-companion --companion-bind 127.0.0.1:$COMPANION_PORT --companion-rp-id $COMPANION_RP_ID"
   "$DAEMON_BIN" --master-companion \
     --companion-bind "127.0.0.1:$COMPANION_PORT" \
     --companion-operator-omni "0x$OPERATOR_OMNI" \
     --companion-device-key-hash "$COMP_DEVICE_KEY_HASH" \
     --companion-k11-cred-id "$COMP_K11_CRED_ID_HASH" \
+    --companion-rp-id "$COMPANION_RP_ID" \
     >"$COMP_LOG" 2>&1 &
   COMP_PID=$!
   sleep 1
