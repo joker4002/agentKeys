@@ -48,6 +48,25 @@ impl MemoryWorkerConfig {
                 kek_hex_stage1.len()
             ));
         }
+        let kek_lc = kek_hex_stage1.to_lowercase();
+        if kek_lc == "0".repeat(64) {
+            return Err(anyhow!(
+                "AGENTKEYS_MEMORY_KEK_HEX is all zeros — rejecting (looks like a placeholder)"
+            ));
+        }
+        if kek_lc.chars().all(|c| c == kek_lc.chars().next().unwrap()) {
+            return Err(anyhow!(
+                "AGENTKEYS_MEMORY_KEK_HEX is all the same byte — rejecting (looks like a placeholder)"
+            ));
+        }
+        // Fail-loud WARN per arch.md §22b.2 stage-1 simplifications inventory:
+        // KEK from env is a stage-1 simplification; stage 2 (#91) hardens.
+        eprintln!(
+            "==> ⚠️  WARN [arch.md §22b.2]: agentkeys-worker-memory running with env-injected \
+             KEK (AGENTKEYS_MEMORY_KEK_HEX) on chain={chain_profile}. This is the stage-1 \
+             simplification. Stage 2 (issue #91) replaces with mTLS-derived KEK from the \
+             signer enclave (arch.md §15.1)."
+        );
         Ok(MemoryWorkerConfig {
             memory_bucket,
             region,

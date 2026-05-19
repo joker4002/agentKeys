@@ -3,7 +3,7 @@
 # SidecarRegistry. Implements arch.md §10.2 "agent device pairing"
 # (master mints a link code, agent redeems it).
 #
-# Stage-1 simplification (per arch.md §22a):
+# Stage-1 simplification (per arch.md §22b stage-1 simplifications inventory):
 #   - msg.sender = the operator's master EVM wallet (the one that
 #     deployed the contracts / ran heima-device-register.sh)
 #   - The agent's K10 == a freshly-generated secp256k1 keypair, persisted

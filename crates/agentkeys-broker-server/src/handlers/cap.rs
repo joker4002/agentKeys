@@ -22,7 +22,7 @@
 //! 5. Cap payload includes an explicit `op` discriminator so the worker
 //!    can refuse a fetch-cap submitted to /store etc.
 //!
-//! Stage-1 simplification per arch.md §22a: K10 signature over the
+//! Stage-1 simplification per arch.md §22b.4 (stage-1 simplifications inventory — no K10 signature requirement; issue #90 for the hardening): K10 signature over the
 //! cap-mint request is not yet required (stage 2 adds the daemon's
 //! per-call K10 signature). Until then, the session JWT + on-chain
 //! device binding are the auth surface.

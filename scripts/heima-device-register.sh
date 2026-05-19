@@ -3,7 +3,8 @@
 # device on the live SidecarRegistry. Implements arch.md §1.4 / §10.1
 # stage 4: "on-chain SidecarRegistry binding."
 #
-# Sovereign-mode shape (stage-1 simplification per arch.md §22a):
+# Sovereign-mode shape (stage-1 simplification per arch.md §22b — stage-1
+# simplifications inventory; entries §22b.1 K11 stub + §22b.3 attestation):
 #   - msg.sender = the operator's master EVM wallet (derived from
 #     ./test-hei mnemonic, same wallet that deployed the contracts)
 #   - K10 device pubkey hash = keccak256(20-byte master wallet addr)

@@ -53,7 +53,10 @@ fn k11_assert_stub_mode_emits_hex() {
 }
 
 #[test]
-fn k11_non_stub_mode_errors_with_stage_2_pointer() {
+fn k11_non_stub_mode_without_webauthn_errors_with_actionable_hint() {
+    // AGENTKEYS_K11_STUB=0 + no --webauthn → error pointing at the two
+    // ways to proceed (either pass --webauthn or set STUB=1). Real
+    // ceremony lives behind --webauthn (no more "stage 2 not shipped").
     let omni = test_omni();
     let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
     cmd.env("AGENTKEYS_K11_STUB", "0")
@@ -65,8 +68,8 @@ fn k11_non_stub_mode_errors_with_stage_2_pointer() {
         .arg(&omni);
     cmd.assert()
         .failure()
-        .stderr(contains("stage 2"))
-        .stderr(contains("90"));
+        .stderr(contains("--webauthn"))
+        .stderr(contains("AGENTKEYS_K11_STUB"));
 }
 
 #[test]

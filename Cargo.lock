@@ -93,9 +93,15 @@ dependencies = [
  "async-trait",
  "aws-credential-types",
  "axum",
+ "base64",
+ "ciborium",
  "clap",
  "hex",
+ "hyper 1.9.0",
+ "hyper-util",
+ "p256 0.13.2",
  "predicates",
+ "rand_core",
  "reqwest",
  "rusqlite",
  "serde",
@@ -104,6 +110,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower-service",
 ]
 
 [[package]]

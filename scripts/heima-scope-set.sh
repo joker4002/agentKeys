@@ -3,7 +3,7 @@
 # live AgentKeysScope contract. Wraps
 # `AgentKeysScope.setScopeWithWebauthn(...)` per arch.md §12.4.
 #
-# Stage-1 simplification (per arch.md §22a):
+# Stage-1 simplification (per arch.md §22b stage-1 simplifications inventory):
 #   - K11 assertion is a non-empty stub byte string (the contract checks
 #     `k11Assertion.length != 0` but doesn't P-256-verify on-chain yet).
 #     Stage 2 replaces the stub with a real WebAuthn assertion.

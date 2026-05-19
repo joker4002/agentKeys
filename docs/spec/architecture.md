@@ -1478,6 +1478,82 @@ For payment caps specifically (per §15.5), the operator can override the per-ca
 
 ---
 
+## 22b. Stage-1 simplifications inventory
+
+Stage 1 ships a working end-to-end credential-management flow against the live Heima EVM contracts. Some pieces of the full architecture (§5a K11 ceremony, §11 mTLS-derived KEK, §15 worker independent re-verify) are intentionally simplified to keep stage 1 demoable on a developer workstation without an HSM, a TEE-attested signer, or browser-side WebAuthn integration. Every such simplification is listed here with the explicit stage-2 hardening pointer.
+
+Codebase rule: any source file that takes a stage-1 shortcut **must** cite this section by name (`per arch.md §22b stage-1 simplifications inventory`) **and** point at the corresponding hardening issue. Drift (citing a non-existent section, omitting the issue link, or shipping a shortcut without an entry here) is treated as a must-fix in code review.
+
+### 22b.1 K11 assertion bytes — stub by default, real Touch ID ceremony via `--webauthn`
+
+**What ships in stage 1**:
+- `agentkeys k11 enroll/assert` CLI subcommand defaults to a deterministic stub that produces the bytes `"stage1-k11-stub:" || sha256(label || omni || ":" || message)`. The on-chain `SidecarRegistry`/`AgentKeysScope` contracts gate on `k11Assertion.length != 0` only — they do NOT verify a P-256 signature, so the stub bytes satisfy the gate.
+- **Real WebAuthn ceremony available via `--webauthn`** — `agentkeys k11 enroll --webauthn` brings up a localhost axum server, opens the operator's default browser, and runs the platform-authenticator ceremony. On macOS this triggers the Touch ID prompt against the Secure Enclave-resident passkey; on Windows it triggers Windows Hello; on Linux it depends on the available authenticator. `agentkeys k11 assert --webauthn --message-hex 0x...` produces a real WebAuthn assertion cryptographically bound to the message via the WebAuthn challenge = `sha256(message)` trick.
+- The bash helpers (`heima-scope-set.sh`, `heima-device-register.sh`, etc.) still pass stub bytes for now — wiring them to the `--webauthn` flow is a stage-1.5 follow-up so the demo runs in CI / non-attested envs by default.
+
+**What stage 2 (#90) adds**:
+- On-chain P-256 verification via the EIP-7212 P-256 precompile (when Heima ships it; tracked at the Heima parachain level).
+- M-of-N multi-master-device recovery flow via WebAuthn-bound master rotations.
+- Bash helpers default to `--webauthn` and require it to be present + valid before submitting any master-mutation tx.
+
+**Fail-loud guarantee**: when stub mode is active AND `AGENTKEYS_CHAIN=heima` (production mainnet), the CLI prints a WARN to stderr explaining that the bytes are not a real WebAuthn assertion and pointing at this section + issue #90.
+
+### 22b.2 Worker KEK — `AGENTKEYS_WORKER_KEK_HEX` / `AGENTKEYS_MEMORY_KEK_HEX` env var instead of mTLS-derived
+
+**What ships in stage 1**:
+- `agentkeys-worker-creds` and `agentkeys-worker-memory` read their AES-256-GCM key from `AGENTKEYS_WORKER_KEK_HEX` / `AGENTKEYS_MEMORY_KEK_HEX` env at boot.
+- Length-check at startup (must be 32 bytes hex-encoded); otherwise fail-fast.
+
+**What stage 2 (#91) adds**:
+- mTLS-attested KEK derivation from the signer per §15.1. Worker presents its attestation-issued cert; signer accepts only attested workers; signer derives KEK from K3 (per-operator + per-data-class) and returns it over the mTLS channel.
+- Per-K3-epoch rotation of the KEK without re-encrypting old blobs (via the envelope's k3_epoch field; mismatch → re-derive via mTLS).
+
+**Fail-loud guarantee**: worker prints a WARN at startup citing this section + issue #91 when KEK is from env (NOT mTLS-derived).
+
+### 22b.3 Attestation bytes — empty `0x` blob on master/agent device registration
+
+**What ships in stage 1**:
+- `SidecarRegistry.registerMasterDevice` and `registerAgentDevice` accept an `attestation` bytes parameter. Stage 1 passes `0x` (empty) — the contract stores it but doesn't verify it.
+- For master devices, `k11CredId` is also `bytes32(0)` in stage 1; the stored value is meaningful only once K11 enrollment is webauthn-real (§22b.1).
+
+**What stage 2 adds**:
+- For master devices: a real attestation blob (webauthn-rs attestation statement) covering both K10 device-key authenticity and K11 platform-passkey binding.
+- For agent devices: a fresh `link_code_redemption` that the master mints; agent redeems it to register; on-chain check that the redemption matches the per-operator unspent set.
+
+### 22b.4 Cap-mint daemon→broker auth — session JWT only, no K10 signature on the request
+
+**What ships in stage 1**:
+- Broker `/v1/cap/cred-*` endpoints verify the caller's session JWT and require `session.omni_account == request.operator_omni`. They check on-chain SidecarRegistry for device binding + role.
+- The request body is NOT additionally signed by K10 — that's a stage-2 hardening.
+
+**What stage 2 adds**:
+- Daemon signs every cap-mint request with K10. Broker verifies the signature against the on-chain device-pubkey before signing the cap. This closes the "broker hot-path compromise → forge caps for any active device" path that today depends on the session JWT alone.
+
+### 22b.5 Audit chain anchoring — direct tx per audit entry (tier C)
+
+**What ships in stage 1**:
+- `CredentialAudit.append(operatorOmni, actorOmni, serviceHash, opType, payloadHash)` is open-append (any caller; gas is the spam-resistance).
+- Each audit entry is a fresh tx, not a Merkle-batched root.
+
+**What stage 2 adds**:
+- Audit-relay worker (per arch.md §15.3 tier A) batches audit entries into a Merkle tree; submits one tx per batch with the root. Workers + brokers consume the tier-A relay; tier C (direct append per entry) remains as the sovereign fallback.
+
+### 22b.6 Cross-references from code
+
+Every source file or doc that takes a stage-1 shortcut **must** include a comment citing this section by name. Search the codebase for `arch.md §22b` to find them. Drift (a shortcut citing a non-existent section or omitting the issue link) is must-fix at code review.
+
+Known sites at HEAD:
+- `crates/agentkeys-cli/src/k11.rs` — stub assertion bytes (§22b.1).
+- `crates/agentkeys-cli/src/k11_webauthn.rs` — real WebAuthn ceremony (§22b.1).
+- `crates/agentkeys-worker-creds/src/state.rs` — `AGENTKEYS_WORKER_KEK_HEX` (§22b.2).
+- `crates/agentkeys-worker-memory/src/state.rs` — `AGENTKEYS_MEMORY_KEK_HEX` (§22b.2).
+- `crates/agentkeys-broker-server/src/handlers/cap.rs` — no K10 signature requirement (§22b.4).
+- `scripts/heima-device-register.sh` — empty attestation + empty K11 assertion on first call (§22b.1, §22b.3).
+- `scripts/heima-agent-create.sh` — empty K11 / link-code-redemption stubs (§22b.3).
+- `scripts/heima-scope-set.sh` — stub K11 assertion (§22b.1).
+
+---
+
 ## 23. Cargo workspace
 
 ```

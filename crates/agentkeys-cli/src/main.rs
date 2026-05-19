@@ -308,17 +308,28 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum K11Action {
-    #[command(about = "Enroll a K11 credential for an operator (stub mode in stage 1)")]
+    #[command(about = "Enroll a K11 credential for an operator (stub by default; --webauthn for real Touch ID ceremony)")]
     Enroll {
         #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
         operator_omni: String,
+        /// Run the real WebAuthn ceremony in the operator's default browser.
+        /// macOS: triggers the Touch ID prompt against the platform passkey.
+        /// Without this flag the command writes a deterministic stub
+        /// (for CI / non-attested environments).
+        #[arg(long)]
+        webauthn: bool,
     },
-    #[command(about = "Produce a K11 assertion over a message (stub mode in stage 1)")]
+    #[command(about = "Produce a K11 assertion over a message (stub by default; --webauthn for real Touch ID)")]
     Assert {
         #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
         operator_omni: String,
         #[arg(long, help = "Hex-encoded message to sign over (with or without 0x prefix)")]
         message_hex: String,
+        /// Run the real WebAuthn ceremony. The application message is
+        /// SHA-256-hashed and used as the WebAuthn challenge so the
+        /// assertion is cryptographically bound to this exact message.
+        #[arg(long)]
+        webauthn: bool,
     },
 }
 
@@ -406,28 +417,63 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
 /// Stub-mode toggle: `AGENTKEYS_K11_STUB=1` (default). Setting it to `0`
 /// errors out today — real WebAuthn is a stage-2 deliverable.
 async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
-    let stub_mode = std::env::var("AGENTKEYS_K11_STUB")
+    let stub_env = std::env::var("AGENTKEYS_K11_STUB")
         .map(|v| v != "0")
         .unwrap_or(true);
-    if !stub_mode {
+
+    // Resolve mode: --webauthn flag wins over AGENTKEYS_K11_STUB env.
+    let use_webauthn = matches!(action,
+        K11Action::Enroll { webauthn: true, .. } | K11Action::Assert { webauthn: true, .. });
+
+    if !use_webauthn && !stub_env {
         anyhow::bail!(
-            "real WebAuthn enrollment ships in stage 2 (issue #90). Set AGENTKEYS_K11_STUB=1 \
-             to use the stage-1 deterministic stub, or wait for the webauthn-rs integration."
+            "K11 stub mode disabled (AGENTKEYS_K11_STUB=0) and --webauthn not passed. \
+             Either pass --webauthn for the real Touch ID ceremony, or set \
+             AGENTKEYS_K11_STUB=1 to use the deterministic stub."
         );
     }
-    match action {
-        K11Action::Enroll { operator_omni } => {
-            let enrollment = agentkeys_cli::k11::enroll(operator_omni)
-                .map_err(|e| anyhow::anyhow!("k11 enroll: {e}"))?;
-            serde_json::to_string_pretty(&enrollment)
-                .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+
+    // Stage-1 stub-on-mainnet WARN per audit US-003: stub bytes are not
+    // a real K11 binding; operators on heima mainnet should know.
+    if !use_webauthn {
+        let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+        if chain == "heima" {
+            eprintln!(
+                "==> ⚠️  WARN: K11 stub mode active on chain={chain}. The bytes you're \
+                 about to produce are NOT a real WebAuthn assertion — they only satisfy \
+                 the on-chain k11Assertion.length != 0 gate. Pass --webauthn for a real \
+                 Touch ID ceremony (macOS). See arch.md stage-1 simplifications inventory \
+                 + issue #90 for stage-2 hardening."
+            );
         }
-        K11Action::Assert { operator_omni, message_hex } => {
+    }
+
+    match action {
+        K11Action::Enroll { operator_omni, webauthn } => {
+            if *webauthn {
+                let enrollment = agentkeys_cli::k11_webauthn::enroll_webauthn(operator_omni)
+                    .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
+                serde_json::to_string_pretty(&enrollment)
+                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+            } else {
+                let enrollment = agentkeys_cli::k11::enroll(operator_omni)
+                    .map_err(|e| anyhow::anyhow!("k11 enroll: {e}"))?;
+                serde_json::to_string_pretty(&enrollment)
+                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+            }
+        }
+        K11Action::Assert { operator_omni, message_hex, webauthn } => {
             let msg = hex::decode(message_hex.trim_start_matches("0x"))
                 .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
-            let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
-                .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
-            Ok(format!("0x{}", hex::encode(assertion)))
+            if *webauthn {
+                let assertion = agentkeys_cli::k11_webauthn::assert_webauthn(operator_omni, &msg)
+                    .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
+                Ok(format!("0x{}", hex::encode(assertion)))
+            } else {
+                let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
+                    .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
+                Ok(format!("0x{}", hex::encode(assertion)))
+            }
         }
     }
 }
