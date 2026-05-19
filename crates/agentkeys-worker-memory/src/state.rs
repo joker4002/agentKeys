@@ -48,15 +48,20 @@ impl MemoryWorkerConfig {
                 kek_hex_stage1.len()
             ));
         }
-        let kek_lc = kek_hex_stage1.to_lowercase();
-        if kek_lc == "0".repeat(64) {
+        // Decode to BYTES first so patterns like 0x0101… (= byte 0x01 ×32
+        // but alternating hex chars) are caught. Codex audit finding.
+        let kek_bytes = hex::decode(&kek_hex_stage1)
+            .map_err(|e| anyhow!("AGENTKEYS_MEMORY_KEK_HEX not valid hex: {e}"))?;
+        if kek_bytes.iter().all(|&b| b == 0) {
             return Err(anyhow!(
-                "AGENTKEYS_MEMORY_KEK_HEX is all zeros — rejecting (looks like a placeholder)"
+                "AGENTKEYS_MEMORY_KEK_HEX decodes to all zeros — rejecting (placeholder)"
             ));
         }
-        if kek_lc.chars().all(|c| c == kek_lc.chars().next().unwrap()) {
+        if kek_bytes.iter().all(|&b| b == kek_bytes[0]) {
             return Err(anyhow!(
-                "AGENTKEYS_MEMORY_KEK_HEX is all the same byte — rejecting (looks like a placeholder)"
+                "AGENTKEYS_MEMORY_KEK_HEX decodes to all the same byte (0x{:02x}) — \
+                 rejecting (placeholder)",
+                kek_bytes[0]
             ));
         }
         // Fail-loud WARN per arch.md §22b.2 stage-1 simplifications inventory:

@@ -222,11 +222,15 @@ async fn enroll_webauthn_async(operator_omni: &str) -> Result<WebauthnEnrollment
         ==> timing out after {CEREMONY_TIMEOUT_SECS}s"
     );
 
+    // RAII abort guard — fires server_task.abort() on every exit path
+    // including the timeout-error-return below. Codex audit: the prior
+    // `server_task.abort()` after the `?`s was unreachable on early
+    // returns and the server would dangle until process exit.
+    let _abort_guard = AbortOnDrop(server_task);
     let post = tokio::time::timeout(Duration::from_secs(CEREMONY_TIMEOUT_SECS), rx)
         .await
         .map_err(|_| WebauthnError::Timeout(CEREMONY_TIMEOUT_SECS))?
         .map_err(|e| WebauthnError::Io(format!("oneshot recv: {e}")))?;
-    server_task.abort();
 
     let enrollment = finalize_enroll(operator_omni, &challenge_b64url, &rp_origin, &post)?;
     persist_enrollment(&enrollment)?;
@@ -298,13 +302,29 @@ async fn assert_webauthn_async(
         hex::encode(challenge_bytes)
     );
 
+    // RAII abort guard — fires server_task.abort() on every exit path
+    // including the timeout-error-return below. Codex audit: the prior
+    // `server_task.abort()` after the `?`s was unreachable on early
+    // returns and the server would dangle until process exit.
+    let _abort_guard = AbortOnDrop(server_task);
     let post = tokio::time::timeout(Duration::from_secs(CEREMONY_TIMEOUT_SECS), rx)
         .await
         .map_err(|_| WebauthnError::Timeout(CEREMONY_TIMEOUT_SECS))?
         .map_err(|e| WebauthnError::Io(format!("oneshot recv: {e}")))?;
-    server_task.abort();
 
     finalize_assert(&enrollment, &challenge_b64url, &rp_origin, &post)
+}
+
+/// RAII guard: when dropped, aborts the wrapped tokio task. Used to
+/// guarantee the local ceremony server is shut down on every exit path
+/// from `enroll_webauthn_async` / `assert_webauthn_async` (including
+/// the timeout-error early-return).
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn open_in_browser(url: &str) -> Result<(), WebauthnError> {
@@ -352,12 +372,52 @@ fn finalize_enroll(
     let attestation_bytes = URL_SAFE_NO_PAD
         .decode(&post.attestation_object)
         .map_err(|e| WebauthnError::B64Decode(format!("attestationObject: {e}")))?;
-    let cose_pubkey = extract_cose_pubkey_from_attestation(&attestation_bytes)?;
+    let parsed = extract_attested_credential(&attestation_bytes)?;
+
+    // Verify the credential id the browser sent in `cred.id` matches the
+    // credentialId the authenticator placed inside attestedCredentialData.
+    // Without this check, a malicious page could substitute an arbitrary
+    // id (codex audit finding).
+    let post_cred_id = URL_SAFE_NO_PAD
+        .decode(&post.id)
+        .map_err(|e| WebauthnError::B64Decode(format!("credential id: {e}")))?;
+    if post_cred_id != parsed.credential_id {
+        return Err(WebauthnError::Cbor(format!(
+            "credential id mismatch: browser sent {} bytes, authenticator bound {} bytes",
+            post_cred_id.len(),
+            parsed.credential_id.len()
+        )));
+    }
+
+    // Verify rpIdHash == sha256("localhost"). This binds the credential
+    // to our relying party so a passkey enrolled against a different RP
+    // can't be replayed here.
+    let mut h = Sha256::new();
+    h.update(b"localhost");
+    let expected_rp_id_hash = h.finalize();
+    if parsed.rp_id_hash != expected_rp_id_hash.as_slice() {
+        return Err(WebauthnError::Cbor(format!(
+            "rpIdHash mismatch: expected sha256('localhost'), got {}",
+            hex::encode(&parsed.rp_id_hash)
+        )));
+    }
+
+    // Verify flags require user-presence + user-verified + attested-credential-data.
+    // FLAG_UP = 0x01, FLAG_UV = 0x04, FLAG_AT = 0x40.
+    const FLAG_UP: u8 = 0x01;
+    const FLAG_UV: u8 = 0x04;
+    const FLAG_AT: u8 = 0x40;
+    if (parsed.flags & (FLAG_UP | FLAG_UV | FLAG_AT)) != (FLAG_UP | FLAG_UV | FLAG_AT) {
+        return Err(WebauthnError::Cbor(format!(
+            "authData flags missing UP/UV/AT bits (got 0x{:02x})",
+            parsed.flags
+        )));
+    }
 
     Ok(WebauthnEnrollment {
         operator_omni: operator_omni.to_string(),
         credential_id_b64url: post.id.clone(),
-        cose_pubkey_hex: format!("0x{}", hex::encode(&cose_pubkey)),
+        cose_pubkey_hex: format!("0x{}", hex::encode(&parsed.cose_pubkey)),
         enrolled_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -400,17 +460,18 @@ fn finalize_assert(
         .decode(&post.signature)
         .map_err(|e| WebauthnError::B64Decode(format!("signature: {e}")))?;
 
-    // Verify the signature: signed-bytes = authenticatorData || sha256(clientDataJSON)
+    // WebAuthn signature contract (per W3C WebAuthn §6.3.3):
+    //   sig = ECDSA-sign(privkey, authenticatorData || sha256(clientDataJSON))
+    // The signed bytes are the CONCATENATION (authData || cd_hash) — the
+    // verify function then sha256's the message internally. The previous
+    // code SHA256'd this concatenation BEFORE passing to verify, so
+    // verify was effectively checking sha256(sha256(...))  (codex audit).
     let mut h = Sha256::new();
     h.update(&client_data_bytes);
     let cd_hash = h.finalize();
-    let mut signed = Vec::with_capacity(authenticator_data.len() + cd_hash.len());
-    signed.extend_from_slice(&authenticator_data);
-    signed.extend_from_slice(&cd_hash);
-
-    let mut h2 = Sha256::new();
-    h2.update(&signed);
-    let digest = h2.finalize();
+    let mut signed_bytes = Vec::with_capacity(authenticator_data.len() + cd_hash.len());
+    signed_bytes.extend_from_slice(&authenticator_data);
+    signed_bytes.extend_from_slice(&cd_hash);
 
     let pubkey_hex = enrollment.cose_pubkey_hex.trim_start_matches("0x");
     let pubkey_bytes = hex::decode(pubkey_hex)
@@ -427,8 +488,10 @@ fn finalize_assert(
 
     let sig = Signature::from_der(&signature_der)
         .map_err(|e| WebauthnError::SigParse(e.to_string()))?;
+    // Pass the message unhashed; `Verifier::verify` on p256::ecdsa::VerifyingKey
+    // applies SHA-256 internally per the ECDSA-with-SHA256 contract.
     verifying_key
-        .verify(&digest, &sig)
+        .verify(&signed_bytes, &sig)
         .map_err(|_| WebauthnError::SigInvalid)?;
 
     // Return the WebAuthn assertion in its canonical transport shape:
@@ -440,10 +503,20 @@ fn finalize_assert(
     Ok(out)
 }
 
-/// Walk the attestationObject CBOR, return the raw uncompressed P-256
-/// pubkey (`0x04 || X || Y`, 65 bytes) extracted from the embedded
-/// authData's attestedCredentialData.
-fn extract_cose_pubkey_from_attestation(att_obj_bytes: &[u8]) -> Result<Vec<u8>, WebauthnError> {
+struct AttestedCredential {
+    rp_id_hash: Vec<u8>,
+    flags: u8,
+    credential_id: Vec<u8>,
+    /// Raw uncompressed P-256 pubkey (`0x04 || X || Y`, 65 bytes).
+    cose_pubkey: Vec<u8>,
+}
+
+/// Walk the attestationObject CBOR, return rpIdHash + flags + credentialId +
+/// COSE pubkey extracted from authData.attestedCredentialData. Returning
+/// all four lets the caller bind the enrollment to the relying party
+/// (rpIdHash) AND verify the credential id the browser sent matches the
+/// authenticator-bound one (codex audit finding).
+fn extract_attested_credential(att_obj_bytes: &[u8]) -> Result<AttestedCredential, WebauthnError> {
     // attestationObject is CBOR: { "fmt": str, "attStmt": map, "authData": bytes }
     let value: ciborium::Value = ciborium::from_reader(Cursor::new(att_obj_bytes))
         .map_err(|e| WebauthnError::Cbor(format!("attestationObject root: {e}")))?;
@@ -470,12 +543,18 @@ fn extract_cose_pubkey_from_attestation(att_obj_bytes: &[u8]) -> Result<Vec<u8>,
             auth_data_bytes.len()
         )));
     }
+    let rp_id_hash = auth_data_bytes[0..32].to_vec();
+    let flags = auth_data_bytes[32];
+    // bytes 33..37 = signCount (4 BE bytes) — not used here
+    // bytes 37..53 = aaguid (16 bytes) — not used here
     let cred_id_len = u16::from_be_bytes([auth_data_bytes[53], auth_data_bytes[54]]) as usize;
-    let cose_start = 55 + cred_id_len;
-    if auth_data_bytes.len() <= cose_start {
+    let cred_id_start = 55;
+    let cred_id_end = cred_id_start + cred_id_len;
+    if auth_data_bytes.len() <= cred_id_end {
         return Err(WebauthnError::Cbor("authData missing credentialPublicKey".into()));
     }
-    let cose_bytes = &auth_data_bytes[cose_start..];
+    let credential_id = auth_data_bytes[cred_id_start..cred_id_end].to_vec();
+    let cose_bytes = &auth_data_bytes[cred_id_end..];
     let cose: ciborium::Value = ciborium::from_reader(Cursor::new(cose_bytes))
         .map_err(|e| WebauthnError::Cbor(format!("COSE pubkey: {e}")))?;
     let cose_map = cose.as_map().ok_or(WebauthnError::MissingField("COSE pubkey not a map"))?;
@@ -510,7 +589,12 @@ fn extract_cose_pubkey_from_attestation(att_obj_bytes: &[u8]) -> Result<Vec<u8>,
     uncompressed.push(0x04);
     uncompressed.extend_from_slice(&x);
     uncompressed.extend_from_slice(&y);
-    Ok(uncompressed)
+    Ok(AttestedCredential {
+        rp_id_hash,
+        flags,
+        credential_id,
+        cose_pubkey: uncompressed,
+    })
 }
 
 pub fn persist_enrollment(enrollment: &WebauthnEnrollment) -> Result<(), WebauthnError> {

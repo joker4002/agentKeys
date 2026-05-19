@@ -54,19 +54,23 @@ impl WorkerConfig {
                 kek_hex_stage1.len()
             ));
         }
-        // Reject obviously-weak KEK patterns (all zeros, all same byte). A
-        // real KEK has high entropy; these patterns indicate a forgotten
-        // placeholder. Saves an operator from silently shipping with a
-        // demo key.
-        let kek_lc = kek_hex_stage1.to_lowercase();
-        if kek_lc == "0".repeat(64) {
+        // Reject obviously-weak KEK patterns (all zeros, all same byte).
+        // Must decode to BYTES first — the prior "all same hex char"
+        // check missed patterns like `0101…` which is the byte 0x01
+        // repeated 32 times but with hex chars alternating between 0/1.
+        // Codex audit finding.
+        let kek_bytes = hex::decode(&kek_hex_stage1)
+            .map_err(|e| anyhow!("AGENTKEYS_WORKER_KEK_HEX not valid hex: {e}"))?;
+        if kek_bytes.iter().all(|&b| b == 0) {
             return Err(anyhow!(
-                "AGENTKEYS_WORKER_KEK_HEX is all zeros — rejecting (looks like a placeholder)"
+                "AGENTKEYS_WORKER_KEK_HEX decodes to all zeros — rejecting (placeholder)"
             ));
         }
-        if kek_lc.chars().all(|c| c == kek_lc.chars().next().unwrap()) {
+        if kek_bytes.iter().all(|&b| b == kek_bytes[0]) {
             return Err(anyhow!(
-                "AGENTKEYS_WORKER_KEK_HEX is all the same byte — rejecting (looks like a placeholder)"
+                "AGENTKEYS_WORKER_KEK_HEX decodes to all the same byte (0x{:02x}) — \
+                 rejecting (placeholder)",
+                kek_bytes[0]
             ));
         }
         // Fail-loud WARN per arch.md §22b.2 stage-1 simplifications inventory:

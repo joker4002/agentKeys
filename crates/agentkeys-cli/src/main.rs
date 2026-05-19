@@ -298,7 +298,7 @@ enum Commands {
 
     #[command(
         about = "K11 (WebAuthn) enrollment + assertion (v2 stage 1 — stub mode)",
-        long_about = "Stage-1 simplification per arch.md §22a: K11 enrollment and assertion produce deterministic stub bytes that satisfy the on-chain `k11Assertion.length != 0` gate without requiring a real WebAuthn authenticator. Stage 2 (issue #90) replaces the stub with `webauthn-rs` + Touch ID / Face ID via the platform authenticator.\n\nSet AGENTKEYS_K11_STUB=1 (the default) to use stub mode; unset or set to 0 to require real WebAuthn (errors out today — feature lands in stage 2).\n\nExamples:\n  agentkeys k11 enroll --operator-omni 0x<64-hex>\n  agentkeys k11 assert --operator-omni 0x<64-hex> --message-hex 0xdeadbeef"
+        long_about = "Real WebAuthn ceremony or deterministic stub.\n\nReal mode (--webauthn): opens the operator's default browser, runs the platform-authenticator ceremony (macOS: Touch ID against the Secure Enclave passkey), persists the real attested credential to ~/.agentkeys/k11/<omni>.json. The assert path binds to the application message via challenge = sha256(message), producing a real WebAuthn assertion verifiable off-chain today and on-chain after Heima ships EIP-7212 P-256 precompile.\n\nStub mode (default — for CI / non-attested envs): produces deterministic bytes that just satisfy the on-chain `k11Assertion.length != 0` gate (per arch.md §22b.1 stage-1 simplifications inventory). On mainnet (AGENTKEYS_CHAIN=heima) stub mode prints a WARN.\n\nExamples:\n  agentkeys k11 enroll  --webauthn --operator-omni 0x<64-hex>\n  agentkeys k11 assert  --webauthn --operator-omni 0x<64-hex> --message-hex 0xdeadbeef\n  agentkeys k11 enroll  --operator-omni 0x<64-hex>     # stub (CI)\n  agentkeys k11 assert  --operator-omni 0x<64-hex> --message-hex 0xdeadbeef"
     )]
     K11 {
         #[command(subcommand)]
@@ -410,7 +410,8 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
 
 /// `agentkeys k11 enroll/assert` — stage-1 stub mode by default.
 ///
-/// Stage-1 simplification per arch.md §22a: deterministic stub bytes
+/// Stage-1 simplification per arch.md §22b.1 (stage-1 simplifications
+/// inventory — K11 stub bytes; issue #90 for stage-2 hardening): deterministic stub bytes
 /// satisfy the on-chain `k11Assertion.length != 0` gate without a real
 /// WebAuthn authenticator. Stage 2 (#90) swaps in `webauthn-rs` + Touch ID.
 ///
