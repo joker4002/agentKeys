@@ -378,3 +378,67 @@ Codex verified:
 **Errors + fixes**:
 
 (populated during stage-2 execution)
+
+---
+
+## K3 rotation test — 2026-05-19 (Heima Mainnet)
+
+Driver: `scripts/heima-k3-rotate.sh` against
+`K3EpochCounter = 0xeacc97d4e7854c52d4736e5fba2dc7c2c2b147d9` on Heima Mainnet.
+Per the contract design `advanceEpoch()` is forward-only, so the "back and forth"
+test is bounded to forward-path correctness + idempotency.
+
+### Round 1 — single advance
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh`
+
+**Pre**: `currentEpoch() = 1`
+
+**Tx**: `0xda25e5f340f66a9d08ff8d35c354a6cd62ce34508a8286c5797c64c16f47ed6b`
+
+**Post**: `currentEpoch() = 2` ✓
+
+### Round 2 — second single advance
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh`
+
+**Pre**: `currentEpoch() = 2`
+
+**Tx**: `0x8e8deab538b921b6ca67ea88eadce40e487e3aaee6cf99c93e3a38ab2881b059`
+
+**Post**: `currentEpoch() = 3` ✓
+
+### Round 3 — idempotency skip
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh --target-epoch 3`
+
+**Pre**: `currentEpoch() = 3`
+
+**Behaviour**: script pre-reads currentEpoch (3) vs target (3), logs
+`skip currentEpoch (3) already >= target (3)`, exits 0 with
+`{"ok":true,"skipped":"already-at-target","current_epoch":3}`. No tx submitted.
+
+**Post**: `currentEpoch() = 3` ✓
+
+### Round 4 — multi-step advance
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh --target-epoch 6`
+
+**Pre**: `currentEpoch() = 3`
+
+**Behaviour**: script computes 3 steps (3 → 6), sends 3 sequential
+`advanceEpoch()` txs:
+- step 1: `0x0e42480835d5000143db8101b16c7108e618530f72b87e336fd5551d852a0c3e`
+- step 2: `0x7479495b1055884602cd596d076e8acb8b56de2f944ec630060330373ef30c74`
+- step 3: `0x66c00a8d46b173ff206257df5ebabe89c2636a2efd466777f21fd7d625cac00d`
+
+**Post**: `currentEpoch() = 6` ✓
+
+### Verdict
+
+5 real txs landed; script idempotent + multi-step both work. The
+forward-only invariant of `K3EpochCounter` is enforced — there is no
+"rotate back" by contract design (historical epochs are retained inside
+the signer enclave for decrypt of pre-rotation blobs, not on chain).
+
+No errors surfaced. `K3EpochCounter` now at epoch 6 on Heima Mainnet.
