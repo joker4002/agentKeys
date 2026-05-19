@@ -51,7 +51,7 @@ else
 fi
 
 STEP_NUM=0
-STEP_TOTAL=9
+STEP_TOTAL=10
 CURRENT_STEP_NAME=""
 
 step() { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
@@ -424,48 +424,66 @@ if should_run_step 7; then
   fi
 fi
 
-# ─── Step 8: M-of-N recovery flow (dry-run or real) ──────────────────
+SPARE_STATE_DIR="${SPARE_STATE_DIR:-/tmp/agentkeys-spare-current}"
+
+# ─── Step 8: Register a synthetic 3rd master (the "spare") ────────────
+# Why synthetic: the spare exists ONLY to be revoked in step 9. It never
+# needs to sign for its own revocation (primary + companion provide the
+# 2-of-2 quorum). Using a freshly-generated P-256 keypair (not a real
+# WebAuthn passkey) saves a Touch ID without weakening the contract test.
 if should_run_step 8; then
-  step "M-of-N recovery flow"
-  if [ -n "$REVOKE_TARGET" ]; then
-    if [ "$USE_WEBAUTHN" = 1 ]; then
-      info "executing real revokeMasterDevice against $REVOKE_TARGET"
-      bash "$REPO_ROOT/harness/scripts/heima-recovery.sh" \
-        --target-device-key-hash "$REVOKE_TARGET" \
-        --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -5 >&2 \
-        || die "recovery failed"
-      ok "master revoked"
-    else
-      skip "--revoke-master only honoured with --webauthn"
-    fi
+  step "Register synthetic 3rd master (the \"spare\" — will be revoked in step 9)"
+  if [ "$USE_WEBAUTHN" != "1" ]; then
+    skip "stub mode — spare registration needs primary K11 ceremony"
   else
-    info "no --revoke-master <hash> given — sanity-checking script presence only"
-    info "(revoke is destructive — won't pick a default target; pass --revoke-master 0x<hash>)"
-    if [ -x "$REPO_ROOT/harness/scripts/heima-recovery.sh" ]; then
-      ok "harness/scripts/heima-recovery.sh is executable"
-      bash "$REPO_ROOT/harness/scripts/heima-recovery.sh" --help 2>&1 | head -1 >&2 || true
-    else
-      die "harness/scripts/heima-recovery.sh missing"
+    if ! bash "$REPO_ROOT/harness/scripts/heima-register-spare-master.sh" \
+         --state-dir "$SPARE_STATE_DIR" 2>&1 | tail -10 >&2; then
+      die "spare master registration failed"
     fi
-    if [ "$USE_WEBAUTHN" = 1 ]; then
-      # Always curl fresh; previous runs may have left a stale whoami file
-      # with a placeholder hash from before the daemon was started with
-      # the correct --companion-device-key-hash.
-      rm -f /tmp/agentkeys-companion-whoami.json
-      if curl -sSf "http://127.0.0.1:$COMPANION_PORT/v1/companion/whoami" \
-         >/tmp/agentkeys-companion-whoami.json 2>/dev/null; then
-        WHOAMI_HASH=$(jq -r .device_key_hash /tmp/agentkeys-companion-whoami.json 2>/dev/null || echo "?")
-        info "to revoke the companion, re-run:"
-        info "  bash harness/v2-stage2-demo.sh --webauthn --only-step 8 --revoke-master $WHOAMI_HASH"
-      fi
-    fi
-    skip "no target specified — pass --revoke-master <hash> to actually revoke"
   fi
 fi
 
-# ─── Step 9: Cleanup + summary ───────────────────────────────────────
+# ─── Step 9: Revoke the spare via 2-of-2 M-of-N quorum ────────────────
 if should_run_step 9; then
-  step "Summary"
+  step "Revoke spare via 2-of-2 M-of-N quorum (primary + companion)"
+  if [ "$USE_WEBAUTHN" != "1" ]; then
+    skip "stub mode — revoke needs primary + companion K11 ceremonies"
+  elif [ ! -f "$SPARE_STATE_DIR/device_key_hash" ]; then
+    skip "no spare state at $SPARE_STATE_DIR — re-run step 8 first"
+  else
+    SPARE_HASH=$(cat "$SPARE_STATE_DIR/device_key_hash")
+    info "target spare device_key_hash = $SPARE_HASH"
+
+    # Check if already revoked (idempotency).
+    IS_ACTIVE=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$SPARE_HASH" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "false")
+    if [ "$IS_ACTIVE" = "false" ]; then
+      skip "spare already revoked"
+    else
+      info "running heima-recovery.sh with --target-device-key-hash $SPARE_HASH"
+      info "(2 Touch ID prompts incoming: PRIMARY MASTER at localhost, then COMPANION MASTER at companion.localhost)"
+      bash "$REPO_ROOT/harness/scripts/heima-recovery.sh" \
+        --target-device-key-hash "$SPARE_HASH" \
+        --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -10 >&2 \
+        || die "recovery failed"
+
+      POST_ACTIVE=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$SPARE_HASH" --rpc-url "$RPC_HTTP")
+      [ "$POST_ACTIVE" = "false" ] || die "post-revoke isActive($SPARE_HASH) = $POST_ACTIVE (expected false)"
+      ok "spare revoked — M-of-N quorum verified on chain"
+    fi
+  fi
+fi
+
+# ─── Step 10: Cleanup + summary ───────────────────────────────────────
+if should_run_step 10; then
+  step "Cleanup spare local state + summary"
+  if [ -d "$SPARE_STATE_DIR" ]; then
+    info "removing local spare state at $SPARE_STATE_DIR"
+    info "(on-chain entry stays as revoked=true — that's the audit trail)"
+    rm -rf "$SPARE_STATE_DIR"
+    ok "local spare state cleared"
+  else
+    skip "no local spare state to clean up"
+  fi
   if [ -f /tmp/agentkeys-companion.pid ]; then
     COMP_PID=$(cat /tmp/agentkeys-companion.pid)
     if kill -0 "$COMP_PID" 2>/dev/null; then
