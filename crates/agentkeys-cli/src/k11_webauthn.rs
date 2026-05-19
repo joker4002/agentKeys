@@ -46,6 +46,106 @@ use tokio::sync::oneshot;
 
 const CEREMONY_TIMEOUT_SECS: u64 = 300;
 
+// Shared CSS injected into both ceremony pages. Native-macOS look:
+// system-ui font (matches the Touch ID modal), light/dark adaptive via
+// prefers-color-scheme so the page background blends with the OS sheet
+// instead of clashing against a stark white. Card layout, monospace
+// hex blocks, a primary pill button styled like macOS controls.
+const SHARED_CSS: &str = "<style>
+  :root {
+    --bg: #f5f5f7;
+    --fg: #1d1d1f;
+    --muted: #6e6e73;
+    --card: #ffffff;
+    --border: #d2d2d7;
+    --hex-bg: #f5f5f7;
+    --accent: #0066cc;
+    --accent-fg: #ffffff;
+    --ok: #248a3d;
+    --err: #d70015;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a1c;
+      --fg: #f5f5f7;
+      --muted: #98989d;
+      --card: #2c2c2e;
+      --border: #38383a;
+      --hex-bg: #1c1c1e;
+      --accent: #0a84ff;
+      --accent-fg: #ffffff;
+      --ok: #30d158;
+      --err: #ff453a;
+    }
+  }
+  html, body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text',
+                 'Segoe UI', Roboto, sans-serif;
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    display: flex; justify-content: center; align-items: flex-start;
+    padding: 4em 1em;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2em 2.25em;
+    max-width: 560px;
+    width: 100%;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 0.5em;
+    color: var(--muted); font-size: 0.85em; letter-spacing: 0.02em;
+    text-transform: uppercase; font-weight: 600; margin-bottom: 0.5em;
+  }
+  .dot {
+    width: 8px; height: 8px; background: var(--accent); border-radius: 50%;
+  }
+  h1 {
+    font-size: 1.4em; margin: 0 0 0.25em 0; font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .sub { color: var(--muted); margin: 0 0 1.5em 0; font-size: 0.95em; }
+  .kv { display: grid; grid-template-columns: max-content 1fr;
+        column-gap: 1.5em; row-gap: 0.75em; margin: 0 0 1.5em 0;
+        font-size: 0.9em; }
+  .kv dt { color: var(--muted); font-weight: 500; }
+  .kv dt .kv-meta { color: var(--muted); font-weight: 400;
+                    font-size: 0.85em; margin-left: 0.5em; opacity: 0.7; }
+  .kv dd { margin: 0; }
+  .hex {
+    background: var(--hex-bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.35em 0.55em;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo,
+                 Consolas, monospace;
+    font-size: 0.82em; word-break: break-all; line-height: 1.4;
+    display: inline-block; max-width: 100%; box-sizing: border-box;
+  }
+  .hex.msg { display: block; max-height: 6em; overflow-y: auto; }
+  .status { color: var(--muted); font-size: 0.92em; margin: 0 0 1em 0; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+  button.primary {
+    background: var(--accent); color: var(--accent-fg);
+    border: none; border-radius: 8px;
+    padding: 0.75em 1.5em; font-size: 1em; font-weight: 500;
+    font-family: inherit; cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.05s ease;
+    width: 100%;
+  }
+  button.primary:hover { opacity: 0.92; }
+  button.primary:active { transform: scale(0.99); }
+  button.primary:disabled { opacity: 0.5; cursor: default; }
+</style>";
+
 #[derive(Debug, thiserror::Error)]
 pub enum WebauthnError {
     #[error("io: {0}")]
@@ -642,13 +742,29 @@ pub fn load_enrollment(operator_omni: &str) -> Result<WebauthnEnrollment, Webaut
 async fn serve_enroll_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
     let html = format!(
         r##"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>AgentKeys K11 Enrollment</title>
-<style>body{{font-family:system-ui;padding:2em;max-width:600px}}.ok{{color:green}}.err{{color:red}}</style>
+<html lang="en"><head><meta charset="utf-8"><title>AgentKeys — K11 enrollment</title>
+{shared_css}
 </head><body>
-<h1>AgentKeys — K11 enrollment</h1>
-<p>Operator: <code>{omni}</code></p>
-<p id="status">Press the button to start enrollment. Touch ID will prompt.</p>
-<button id="go" style="padding:1em;font-size:1.2em">Start enrollment</button>
+<main class="card">
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="brand-name">AgentKeys</span>
+    </div>
+    <h1>K11 enrollment</h1>
+    <p class="sub">Bind a platform passkey for master-tier authorisation.</p>
+  </header>
+  <section class="kv">
+    <dt>Operator</dt>
+    <dd><code class="hex">{omni}</code></dd>
+    <dt>Authenticator</dt>
+    <dd>Platform (Touch ID / Windows Hello / Secure Enclave)</dd>
+    <dt>Algorithm</dt>
+    <dd>ECDSA P-256 / SHA-256 (ES256)</dd>
+  </section>
+  <p id="status" class="status">Press the button below. macOS will prompt for Touch ID.</p>
+  <button id="go" class="primary">Start enrollment</button>
+</main>
 <script>
 const challenge = "{challenge}";
 const omni = "{omni}";
@@ -711,18 +827,23 @@ document.getElementById('go').onclick = async () => {{
       body: JSON.stringify(payload)
     }});
     if (r.ok) {{
-      status.innerHTML = '<span class="ok">✓ Enrollment complete. You can close this tab.</span>';
+      status.className = 'status ok';
+      status.textContent = '✓ Enrollment complete — you can close this tab.';
+      document.getElementById('go').disabled = true;
     }} else {{
-      status.innerHTML = '<span class="err">✗ Server rejected: ' + r.status + '</span>';
+      status.className = 'status err';
+      status.textContent = '✗ Server rejected: ' + r.status;
     }}
   }} catch (e) {{
-    status.innerHTML = '<span class="err">✗ ' + e.message + '</span>';
+    status.className = 'status err';
+    status.textContent = '✗ ' + e.message;
   }}
 }};
 </script>
 </body></html>"##,
         omni = ctx.operator_omni,
         challenge = ctx.challenge_b64url,
+        shared_css = SHARED_CSS,
     );
     Html(html)
 }
@@ -732,14 +853,28 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
     let msg_hex = ctx.message_hex.as_deref().unwrap_or("");
     let html = format!(
         r##"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>AgentKeys K11 Assertion</title>
-<style>body{{font-family:system-ui;padding:2em;max-width:600px}}.ok{{color:green}}.err{{color:red}}code{{word-break:break-all}}</style>
+<html lang="en"><head><meta charset="utf-8"><title>AgentKeys — K11 assertion</title>
+{shared_css}
 </head><body>
-<h1>AgentKeys — K11 assertion</h1>
-<p>Operator: <code>{omni}</code></p>
-<p>Signing over message: <code>0x{msg}</code></p>
-<p id="status">Press the button to sign. Touch ID will prompt.</p>
-<button id="go" style="padding:1em;font-size:1.2em">Sign</button>
+<main class="card">
+  <header>
+    <div class="brand">
+      <span class="dot"></span>
+      <span class="brand-name">AgentKeys</span>
+    </div>
+    <h1>K11 assertion</h1>
+    <p class="sub">Sign a master-mutation payload with the bound passkey.</p>
+  </header>
+  <section class="kv">
+    <dt>Operator</dt>
+    <dd><code class="hex">{omni}</code></dd>
+    <dt>Message <span class="kv-meta">SHA-256 = challenge</span></dt>
+    <dd><code class="hex msg">0x{msg}</code></dd>
+  </section>
+  <p id="status" class="status">Press the button below. macOS will prompt for Touch ID.</p>
+  <button id="go" class="primary">Sign with Touch ID</button>
+</main>
+{shared_css_extra}
 <script>
 const challenge = "{challenge}";
 const credId = "{cred_id}";
@@ -777,20 +912,27 @@ document.getElementById('go').onclick = async () => {{
       body: JSON.stringify(payload)
     }});
     if (r.ok) {{
-      status.innerHTML = '<span class="ok">✓ Assertion complete. You can close this tab.</span>';
+      status.className = 'status ok';
+      status.textContent = '✓ Signature delivered — you can close this tab.';
+      document.getElementById('go').disabled = true;
     }} else {{
-      status.innerHTML = '<span class="err">✗ Server rejected: ' + r.status + '</span>';
+      status.className = 'status err';
+      status.textContent = '✗ Server rejected: ' + r.status;
     }}
   }} catch (e) {{
-    status.innerHTML = '<span class="err">✗ ' + e.message + '</span>';
+    status.className = 'status err';
+    status.textContent = '✗ ' + e.message;
   }}
 }};
 </script>
-</body></html>"##,
+</body></html>
+{shared_css_extra}"##,
         omni = ctx.operator_omni,
         challenge = ctx.challenge_b64url,
         cred_id = cred_id,
         msg = msg_hex,
+        shared_css = SHARED_CSS,
+        shared_css_extra = "",
     );
     Html(html)
 }
