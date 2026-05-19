@@ -360,14 +360,19 @@ if should_run_step 5; then
     sleep 1
   fi
 
-  # Compute companion's on-chain device_key_hash from its K11 pubkey so
-  # registration + later revoke can find it. Falls back to all-zeros in
-  # stub mode (no K11 file).
+  # Compute companion's on-chain identifiers from its K11 file so registration
+  # + later revoke can find it. Falls back to all-zeros in stub mode (no K11).
   COMP_DEVICE_KEY_HASH="0x0000000000000000000000000000000000000000000000000000000000000000"
+  COMP_K11_CRED_ID_HASH="0x0000000000000000000000000000000000000000000000000000000000000000"
   if [ -f "$COMP_FILE" ]; then
     COSE_HEX=$(jq -r .cose_pubkey_hex "$COMP_FILE")
     COMP_DEVICE_KEY_HASH=$(cast keccak "$COSE_HEX")
+    # k11CredId in the contract is bytes32; we hash the b64url credential id
+    # because credential ids are variable-length opaque bytes.
+    CRED_B64=$(jq -r .credential_id_b64url "$COMP_FILE")
+    COMP_K11_CRED_ID_HASH="0x$(printf '%s' "$CRED_B64" | shasum -a 256 | awk '{print $1}')"
     info "companion device_key_hash = $COMP_DEVICE_KEY_HASH"
+    info "companion k11_cred_id     = $COMP_K11_CRED_ID_HASH"
   fi
 
   COMP_LOG="/tmp/agentkeys-companion-$$.log"
@@ -376,6 +381,7 @@ if should_run_step 5; then
     --companion-bind "127.0.0.1:$COMPANION_PORT" \
     --companion-operator-omni "0x$OPERATOR_OMNI" \
     --companion-device-key-hash "$COMP_DEVICE_KEY_HASH" \
+    --companion-k11-cred-id "$COMP_K11_CRED_ID_HASH" \
     >"$COMP_LOG" 2>&1 &
   COMP_PID=$!
   sleep 1

@@ -353,7 +353,7 @@ pub async fn assert_webauthn_for_chain(
     rp_id: &str,
 ) -> Result<K11ChainAssertion, WebauthnError> {
     let enrollment = load_enrollment_with_rp(operator_omni, rp_id)?;
-    let parts = assert_webauthn_inner_parts(operator_omni, &expected_challenge, rp_id).await?;
+    let parts = assert_webauthn_inner_parts(operator_omni, expected_challenge, rp_id).await?;
     extract_chain_assertion(&enrollment, expected_challenge, &parts)
 }
 
@@ -438,7 +438,16 @@ async fn assert_webauthn_inner(
     message: &[u8],
     rp_id: &str,
 ) -> Result<Vec<u8>, WebauthnError> {
-    let parts = assert_webauthn_inner_parts(operator_omni, message, rp_id).await?;
+    // Legacy callers pass arbitrary-length message bytes; we sha256 them
+    // to fit WebAuthn's 32-byte challenge slot. This produces an assertion
+    // bound to the message (challenge ≡ sha256(message)) but is NOT
+    // suitable for chain submission — the contract expects challenge to
+    // BE the operation hash, not sha256(operation hash). Use
+    // `assert_webauthn_for_chain` for that path.
+    let mut h = Sha256::new();
+    h.update(message);
+    let challenge_bytes: [u8; 32] = h.finalize().into();
+    let parts = assert_webauthn_inner_parts(operator_omni, challenge_bytes, rp_id).await?;
     let mut out = Vec::with_capacity(
         parts.authenticator_data.len() + parts.client_data_json.len() + parts.signature_der.len(),
     );
@@ -450,7 +459,7 @@ async fn assert_webauthn_inner(
 
 async fn assert_webauthn_inner_parts(
     operator_omni: &str,
-    message: &[u8],
+    challenge_bytes: [u8; 32],
     rp_id: &str,
 ) -> Result<AssertParts, WebauthnError> {
     // Load the previously-enrolled credential for THIS rp_id (primary vs
@@ -474,13 +483,10 @@ async fn assert_webauthn_inner_parts(
     let port = listener.local_addr().map_err(|e| WebauthnError::Bind(e.to_string()))?.port();
     let rp_origin = format!("http://{rp_id}:{port}");
 
-    // WebAuthn challenge = sha256(application message). The browser signs
-    // over (authenticatorData || sha256(clientDataJSON)) and clientDataJSON
-    // includes this challenge — so the resulting signature binds to our
-    // application message.
-    let mut h = Sha256::new();
-    h.update(message);
-    let challenge_bytes = h.finalize();
+    // The 32-byte challenge passed in IS the value WebAuthn signs over (no
+    // additional hashing). Caller is responsible for deciding whether to
+    // pre-hash an arbitrary message (legacy callers) or pass a pre-computed
+    // 32-byte commitment (chain submission via assert_webauthn_for_chain).
     let challenge_b64url = URL_SAFE_NO_PAD.encode(challenge_bytes);
 
     let ctx = Arc::new(ServerCtx {
@@ -489,7 +495,7 @@ async fn assert_webauthn_inner_parts(
         operator_omni: operator_omni.to_string(),
         challenge_b64url: challenge_b64url.clone(),
         allow_credential_b64url: Some(enrollment.credential_id_b64url.clone()),
-        message_hex: Some(hex::encode(message)),
+        message_hex: Some(hex::encode(challenge_bytes)),
     });
 
     let (tx, rx) = oneshot::channel::<AssertPost>();

@@ -142,7 +142,7 @@ CAST_ARGS=(
   send "$REGISTRY"
   "registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8)"
   "$DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" "$K11_CRED_ID" \
-  "$K11_PUB_X" "$K11_PUB_Y" "0x" "$ROLES"
+  "$K11_PUB_X" "$K11_PUB_Y" "0x00" "$ROLES"
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" --private-key "$MASTER_KEY"
 )
 

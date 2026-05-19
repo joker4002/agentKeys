@@ -166,14 +166,27 @@ fi
 # K11Assertion tuple = (deviceKeyHash, authData, cdj, challengeLocation, r, s)
 TUPLE="($PRIMARY_DEVICE_KEY_HASH,$AUTH_DATA,$CDJ_HEX,$CHALL_LOC,$R_HEX,$S_HEX)"
 
+# Sanity-check critical bytes32 args before cast — the cast parser's
+# "invalid string length" errors are opaque otherwise.
+for pair in "COMP_DEVICE_KEY_HASH=$COMP_DEVICE_KEY_HASH" \
+            "OPERATOR_OMNI=0x$OPERATOR_OMNI" \
+            "COMP_K11_CRED_ID=$COMP_K11_CRED_ID" \
+            "COMP_K11_PUB_X=$COMP_K11_PUB_X" \
+            "COMP_K11_PUB_Y=$COMP_K11_PUB_Y"; do
+  name="${pair%%=*}"; val="${pair#*=}"
+  if [ "${#val}" -ne 66 ]; then
+    die "$name has length ${#val} (expected 66 = 0x + 64 hex); val=$val"
+  fi
+done
+
 log "Submitting registerAdditionalMasterDevice tx …"
 CAST_ARGS=(
   send "$REGISTRY"
   'registerAdditionalMasterDevice(bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8,(bytes32,bytes,bytes,uint256,uint256,uint256))'
   "$COMP_DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" \
-  "0x$(printf '%s' "$COMP_K11_CRED_ID" | xxd -p -c 65536 | head -c 64 | sed 's/$/0000000000000000000000000000000000000000000000000000000000000000/' | head -c 64)" \
+  "$COMP_K11_CRED_ID" \
   "$COMP_K11_PUB_X" "$COMP_K11_PUB_Y" \
-  "0x" "$ROLES" \
+  "0x00" "$ROLES" \
   "$TUPLE"
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" --private-key "$MASTER_KEY"
 )
