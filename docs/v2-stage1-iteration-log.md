@@ -169,6 +169,15 @@ $ target/debug/agentkeys k11 enroll --webauthn --operator-omni 0xaa…aa
    with mode="webauthn" + real COSE pubkey)
 ```
 
+## Audit codex review passes
+
+| Pass | Commit | Verdict | Findings |
+|---|---|---|---|
+| Audit-1 | `ae2ada7` | REJECTED | 5 must-fix: 2 remaining false §22a citations in main.rs; CBOR auth-data not validated (rpIdHash + flags + cred-id); double-hash signature verify; timeout-abort unreachable; KEK check missed alternating-hex-char patterns |
+| Audit-2 | `d0ab230` | APPROVED | All 5 must-fix addressed: cite §22b.1; finalize_enroll verifies rpIdHash + UP/UV/AT + cred-id; signed_bytes passed unhashed to verify; AbortOnDrop<T> RAII guard; hex::decode-then-iter().all() byte uniformity check |
+
+---
+
 ## Codex review passes
 
 | Pass | Commit | Verdict | Findings |
