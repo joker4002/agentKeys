@@ -167,7 +167,14 @@ if [ "$EXISTING_SCOPE" != "ERR" ] && [ -n "$EXISTING_SCOPE" ]; then
   # The trailing `[1.779e9]` is cast's scientific-notation annotation on
   # large uints — strip it. Parse via python3 because the services-array
   # can contain commas which confuse naive shell `IFS=,` splits.
-  PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE" 2>/dev/null || true
+  # Codex review: do NOT swallow parser failure with `|| true` — if
+  # python3 fails (missing dep, malformed cast output, etc.) the idempotency
+  # check would silently fall through to "proceeding" and re-submit a tx.
+  # Fail loud instead so the operator notices.
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "python3 required for getScope idempotency parser — install python3 and re-run"
+  fi
+  PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE"
 import sys, re
 raw = sys.argv[1].strip()
 m = re.match(r"\((.*)\)$", raw, re.DOTALL)
@@ -195,6 +202,10 @@ print(clean[5])  # updatedAt (unused)
 print(clean[6])  # exists
 PYEOF
 )
+  PARSE_RC=$?
+  if [ "$PARSE_RC" != "0" ]; then
+    die "python3 getScope parser failed (exit $PARSE_RC). Raw cast output: $EXISTING_SCOPE"
+  fi
   if [ -n "$PARSED" ]; then
     EX_SERVICES=$(printf '%s\n' "$PARSED" | sed -n '1p')
     EX_READ_ONLY=$(printf '%s\n' "$PARSED" | sed -n '2p')

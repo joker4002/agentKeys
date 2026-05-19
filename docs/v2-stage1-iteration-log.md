@@ -87,6 +87,37 @@ $ bash scripts/v2-stage1-demo.sh --from-step 12   # second run from scratch shel
 
 All 4 steps print correct `[step N/15]` counter and pass green.
 
+### Error A.4 — `python3` dep unchecked + parser failures silently swallowed (codex review finding)
+
+**Symptom**: codex adversarial review of commit `65aae78` flagged that the new `python3` parser in `heima-scope-{set,revoke}.sh` was invoked with `2>/dev/null || true`, so:
+- A workstation missing `python3` silently falls through to "scope not yet set (or differs) → proceeding" and re-submits a tx (recreates the original A.1 bug).
+- The orchestrator's tool sanity-check (`do_step_1`) did NOT list `python3` as a required tool.
+- A transient RPC error from cast call could also produce malformed output that breaks the parser silently.
+
+**Fix (3 places)**:
+- `scripts/v2-stage1-demo.sh:177`: added `python3` to the prereq tool list in step 1 sanity-check.
+- `scripts/heima-scope-set.sh:160-175`: pre-check `command -v python3` and `die` if missing; removed `2>/dev/null || true`; added explicit `PARSE_RC=$?` check post-invocation that `die`s with the raw cast output included.
+- `scripts/heima-scope-revoke.sh:90-105`: same fix pattern.
+
+Now: missing python3 → loud failure at step 1, NOT silent re-submission. Parser failures → loud failure with the raw cast output dumped for diagnostics.
+
+### Verified after codex fix
+
+```bash
+$ bash scripts/v2-stage1-demo.sh --from-step 12   # second-pass post-codex-fix
+  step 12 → skip scope already matches  (idempotent ✓)
+  step 13 → +1 audit entry              (append-only by contract ✓)
+  step 14 → K11 enrollment already exists
+  step 15 → summary print
+  All counters correct: [step 12/15], [step 13/15], [step 14/15], [step 15/15].
+```
+
+---
+
+## Codex review pass (final, post-fix-A.4)
+
+Verdict shape will land in the next codex round; the changes are minimal and bounded (3 files, ~30 LOC of pure safety hardening). No behavior change on the happy path.
+
 ---
 
 ## Iteration 1 — funding helper script (US-001)

@@ -91,7 +91,11 @@ EXISTING_SCOPE=$(cast call "$SCOPE_CONTRACT" \
   "0x$OPERATOR_OMNI" "$ACTOR_OMNI" \
   --rpc-url "$RPC_HTTP" 2>&1 || echo ERR)
 if [ "$EXISTING_SCOPE" != "ERR" ] && [ -n "$EXISTING_SCOPE" ]; then
-  PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE" 2>/dev/null || true
+  # Codex review: fail loud on parser failure instead of silently proceeding.
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "python3 required for getScope idempotency parser — install python3 and re-run"
+  fi
+  PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE"
 import sys, re
 raw = sys.argv[1].strip()
 m = re.match(r"\((.*)\)$", raw, re.DOTALL)
@@ -108,6 +112,10 @@ print("[" + ",".join(hashes) + "]")
 print(parts[-1])  # exists
 PYEOF
 )
+  PARSE_RC=$?
+  if [ "$PARSE_RC" != "0" ]; then
+    die "python3 getScope parser failed (exit $PARSE_RC). Raw cast output: $EXISTING_SCOPE"
+  fi
   if [ -n "$PARSED" ]; then
     EX_SERVICES=$(printf '%s\n' "$PARSED" | sed -n '1p')
     EX_EXISTS=$(printf '%s\n' "$PARSED" | sed -n '2p')

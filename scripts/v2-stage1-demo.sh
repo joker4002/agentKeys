@@ -174,7 +174,10 @@ in_scope() {
 do_step_1() {
   step "Tool sanity-check"
   local missing=()
-  for tool in jq curl awk sed grep aws cargo node npx; do
+  # python3: parsing cast's tuple-of-struct return in heima-scope-{set,revoke}.sh
+  # (codex review finding — missing python3 silently bypasses the idempotency
+  # check and re-submits txs on every run).
+  for tool in jq curl awk sed grep aws cargo node npx python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       missing+=("$tool")
     fi
@@ -182,7 +185,7 @@ do_step_1() {
   if [ ${#missing[@]} -gt 0 ]; then
     die "missing tools: ${missing[*]} — install them before re-running"
   fi
-  ok "all required tools present (jq curl awk sed grep aws cargo node npx)"
+  ok "all required tools present (jq curl awk sed grep aws cargo node npx python3)"
 
   # forge + cast are only needed for step 8 (chain deploy). Soft-warn now,
   # hard-fail in step 8 if missing.
