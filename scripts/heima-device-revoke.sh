@@ -166,10 +166,22 @@ if [ -n "$EXISTING" ] && [ "$EXISTING" != "0x" ]; then
 fi
 ok "device active → revoking"
 
+# Stage-2 split: revokeAgentDevice (no K11) vs revokeMasterDevice (M-of-N).
+# Master revoke must go through the M-of-N quorum flow — delegate to
+# harness/scripts/heima-recovery.sh which collects threshold K11 sigs.
+if [ "$REVOKE_MASTER" = "1" ]; then
+  log "Master revoke requires the M-of-N quorum flow — delegating to heima-recovery.sh"
+  exec bash "$REPO_ROOT/harness/scripts/heima-recovery.sh" \
+    --target-device-key-hash "$DEVICE_KEY_HASH" \
+    --companion-url "${AGENTKEYS_COMPANION_URL:-http://127.0.0.1:9091}"
+fi
+
+# Agent revoke: no K11 sig needed (agents never hold K11). New ABI is
+# revokeAgentDevice(bytes32).
 CAST_ARGS=(
   send "$REGISTRY"
-  "revokeDevice(bytes32,bytes)"
-  "$DEVICE_KEY_HASH" "$K11_ARG"
+  "revokeAgentDevice(bytes32)"
+  "$DEVICE_KEY_HASH"
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" --private-key "$MASTER_KEY"
 )
 

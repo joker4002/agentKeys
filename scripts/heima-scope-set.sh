@@ -119,16 +119,11 @@ ACTOR_OMNI=$(jq -r .actor_omni "$AGENT_FILE")
 [ "$ACTOR_OMNI" = "null" ] || [ -z "$ACTOR_OMNI" ] \
   && die "agent file missing actor_omni — re-run heima-agent-create.sh to register on chain first"
 
-# Master key (same flow as the other scripts).
-MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-[ -f "$MNEMONIC_FILE" ] || die "missing mnemonic at $MNEMONIC_FILE"
-if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
-  log "Installing scripts/node_modules deps (first run only)…"
-  npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund || die "npm install failed"
-fi
-DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-MASTER_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
-MASTER_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
+# Master key — uses shared resolve_master_key (supports raw-hex deployer
+# key at ~/.agentkeys/heima-deployer.key OR mnemonic at ./test-hei).
+. "$REPO_ROOT/harness/scripts/_lib.sh"
+MASTER_KEY=$(resolve_master_key) || die "could not resolve deployer key"
+MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
 MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
 OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
 
@@ -153,34 +148,48 @@ for i in "${!SERVICE_HASHES[@]}"; do
 done
 SERVICES_ARG+="]"
 
-# Stage-1 K11 assertion stub. Non-empty (contract requires
-# k11Assertion.length != 0) but not P-256-verified on-chain yet.
-# Format: ASCII "stage1-k11-stub:" || OPERATOR_OMNI as hex.
-# K11 assertion bytes — two modes per arch.md §22b.1:
-#   USE_WEBAUTHN=1 → derive a deterministic message hash binding to the
-#     exact (operator, agent, services, caps) tuple; call
-#     `agentkeys k11 assert --webauthn` which opens browser + Touch ID
-#     and returns the real WebAuthn assertion (authData||clientData||sig).
-#   USE_WEBAUTHN=0 → deterministic stub bytes for CI / non-attested envs.
-if [ "$USE_WEBAUTHN" = "1" ]; then
-  # Domain-separated message bound to this exact scope-set call. The
-  # signer's clientDataJSON.challenge will equal sha256(message) so the
-  # resulting assertion is cryptographically bound to these arguments.
-  msg_hex=$(printf 'agentkeys:scope-set:%s:%s:%s:%s:%s:%s:%s:%s:%s' \
-    "$OPERATOR_OMNI" "$ACTOR_OMNI" "$SERVICES_ARG" "$READ_ONLY" \
-    "$MAX_PER_CALL" "$MAX_PER_PERIOD" "$MAX_TOTAL" "$PERIOD_SECONDS" \
-    "$AGENTKEYS_CHAIN" | xxd -p -c 65536 | tr -d '\n')
-  log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
-  K11_BYTES=$("$AGENTKEYS_BIN" k11 assert --webauthn \
-    --operator-omni "0x$OPERATOR_OMNI" \
-    --message-hex "$msg_hex" 2>/dev/null) \
-    || die "agentkeys k11 assert --webauthn failed — run agentkeys k11 enroll --webauthn first?"
-else
-  # Stage-1 stub. Non-empty bytes satisfy on-chain length!=0 gate.
-  K11_BYTES="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
-fi
-# Backwards-compat alias for the existing variable name used downstream.
-K11_STUB="$K11_BYTES"
+# Stage-2 K11 assertion: real WebAuthn ceremony required.
+# The contract's setScopeWithWebauthn now takes a K11Assertion struct
+# (attestingDeviceKeyHash, authenticatorData, clientDataJSON,
+#  challengeLocation, r, s) and verifies the P-256 sig on chain via
+# K11Verifier. Stub bytes no longer work — the contract rejects them.
+PRIMARY_DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
+PRIMARY_K11_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json"
+[ -f "$PRIMARY_K11_FILE" ] || die "primary K11 not enrolled at $PRIMARY_K11_FILE — run \`agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI\` first"
+MODE=$(jq -r .mode "$PRIMARY_K11_FILE")
+[ "$MODE" = "webauthn" ] || die "primary K11 mode=$MODE (need 'webauthn') — re-enroll with --webauthn"
+
+# Compute expected_challenge per contract:
+#   keccak256(abi.encode(OP_SET_SCOPE, operatorOmni, agentOmni, servicesDigest,
+#     readOnly, maxPerCall, maxPerPeriod, maxTotal, periodSeconds, chainid, nonce))
+# servicesDigest = keccak256(abi.encode(services)) — the contract hashes the
+# bytes32[] array; cast abi-encode emits the same canonical layout.
+SCOPE_NONCE=$(cast call "$SCOPE_CONTRACT" \
+  "scopeNonce(bytes32,bytes32)(uint256)" "0x$OPERATOR_OMNI" "$ACTOR_OMNI" \
+  --rpc-url "$RPC_HTTP")
+OP_KIND=$(cast call "$SCOPE_CONTRACT" "OP_SET_SCOPE()(bytes32)" --rpc-url "$RPC_HTTP")
+SERVICES_DIGEST=$(cast keccak "$(cast abi-encode 'wrap(bytes32[])' "$SERVICES_ARG")")
+CHALLENGE=$(cast keccak "$(cast abi-encode \
+  'setScope(bytes32,bytes32,bytes32,bytes32,bool,uint128,uint128,uint128,uint32,uint256,uint256)' \
+  "$OP_KIND" "0x$OPERATOR_OMNI" "$ACTOR_OMNI" "$SERVICES_DIGEST" \
+  "$READ_ONLY" "$MAX_PER_CALL" "$MAX_PER_PERIOD" "$MAX_TOTAL" \
+  "$PERIOD_SECONDS" "$LIVE_CHAIN_ID" "$SCOPE_NONCE")")
+log "expected_challenge = $CHALLENGE"
+
+log "Requesting K11 assertion from PRIMARY master (Touch ID prompt at localhost)…"
+ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
+  --webauthn --rp-id localhost --emit-chain-payload \
+  --operator-omni "0x$OPERATOR_OMNI" \
+  --message-hex "$CHALLENGE" 2>/dev/null) \
+  || die "primary K11 ceremony failed"
+
+K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
+K11_CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)
+K11_CDJ_HEX="0x$(printf '%s' "$K11_CDJ_UTF8" | xxd -p -c 65536 | tr -d '\n')"
+K11_CHALL_LOC=$(echo "$ASSERTION_JSON" | jq -r .challenge_location)
+K11_R_HEX=$(echo "$ASSERTION_JSON" | jq -r .r_hex)
+K11_S_HEX=$(echo "$ASSERTION_JSON" | jq -r .s_hex)
+K11_TUPLE="($PRIMARY_DEVICE_KEY_HASH,$K11_AUTH_DATA,$K11_CDJ_HEX,$K11_CHALL_LOC,$K11_R_HEX,$K11_S_HEX)"
 
 log "Inputs"
 echo "    AGENTKEYS_CHAIN  = $AGENTKEYS_CHAIN (chain_id $LIVE_CHAIN_ID)" >&2
@@ -288,7 +297,7 @@ ok "scope not yet set (or differs) → proceeding"
 
 CAST_ARGS=(
   send "$SCOPE_CONTRACT"
-  "setScopeWithWebauthn(bytes32,bytes32,bytes32[],bool,uint128,uint128,uint128,uint32,bytes)"
+  "setScopeWithWebauthn(bytes32,bytes32,bytes32[],bool,uint128,uint128,uint128,uint32,(bytes32,bytes,bytes,uint256,uint256,uint256))"
   "0x$OPERATOR_OMNI"
   "$ACTOR_OMNI"
   "$SERVICES_ARG"
@@ -297,7 +306,7 @@ CAST_ARGS=(
   "$MAX_PER_PERIOD"
   "$MAX_TOTAL"
   "$PERIOD_SECONDS"
-  "$K11_STUB"
+  "$K11_TUPLE"
   --rpc-url "$RPC_HTTP"
   --chain-id "$LIVE_CHAIN_ID"
   --private-key "$MASTER_KEY"
