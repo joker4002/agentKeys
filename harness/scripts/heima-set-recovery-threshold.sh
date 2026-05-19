@@ -62,10 +62,9 @@ if [ -z "$REGISTRY" ]; then
 fi
 [ -z "$REGISTRY" ] && die "--registry-address required"
 
-MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-MASTER_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
-MASTER_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
+. "$REPO_ROOT/harness/scripts/_lib.sh"
+MASTER_KEY=$(resolve_master_key) || die "could not resolve deployer key"
+MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
 MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
 OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
 PRIMARY_DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")

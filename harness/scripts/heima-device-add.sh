@@ -111,15 +111,12 @@ else
 fi
 
 # Step 2: derive primary master wallet + load primary's K11 (for the
-# authorization assertion).
-MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-[ -f "$MNEMONIC_FILE" ] || die "missing mnemonic"
-if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
-  npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund || die "npm install failed"
-fi
-DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-MASTER_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
-MASTER_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
+# authorization assertion). Uses _lib.sh's resolve_master_key so this
+# accepts raw-hex keys (~/.agentkeys/heima-deployer.key) AND mnemonic
+# files (./test-hei).
+. "$REPO_ROOT/harness/scripts/_lib.sh"
+MASTER_KEY=$(resolve_master_key) || die "could not resolve deployer key"
+MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
 MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
 OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
 [ "0x$OPERATOR_OMNI" = "$COMP_OPERATOR_OMNI" ] \

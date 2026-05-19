@@ -442,9 +442,12 @@ if should_run_step 8; then
       die "harness/scripts/heima-recovery.sh missing"
     fi
     if [ "$USE_WEBAUTHN" = 1 ]; then
-      # Surface the companion's hash so the operator can copy-paste it.
-      if [ -f /tmp/agentkeys-companion-whoami.json ] 2>/dev/null \
-         || curl -sSf "http://127.0.0.1:$COMPANION_PORT/v1/companion/whoami" >/tmp/agentkeys-companion-whoami.json 2>/dev/null; then
+      # Always curl fresh; previous runs may have left a stale whoami file
+      # with a placeholder hash from before the daemon was started with
+      # the correct --companion-device-key-hash.
+      rm -f /tmp/agentkeys-companion-whoami.json
+      if curl -sSf "http://127.0.0.1:$COMPANION_PORT/v1/companion/whoami" \
+         >/tmp/agentkeys-companion-whoami.json 2>/dev/null; then
         WHOAMI_HASH=$(jq -r .device_key_hash /tmp/agentkeys-companion-whoami.json 2>/dev/null || echo "?")
         info "to revoke the companion, re-run:"
         info "  bash harness/v2-stage2-demo.sh --webauthn --only-step 8 --revoke-master $WHOAMI_HASH"

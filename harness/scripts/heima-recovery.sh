@@ -74,37 +74,21 @@ if [ -z "$REGISTRY" ]; then
 fi
 [ -z "$REGISTRY" ] && die "--registry-address required"
 
-# Derive primary master.
-MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-if [ ! -f "$MNEMONIC_FILE" ]; then
-  if [ "$DRY_RUN" = "1" ]; then
-    ok "no mnemonic + dry-run — using placeholder operator/master"
-    MASTER_KEY="0x0000000000000000000000000000000000000000000000000000000000000001"
-    MASTER_ADDR_LC="0x0000000000000000000000000000000000000001"
-    OPERATOR_OMNI="0000000000000000000000000000000000000000000000000000000000000000"
-    PRIMARY_DEVICE_KEY_HASH="0x0000000000000000000000000000000000000000000000000000000000000001"
-  else
-    die "missing mnemonic at $MNEMONIC_FILE"
-  fi
+# Derive primary master via shared key-resolution lib.
+. "$REPO_ROOT/harness/scripts/_lib.sh"
+if MASTER_KEY=$(resolve_master_key 2>/dev/null); then
+  MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
+  MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
+  OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
+  PRIMARY_DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
+elif [ "$DRY_RUN" = "1" ]; then
+  ok "no deployer key + dry-run — using placeholder operator/master"
+  MASTER_KEY="0x0000000000000000000000000000000000000000000000000000000000000001"
+  MASTER_ADDR_LC="0x0000000000000000000000000000000000000001"
+  OPERATOR_OMNI="0000000000000000000000000000000000000000000000000000000000000000"
+  PRIMARY_DEVICE_KEY_HASH="0x0000000000000000000000000000000000000000000000000000000000000001"
 else
-  if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
-    if [ "$DRY_RUN" = "1" ]; then
-      ok "ethers not installed + dry-run — using placeholder operator/master"
-      MASTER_KEY="0x0000000000000000000000000000000000000000000000000000000000000001"
-      MASTER_ADDR_LC="0x0000000000000000000000000000000000000001"
-      OPERATOR_OMNI="0000000000000000000000000000000000000000000000000000000000000000"
-      PRIMARY_DEVICE_KEY_HASH="0x0000000000000000000000000000000000000000000000000000000000000001"
-    else
-      die "missing scripts/node_modules/ethers — run \`npm install --prefix scripts\` first"
-    fi
-  else
-    DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-    MASTER_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
-    MASTER_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
-    MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
-    OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
-    PRIMARY_DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
-  fi
+  die "could not resolve deployer key (set HEIMA_DEPLOYER_KEY_FILE or place ~/.agentkeys/heima-deployer.key)"
 fi
 
 # Read threshold + nonce + op kind.
