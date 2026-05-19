@@ -114,9 +114,19 @@ $ bash scripts/v2-stage1-demo.sh --from-step 12   # second-pass post-codex-fix
 
 ---
 
-## Codex review pass (final, post-fix-A.4)
+## Codex review passes
 
-Verdict shape will land in the next codex round; the changes are minimal and bounded (3 files, ~30 LOC of pure safety hardening). No behavior change on the happy path.
+| Pass | Commit | Verdict | Findings |
+|---|---|---|---|
+| 1 | `65aae78` | REJECTED | python3 dep unchecked + parser failures swallowed with `2>/dev/null || true` |
+| 2 | `cd77e68` | REJECTED | `set -euo pipefail` aborted `$(python3 ...)` before `PARSE_RC=$?` ran — diagnostic branch unreachable |
+| 3 | `a2ade7c` | APPROVED | `set +e` / `set -e` bracketing makes PARSE_RC inspection reachable; happy path unchanged |
+
+Final test pass:
+- `bash scripts/v2-stage1-demo.sh --from-step 12` on Heima mainnet → exit 0, step 12 logs skip (idempotent), steps 13/14/15 green
+- `AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh` → 13/13 checks pass
+
+Deslop pass: no-op. The python3 parser blocks in `heima-scope-{set,revoke}.sh` decode different subsets of the Scope struct (set: all 8 fields for config-equality check; revoke: only services + exists for "is the scope empty" check). Extracting would be over-abstraction and break the operator-readability principle for these scripts (each runnable + readable in isolation).
 
 ---
 
