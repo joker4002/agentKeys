@@ -95,6 +95,8 @@ if [ "$EXISTING_SCOPE" != "ERR" ] && [ -n "$EXISTING_SCOPE" ]; then
   if ! command -v python3 >/dev/null 2>&1; then
     die "python3 required for getScope idempotency parser — install python3 and re-run"
   fi
+  # `set -e` would abort before PARSE_RC inspection (codex pass-2 finding).
+  set +e
   PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE"
 import sys, re
 raw = sys.argv[1].strip()
@@ -113,6 +115,7 @@ print(parts[-1])  # exists
 PYEOF
 )
   PARSE_RC=$?
+  set -e
   if [ "$PARSE_RC" != "0" ]; then
     die "python3 getScope parser failed (exit $PARSE_RC). Raw cast output: $EXISTING_SCOPE"
   fi

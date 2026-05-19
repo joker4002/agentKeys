@@ -174,6 +174,11 @@ if [ "$EXISTING_SCOPE" != "ERR" ] && [ -n "$EXISTING_SCOPE" ]; then
   if ! command -v python3 >/dev/null 2>&1; then
     die "python3 required for getScope idempotency parser — install python3 and re-run"
   fi
+  # `set -e` would abort the script if python3 exits non-zero inside the
+  # $() command-substitution, BEFORE we get to inspect PARSE_RC. Wrap with
+  # set +e / set -e so we can surface a useful diagnostic instead of a
+  # generic shell abort. Codex review (pass 2) flagged this exact gap.
+  set +e
   PARSED=$(python3 - <<'PYEOF' "$EXISTING_SCOPE"
 import sys, re
 raw = sys.argv[1].strip()
@@ -203,6 +208,7 @@ print(clean[6])  # exists
 PYEOF
 )
   PARSE_RC=$?
+  set -e
   if [ "$PARSE_RC" != "0" ]; then
     die "python3 getScope parser failed (exit $PARSE_RC). Raw cast output: $EXISTING_SCOPE"
   fi
