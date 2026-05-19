@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(State::new(args.inbox_bucket.clone()).await?);
 
     let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
         .route("/v1/email/send", post(handlers::send))
         .route("/v1/email/inbox/:actor_omni", get(handlers::inbox))
         .with_state(state);

@@ -34,6 +34,22 @@ WITH_CERTBOT="yes"           # default: install certbot (opt out via --without-c
 ASSUME_YES=false
 PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
 SIGNER_HOST=""               # --signer-host: hostname for the dedicated signer listener
+AUDIT_HOST=""                # --audit-host: hostname for tier-A audit-relay worker (default audit.<zone>)
+EMAIL_HOST=""                # --email-host: hostname for email-service worker (default email.<zone>)
+CRED_HOST=""                 # --cred-host:  hostname for credentials-service worker (default cred.<zone>)
+MEMORY_HOST=""               # --memory-host: hostname for memory-service worker (default memory.<zone>)
+# Chain + bucket overrides for the credentials + memory workers. Defaults
+# target Heima Mainnet (production chain) with addresses pulled from
+# scripts/operator-workstation.env. Pass --chain-rpc / --vault-bucket /
+# --memory-bucket / --scope-addr / --registry-addr / --k3-counter-addr
+# to override per-host (e.g. when running against a fork or testnet).
+CHAIN_RPC=""
+VAULT_BUCKET=""
+MEMORY_BUCKET=""
+SCOPE_ADDR=""
+REGISTRY_ADDR=""
+K3_COUNTER_ADDR=""
+WITH_WORKERS="yes"           # --without-workers: skip build+install of the 4 service workers (audit/email/cred/memory)
 CLEAN_BROKER="auto"          # --clean: force `cargo clean -p` first; auto = self-heal only on assertion miss
 # Verified SES sender for email-link auth. Operator must register this
 # identity via scripts/ses-verify-sender.sh BEFORE booting the broker;
@@ -68,6 +84,17 @@ while (( $# > 0 )); do
     --upgrade|--skip-pull) shift ;;        # back-compat no-ops (script is idempotent; --ref drives any pull)
     --ref)                PULL_REF="$2"; shift 2 ;;
     --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
+    --audit-host)         AUDIT_HOST="$2"; shift 2 ;;
+    --email-host)         EMAIL_HOST="$2"; shift 2 ;;
+    --cred-host)          CRED_HOST="$2"; shift 2 ;;
+    --memory-host)        MEMORY_HOST="$2"; shift 2 ;;
+    --chain-rpc)          CHAIN_RPC="$2"; shift 2 ;;
+    --vault-bucket)       VAULT_BUCKET="$2"; shift 2 ;;
+    --memory-bucket)      MEMORY_BUCKET="$2"; shift 2 ;;
+    --scope-addr)         SCOPE_ADDR="$2"; shift 2 ;;
+    --registry-addr)      REGISTRY_ADDR="$2"; shift 2 ;;
+    --k3-counter-addr)    K3_COUNTER_ADDR="$2"; shift 2 ;;
+    --without-workers)    WITH_WORKERS="no"; shift ;;
     --email-from)         BROKER_EMAIL_FROM_ADDRESS="$2"; shift 2 ;;
     --clean)              CLEAN_BROKER="yes"; shift ;;
     --no-clean)           CLEAN_BROKER="no"; shift ;;
@@ -212,6 +239,34 @@ if [[ -f "$EXISTING_UNIT" ]]; then
   log "  detected: ISSUER_URL=${ISSUER_URL:-(unset)}  ACCOUNT_ID=${ACCOUNT_ID:-(unset)}  REGION=$REGION  CRED_MODE=$CRED_MODE"
 fi
 
+# Detect previously-configured worker overrides. Keeps re-runs idempotent:
+# operator who passed `--chain-rpc https://devnet.example` on a first run
+# can re-run with no flags and the worker env files keep their first-run
+# values instead of resetting to the hardcoded defaults.
+read_envfile_var() {
+  local env_file="$1" key="$2"
+  sudo test -f "$env_file" || return 0
+  sudo grep -E "^${key}=" "$env_file" 2>/dev/null | head -1 | sed -E "s/^${key}=//" || true
+}
+if [[ -z "$CHAIN_RPC" ]]; then
+  CHAIN_RPC="$(read_envfile_var /etc/agentkeys/worker-creds.env AGENTKEYS_CHAIN_RPC_HTTP)"
+fi
+if [[ -z "$VAULT_BUCKET" ]]; then
+  VAULT_BUCKET="$(read_envfile_var /etc/agentkeys/worker-creds.env VAULT_BUCKET)"
+fi
+if [[ -z "$MEMORY_BUCKET" ]]; then
+  MEMORY_BUCKET="$(read_envfile_var /etc/agentkeys/worker-memory.env MEMORY_BUCKET)"
+fi
+if [[ -z "$SCOPE_ADDR" ]]; then
+  SCOPE_ADDR="$(read_envfile_var /etc/agentkeys/worker-creds.env SCOPE_CONTRACT_ADDRESS_HEIMA)"
+fi
+if [[ -z "$REGISTRY_ADDR" ]]; then
+  REGISTRY_ADDR="$(read_envfile_var /etc/agentkeys/worker-memory.env SIDECAR_REGISTRY_ADDRESS_HEIMA)"
+fi
+if [[ -z "$K3_COUNTER_ADDR" ]]; then
+  K3_COUNTER_ADDR="$(read_envfile_var /etc/agentkeys/worker-memory.env K3_EPOCH_COUNTER_ADDRESS_HEIMA)"
+fi
+
 # ─── Optional git pull (--ref, opt-in) ────────────────────────────────────────
 # Default behavior: build whatever is currently checked out. The operator is
 # expected to git-pull themselves before invoking the script if they want a
@@ -305,20 +360,42 @@ ISSUER_HOST="${ISSUER_URL#https://}"
 ISSUER_HOST="${ISSUER_HOST#http://}"
 ISSUER_HOST="${ISSUER_HOST%%/*}"
 
-# Derive SIGNER_HOST from ISSUER_HOST when not supplied explicitly.
-# Convention: if ISSUER_HOST is "broker.foo.com", signer host is "signer.foo.com".
-# If ISSUER_HOST has no dots (unlikely), fall back to "signer.${ISSUER_HOST}".
-# Pass --signer-host to override.
+# Derive companion hostnames from ISSUER_HOST when not supplied explicitly.
+# Convention: if ISSUER_HOST is "broker.foo.com", signer host is "signer.foo.com",
+# audit/email/cred/memory hosts are "audit.foo.com" / "email.foo.com" / etc.
+# If ISSUER_HOST has no dots (unlikely), fall back to "<label>.${ISSUER_HOST}".
+ISSUER_ZONE="${ISSUER_HOST#*.}"   # everything after the first label
+if [[ "$ISSUER_ZONE" == "$ISSUER_HOST" ]]; then
+  # No dot — single-label hostname (dev/localhost). Prefix with "<label>.".
+  derive_companion() { echo "${1}.${ISSUER_HOST}"; }
+else
+  derive_companion() { echo "${1}.${ISSUER_ZONE}"; }
+fi
 if [[ -z "$SIGNER_HOST" ]]; then
-  ISSUER_ZONE="${ISSUER_HOST#*.}"   # everything after the first label
-  if [[ "$ISSUER_ZONE" == "$ISSUER_HOST" ]]; then
-    # No dot — single-label hostname (dev/localhost). Prefix with "signer.".
-    SIGNER_HOST="signer.${ISSUER_HOST}"
-  else
-    SIGNER_HOST="signer.${ISSUER_ZONE}"
-  fi
+  SIGNER_HOST="$(derive_companion signer)"
   warn "Derived signer hostname: $SIGNER_HOST  (pass --signer-host to override)"
 fi
+if [[ -z "$AUDIT_HOST"  ]]; then AUDIT_HOST="$(derive_companion audit)";  fi
+if [[ -z "$EMAIL_HOST"  ]]; then EMAIL_HOST="$(derive_companion email)";  fi
+if [[ -z "$CRED_HOST"   ]]; then CRED_HOST="$(derive_companion cred)";    fi
+if [[ -z "$MEMORY_HOST" ]]; then MEMORY_HOST="$(derive_companion memory)";fi
+
+# Service-worker defaults (dev-only co-location on the broker host).
+# Production will split each service to its own machine + IAM principal;
+# see CLAUDE.md "for production, we will isolate all the services".
+[[ -z "$CHAIN_RPC" ]]       && CHAIN_RPC="https://rpc.heima-parachain.heima.network"
+[[ -z "$VAULT_BUCKET" ]]    && VAULT_BUCKET="agentkeys-vault-${ACCOUNT_ID}"
+[[ -z "$MEMORY_BUCKET" ]]   && MEMORY_BUCKET="agentkeys-memory-${ACCOUNT_ID}"
+# Contract addresses pulled from operator-workstation.env on Heima Mainnet.
+# Source the repo-committed env file so a fresh broker host inherits the
+# same canonical addresses as the operator laptop (no manual sync needed).
+if [[ -f "$REPO_ROOT/scripts/operator-workstation.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a; . "$REPO_ROOT/scripts/operator-workstation.env"; set +a
+fi
+[[ -z "$SCOPE_ADDR" ]]      && SCOPE_ADDR="${SCOPE_CONTRACT_ADDRESS_HEIMA:-}"
+[[ -z "$REGISTRY_ADDR" ]]   && REGISTRY_ADDR="${SIDECAR_REGISTRY_ADDRESS_HEIMA:-}"
+[[ -z "$K3_COUNTER_ADDR" ]] && K3_COUNTER_ADDR="${K3_EPOCH_COUNTER_ADDRESS_HEIMA:-}"
 
 # ─── Summary + confirmation ──────────────────────────────────────────────────
 cat <<EOF
@@ -326,6 +403,10 @@ cat <<EOF
 ── Summary ──
   Issuer URL  : $ISSUER_URL  (host: $ISSUER_HOST)
   Signer host : $SIGNER_HOST  (dedicated signer listener — fronts :8092)
+  Audit host  : $AUDIT_HOST   (audit-relay worker — fronts :9092)
+  Email host  : $EMAIL_HOST   (email-service worker — fronts :9093)
+  Cred host   : $CRED_HOST    (credentials worker — fronts :9094)
+  Memory host : $MEMORY_HOST  (memory worker — fronts :9095)
   Account ID  : $ACCOUNT_ID
   Region      : $REGION
   Cred mode   : $CRED_MODE
@@ -338,9 +419,10 @@ cat <<EOF
 This will:
   • install build deps + Rust toolchain (if missing)
   • build agentkeys-mock-server + agentkeys-broker-server in release mode
-  • install both binaries to /usr/local/bin
+  • build agentkeys-worker-{audit,email,creds,memory} in release mode (skip with --without-workers)
+  • install all binaries to /usr/local/bin
   • create the 'agentkeys' system user + /var/lib/agentkeys (mode 0700)
-  • drop systemd units for backend + broker
+  • drop systemd units for backend + broker + signer + 4 service workers
 EOF
 [[ "$WITH_NGINX"   == "yes" ]] && echo "  • install nginx + write /etc/nginx/sites-available/agentkeys-broker"
 [[ "$WITH_CERTBOT" == "yes" ]] && echo "  • install certbot (you run it manually after DNS is in place)"
@@ -524,25 +606,52 @@ fi
 # Stop both services before swap so the kernel isn't holding old inodes
 # while we install new ones. Both stops are idempotent (no-op on fresh
 # hosts where nothing's running yet).
-log "Stopping agentkeys-backend + agentkeys-broker + agentkeys-signer (idempotent)"
-sudo systemctl stop agentkeys-signer  2>/dev/null || true
-sudo systemctl stop agentkeys-broker  2>/dev/null || true
-sudo systemctl stop agentkeys-backend 2>/dev/null || true
+log "Stopping agentkeys services (idempotent)"
+# Workers first (they depend on broker), then signer, then broker, then backend.
+for svc in agentkeys-worker-memory agentkeys-worker-creds agentkeys-worker-email agentkeys-worker-audit \
+           agentkeys-signer agentkeys-broker agentkeys-backend; do
+  sudo systemctl stop "$svc" 2>/dev/null || true
+done
 
 # Backup existing binaries → .bak so a failed install can be rolled back.
 # Skip on fresh hosts where /usr/local/bin/agentkeys-* don't exist yet.
-for bin in agentkeys-mock-server agentkeys-broker-server; do
+BACKUP_BINS=(agentkeys-mock-server agentkeys-broker-server)
+if [[ "$WITH_WORKERS" == "yes" ]]; then
+  BACKUP_BINS+=(agentkeys-worker-audit agentkeys-worker-email \
+                agentkeys-worker-creds agentkeys-worker-memory)
+fi
+for bin in "${BACKUP_BINS[@]}"; do
   if [[ -x "/usr/local/bin/$bin" ]]; then
     log "Backing up /usr/local/bin/$bin → /usr/local/bin/$bin.bak"
     sudo cp -p "/usr/local/bin/$bin" "/usr/local/bin/$bin.bak"
   fi
 done
 
+# ─── 2b. Build service workers (audit + email + creds + memory) ─────────────
+# Co-located on the broker host for dev (CLAUDE.md "for production, we will
+# isolate all the services"). One cargo invocation builds all 4 in parallel.
+if [[ "$WITH_WORKERS" == "yes" ]]; then
+  log "Building service workers (audit + email + creds + memory, release)"
+  ( cd "$REPO_ROOT" && cargo build --release \
+      -p agentkeys-worker-audit \
+      -p agentkeys-worker-email \
+      -p agentkeys-worker-creds \
+      -p agentkeys-worker-memory )
+fi
+
 log "Installing binaries to /usr/local/bin"
 sudo install -m 0755 \
   "$REPO_ROOT/target/release/agentkeys-mock-server" \
   "$REPO_ROOT/target/release/agentkeys-broker-server" \
   /usr/local/bin/
+if [[ "$WITH_WORKERS" == "yes" ]]; then
+  sudo install -m 0755 \
+    "$REPO_ROOT/target/release/agentkeys-worker-audit" \
+    "$REPO_ROOT/target/release/agentkeys-worker-email" \
+    "$REPO_ROOT/target/release/agentkeys-worker-creds" \
+    "$REPO_ROOT/target/release/agentkeys-worker-memory" \
+    /usr/local/bin/
+fi
 
 # ─── 4. System user + state dir ───────────────────────────────────────────────
 if ! id -u agentkeys >/dev/null 2>&1; then
@@ -620,6 +729,98 @@ EOF
   log "  → wrote $DEV_KEY_SERVICE_ENV_FILE (mode 0600, owner agentkeys)"
 else
   log "DEV_KEY_SERVICE_MASTER_SECRET already present at $DEV_KEY_SERVICE_ENV_FILE — preserving (re-runs are idempotent)"
+fi
+
+# ─── 4c. Service-worker env files (audit + email + creds + memory) ───────────
+# Co-located with the broker for dev (CLAUDE.md "for production, we will
+# isolate all the services"). Each worker gets its own EnvironmentFile under
+# /etc/agentkeys/, mode 0600 for the two that carry secret KEK material.
+#
+# Idempotency: KEK secrets are auto-generated on FIRST RUN and preserved on
+# every subsequent re-run — regenerating either would invalidate every
+# previously-encrypted credential blob (worker-creds) or memory blob
+# (worker-memory) in S3.
+WORKER_AUDIT_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-audit.env
+WORKER_EMAIL_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-email.env
+WORKER_CREDS_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-creds.env
+WORKER_MEMORY_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-memory.env
+
+if [[ "$WITH_WORKERS" == "yes" ]]; then
+  # audit + email: no secrets. Mode 0644 is fine; the values are public
+  # config (bucket name, leaves dir). Rewrite on every run so bucket /
+  # region overrides via --vault-bucket / --region take effect.
+  log "Writing $WORKER_AUDIT_ENV_FILE"
+  sudo tee "$WORKER_AUDIT_ENV_FILE" >/dev/null <<EOF
+AGENTKEYS_WORKER_AUDIT_BIND=127.0.0.1:9092
+AGENTKEYS_WORKER_AUDIT_LEAVES_DIR=/var/lib/agentkeys/audit-leaves
+AGENTKEYS_WORKER_AUDIT_FLUSH_INTERVAL_SECS=300
+EOF
+  sudo chmod 0644 "$WORKER_AUDIT_ENV_FILE"
+  sudo install -d -m 0750 -o agentkeys -g agentkeys /var/lib/agentkeys/audit-leaves
+
+  log "Writing $WORKER_EMAIL_ENV_FILE"
+  sudo tee "$WORKER_EMAIL_ENV_FILE" >/dev/null <<EOF
+AGENTKEYS_WORKER_EMAIL_BIND=127.0.0.1:9093
+AGENTKEYS_VAULT_BUCKET=$VAULT_BUCKET
+AWS_REGION=$REGION
+EOF
+  sudo chmod 0644 "$WORKER_EMAIL_ENV_FILE"
+
+  # creds + memory carry KEK secrets — mode 0600, owner agentkeys.
+  # Pattern lifted from the dev_key_service.env block above.
+  ensure_kek_env() {
+    local env_file="$1" kek_var="$2"
+    if ! sudo test -s "$env_file"; then return 1; fi
+    # Re-extract the existing KEK so subsequent overwrites preserve it.
+    sudo grep -E "^${kek_var}=" "$env_file" | head -1 | sed -E "s/^${kek_var}=//"
+  }
+
+  EXISTING_CREDS_KEK="$(ensure_kek_env "$WORKER_CREDS_ENV_FILE" AGENTKEYS_WORKER_KEK_HEX || true)"
+  if [[ -z "$EXISTING_CREDS_KEK" ]]; then
+    log "Generating AGENTKEYS_WORKER_KEK_HEX (first-time — re-runs preserve it)"
+    EXISTING_CREDS_KEK=$(openssl rand -hex 32)
+    [[ ${#EXISTING_CREDS_KEK} -eq 64 ]] || die "openssl rand produced unexpected length"
+  else
+    log "Preserving existing AGENTKEYS_WORKER_KEK_HEX (regen would invalidate every cred blob)"
+  fi
+  sudo tee "$WORKER_CREDS_ENV_FILE" >/dev/null <<EOF
+# Auto-generated by setup-broker-host.sh.
+# AGENTKEYS_WORKER_KEK_HEX is preserved across re-runs — regenerating would
+# invalidate every credential blob already in S3. Stage 2 replaces this
+# with an mTLS-derived KEK from the signer.
+WORKER_BIND=127.0.0.1:9094
+VAULT_BUCKET=$VAULT_BUCKET
+AWS_REGION=$REGION
+AGENTKEYS_CHAIN_RPC_HTTP=$CHAIN_RPC
+SCOPE_CONTRACT_ADDRESS_HEIMA=$SCOPE_ADDR
+AGENTKEYS_WORKER_KEK_HEX=$EXISTING_CREDS_KEK
+EOF
+  sudo chown agentkeys:agentkeys "$WORKER_CREDS_ENV_FILE"
+  sudo chmod 0600 "$WORKER_CREDS_ENV_FILE"
+
+  EXISTING_MEMORY_KEK="$(ensure_kek_env "$WORKER_MEMORY_ENV_FILE" AGENTKEYS_MEMORY_KEK_HEX || true)"
+  if [[ -z "$EXISTING_MEMORY_KEK" ]]; then
+    log "Generating AGENTKEYS_MEMORY_KEK_HEX (first-time — re-runs preserve it)"
+    EXISTING_MEMORY_KEK=$(openssl rand -hex 32)
+    [[ ${#EXISTING_MEMORY_KEK} -eq 64 ]] || die "openssl rand produced unexpected length"
+  else
+    log "Preserving existing AGENTKEYS_MEMORY_KEK_HEX (regen would invalidate every memory blob)"
+  fi
+  sudo tee "$WORKER_MEMORY_ENV_FILE" >/dev/null <<EOF
+# Auto-generated by setup-broker-host.sh.
+# AGENTKEYS_MEMORY_KEK_HEX is preserved across re-runs — regenerating would
+# invalidate every memory blob already in S3.
+WORKER_BIND=127.0.0.1:9095
+MEMORY_BUCKET=$MEMORY_BUCKET
+AWS_REGION=$REGION
+AGENTKEYS_CHAIN_RPC_HTTP=$CHAIN_RPC
+SIDECAR_REGISTRY_ADDRESS_HEIMA=$REGISTRY_ADDR
+SCOPE_CONTRACT_ADDRESS_HEIMA=$SCOPE_ADDR
+K3_EPOCH_COUNTER_ADDRESS_HEIMA=$K3_COUNTER_ADDR
+AGENTKEYS_MEMORY_KEK_HEX=$EXISTING_MEMORY_KEK
+EOF
+  sudo chown agentkeys:agentkeys "$WORKER_MEMORY_ENV_FILE"
+  sudo chmod 0600 "$WORKER_MEMORY_ENV_FILE"
 fi
 
 # ─── 5. systemd units ─────────────────────────────────────────────────────────
@@ -739,6 +940,131 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# ── agentkeys-worker-{audit,email,creds,memory} (dev co-location, issue #90) ─
+# All 4 workers are co-located with the broker for development. Each binds
+# to a loopback port and is fronted by nginx at its own subdomain:
+#
+#   audit.<zone>  → :9092  → /v1/audit/*  (tier-A Merkle relay)
+#   email.<zone>  → :9093  → /v1/email/*  (SES send + inbox list)
+#   cred.<zone>   → :9094  → /v1/cred/*   (credential blob CRUD)
+#   memory.<zone> → :9095  → /v1/memory/* (long-term memory CRUD)
+#
+# Production will split each to its own EC2/IAM principal (CLAUDE.md
+# "for production, we will isolate all the services for the security issue").
+# The subdomain layout is the migration seam: when a service moves to its
+# own host, only the A record changes — clients keep talking to the same
+# URL.
+
+if [[ "$WITH_WORKERS" == "yes" ]]; then
+  log "Writing agentkeys-worker-audit.service"
+  sudo tee /etc/systemd/system/agentkeys-worker-audit.service >/dev/null <<EOF
+[Unit]
+Description=AgentKeys audit-service worker (tier-A Merkle relay, arch.md §15.3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$WORKER_AUDIT_ENV_FILE
+ExecStart=/usr/local/bin/agentkeys-worker-audit
+Restart=on-failure
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentkeys
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  log "Writing agentkeys-worker-email.service"
+  sudo tee /etc/systemd/system/agentkeys-worker-email.service >/dev/null <<EOF
+[Unit]
+Description=AgentKeys email-service worker (arch.md §15.1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$WORKER_EMAIL_ENV_FILE
+ExecStart=/usr/local/bin/agentkeys-worker-email --inbox-bucket \${AGENTKEYS_VAULT_BUCKET}
+Restart=on-failure
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # creds + memory need BROKER_CAP_PUBKEY_PEM (a multi-line PEM string),
+  # which systemd EnvironmentFile= can't carry. Inject it via /bin/sh -c
+  # that reads the broker's session-keypair.pub.pem (written at broker
+  # boot) into the env var before exec'ing the binary.
+  BROKER_CAP_PEM_PATH=/var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem
+
+  log "Writing agentkeys-worker-creds.service"
+  sudo tee /etc/systemd/system/agentkeys-worker-creds.service >/dev/null <<EOF
+[Unit]
+Description=AgentKeys credentials-service worker (arch.md §15.4)
+After=network-online.target agentkeys-broker.service
+Wants=network-online.target
+Requires=agentkeys-broker.service
+
+[Service]
+Type=simple
+EnvironmentFile=$WORKER_CREDS_ENV_FILE
+# BROKER_CAP_PUBKEY_PEM is a multi-line PEM — load it from the broker's
+# session-pubkey export at start. Falls back to dying loud if the file
+# isn't there (broker hasn't written it yet → upstream boot ordering bug).
+ExecStart=/bin/sh -c 'export BROKER_CAP_PUBKEY_PEM="\$(cat $BROKER_CAP_PEM_PATH)" && [ -n "\$BROKER_CAP_PUBKEY_PEM" ] && exec /usr/local/bin/agentkeys-worker-creds'
+Restart=on-failure
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  log "Writing agentkeys-worker-memory.service"
+  sudo tee /etc/systemd/system/agentkeys-worker-memory.service >/dev/null <<EOF
+[Unit]
+Description=AgentKeys memory-service worker (arch.md §15.2)
+After=network-online.target agentkeys-broker.service
+Wants=network-online.target
+Requires=agentkeys-broker.service
+
+[Service]
+Type=simple
+EnvironmentFile=$WORKER_MEMORY_ENV_FILE
+ExecStart=/bin/sh -c 'export BROKER_CAP_PUBKEY_PEM="\$(cat $BROKER_CAP_PEM_PATH)" && [ -n "\$BROKER_CAP_PUBKEY_PEM" ] && exec /usr/local/bin/agentkeys-worker-memory'
+Restart=on-failure
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
 
 # ─── 6. nginx (optional) ──────────────────────────────────────────────────────
 # Two-phase nginx config to avoid the certbot ↔ nginx chicken-and-egg:
@@ -862,6 +1188,64 @@ EOF
   fi
 }
 
+# write_worker_nginx_site <slug> <host> <port>
+#   Writes /etc/nginx/sites-available/agentkeys-worker-<slug>.
+#   Flips A → B (HTTP-only → HTTPS) when /etc/letsencrypt/live/<host>/fullchain.pem
+#   appears. All worker subdomains share the same proxy shape; the only
+#   difference is the loopback port.
+write_worker_nginx_site() {
+  local slug="$1" host="$2" port="$3"
+  local cert_path="/etc/letsencrypt/live/$host/fullchain.pem"
+  local sitefile="/etc/nginx/sites-available/agentkeys-worker-$slug"
+  if sudo test -f "$cert_path"; then
+    log "Writing nginx site for $host (HTTPS — LE cert detected) → :$port"
+    sudo tee "$sitefile" >/dev/null <<EOF
+server {
+    listen 80;
+    server_name $host;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $host;
+
+    ssl_certificate     /etc/letsencrypt/live/$host/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$host/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        proxy_pass http://127.0.0.1:$port;
+        proxy_http_version 1.1;
+        proxy_set_header Host              \$host;
+        proxy_set_header Authorization     \$http_authorization;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-For   \$remote_addr;
+        proxy_read_timeout 30s;
+    }
+}
+EOF
+  else
+    log "Writing nginx site for $host (HTTP-only — no LE cert yet) → :$port"
+    sudo tee "$sitefile" >/dev/null <<EOF
+# HTTP-only initial config for $slug worker. To issue the cert:
+#   sudo certbot certonly --webroot -w /var/www/certbot -d $host \\
+#     --agree-tos -m <ops@your.org> --non-interactive
+# then re-run scripts/setup-broker-host.sh to flip on the :443 block.
+server {
+    listen 80;
+    server_name $host;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / {
+        return 503 "TLS cert not yet issued for $slug — see setup-broker-host.sh\n";
+        default_type text/plain;
+    }
+}
+EOF
+  fi
+}
+
 if [[ "$WITH_NGINX" == "yes" ]]; then
   if ! have nginx; then
     log "Installing nginx"
@@ -869,18 +1253,29 @@ if [[ "$WITH_NGINX" == "yes" ]]; then
   fi
   sudo install -d -m 0755 /var/www/certbot
   write_nginx_site
+  if [[ "$WITH_WORKERS" == "yes" ]]; then
+    write_worker_nginx_site audit  "$AUDIT_HOST"  9092
+    write_worker_nginx_site email  "$EMAIL_HOST"  9093
+    write_worker_nginx_site cred   "$CRED_HOST"   9094
+    write_worker_nginx_site memory "$MEMORY_HOST" 9095
+  fi
   # Single point of enabling — one ln -sf per vhost (idempotent), default
   # vhost out of the way. Done here (not inside write_nginx_site) so the
   # symlinks aren't sprinkled across HTTPS / HTTP-only branches.
   if [[ -d /etc/nginx/sites-enabled ]]; then
     sudo ln -sf /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
     sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
+    if [[ "$WITH_WORKERS" == "yes" ]]; then
+      for slug in audit email cred memory; do
+        sudo ln -sf "/etc/nginx/sites-available/agentkeys-worker-$slug" /etc/nginx/sites-enabled/
+      done
+    fi
     sudo rm -f /etc/nginx/sites-enabled/default
   fi
   if sudo nginx -t; then
     sudo systemctl reload nginx 2>/dev/null || sudo systemctl restart nginx
   else
-    warn "nginx -t failed — leaving service in current state. Inspect /etc/nginx/sites-available/agentkeys-broker."
+    warn "nginx -t failed — leaving service in current state. Inspect /etc/nginx/sites-available/agentkeys-*."
   fi
 fi
 
@@ -901,17 +1296,29 @@ ensure_broker_keypairs /usr/local/bin/agentkeys-broker-server
 # unit-file rewrite — on fresh hosts where the units were just enabled,
 # this is equivalent to start; on re-runs it picks up the new binary +
 # any unit-file changes.
-log "daemon-reload + enable + restart agentkeys-backend, agentkeys-broker, agentkeys-signer"
+CORE_UNITS=(agentkeys-backend agentkeys-broker agentkeys-signer)
+WORKER_UNITS=()
+if [[ "$WITH_WORKERS" == "yes" ]]; then
+  WORKER_UNITS=(agentkeys-worker-audit agentkeys-worker-email \
+                agentkeys-worker-creds agentkeys-worker-memory)
+fi
+
+log "daemon-reload + enable + restart core + worker services"
 sudo systemctl daemon-reload
-sudo systemctl enable agentkeys-backend agentkeys-broker agentkeys-signer
-# Start broker first so it writes the session pubkey PEM before the signer starts.
+sudo systemctl enable "${CORE_UNITS[@]}" "${WORKER_UNITS[@]}"
+# Start broker first so it writes the session pubkey PEM before the signer
+# (and the creds/memory workers, which Requires=agentkeys-broker.service)
+# start. Order: backend + broker → signer → workers.
 sudo systemctl restart agentkeys-backend agentkeys-broker
-# Brief pause to let broker write the pubkey file before signer reads it.
+# Brief pause to let broker write the pubkey file before signer + workers read it.
 sleep 2
 sudo systemctl restart agentkeys-signer
+if (( ${#WORKER_UNITS[@]} > 0 )); then
+  sudo systemctl restart "${WORKER_UNITS[@]}"
+fi
 
 sleep 2
-sudo systemctl --no-pager --full status agentkeys-backend agentkeys-broker agentkeys-signer || true
+sudo systemctl --no-pager --full status "${CORE_UNITS[@]}" "${WORKER_UNITS[@]}" || true
 
 log "Recent broker logs (look for 'broker listening on 127.0.0.1:8091'):"
 sudo journalctl -u agentkeys-broker -n 20 --no-pager || true
@@ -948,6 +1355,12 @@ probe_or_die() {
 probe_or_die broker  8091 agentkeys-broker
 probe_or_die backend 8090 agentkeys-backend
 probe_or_die signer  8092 agentkeys-signer
+if [[ "$WITH_WORKERS" == "yes" ]]; then
+  probe_or_die worker-audit  9092 agentkeys-worker-audit
+  probe_or_die worker-email  9093 agentkeys-worker-email
+  probe_or_die worker-creds  9094 agentkeys-worker-creds
+  probe_or_die worker-memory 9095 agentkeys-worker-memory
+fi
 
 # ─── 9. Print remaining manual steps ──────────────────────────────────────────
 cat <<EOF
@@ -956,15 +1369,22 @@ cat <<EOF
   AgentKeys broker host bootstrap complete.
 ================================================================================
 Status:
-  • backend systemd:           agentkeys-backend.service   (:8090, loopback)
-  • broker  systemd:           agentkeys-broker.service    (:8091, loopback)
-  • signer  systemd:           agentkeys-signer.service    (:8092, loopback)
-  • binaries:                  /usr/local/bin/agentkeys-{mock-server,broker-server}
+  • backend       systemd:     agentkeys-backend.service        (:8090, loopback)
+  • broker        systemd:     agentkeys-broker.service         (:8091, loopback)
+  • signer        systemd:     agentkeys-signer.service         (:8092, loopback)
+  • worker-audit  systemd:     agentkeys-worker-audit.service   (:9092, loopback → $AUDIT_HOST)
+  • worker-email  systemd:     agentkeys-worker-email.service   (:9093, loopback → $EMAIL_HOST)
+  • worker-creds  systemd:     agentkeys-worker-creds.service   (:9094, loopback → $CRED_HOST)
+  • worker-memory systemd:     agentkeys-worker-memory.service  (:9095, loopback → $MEMORY_HOST)
+  • binaries:                  /usr/local/bin/agentkeys-{mock-server,broker-server,worker-{audit,email,creds,memory}}
   • state dir:                 /var/lib/agentkeys      (mode 0700, agentkeys:agentkeys)
   • audit DB will land at:     /var/lib/agentkeys/.agentkeys/broker/audit.sqlite
+  • audit leaves dir:          /var/lib/agentkeys/audit-leaves (per-batch Merkle JSONL)
   • OIDC keypair will land at: /var/lib/agentkeys/.agentkeys/broker/oidc-keypair.json
   • session pubkey (signer):   /var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem
-                               (written by broker at boot; read by signer for JWT auth)
+                               (written by broker at boot; read by signer + workers for JWT auth)
+  • worker env files:          /etc/agentkeys/worker-{audit,email,creds,memory}.env
+                               (creds + memory carry KEK secrets — mode 0600)
 
 What you still need to do by hand:
 
@@ -1011,15 +1431,27 @@ esac
 
 cat <<EOF
   Public reachability:
-    1. Add DNS A records:
-         $ISSUER_HOST  → <this host's public IP>
-         $SIGNER_HOST  → <this host's public IP>  (same IP, separate vhost)
+    1. Add DNS A records (all point to this host's public IP):
+         $ISSUER_HOST  → <public IP>
+         $SIGNER_HOST  → <public IP>  (signer vhost)
+         $AUDIT_HOST   → <public IP>  (audit-relay worker vhost)
+         $EMAIL_HOST   → <public IP>  (email-service worker vhost)
+         $CRED_HOST    → <public IP>  (credentials-service worker vhost)
+         $MEMORY_HOST  → <public IP>  (memory-service worker vhost)
     2. Open port 443 on the host firewall (and 80 only for ACME challenges).
-       Drop all ingress to :8090, :8091, and :8092 except 127.0.0.1.
-    3. Issue the TLS cert for the signer hostname:
-         sudo certbot --nginx -d $SIGNER_HOST
-       Then re-run this script to flip nginx onto the :443 ssl block.
-    4. Verify: curl -sS https://$SIGNER_HOST/healthz   # → "ok"
+       Drop all ingress to :8090, :8091, :8092, :9092, :9093, :9094, :9095 except 127.0.0.1.
+    3. Issue Let's Encrypt certs for every co-located vhost:
+         for h in $SIGNER_HOST $AUDIT_HOST $EMAIL_HOST $CRED_HOST $MEMORY_HOST; do
+           sudo certbot certonly --webroot -w /var/www/certbot -d "\$h" \\
+             --agree-tos -m <ops@your.org> --non-interactive
+         done
+       Then re-run this script to flip nginx onto the :443 ssl block for each.
+    4. Verify each worker is reachable end-to-end:
+         curl -sS https://$SIGNER_HOST/healthz   # → "ok"
+         curl -sS https://$AUDIT_HOST/healthz    # → "ok"
+         curl -sS https://$EMAIL_HOST/healthz    # → "ok"
+         curl -sS https://$CRED_HOST/healthz     # → JSON {"ok":true,...}
+         curl -sS https://$MEMORY_HOST/healthz   # → JSON {"ok":true,...}
 
 EOF
 

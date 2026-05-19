@@ -14,7 +14,8 @@ The runbook is split by concern, not by stage:
 | [§4 OIDC federation](#4-oidc-federation-stage-7) | Register the broker as an OIDC provider, swap to PrincipalTag-scoped trust | After §1–§3 + a publicly-reachable broker |
 | [§5 EC2 broker host](#5-ec2-broker-host-optional) | EIP, A record, security group | Only if you're hosting the broker on AWS |
 | [§6 Signer host](#6-signer-host) | DNS A record + TLS cert + nginx flip for `signer.<zone>` | After §5 — needs `$EIP` |
-| [§7 Cleanup](#7-cleanup) | Tear-down recipe | When you want to delete it all |
+| [§7 Service workers](#7-service-workers-audit--email--cred--memory) | 4 DNS A records + TLS certs + nginx flips for `audit/email/cred/memory.<zone>` (dev co-located on broker host) | After §5 — needs `$EIP` |
+| [§8 Cleanup](#8-cleanup) | Tear-down recipe | When you want to delete it all |
 
 **Cloud-portability:** §1 (DNS) and §2 (inbound mail) are the cloud-replaceable layers — Tencent Cloud SimpleDM + COS would slot in here unchanged at the §3+ boundary. See [§2.2](#22-future-tencent-cloud-simpledm--cos).
 
@@ -100,6 +101,12 @@ Done as part of [§5 EC2 broker host](#5-ec2-broker-host-optional), once you kno
 ### 1.3 Signer subdomain — A record + TLS cert (issue #74 step 1b)
 
 Done as part of [§6 Signer host](#6-signer-host), once `$EIP` is known from [§5.1](#51-allocate--attach-an-elastic-ip).
+
+### 1.4 Service-worker subdomains — bulk A records (issue #90)
+
+The 4 service workers (`audit` / `email` / `cred` / `memory`) co-locate on the broker host today (dev-only per [CLAUDE.md](../CLAUDE.md) "for production, we will isolate all the services for the security issue"). All 4 A records point to the same `$EIP`. The hostnames are the migration seam — when a worker moves to its own machine, only the A record changes.
+
+Done as part of [§7 Service workers](#7-service-workers-audit--email--cred--memory) using the [`scripts/dns-upsert-workers.sh`](../scripts/dns-upsert-workers.sh) helper.
 
 ---
 
@@ -843,7 +850,84 @@ curl -sS -o /dev/null -w '%{http_code}\n' "https://$SIGNER_HOST/session/create"
 
 ---
 
-## 7. Cleanup
+## 7. Service workers (audit / email / cred / memory)
+
+| Concern | Today | Future |
+|---|---|---|
+| Processes | 4 systemd units: `agentkeys-worker-{audit,email,creds,memory}.service` on `127.0.0.1:{9092,9093,9094,9095}` | Each splits to its own EC2 / IAM principal |
+| Host | **Same EC2 box as the broker** — co-located behind the same nginx, provisioned by the same `setup-broker-host.sh` run | Separate machines (or enclaves); only the A records + certs move |
+| Public hostnames | `audit.<zone>` / `email.<zone>` / `cred.<zone>` / `memory.<zone>` — exported as `WORKER_*_HOST` / `AGENTKEYS_WORKER_*_URL` in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env) | Same hostnames (unchanged) |
+| Endpoints | `audit` → `/v1/audit/*` + `/healthz` ; `email` → `/v1/email/*` + `/healthz` ; `cred` → `/v1/cred/*` + `/healthz` ; `memory` → `/v1/memory/*` + `/healthz` | Unchanged |
+| KEK material | `/etc/agentkeys/worker-{creds,memory}.env` (mode 0600, owner `agentkeys`) — auto-generated on first `setup-broker-host.sh` run, **never rotated** (rotation invalidates every previously-encrypted blob) | mTLS-derived KEK from the signer |
+
+### 7.1 DNS — 4 A records in one Route 53 batch
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+awsp agentkeys-admin                           # account-owner profile (Route 53 + EC2 read)
+set -a; source ./scripts/operator-workstation.env; set +a
+
+# Single helper — derives EIP from AWS, validates it's not VPN-rewritten,
+# UPSERTs all 4 records atomically, waits for INSYNC + Cloudflare DoH
+# propagation, then prints the next-step certbot loop.
+bash scripts/dns-upsert-workers.sh
+
+# Override knobs:
+#   --eip 1.2.3.4               # use a known EIP instead of describe-addresses
+#   --zone-id Z…                # override default litentry.org zone
+#   --ttl 60                    # tighter TTL while iterating
+#   --dry-run                   # print the change-batch JSON, don't apply
+```
+
+The script is idempotent (UPSERT replaces if exists, creates if not). Re-running it is a no-op when the records already point at `$EIP`.
+
+### 7.2 TLS certs + nginx flip
+
+> The four worker `WORKER_*_HOST` variables are **laptop-only** (set in `operator-workstation.env`). On the broker host, derive them from the nginx vhosts that `setup-broker-host.sh` just wrote — the snippet below does it inline so commands work in a fresh broker shell with no env vars set.
+
+```bash
+# === ON BROKER HOST ===
+# 1. First pass writes HTTP-only nginx vhosts for all 4 workers.
+sudo bash scripts/setup-broker-host.sh --yes
+
+# Read the 4 hostnames back out of the just-written vhosts.
+AUDIT_HOST=$(awk '/server_name/ && /audit\./  {gsub(";",""); print $2}' /etc/nginx/sites-available/agentkeys-worker-audit  | head -1)
+EMAIL_HOST=$(awk '/server_name/ && /email\./  {gsub(";",""); print $2}' /etc/nginx/sites-available/agentkeys-worker-email  | head -1)
+CRED_HOST=$(awk  '/server_name/ && /cred\./   {gsub(";",""); print $2}' /etc/nginx/sites-available/agentkeys-worker-cred   | head -1)
+MEMORY_HOST=$(awk '/server_name/ && /memory\./ {gsub(";",""); print $2}' /etc/nginx/sites-available/agentkeys-worker-memory | head -1)
+echo "AUDIT=$AUDIT_HOST EMAIL=$EMAIL_HOST CRED=$CRED_HOST MEMORY=$MEMORY_HOST"
+
+# 2. Issue Let's Encrypt certs (webroot mode — does NOT touch nginx config).
+for h in "$AUDIT_HOST" "$EMAIL_HOST" "$CRED_HOST" "$MEMORY_HOST"; do
+  sudo certbot certonly --webroot -w /var/www/certbot -d "$h" \
+    --agree-tos -m ops@litentry.org --non-interactive
+done
+
+# 3. Re-run to flip each vhost onto :443 ssl. Idempotent — re-runs without
+#    new certs are no-ops; re-runs after cert issuance flip A → B per host.
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+### 7.3 Verify
+
+```bash
+# === ON OPERATOR WORKSTATION ===
+bash scripts/verify-workers.sh
+
+# Per-worker drilldown if any failed:
+curl -sS "https://${WORKER_AUDIT_HOST}/healthz"     # → ok
+curl -sS "https://${WORKER_EMAIL_HOST}/healthz"     # → ok
+curl -sS "https://${WORKER_CRED_HOST}/healthz"      # → JSON {"ok":true,...}
+curl -sS "https://${WORKER_MEMORY_HOST}/healthz"    # → JSON {"ok":true,...}
+
+# Defense-in-depth: each worker vhost only proxies its own /v1/<slug>/* surface.
+curl -sS -o /dev/null -w '%{http_code}\n' "https://${WORKER_AUDIT_HOST}/v1/cred/anything"
+# 404 (audit vhost won't proxy /v1/cred)
+```
+
+---
+
+## 8. Cleanup
 
 ```bash
 # OIDC federation (if §4 ran)

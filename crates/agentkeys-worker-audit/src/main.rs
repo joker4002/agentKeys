@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
         .route("/v1/audit/append", post(handlers::append))
         .route("/v1/audit/flush/:operator_omni", post(handlers::flush_one))
         .route("/v1/audit/flush-all", post(handlers::flush_all))

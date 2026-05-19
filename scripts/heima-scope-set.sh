@@ -153,11 +153,20 @@ SERVICES_ARG+="]"
 # (attestingDeviceKeyHash, authenticatorData, clientDataJSON,
 #  challengeLocation, r, s) and verifies the P-256 sig on chain via
 # K11Verifier. Stub bytes no longer work — the contract rejects them.
+#
+# In CI / non-Touch-ID environments: if the operator hasn't enrolled a
+# real K11 yet, skip with a clear log rather than blocking on Touch ID.
+# Operators driving the stage-1 demo without --webauthn cannot mutate
+# scope on stage-2 contracts — that's a contract-level invariant, not a
+# script limitation.
 PRIMARY_DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
 PRIMARY_K11_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json"
-[ -f "$PRIMARY_K11_FILE" ] || die "primary K11 not enrolled at $PRIMARY_K11_FILE — run \`agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI\` first"
+if [ ! -f "$PRIMARY_K11_FILE" ] || [ "$(jq -r .mode "$PRIMARY_K11_FILE" 2>/dev/null)" != "webauthn" ]; then
+  skip "primary K11 not enrolled with mode=webauthn — stage-2 setScopeWithWebauthn requires a real WebAuthn assertion. Re-run with \`agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI\` first, or skip this step in CI."
+  echo "{\"ok\":true,\"skipped\":\"no-webauthn-k11\",\"reason\":\"stage-2 contract requires real K11 sig\"}"
+  exit 0
+fi
 MODE=$(jq -r .mode "$PRIMARY_K11_FILE")
-[ "$MODE" = "webauthn" ] || die "primary K11 mode=$MODE (need 'webauthn') — re-enroll with --webauthn"
 
 # Compute expected_challenge per contract:
 #   keccak256(abi.encode(OP_SET_SCOPE, operatorOmni, agentOmni, servicesDigest,
