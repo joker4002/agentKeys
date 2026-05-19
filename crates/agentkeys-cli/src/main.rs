@@ -453,6 +453,7 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
         K11Action::Enroll { operator_omni, webauthn } => {
             if *webauthn {
                 let enrollment = agentkeys_cli::k11_webauthn::enroll_webauthn(operator_omni)
+                    .await
                     .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
                 serde_json::to_string_pretty(&enrollment)
                     .map_err(|e| anyhow::anyhow!("serialize: {e}"))
@@ -468,6 +469,7 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
                 .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
             if *webauthn {
                 let assertion = agentkeys_cli::k11_webauthn::assert_webauthn(operator_omni, &msg)
+                    .await
                     .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
                 Ok(format!("0x{}", hex::encode(assertion)))
             } else {

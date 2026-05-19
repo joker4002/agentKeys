@@ -143,31 +143,27 @@ pub fn enrollment_path(operator_omni: &str) -> PathBuf {
         .join(format!("{}.json", operator_omni.trim_start_matches("0x")))
 }
 
-/// Run the enrollment ceremony. Blocks until the browser POSTs back or
-/// the 5-minute timeout fires. Persists the result to
+/// Run the enrollment ceremony. Blocks (awaits) until the browser POSTs
+/// back or the 5-minute timeout fires. Persists the result to
 /// `~/.agentkeys/k11/<omni>.json` (mode 0600).
-pub fn enroll_webauthn(operator_omni: &str) -> Result<WebauthnEnrollment, WebauthnError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| WebauthnError::Io(e.to_string()))?;
-    rt.block_on(async { enroll_webauthn_async(operator_omni).await })
+///
+/// Async — call from inside an existing tokio runtime (e.g. the CLI's
+/// `#[tokio::main]`). Creating a nested runtime via `block_on` panics
+/// with "Cannot start a runtime from within a runtime".
+pub async fn enroll_webauthn(operator_omni: &str) -> Result<WebauthnEnrollment, WebauthnError> {
+    enroll_webauthn_inner(operator_omni).await
 }
 
 /// Run the assert ceremony. Returns the assertion bytes
 /// (`authenticatorData || clientDataJSON || signature`).
-pub fn assert_webauthn(
+pub async fn assert_webauthn(
     operator_omni: &str,
     message: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| WebauthnError::Io(e.to_string()))?;
-    rt.block_on(async { assert_webauthn_async(operator_omni, message).await })
+    assert_webauthn_inner(operator_omni, message).await
 }
 
-async fn enroll_webauthn_async(operator_omni: &str) -> Result<WebauthnEnrollment, WebauthnError> {
+async fn enroll_webauthn_inner(operator_omni: &str) -> Result<WebauthnEnrollment, WebauthnError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| WebauthnError::Bind(e.to_string()))?;
@@ -237,7 +233,7 @@ async fn enroll_webauthn_async(operator_omni: &str) -> Result<WebauthnEnrollment
     Ok(enrollment)
 }
 
-async fn assert_webauthn_async(
+async fn assert_webauthn_inner(
     operator_omni: &str,
     message: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
@@ -432,6 +428,16 @@ fn finalize_assert(
     expected_origin: &str,
     post: &AssertPost,
 ) -> Result<Vec<u8>, WebauthnError> {
+    // Cross-check the credential id the browser used against the one
+    // we enrolled. The browser will only sign with a passkey whose id
+    // was in `allowCredentials` — but a debug build of the page could
+    // be tweaked, and verifying here is cheap.
+    if post.id != enrollment.credential_id_b64url {
+        return Err(WebauthnError::Cbor(format!(
+            "assertion credential id ({}) doesn't match enrolled credential ({})",
+            post.id, enrollment.credential_id_b64url
+        )));
+    }
     let client_data_bytes = URL_SAFE_NO_PAD
         .decode(&post.client_data_json)
         .map_err(|e| WebauthnError::B64Decode(format!("clientDataJSON: {e}")))?;
