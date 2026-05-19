@@ -23,12 +23,18 @@
 //! roaming authenticator (YubiKey) is accepted in this mode — that's a
 //! stage-2 multi-authenticator concern.
 //!
-//! Stage 1 limitation: we DON'T verify the attestation statement (no
-//! vendor metadata service hookup). For platform authenticators this is
-//! normally acceptable because the attestation type is `none` or `self`
-//! by default. The fix would be to wire in `webauthn-rs` for the
-//! enrollment path while keeping the manual signed-message assert path.
-//! Tracked alongside #90.
+//! **Stage 1 limitation (codex audit, arch.md §22b.1)**: we DON'T verify
+//! the attestation **statement** — only the attested credential data
+//! (rpIdHash, UP|UV|AT flags, credentialId-matches-browser-id, COSE
+//! pubkey shape). For platform authenticators the operator's JS
+//! configures `attestation: "none"`, so the attestation statement is
+//! the empty CBOR map and there's nothing meaningful to verify against
+//! a vendor metadata service today. The signed-message assert path
+//! still gives full cryptographic binding (challenge = sha256(message);
+//! ECDSA verify against stored COSE pubkey). Stage 2 (#90) wires in
+//! `webauthn-rs` for the enrollment path to validate attestation
+//! statements against the FIDO MDS3 metadata service when
+//! `attestation != "none"` is requested.
 
 use std::fs;
 use std::io::Cursor;

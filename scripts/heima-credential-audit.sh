@@ -73,6 +73,12 @@ if [ -z "$AUDIT_CONTRACT" ]; then
   eval "AUDIT_CONTRACT=\${CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME_UC}:-}"
 fi
 [ -z "$AUDIT_CONTRACT" ] && die "--audit-address required"
+if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
+  case "$(printf '%s' "$AUDIT_CONTRACT" | tr '[:upper:]' '[:lower:]')" in
+    0x000000000000000000000000000000000000000[0-9a-f])
+      die "CredentialAudit address $AUDIT_CONTRACT is the operator-workstation.env sentinel — run bash scripts/heima-bring-up.sh first." ;;
+  esac
+fi
 
 AGENT_FILE="$HOME/.agentkeys/agents/${LABEL}.json"
 [ -f "$AGENT_FILE" ] || die "no agent file for '$LABEL'"

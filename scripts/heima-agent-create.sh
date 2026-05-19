@@ -86,6 +86,12 @@ if [ -z "$REGISTRY" ]; then
   eval "REGISTRY=\${SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:-}"
 fi
 [ -z "$REGISTRY" ] && die "--registry-address required (or set \$SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC:-HEIMA})"
+if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
+  case "$(printf '%s' "$REGISTRY" | tr '[:upper:]' '[:lower:]')" in
+    0x000000000000000000000000000000000000000[0-9a-f])
+      die "SidecarRegistry address $REGISTRY is the operator-workstation.env sentinel — run bash scripts/heima-bring-up.sh first." ;;
+  esac
+fi
 
 # Derive master EVM key from mnemonic (same flow as heima-device-register.sh).
 MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"

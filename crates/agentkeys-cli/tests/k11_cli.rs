@@ -18,6 +18,9 @@ fn k11_enroll_stub_mode_emits_json() {
     // Stub mode is the default; explicitly set AGENTKEYS_K11_STUB=1 to be
     // resilient to env leaks from CI.
     cmd.env("AGENTKEYS_K11_STUB", "1")
+        // Stub mode is dev-chain-only without explicit opt-in
+        // (arch.md §22b.1 fail-loud on mainnet).
+        .env("AGENTKEYS_CHAIN", "heima-paseo")
         // The `backend` top-level CLI flag is required for the CLI to
         // parse, even though k11 doesn't use it. Hand it a dummy.
         .arg("--backend")
@@ -37,6 +40,9 @@ fn k11_assert_stub_mode_emits_hex() {
     let omni = test_omni();
     let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
     cmd.env("AGENTKEYS_K11_STUB", "1")
+        // Stub mode is dev-chain-only without explicit opt-in
+        // (arch.md §22b.1 fail-loud on mainnet).
+        .env("AGENTKEYS_CHAIN", "heima-paseo")
         .arg("--backend")
         .arg("http://localhost:0")
         .arg("k11")
@@ -60,6 +66,7 @@ fn k11_non_stub_mode_without_webauthn_errors_with_actionable_hint() {
     let omni = test_omni();
     let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
     cmd.env("AGENTKEYS_K11_STUB", "0")
+        .env("AGENTKEYS_CHAIN", "heima-paseo")
         .arg("--backend")
         .arg("http://localhost:0")
         .arg("k11")
@@ -73,9 +80,56 @@ fn k11_non_stub_mode_without_webauthn_errors_with_actionable_hint() {
 }
 
 #[test]
+fn k11_stub_mode_on_mainnet_hard_errors_without_opt_in() {
+    // Codex audit fix: AGENTKEYS_CHAIN=heima + stub mode + no opt-in must
+    // HARD ERROR (not just warn) so operators can't silently sign master
+    // mutations against mainnet with stub bytes.
+    let omni = test_omni();
+    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    cmd.env("AGENTKEYS_K11_STUB", "1")
+        .env("AGENTKEYS_CHAIN", "heima")
+        .env_remove("AGENTKEYS_ALLOW_STAGE1_STUBS")
+        .arg("--backend")
+        .arg("http://localhost:0")
+        .arg("k11")
+        .arg("enroll")
+        .arg("--operator-omni")
+        .arg(&omni);
+    cmd.assert()
+        .failure()
+        .stderr(contains("permitted on chain=heima"))
+        .stderr(contains("AGENTKEYS_ALLOW_STAGE1_STUBS"));
+}
+
+#[test]
+fn k11_stub_mode_on_mainnet_opt_in_warns_but_succeeds() {
+    // With explicit opt-in, mainnet stub mode is allowed but loudly
+    // warned. For staging / smoke tests against mainnet that can't yet
+    // use Touch ID (CI runners, headless boxes).
+    let omni = test_omni();
+    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
+    cmd.env("AGENTKEYS_K11_STUB", "1")
+        .env("AGENTKEYS_CHAIN", "heima")
+        .env("AGENTKEYS_ALLOW_STAGE1_STUBS", "1")
+        .arg("--backend")
+        .arg("http://localhost:0")
+        .arg("k11")
+        .arg("enroll")
+        .arg("--operator-omni")
+        .arg(&omni);
+    cmd.assert()
+        .success()
+        .stderr(contains("WARN"))
+        .stdout(contains("\"mode\": \"stage1-stub\""));
+}
+
+#[test]
 fn k11_assert_rejects_invalid_omni() {
     let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
     cmd.env("AGENTKEYS_K11_STUB", "1")
+        // Stub mode is dev-chain-only without explicit opt-in
+        // (arch.md §22b.1 fail-loud on mainnet).
+        .env("AGENTKEYS_CHAIN", "heima-paseo")
         .arg("--backend")
         .arg("http://localhost:0")
         .arg("k11")

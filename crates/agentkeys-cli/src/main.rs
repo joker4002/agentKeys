@@ -434,17 +434,36 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
         );
     }
 
-    // Stage-1 stub-on-mainnet WARN per audit US-003: stub bytes are not
-    // a real K11 binding; operators on heima mainnet should know.
+    // Stage-1 stub-on-mainnet protection (codex audit follow-up):
+    //   chain == heima + stub mode + no explicit opt-in → HARD ERROR.
+    //   chain == heima + stub mode + AGENTKEYS_ALLOW_STAGE1_STUBS=1 → WARN.
+    //   other chains (heima-paseo, anvil, etc.) + stub mode → no message
+    //     (it's the expected dev/CI behaviour).
+    // Per arch.md §22b.1 — stage-1 simplifications inventory.
     if !use_webauthn {
         let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+        let allow_stubs = std::env::var("AGENTKEYS_ALLOW_STAGE1_STUBS")
+            .map(|v| v != "0")
+            .unwrap_or(false);
         if chain == "heima" {
+            if !allow_stubs {
+                anyhow::bail!(
+                    "K11 stub mode is NOT permitted on chain=heima (mainnet). The stub \
+                     bytes only satisfy the on-chain k11Assertion.length != 0 gate — they \
+                     are not a real WebAuthn assertion and any operator who reads them \
+                     later cannot distinguish them from a real ceremony. \
+                     \n\nOptions: \
+                     \n  1. Pass --webauthn for a real Touch ID ceremony (recommended). \
+                     \n  2. Set AGENTKEYS_ALLOW_STAGE1_STUBS=1 to opt into stub mode \
+                     (emits a WARN; for staging/test runs only). \
+                     \n  3. Switch to AGENTKEYS_CHAIN=heima-paseo or anvil for dev work. \
+                     \n\nSee arch.md §22b.1 + issue #90 for stage-2 hardening."
+                );
+            }
             eprintln!(
-                "==> ⚠️  WARN: K11 stub mode active on chain={chain}. The bytes you're \
-                 about to produce are NOT a real WebAuthn assertion — they only satisfy \
-                 the on-chain k11Assertion.length != 0 gate. Pass --webauthn for a real \
-                 Touch ID ceremony (macOS). See arch.md stage-1 simplifications inventory \
-                 + issue #90 for stage-2 hardening."
+                "==> ⚠️  WARN: K11 stub mode active on chain={chain} (AGENTKEYS_ALLOW_STAGE1_STUBS=1). \
+                 The bytes you're about to produce are NOT a real WebAuthn assertion. \
+                 See arch.md §22b.1 + issue #90."
             );
         }
     }

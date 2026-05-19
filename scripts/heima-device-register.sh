@@ -75,6 +75,15 @@ if [ -z "$REGISTRY" ]; then
   eval "REGISTRY=\${SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:-}"
 fi
 [ -z "$REGISTRY" ] && die "--registry-address required (or set \$SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC:-HEIMA} in operator-workstation.env)"
+# Codex audit follow-up: refuse the operator-workstation.env sentinel
+# placeholders (0x...0001..0x...0004) on production chain — they'd
+# silently target the zero-prefix address and emit confusing failures.
+if [ "$AGENTKEYS_CHAIN" = "heima" ]; then
+  case "$(printf '%s' "$REGISTRY" | tr '[:upper:]' '[:lower:]')" in
+    0x000000000000000000000000000000000000000[0-9a-f])
+      die "SidecarRegistry address $REGISTRY is the operator-workstation.env sentinel (pre-deploy). Run 'bash scripts/heima-bring-up.sh' first to deploy the real contracts." ;;
+  esac
+fi
 [ -z "$ROLES" ]    && die "--roles required (comma-separated: cap-mint,recovery,scope-mgmt)"
 
 

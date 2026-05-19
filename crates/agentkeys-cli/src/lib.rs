@@ -402,8 +402,9 @@ impl CommandContext {
                 Ok(Arc::new(backend))
             }
             CredentialBackendKind::Sidecar => Err(anyhow!(
-                "--credential-backend=sidecar is reserved for the stage 1 daemon proxy (issue v2-stage-1) and is not yet implemented. \
-                 Use --credential-backend=s3 with --envelope-version=v2 to exercise the actor_omni-keyed v2 path against the existing S3 backend, \
+                "--credential-backend=sidecar is not yet wired through. The daemon proxy + broker cap-mint endpoints + credentials-worker are shipped \
+                 (run `agentkeys-daemon proxy` + `agentkeys-broker-server` + `agentkeys-worker-creds`), but the CLI→daemon `/v1/cred/*` handoff isn't stitched yet. \
+                 Tracked in #91. For stage-1 use --credential-backend=s3 with --envelope-version=v2 (actor_omni-keyed paths, same envelope bytes the worker would write) \
                  or --credential-backend=http for the legacy mock-server."
             )),
         }

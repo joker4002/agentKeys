@@ -14,10 +14,18 @@
 //!   - emits a one-line JSON audit row per request to stdout for the
 //!     operator's local audit log + the eventual chain-batch relay.
 //!
-//! Stage-1 simplification: no SO_PEERCRED enforcement (the unix socket
-//! is permission-gated to the operator's uid); per-caller scope
-//! policies are stubbed (allow-all when no policy file is loaded). Both
-//! get sharper teeth in stage 2 (issue #90).
+//! Stage-1 simplification per arch.md §22b (codex audit follow-up):
+//!   - **No SO_PEERCRED enforcement**. Socket access is gated only by
+//!     the 0600 perm bit + parent-dir 0700 (operator-uid owned). On a
+//!     multi-user box where another local user can read the operator's
+//!     `$XDG_RUNTIME_DIR`, that user can connect and the proxy will
+//!     accept the request. Stage 2 (#90) adds peer-credential reading
+//!     via tokio's `UnixStream::peer_cred()` + per-(uid, binary_path)
+//!     policy match before any cap-mint.
+//!   - **Per-caller scope policies stubbed** — allow-all when no
+//!     policy file is loaded. Stage 2 (#90) adds policy file loading +
+//!     deny-by-default + per-caller spend quotas.
+//! Both gaps are tracked in #90's "Daemon hardening" task list.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
