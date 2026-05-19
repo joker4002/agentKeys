@@ -166,6 +166,14 @@ if [ ! -f "$PRIMARY_K11_FILE" ] || [ "$(jq -r .mode "$PRIMARY_K11_FILE" 2>/dev/n
   echo "{\"ok\":true,\"skipped\":\"no-webauthn-k11\",\"reason\":\"stage-2 contract requires real K11 sig\"}"
   exit 0
 fi
+# Stub-mode caller (no --webauthn) on a laptop that has a stale webauthn K11
+# enrollment from a prior real ceremony: still skip — caller didn't ask for
+# Touch ID, so we don't trigger one. CI-friendly path.
+if [ "$USE_WEBAUTHN" = "0" ]; then
+  skip "stub mode (no --webauthn) — refusing to trigger a Touch ID ceremony. Re-run with --webauthn for the real setScopeWithWebauthn, or accept skip in CI."
+  echo "{\"ok\":true,\"skipped\":\"stub-mode-refuses-touchid\",\"reason\":\"caller did not pass --webauthn but K11 file is in webauthn mode\"}"
+  exit 0
+fi
 MODE=$(jq -r .mode "$PRIMARY_K11_FILE")
 
 # Compute expected_challenge per contract:

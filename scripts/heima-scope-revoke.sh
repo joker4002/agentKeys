@@ -98,6 +98,13 @@ if [ ! -f "$PRIMARY_K11_FILE" ] || [ "$(jq -r .mode "$PRIMARY_K11_FILE" 2>/dev/n
   echo "{\"ok\":true,\"skipped\":\"no-webauthn-k11\"}"
   exit 0
 fi
+# Stub-mode caller (no --webauthn) on a laptop with a stale webauthn K11
+# enrollment: skip cleanly instead of triggering Touch ID.
+if [ "$USE_WEBAUTHN" = "0" ]; then
+  skip "stub mode (no --webauthn) — refusing to trigger a Touch ID ceremony for revokeScope. Re-run with --webauthn to actually revoke, or accept the skip in CI."
+  echo "{\"ok\":true,\"skipped\":\"stub-mode-refuses-touchid\"}"
+  exit 0
+fi
 MODE=$(jq -r .mode "$PRIMARY_K11_FILE")
 
 # Compute expected challenge per contract: keccak256(abi.encode(

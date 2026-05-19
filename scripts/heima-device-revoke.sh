@@ -142,27 +142,17 @@ echo "    master        = $MASTER_ADDR" >&2
 echo "    deviceKeyHash = $DEVICE_KEY_HASH" >&2
 echo "    revoke_kind   = $( [ "$REVOKE_MASTER" = 1 ] && echo MASTER || echo AGENT )" >&2
 
-# Idempotency: pre-read getDevice. If already revoked, no-op.
-log "Idempotency check …"
-EXISTING=$(cast call "$REGISTRY" "getDevice(bytes32)" "$DEVICE_KEY_HASH" --rpc-url "$RPC_HTTP" 2>&1 || echo "")
-if [ -n "$EXISTING" ] && [ "$EXISTING" != "0x" ]; then
-  HEX=$(printf '%s' "$EXISTING" | tr -d '\n' | sed 's/^0x//')
-  if [ "${#HEX}" -ge 448 ]; then
-    REGISTERED_AT_HEX="${HEX:320:64}"
-    REGISTERED_AT_DEC=$(printf '%d' "0x$REGISTERED_AT_HEX" 2>/dev/null || echo 0)
-    REVOKED_HEX="${HEX:384:64}"
-    REVOKED_LAST_CHAR="${REVOKED_HEX: -1}"
-    if [ "$REGISTERED_AT_DEC" = "0" ]; then
-      skip "device not registered — nothing to revoke"
-      echo "{\"ok\":true,\"skipped\":\"not-registered\",\"device_key_hash\":\"$DEVICE_KEY_HASH\"}"
-      exit 0
-    fi
-    if [ "$REVOKED_LAST_CHAR" = "1" ]; then
-      skip "device already revoked"
-      echo "{\"ok\":true,\"skipped\":\"already-revoked\",\"device_key_hash\":\"$DEVICE_KEY_HASH\"}"
-      exit 0
-    fi
-  fi
+# Idempotency: isActive(bytes32)(bool) returns true iff registeredAt != 0
+# AND !revoked. So if !isActive, the device is either unregistered (skip)
+# or already revoked (skip). Cleaner than slicing the raw getDevice() tuple
+# at hex offsets — the DeviceEntry struct grew in codex H1, breaking the
+# previous offset-based check.
+log "Idempotency check: is this device still active on-chain?"
+IS_ACTIVE=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$DEVICE_KEY_HASH" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "false")
+if [ "$IS_ACTIVE" = "false" ]; then
+  skip "device not active (already-revoked or never-registered) — no-op"
+  echo "{\"ok\":true,\"skipped\":\"not-active\",\"device_key_hash\":\"$DEVICE_KEY_HASH\"}"
+  exit 0
 fi
 ok "device active → revoking"
 

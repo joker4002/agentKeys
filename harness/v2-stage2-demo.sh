@@ -51,7 +51,7 @@ else
 fi
 
 STEP_NUM=0
-STEP_TOTAL=10
+STEP_TOTAL=11
 CURRENT_STEP_NAME=""
 
 step() { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
@@ -518,8 +518,18 @@ if should_run_step 9; then
   fi
 fi
 
-# ─── Step 10: Cleanup + summary ───────────────────────────────────────
+# ─── Step 10: Tier-A audit relay + email-inbox smoke (issue #90 workers) ──
 if should_run_step 10; then
+  step "Tier-A audit relay + email-inbox smoke (workers co-located on broker host)"
+  if bash "$REPO_ROOT/scripts/heima-worker-smoke.sh" 2>&1 | tail -20 >&2; then
+    ok "tier-A Merkle root committed on-chain; email worker /healthz green"
+  else
+    die "heima-worker-smoke.sh failed — workers deployed? Run scripts/verify-workers.sh from this laptop."
+  fi
+fi
+
+# ─── Step 11: Cleanup + summary ───────────────────────────────────────
+if should_run_step 11; then
   step "Cleanup spare local state + summary"
   if [ -d "$SPARE_STATE_DIR" ]; then
     info "removing local spare state at $SPARE_STATE_DIR"
