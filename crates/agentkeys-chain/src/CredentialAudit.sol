@@ -30,6 +30,18 @@ contract CredentialAudit {
     /// @notice operator_omni → append-only list of entries.
     mapping(bytes32 => AuditEntry[]) private entries;
 
+    /// @notice tier-A Merkle-batched audit roots. The audit-service worker
+    ///         accumulates per-operator events off-chain, builds a Merkle
+    ///         tree, and commits one root per batch. Operators reconstruct
+    ///         per-event proofs from leaves stored in S3
+    ///         (`s3://<vault>/audit/<root>.jsonl`). arch.md §15.3 tier A.
+    struct AuditRoot {
+        bytes32 merkleRoot;
+        uint64 entryCount;
+        uint64 timestamp;
+    }
+    mapping(bytes32 => AuditRoot[]) private roots;
+
     event AuditAppended(
         bytes32 indexed operatorOmni,
         bytes32 indexed actorOmni,
@@ -37,6 +49,13 @@ contract CredentialAudit {
         uint8 opType,
         uint256 entryIndex,
         bytes32 payloadHash
+    );
+
+    event AuditRootAppended(
+        bytes32 indexed operatorOmni,
+        bytes32 indexed merkleRoot,
+        uint256 rootIndex,
+        uint64 entryCount
     );
 
     /// @notice Append an audit row. Open to any caller — the chain itself
@@ -81,5 +100,58 @@ contract CredentialAudit {
 
     function entryCount(bytes32 operatorOmni) external view returns (uint256) {
         return entries[operatorOmni].length;
+    }
+
+    // ─── tier A: Merkle-batched audit roots ──────────────────────────────
+    /// @notice Commit one Merkle root summarising a batch of audit events.
+    ///         Called by the audit-service worker (arch.md §15.3 tier A).
+    function appendRoot(bytes32 operatorOmni, bytes32 merkleRoot, uint64 batchEntryCount)
+        external
+    {
+        AuditRoot memory r = AuditRoot({
+            merkleRoot: merkleRoot,
+            entryCount: batchEntryCount,
+            timestamp: uint64(block.timestamp)
+        });
+        uint256 idx = roots[operatorOmni].length;
+        roots[operatorOmni].push(r);
+        emit AuditRootAppended(operatorOmni, merkleRoot, idx, batchEntryCount);
+    }
+
+    function rootCount(bytes32 operatorOmni) external view returns (uint256) {
+        return roots[operatorOmni].length;
+    }
+
+    function getRoot(bytes32 operatorOmni, uint256 rootIndex)
+        external
+        view
+        returns (AuditRoot memory)
+    {
+        return roots[operatorOmni][rootIndex];
+    }
+
+    /// @notice Verify a single audit event is included in a previously
+    ///         committed Merkle root. `leaf` is the application-level hash
+    ///         of the audit event (e.g. keccak256(abi.encode(actor, service,
+    ///         opType, payloadHash, timestamp))). `proof` is a standard
+    ///         sorted-pairs Merkle proof.
+    function verifyEntryInRoot(
+        bytes32 operatorOmni,
+        uint256 rootIndex,
+        bytes32[] calldata proof,
+        bytes32 leaf
+    ) external view returns (bool) {
+        if (rootIndex >= roots[operatorOmni].length) return false;
+        bytes32 root = roots[operatorOmni][rootIndex].merkleRoot;
+        bytes32 computed = leaf;
+        for (uint256 i = 0; i < proof.length; ++i) {
+            bytes32 sibling = proof[i];
+            if (computed < sibling) {
+                computed = keccak256(abi.encodePacked(computed, sibling));
+            } else {
+                computed = keccak256(abi.encodePacked(sibling, computed));
+            }
+        }
+        return computed == root;
     }
 }

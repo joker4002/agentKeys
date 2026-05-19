@@ -11,6 +11,7 @@ members = [
     "crates/agentkeys-broker-server",
     "crates/agentkeys-worker-creds",
     "crates/agentkeys-worker-memory",
+    "crates/agentkeys-worker-audit",
 ]
 
 [workspace.dependencies]

@@ -278,6 +278,38 @@ contract AgentKeysV1Test is Test {
         assertEq(page[1].opType, audit.OP_READ());
     }
 
+    // ─── CredentialAudit tier-A Merkle root path (#90 follow-up) ────────
+    function test_CredentialAudit_AppendRoot_AndVerifyMembership() public {
+        // Build a 4-leaf Merkle tree of audit events.
+        bytes32 leaf0 = keccak256("audit-event-0");
+        bytes32 leaf1 = keccak256("audit-event-1");
+        bytes32 leaf2 = keccak256("audit-event-2");
+        bytes32 leaf3 = keccak256("audit-event-3");
+        bytes32 h01 = _hashPair(leaf0, leaf1);
+        bytes32 h23 = _hashPair(leaf2, leaf3);
+        bytes32 root = _hashPair(h01, h23);
+
+        audit.appendRoot(operatorOmni, root, 4);
+        assertEq(audit.rootCount(operatorOmni), 1);
+
+        // Verify leaf2 is in the root via proof [leaf3, h01].
+        bytes32[] memory proof = new bytes32[](2);
+        proof[0] = leaf3;
+        proof[1] = h01;
+        assertTrue(audit.verifyEntryInRoot(operatorOmni, 0, proof, leaf2));
+
+        // Reject a tampered leaf.
+        assertFalse(audit.verifyEntryInRoot(operatorOmni, 0, proof, keccak256("nope")));
+
+        // Reject out-of-range root index.
+        bytes32[] memory emptyProof = new bytes32[](0);
+        assertFalse(audit.verifyEntryInRoot(operatorOmni, 99, emptyProof, leaf0));
+    }
+
+    function _hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
+        return a < b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────
     function _registerFirstMaster() internal {
         uint8 fullRoles =

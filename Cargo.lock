@@ -259,6 +259,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-worker-audit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha3",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentkeys-worker-creds"
 version = "0.1.0"
 dependencies = [
