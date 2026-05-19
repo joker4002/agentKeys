@@ -150,6 +150,7 @@ dependencies = [
 name = "agentkeys-daemon"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-cli",
  "agentkeys-core",
  "agentkeys-mcp",
  "agentkeys-mock-server",
@@ -159,6 +160,7 @@ dependencies = [
  "base64",
  "clap",
  "ed25519-dalek",
+ "hex",
  "http-body-util",
  "hyper 1.9.0",
  "hyper-util",

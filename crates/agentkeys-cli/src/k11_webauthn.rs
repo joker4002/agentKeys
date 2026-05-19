@@ -196,6 +196,41 @@ pub struct WebauthnEnrollment {
     pub enrolled_at_unix: u64,
     /// `"webauthn"` (NOT `"stage1-stub"`).
     pub mode: String,
+    /// Optional RP ID override. Default `"localhost"`. Companion daemon mode
+    /// uses `"companion.localhost"` to get a SECOND, distinct credential in
+    /// the platform keychain on the same Mac.
+    #[serde(default)]
+    pub rp_id: Option<String>,
+}
+
+/// Chain-ready K11 assertion payload — all the fields the on-chain
+/// K11Verifier / SidecarRegistry need, pre-extracted from the raw WebAuthn
+/// outputs. Produced by [`assert_webauthn_for_chain`] for callers building
+/// on-chain `revokeMasterDevice` / `setScopeWithWebauthn` txs.
+///
+/// Field correspondence with the contracts:
+/// - `authenticator_data_hex` → `K11Assertion.authenticatorData`
+/// - `client_data_json` (raw bytes; UTF-8 string OK) → `clientDataJSON`
+/// - `challenge_location` → byte offset of the value's first char
+/// - `r_hex, s_hex` → ECDSA (r, s) components in 0x-prefixed hex (32 bytes each)
+/// - `pub_x_hex, pub_y_hex` → P-256 public key coords in 0x-prefixed hex
+/// - `expected_challenge_hex` → the 32-byte challenge the contract should
+///   reconstruct from operation params + nonce; CLI re-emits it for the
+///   operator's eyeball-verify
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct K11ChainAssertion {
+    pub operator_omni: String,
+    pub credential_id_b64url: String,
+    pub authenticator_data_hex: String,
+    pub client_data_json_b64url: String,
+    pub client_data_json_utf8: String,
+    pub challenge_location: usize,
+    pub r_hex: String,
+    pub s_hex: String,
+    pub pub_x_hex: String,
+    pub pub_y_hex: String,
+    pub expected_challenge_hex: String,
+    pub sign_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,11 +277,27 @@ struct ClientDataJson {
 }
 
 pub fn enrollment_path(operator_omni: &str) -> PathBuf {
+    enrollment_path_with_rp(operator_omni, "localhost")
+}
+
+/// rp_id-aware enrollment path so primary (rp_id=localhost) and companion
+/// (rp_id=companion.localhost) credentials live in distinct files.
+/// Backward-compat: `rp_id=localhost` yields the original filename
+/// `<omni>.json` so existing primary enrollments still load.
+pub fn enrollment_path_with_rp(operator_omni: &str, rp_id: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let suffix = if rp_id == "localhost" {
+        String::new()
+    } else {
+        format!("--{rp_id}")
+    };
     PathBuf::from(home)
         .join(".agentkeys")
         .join("k11")
-        .join(format!("{}.json", operator_omni.trim_start_matches("0x")))
+        .join(format!(
+            "{}{suffix}.json",
+            operator_omni.trim_start_matches("0x")
+        ))
 }
 
 /// Run the enrollment ceremony. Blocks (awaits) until the browser POSTs
@@ -257,7 +308,17 @@ pub fn enrollment_path(operator_omni: &str) -> PathBuf {
 /// `#[tokio::main]`). Creating a nested runtime via `block_on` panics
 /// with "Cannot start a runtime from within a runtime".
 pub async fn enroll_webauthn(operator_omni: &str) -> Result<WebauthnEnrollment, WebauthnError> {
-    enroll_webauthn_inner(operator_omni).await
+    enroll_webauthn_inner(operator_omni, "localhost").await
+}
+
+/// Same as [`enroll_webauthn`] but with a configurable RP ID. The companion
+/// daemon uses RP ID `"companion.localhost"` so the platform keychain
+/// creates a distinct passkey from the primary daemon on the same Mac.
+pub async fn enroll_webauthn_with_rp(
+    operator_omni: &str,
+    rp_id: &str,
+) -> Result<WebauthnEnrollment, WebauthnError> {
+    enroll_webauthn_inner(operator_omni, rp_id).await
 }
 
 /// Run the assert ceremony. Returns the assertion bytes
@@ -266,16 +327,50 @@ pub async fn assert_webauthn(
     operator_omni: &str,
     message: &[u8],
 ) -> Result<Vec<u8>, WebauthnError> {
-    assert_webauthn_inner(operator_omni, message).await
+    assert_webauthn_inner(operator_omni, message, "localhost").await
 }
 
-async fn enroll_webauthn_inner(operator_omni: &str) -> Result<WebauthnEnrollment, WebauthnError> {
+/// Same as [`assert_webauthn`] but for the companion daemon — uses RP ID
+/// `"companion.localhost"` so the platform keychain creates a SECOND,
+/// distinct passkey on the same Mac.
+pub async fn assert_webauthn_with_rp(
+    operator_omni: &str,
+    message: &[u8],
+    rp_id: &str,
+) -> Result<Vec<u8>, WebauthnError> {
+    assert_webauthn_inner(operator_omni, message, rp_id).await
+}
+
+/// Chain-ready variant: runs the ceremony, then post-processes the result
+/// into the exact field set the on-chain K11Verifier needs (r, s as 256-bit
+/// integers, pubX, pubY, authData, clientDataJSON, challengeLocation, sign
+/// count). The `expected_challenge` param MUST be the same 32-byte value the
+/// on-chain contract will reconstruct from operation params + nonce — we
+/// re-emit it in the output so the caller can sanity-check before broadcasting.
+pub async fn assert_webauthn_for_chain(
+    operator_omni: &str,
+    expected_challenge: [u8; 32],
+    rp_id: &str,
+) -> Result<K11ChainAssertion, WebauthnError> {
+    let enrollment = load_enrollment_with_rp(operator_omni, rp_id)?;
+    let parts = assert_webauthn_inner_parts(operator_omni, &expected_challenge, rp_id).await?;
+    extract_chain_assertion(&enrollment, expected_challenge, &parts)
+}
+
+async fn enroll_webauthn_inner(
+    operator_omni: &str,
+    rp_id: &str,
+) -> Result<WebauthnEnrollment, WebauthnError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| WebauthnError::Bind(e.to_string()))?;
     let local_addr = listener.local_addr().map_err(|e| WebauthnError::Bind(e.to_string()))?;
     let port = local_addr.port();
-    let rp_origin = format!("http://localhost:{port}");
+    // Bind URL uses 127.0.0.1; but the browser must see the RP ID (e.g.
+    // `companion.localhost` for the companion daemon) as the effective
+    // domain. Modern Chrome/Safari treat `*.localhost` as loopback so
+    // `http://companion.localhost:PORT` resolves without /etc/hosts.
+    let rp_origin = format!("http://{rp_id}:{port}");
 
     let mut challenge_bytes = [0u8; 32];
     use rand_core::RngCore;
@@ -283,7 +378,7 @@ async fn enroll_webauthn_inner(operator_omni: &str) -> Result<WebauthnEnrollment
     let challenge_b64url = URL_SAFE_NO_PAD.encode(challenge_bytes);
 
     let ctx = Arc::new(ServerCtx {
-        rp_id: "localhost".to_string(),
+        rp_id: rp_id.to_string(),
         rp_origin: rp_origin.clone(),
         operator_omni: operator_omni.to_string(),
         challenge_b64url: challenge_b64url.clone(),
@@ -333,7 +428,7 @@ async fn enroll_webauthn_inner(operator_omni: &str) -> Result<WebauthnEnrollment
         .map_err(|_| WebauthnError::Timeout(CEREMONY_TIMEOUT_SECS))?
         .map_err(|e| WebauthnError::Io(format!("oneshot recv: {e}")))?;
 
-    let enrollment = finalize_enroll(operator_omni, &challenge_b64url, &rp_origin, &post)?;
+    let enrollment = finalize_enroll(operator_omni, rp_id, &challenge_b64url, &rp_origin, &post)?;
     persist_enrollment(&enrollment)?;
     Ok(enrollment)
 }
@@ -341,15 +436,43 @@ async fn enroll_webauthn_inner(operator_omni: &str) -> Result<WebauthnEnrollment
 async fn assert_webauthn_inner(
     operator_omni: &str,
     message: &[u8],
+    rp_id: &str,
 ) -> Result<Vec<u8>, WebauthnError> {
-    // Load the previously-enrolled credential.
-    let enrollment = load_enrollment(operator_omni)?;
+    let parts = assert_webauthn_inner_parts(operator_omni, message, rp_id).await?;
+    let mut out = Vec::with_capacity(
+        parts.authenticator_data.len() + parts.client_data_json.len() + parts.signature_der.len(),
+    );
+    out.extend_from_slice(&parts.authenticator_data);
+    out.extend_from_slice(&parts.client_data_json);
+    out.extend_from_slice(&parts.signature_der);
+    Ok(out)
+}
+
+async fn assert_webauthn_inner_parts(
+    operator_omni: &str,
+    message: &[u8],
+    rp_id: &str,
+) -> Result<AssertParts, WebauthnError> {
+    // Load the previously-enrolled credential for THIS rp_id (primary vs
+    // companion live in distinct files; see enrollment_path_with_rp).
+    let enrollment = load_enrollment_with_rp(operator_omni, rp_id)?;
+    // Sanity: the stored rp_id should match what we asked for. If not, the
+    // file was written by an older CLI; reject so the user re-enrolls cleanly.
+    let enrolled_rp = enrollment.rp_id.clone().unwrap_or_else(|| "localhost".to_string());
+    if enrolled_rp != rp_id {
+        return Err(WebauthnError::Io(format!(
+            "K11 credential at ~/.agentkeys/k11/{}--{rp_id}.json was enrolled with rp_id={enrolled_rp:?} \
+             but assert was called with rp_id={rp_id:?}. Re-enroll the credential with the \
+             matching --rp-id flag.",
+            operator_omni.trim_start_matches("0x")
+        )));
+    }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| WebauthnError::Bind(e.to_string()))?;
     let port = listener.local_addr().map_err(|e| WebauthnError::Bind(e.to_string()))?.port();
-    let rp_origin = format!("http://localhost:{port}");
+    let rp_origin = format!("http://{rp_id}:{port}");
 
     // WebAuthn challenge = sha256(application message). The browser signs
     // over (authenticatorData || sha256(clientDataJSON)) and clientDataJSON
@@ -361,7 +484,7 @@ async fn assert_webauthn_inner(
     let challenge_b64url = URL_SAFE_NO_PAD.encode(challenge_bytes);
 
     let ctx = Arc::new(ServerCtx {
-        rp_id: "localhost".to_string(),
+        rp_id: rp_id.to_string(),
         rp_origin: rp_origin.clone(),
         operator_omni: operator_omni.to_string(),
         challenge_b64url: challenge_b64url.clone(),
@@ -412,7 +535,7 @@ async fn assert_webauthn_inner(
         .map_err(|_| WebauthnError::Timeout(CEREMONY_TIMEOUT_SECS))?
         .map_err(|e| WebauthnError::Io(format!("oneshot recv: {e}")))?;
 
-    finalize_assert(&enrollment, &challenge_b64url, &rp_origin, &post)
+    finalize_assert_parts(&enrollment, &challenge_b64url, &rp_origin, &post)
 }
 
 /// RAII guard: when dropped, aborts the wrapped tokio task. Used to
@@ -444,6 +567,7 @@ fn open_in_browser(url: &str) -> Result<(), WebauthnError> {
 
 fn finalize_enroll(
     operator_omni: &str,
+    rp_id: &str,
     expected_challenge: &str,
     expected_origin: &str,
     post: &EnrollPost,
@@ -489,15 +613,16 @@ fn finalize_enroll(
         )));
     }
 
-    // Verify rpIdHash == sha256("localhost"). This binds the credential
-    // to our relying party so a passkey enrolled against a different RP
-    // can't be replayed here.
+    // Verify rpIdHash == sha256(rp_id). This binds the credential to our
+    // relying party so a passkey enrolled against a different RP can't be
+    // replayed here. Primary daemon: rp_id = "localhost". Companion daemon:
+    // "companion.localhost".
     let mut h = Sha256::new();
-    h.update(b"localhost");
+    h.update(rp_id.as_bytes());
     let expected_rp_id_hash = h.finalize();
     if parsed.rp_id_hash != expected_rp_id_hash.as_slice() {
         return Err(WebauthnError::Cbor(format!(
-            "rpIdHash mismatch: expected sha256('localhost'), got {}",
+            "rpIdHash mismatch: expected sha256({rp_id:?}), got {}",
             hex::encode(&parsed.rp_id_hash)
         )));
     }
@@ -523,19 +648,27 @@ fn finalize_enroll(
             .map(|d| d.as_secs())
             .unwrap_or(0),
         mode: "webauthn".to_string(),
+        rp_id: Some(rp_id.to_string()),
     })
 }
 
-fn finalize_assert(
+/// Verified parts of a WebAuthn assertion — extracted from the raw post and
+/// ready for either chain submission (use [`extract_chain_assertion`]) or the
+/// flat-bytes legacy format ([`finalize_assert`]).
+pub struct AssertParts {
+    pub authenticator_data: Vec<u8>,
+    pub client_data_json: Vec<u8>,
+    pub signature_der: Vec<u8>,
+}
+
+fn finalize_assert_parts(
     enrollment: &WebauthnEnrollment,
     expected_challenge: &str,
     expected_origin: &str,
     post: &AssertPost,
-) -> Result<Vec<u8>, WebauthnError> {
-    // Cross-check the credential id the browser used against the one
-    // we enrolled. The browser will only sign with a passkey whose id
-    // was in `allowCredentials` — but a debug build of the page could
-    // be tweaked, and verifying here is cheap.
+) -> Result<AssertParts, WebauthnError> {
+    // Cross-check credential id, parse clientDataJSON, verify sig, return
+    // the three parts so the caller can pick the output format.
     if post.id != enrollment.credential_id_b64url {
         return Err(WebauthnError::Cbor(format!(
             "assertion credential id ({}) doesn't match enrolled credential ({})",
@@ -562,27 +695,18 @@ fn finalize_assert(
             got: cd.origin,
         });
     }
-
     let authenticator_data = URL_SAFE_NO_PAD
         .decode(&post.authenticator_data)
         .map_err(|e| WebauthnError::B64Decode(format!("authenticatorData: {e}")))?;
     let signature_der = URL_SAFE_NO_PAD
         .decode(&post.signature)
         .map_err(|e| WebauthnError::B64Decode(format!("signature: {e}")))?;
-
-    // WebAuthn signature contract (per W3C WebAuthn §6.3.3):
-    //   sig = ECDSA-sign(privkey, authenticatorData || sha256(clientDataJSON))
-    // The signed bytes are the CONCATENATION (authData || cd_hash) — the
-    // verify function then sha256's the message internally. The previous
-    // code SHA256'd this concatenation BEFORE passing to verify, so
-    // verify was effectively checking sha256(sha256(...))  (codex audit).
     let mut h = Sha256::new();
     h.update(&client_data_bytes);
     let cd_hash = h.finalize();
     let mut signed_bytes = Vec::with_capacity(authenticator_data.len() + cd_hash.len());
     signed_bytes.extend_from_slice(&authenticator_data);
     signed_bytes.extend_from_slice(&cd_hash);
-
     let pubkey_hex = enrollment.cose_pubkey_hex.trim_start_matches("0x");
     let pubkey_bytes = hex::decode(pubkey_hex)
         .map_err(|e| WebauthnError::InvalidCosePubkey(format!("hex: {e}")))?;
@@ -595,22 +719,91 @@ fn finalize_assert(
         return Err(WebauthnError::InvalidCosePubkey("not on curve".into()));
     };
     let verifying_key = VerifyingKey::from(pubkey);
-
     let sig = Signature::from_der(&signature_der)
         .map_err(|e| WebauthnError::SigParse(e.to_string()))?;
-    // Pass the message unhashed; `Verifier::verify` on p256::ecdsa::VerifyingKey
-    // applies SHA-256 internally per the ECDSA-with-SHA256 contract.
     verifying_key
         .verify(&signed_bytes, &sig)
         .map_err(|_| WebauthnError::SigInvalid)?;
+    Ok(AssertParts { authenticator_data, client_data_json: client_data_bytes, signature_der })
+}
 
-    // Return the WebAuthn assertion in its canonical transport shape:
-    // authenticatorData || clientDataJSON || signature
-    let mut out = Vec::with_capacity(authenticator_data.len() + client_data_bytes.len() + signature_der.len());
-    out.extend_from_slice(&authenticator_data);
-    out.extend_from_slice(&client_data_bytes);
-    out.extend_from_slice(&signature_der);
-    Ok(out)
+/// Convert verified WebAuthn assertion parts into the chain-ready payload
+/// (r, s decimal-extracted from DER, pubkey coords split, challenge location
+/// in clientDataJSON found, etc.). The contract uses these fields to verify
+/// the assertion on chain via [K11Verifier].
+pub fn extract_chain_assertion(
+    enrollment: &WebauthnEnrollment,
+    expected_challenge: [u8; 32],
+    parts: &AssertParts,
+) -> Result<K11ChainAssertion, WebauthnError> {
+    // Parse DER signature → (r, s) as 32-byte big-endian integers.
+    let sig = Signature::from_der(&parts.signature_der)
+        .map_err(|e| WebauthnError::SigParse(format!("der → (r,s): {e}")))?;
+    let sig_bytes = sig.to_bytes(); // 64 bytes: r || s
+    if sig_bytes.len() != 64 {
+        return Err(WebauthnError::SigParse(format!(
+            "sig.to_bytes() returned {} bytes; expected 64",
+            sig_bytes.len()
+        )));
+    }
+    let r_hex = format!("0x{}", hex::encode(&sig_bytes[0..32]));
+    let s_hex = format!("0x{}", hex::encode(&sig_bytes[32..64]));
+
+    // Split COSE pubkey into X, Y.
+    let pk_hex = enrollment.cose_pubkey_hex.trim_start_matches("0x");
+    let pk_bytes = hex::decode(pk_hex)
+        .map_err(|e| WebauthnError::InvalidCosePubkey(format!("hex: {e}")))?;
+    if pk_bytes.len() != 65 || pk_bytes[0] != 0x04 {
+        return Err(WebauthnError::InvalidCosePubkey(format!(
+            "expected 0x04 || X(32) || Y(32) = 65 bytes; got {} bytes",
+            pk_bytes.len()
+        )));
+    }
+    let pub_x_hex = format!("0x{}", hex::encode(&pk_bytes[1..33]));
+    let pub_y_hex = format!("0x{}", hex::encode(&pk_bytes[33..65]));
+
+    // Find the challenge location in clientDataJSON (byte offset of the
+    // value's first char). Search for the literal `"challenge":"` prefix.
+    let cdj_utf8 = std::str::from_utf8(&parts.client_data_json)
+        .map_err(|e| WebauthnError::SerdeJson(format!("cdj utf-8: {e}")))?;
+    let needle = "\"challenge\":\"";
+    let challenge_location = cdj_utf8
+        .find(needle)
+        .map(|p| p + needle.len())
+        .ok_or_else(|| {
+            WebauthnError::SerdeJson(format!(
+                "clientDataJSON missing {needle:?} prefix: {cdj_utf8}"
+            ))
+        })?;
+
+    // Extract sign count from authData[33..37] (big-endian uint32).
+    if parts.authenticator_data.len() < 37 {
+        return Err(WebauthnError::Cbor(format!(
+            "authenticatorData {} bytes; expected ≥ 37",
+            parts.authenticator_data.len()
+        )));
+    }
+    let sign_count = u32::from_be_bytes([
+        parts.authenticator_data[33],
+        parts.authenticator_data[34],
+        parts.authenticator_data[35],
+        parts.authenticator_data[36],
+    ]);
+
+    Ok(K11ChainAssertion {
+        operator_omni: enrollment.operator_omni.clone(),
+        credential_id_b64url: enrollment.credential_id_b64url.clone(),
+        authenticator_data_hex: format!("0x{}", hex::encode(&parts.authenticator_data)),
+        client_data_json_b64url: URL_SAFE_NO_PAD.encode(&parts.client_data_json),
+        client_data_json_utf8: cdj_utf8.to_string(),
+        challenge_location,
+        r_hex,
+        s_hex,
+        pub_x_hex,
+        pub_y_hex,
+        expected_challenge_hex: format!("0x{}", hex::encode(expected_challenge)),
+        sign_count,
+    })
 }
 
 struct AttestedCredential {
@@ -711,7 +904,8 @@ fn extract_attested_credential(att_obj_bytes: &[u8]) -> Result<AttestedCredentia
 }
 
 pub fn persist_enrollment(enrollment: &WebauthnEnrollment) -> Result<(), WebauthnError> {
-    let path = enrollment_path(&enrollment.operator_omni);
+    let rp_id = enrollment.rp_id.as_deref().unwrap_or("localhost");
+    let path = enrollment_path_with_rp(&enrollment.operator_omni, rp_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| WebauthnError::Io(e.to_string()))?;
     }
@@ -731,7 +925,14 @@ pub fn persist_enrollment(enrollment: &WebauthnEnrollment) -> Result<(), Webauth
 }
 
 pub fn load_enrollment(operator_omni: &str) -> Result<WebauthnEnrollment, WebauthnError> {
-    let path = enrollment_path(operator_omni);
+    load_enrollment_with_rp(operator_omni, "localhost")
+}
+
+pub fn load_enrollment_with_rp(
+    operator_omni: &str,
+    rp_id: &str,
+) -> Result<WebauthnEnrollment, WebauthnError> {
+    let path = enrollment_path_with_rp(operator_omni, rp_id);
     let bytes = fs::read(&path).map_err(|e| WebauthnError::Io(format!("read {path:?}: {e}")))?;
     let enrollment: WebauthnEnrollment = serde_json::from_slice(&bytes)
         .map_err(|e| WebauthnError::SerdeJson(format!("parse {path:?}: {e}")))?;
@@ -800,7 +1001,7 @@ document.getElementById('go').onclick = async () => {{
   try {{
     const cred = await navigator.credentials.create({{
       publicKey: {{
-        rp: {{ id: "localhost", name: "AgentKeys" }},
+        rp: {{ id: "{rp_id_js}", name: "AgentKeys" }},
         user: {{
           id: hexToBytes(omni),       // 32 raw bytes (within WebAuthn 64-byte cap)
           name: omni,                  // display name — no byte limit
@@ -851,6 +1052,7 @@ document.getElementById('go').onclick = async () => {{
         omni = ctx.operator_omni,
         challenge = ctx.challenge_b64url,
         shared_css = SHARED_CSS,
+        rp_id_js = ctx.rp_id,
     );
     Html(html)
 }
@@ -899,7 +1101,7 @@ document.getElementById('go').onclick = async () => {{
   try {{
     const cred = await navigator.credentials.get({{
       publicKey: {{
-        rpId: "localhost",
+        rpId: "{rp_id_js}",
         challenge: b64urlDecode(challenge),
         allowCredentials: [{{ id: b64urlDecode(credId), type: "public-key" }}],
         userVerification: "required",
@@ -940,6 +1142,7 @@ document.getElementById('go').onclick = async () => {{
         msg = msg_hex,
         shared_css = SHARED_CSS,
         shared_css_extra = "",
+        rp_id_js = ctx.rp_id,
     );
     Html(html)
 }
@@ -965,7 +1168,7 @@ mod tests {
             ),
             attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]), // empty CBOR map; we won't reach the parser
         };
-        let err = finalize_enroll("0xabc", "GOOD", "http://localhost:1234", &post).unwrap_err();
+        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post).unwrap_err();
         assert!(matches!(err, WebauthnError::ChallengeMismatch { .. }));
     }
 
@@ -978,7 +1181,7 @@ mod tests {
             ),
             attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]),
         };
-        let err = finalize_enroll("0xabc", "GOOD", "http://localhost:1234", &post).unwrap_err();
+        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post).unwrap_err();
         assert!(matches!(err, WebauthnError::TypeMismatch { .. }));
     }
 
@@ -991,7 +1194,7 @@ mod tests {
             ),
             attestation_object: URL_SAFE_NO_PAD.encode([0xa0u8]),
         };
-        let err = finalize_enroll("0xabc", "GOOD", "http://localhost:1234", &post).unwrap_err();
+        let err = finalize_enroll("0xabc", "localhost", "GOOD", "http://localhost:1234", &post).unwrap_err();
         assert!(matches!(err, WebauthnError::OriginMismatch { .. }));
     }
 }
