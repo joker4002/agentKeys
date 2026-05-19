@@ -1,0 +1,16 @@
+{
+  "name": "agentkeys-scripts-node-deps",
+  "private": true,
+  "type": "module",
+  "description": "Node runtime deps for the bash/mjs scripts in this directory — specifically @polkadot/* for heima-paseo-sudo.mjs. Not a published package; the only consumer is heima-paseo-bring-up.sh, which runs `npm install --prefix scripts` once before invoking the .mjs. Adding more script-side Node deps lands here too.",
+  "scripts": {
+    "preinstall-note": "echo 'this package.json exists so node_modules sits next to the .mjs scripts. Run: npm install --prefix scripts'"
+  },
+  "dependencies": {
+    "@polkadot/api": "^16.0.0",
+    "@polkadot/keyring": "^14.0.0",
+    "@polkadot/util": "^14.0.0",
+    "@polkadot/util-crypto": "^14.0.0",
+    "ethers": "^6.13.0"
+  }
+}

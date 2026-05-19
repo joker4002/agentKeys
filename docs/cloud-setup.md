@@ -540,10 +540,18 @@ aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
         Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
         Action: "s3:GetObject",
         Resource: "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_user_wallet}/*"
+      },
+      {
+        Sid: "AllowDaemonPutOwnCredentials", Effect: "Allow",
+        Principal: {AWS: "arn:aws:iam::\($acct):role/agentkeys-data-role"},
+        Action: ["s3:PutObject", "s3:DeleteObject"],
+        Resource: "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_user_wallet}/credentials/*"
       }
     ]
   }')"
 ```
+
+**Issue #85 — credentials-prefix write grant.** The fourth statement (`AllowDaemonPutOwnCredentials`) is what lets `agentkeys provision <service>` PUT the AES-256-GCM-sealed credential blob to `s3://$BUCKET/bots/<wallet>/credentials/<service>.enc`. Scope is intentionally tight: only the `credentials/` sub-prefix gets write — every other `bots/<wallet>/*` sub-prefix (inbox, sent, audit, …) stays read-only from the OIDC-assumed session. The plaintext never leaves the operator workstation: AES-256-GCM seal happens before PUT, KEK is derived client-side via the signer's `/dev/sign-message`. PrincipalTag scoping is the cloud-enforced floor; client-side encryption is the second line of defense in case the bucket-policy is misconfigured.
 
 **`bots/` is the per-actor data namespace** — sibling to SES's
 `inbound/`, and to future system prefixes like `audit/`, `dkim/`,

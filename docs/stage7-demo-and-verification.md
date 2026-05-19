@@ -1603,6 +1603,28 @@ URL / `AGENTKEYS_SESSION_ID`, drops any stale AWS creds in the shell
 via env if needed (`AGENTKEYS_BROKER_URL`, `AGENTKEYS_DATA_ROLE_ARN`,
 `AWS_REGION`, `CDP_URL`).
 
+> **Credential storage backend (issue #85).** By default `provision`
+> writes the freshly-minted API key to the legacy mock-server at
+> `http://localhost:8090/credential/store` — fine only if you're running
+> the mock-server on the same workstation (today's transition default).
+> To land the key in the OIDC-scoped S3 vault instead — same path the
+> SES routing Lambda already writes inbound mail through, no extra
+> infra to provision — set:
+>
+> ```bash
+> export AGENTKEYS_CREDENTIAL_BACKEND=s3
+> export AGENTKEYS_BUCKET="$BUCKET"            # same value as cloud-setup.md
+> export AGENTKEYS_SIGNER_URL=https://signer.litentry.org
+> export AGENTKEYS_OMNI_ACCOUNT=<64hex>        # from /v1/auth/.../status
+> ```
+>
+> The blob lands at
+> `s3://$BUCKET/bots/<wallet>/credentials/openrouter.enc`, AES-256-GCM
+> sealed under a per-(wallet, service) KEK derived via the signer's
+> `/dev/sign-message`. The mock-server stays in the picture for the
+> non-credential endpoints (`/session/*`, `/audit/*`, `/identity/*`)
+> until those get their own swap-in target.
+
 > **What "success" looks like vs scraper-DOM drift.** §5.3 demonstrates
 > the auto-provision **pipeline** — session JWT → OIDC JWT → STS →
 > env-var-injection. If openrouter's signup page DOM has drifted since
