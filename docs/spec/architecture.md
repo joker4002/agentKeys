@@ -1056,6 +1056,34 @@ V2 default mode is **sovereign**: operator's `current_master_wallet` signs chain
 
 The mode flips the chain submitter identity (Layer 2 per §6.1); Layer 1 (`actor_omni`) is the same across modes. Workers re-verify against the chain regardless of how the tx landed.
 
+### 16.4 K3 rotation flow
+
+K3 is the signer's per-epoch master secret (§14). The on-chain `K3EpochCounter.currentEpoch()` is a monotonic counter that signals "what's the current K3 version?"; the K3 secret itself is held privately inside the signer enclave and never appears on chain.
+
+**What rotates and what doesn't.** Rotation advances the on-chain epoch counter and notifies workers via `K3Rotated(newEpoch, timestamp)` events. Nothing else changes:
+
+| Item | Behaviour on K3 rotation |
+|---|---|
+| Contract addresses | Unchanged |
+| Operator omni, registered devices, scopes, recovery threshold | Unchanged |
+| Existing S3 blobs | Still decryptable via signer-retained K3_v[old] |
+| New cap-tokens minted post-rotation | Carry `k3_epoch: N+1` |
+| New credential/memory blob writes | KEK derived from K3_v[N+1] (stage 3+; current stage 1–2 deployments derive KEK from `AGENTKEYS_WORKER_KEK_HEX` per §22b.2 — rotation is forward-compatible but not yet driving worker re-key) |
+| Workers | Subscribe to `K3Rotated` SSE, swap to the new epoch for new writes within ~30s |
+
+**Operator action.**
+
+```bash
+# Quarterly hygiene OR TEE-compromise indicator
+bash scripts/heima-k3-rotate.sh
+```
+
+The script (idempotent, supports `--target-epoch N` for multi-step advance) wraps `K3EpochCounter.advanceEpoch()`. Only the address stored at the contract's `signerGovernance` field can call this — stage 2 ships with the deployer EOA as governance; stage 3 swaps in an M-of-N multisig (the contract's `setSignerGovernance(newGov)` makes this a one-tx migration when ready).
+
+Operators do NOT need to re-deploy contracts, re-enroll K11, re-register devices, or migrate S3 data when rotating. The full operational walkthrough is at [`docs/runbook-k3-rotation.md`](../runbook-k3-rotation.md).
+
+**Eager re-encryption.** On a confirmed TEE compromise, operators want existing K3_v[old]-encrypted blobs purged ASAP, not just on-next-read. The eager-re-encrypt tool (`scripts/heima-k3-reencrypt-eager.sh` — stage 3 follow-up tracked in §22b.5) scans all blobs for an operator, decrypts under K3_v[old] in the signer enclave, re-encrypts under K3_v[new]. Without it, rotation is lazy: blobs re-encrypt only on next worker write.
+
 ---
 
 ## 17. Storage layout — per-data-class buckets, per-actor prefixes
