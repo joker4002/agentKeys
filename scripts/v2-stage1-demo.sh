@@ -137,6 +137,21 @@ WEBAUTHN_MODE=0
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
 
+# Resolve agentkeys binary — prefer workspace-local builds (operator just
+# built / is iterating). Falls back to PATH (installed via
+# install-agentkeys-cli.sh). Defends against stale ~/.local/bin/agentkeys
+# missing the k11 subcommand. Step 14 + step 12's helper invoke this.
+if [ -x "$REPO_ROOT/target/release/agentkeys" ]; then
+  AGENTKEYS_BIN="$REPO_ROOT/target/release/agentkeys"
+elif [ -x "$REPO_ROOT/target/debug/agentkeys" ]; then
+  AGENTKEYS_BIN="$REPO_ROOT/target/debug/agentkeys"
+elif command -v agentkeys >/dev/null 2>&1; then
+  AGENTKEYS_BIN="$(command -v agentkeys)"
+else
+  AGENTKEYS_BIN=""  # step 1 (install) will build it; resolver re-checked at step 12/14.
+fi
+export AGENTKEYS_BIN
+
 # ─── Argument parsing ───────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -684,7 +699,7 @@ do_step_14() {
     info "operator_omni = 0x$operator_omni"
     # `agentkeys k11 enroll --webauthn` writes to ~/.agentkeys/k11/<omni>.json
     # itself with mode="webauthn" (k11_webauthn::persist_enrollment).
-    agentkeys k11 enroll --webauthn --operator-omni "0x$operator_omni" \
+    "$AGENTKEYS_BIN" k11 enroll --webauthn --operator-omni "0x$operator_omni" \
       || die "real WebAuthn enrollment failed — re-run without --webauthn for stub mode, or check browser pop-up + Touch ID"
     ok "real K11 enrollment written ($enrollment_file, mode=webauthn)"
   else

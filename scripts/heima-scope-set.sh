@@ -76,6 +76,20 @@ ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 
+# Resolve the agentkeys binary: prefer workspace-local builds (operator
+# just built / is iterating), fall back to PATH (installed via
+# install-agentkeys-cli.sh). Avoids confusion when ~/.local/bin holds
+# a stale binary missing the k11 subcommand.
+if [ -x "$REPO_ROOT/target/release/agentkeys" ]; then
+  AGENTKEYS_BIN="$REPO_ROOT/target/release/agentkeys"
+elif [ -x "$REPO_ROOT/target/debug/agentkeys" ]; then
+  AGENTKEYS_BIN="$REPO_ROOT/target/debug/agentkeys"
+elif command -v agentkeys >/dev/null 2>&1; then
+  AGENTKEYS_BIN="$(command -v agentkeys)"
+else
+  die "agentkeys binary not found (try: cargo build -p agentkeys-cli)"
+fi
+
 AGENTKEYS_CHAIN="${AGENTKEYS_CHAIN:-heima}"
 case "$AGENTKEYS_CHAIN" in
   heima|heima-paseo) ;;
@@ -151,7 +165,7 @@ if [ "$USE_WEBAUTHN" = "1" ]; then
     "$MAX_PER_CALL" "$MAX_PER_PERIOD" "$MAX_TOTAL" "$PERIOD_SECONDS" \
     "$AGENTKEYS_CHAIN" | xxd -p -c 65536 | tr -d '\n')
   log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
-  K11_BYTES=$(agentkeys k11 assert --webauthn \
+  K11_BYTES=$("$AGENTKEYS_BIN" k11 assert --webauthn \
     --operator-omni "0x$OPERATOR_OMNI" \
     --message-hex "$msg_hex" 2>/dev/null) \
     || die "agentkeys k11 assert --webauthn failed — run agentkeys k11 enroll --webauthn first?"

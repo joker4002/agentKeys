@@ -48,6 +48,17 @@ ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 
+# Resolve agentkeys binary (workspace-local first; avoids stale ~/.local/bin).
+if [ -x "$REPO_ROOT/target/release/agentkeys" ]; then
+  AGENTKEYS_BIN="$REPO_ROOT/target/release/agentkeys"
+elif [ -x "$REPO_ROOT/target/debug/agentkeys" ]; then
+  AGENTKEYS_BIN="$REPO_ROOT/target/debug/agentkeys"
+elif command -v agentkeys >/dev/null 2>&1; then
+  AGENTKEYS_BIN="$(command -v agentkeys)"
+else
+  die "agentkeys binary not found (try: cargo build -p agentkeys-cli)"
+fi
+
 AGENTKEYS_CHAIN="${AGENTKEYS_CHAIN:-heima}"
 PROFILE_JSON=$(agentkeys chain show "$AGENTKEYS_CHAIN")
 RPC_HTTP=$(echo "$PROFILE_JSON" | jq -r .rpc.http)
@@ -79,7 +90,7 @@ if [ "$USE_WEBAUTHN" = "1" ]; then
   msg_hex=$(printf 'agentkeys:scope-revoke:%s:%s:%s' \
     "$OPERATOR_OMNI" "$ACTOR_OMNI" "$AGENTKEYS_CHAIN" | xxd -p -c 65536 | tr -d '\n')
   log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
-  K11_STUB=$(agentkeys k11 assert --webauthn \
+  K11_STUB=$("$AGENTKEYS_BIN" k11 assert --webauthn \
     --operator-omni "0x$OPERATOR_OMNI" \
     --message-hex "$msg_hex" 2>/dev/null) \
     || die "agentkeys k11 assert --webauthn failed"
