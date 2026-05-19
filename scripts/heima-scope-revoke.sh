@@ -15,6 +15,7 @@ set -euo pipefail
 LABEL=""
 DRY_RUN=0
 SCOPE_CONTRACT=""
+USE_WEBAUTHN=0  # arch.md §22b.1 — pass --webauthn for real Touch ID ceremony.
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,6 +24,7 @@ while [ $# -gt 0 ]; do
     --scope-address)    SCOPE_CONTRACT="$2"; shift 2 ;;
     --scope-address=*)  SCOPE_CONTRACT="${1#*=}"; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
+    --webauthn)         USE_WEBAUTHN=1; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
     *) echo "unknown flag: $1 (try --help)" >&2; exit 1 ;;
@@ -73,7 +75,17 @@ MASTER_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
 MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
 OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
 
-K11_STUB="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
+if [ "$USE_WEBAUTHN" = "1" ]; then
+  msg_hex=$(printf 'agentkeys:scope-revoke:%s:%s:%s' \
+    "$OPERATOR_OMNI" "$ACTOR_OMNI" "$AGENTKEYS_CHAIN" | xxd -p -c 65536 | tr -d '\n')
+  log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
+  K11_STUB=$(agentkeys k11 assert --webauthn \
+    --operator-omni "0x$OPERATOR_OMNI" \
+    --message-hex "$msg_hex" 2>/dev/null) \
+    || die "agentkeys k11 assert --webauthn failed"
+else
+  K11_STUB="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
+fi
 
 log "Inputs"
 echo "    chain         = $AGENTKEYS_CHAIN" >&2

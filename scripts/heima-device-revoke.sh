@@ -21,6 +21,7 @@ DEVICE_KEY_HASH=""
 REVOKE_MASTER=0
 DRY_RUN=0
 REGISTRY=""
+USE_WEBAUTHN=0  # arch.md §22b.1 — pass --webauthn for real Touch ID K11.
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
     --registry-address)   REGISTRY="$2"; shift 2 ;;
     --registry-address=*) REGISTRY="${1#*=}"; shift ;;
     --dry-run)            DRY_RUN=1; shift ;;
+    --webauthn)           USE_WEBAUTHN=1; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
     *) echo "unknown flag: $1 (try --help)" >&2; exit 1 ;;
@@ -97,11 +99,22 @@ elif [ -n "$LABEL" ]; then
 fi
 case "$DEVICE_KEY_HASH" in 0x*) ;; *) DEVICE_KEY_HASH="0x$DEVICE_KEY_HASH" ;; esac
 
-# Stage-1 K11 stub (only needed for master revoke per contract).
-K11_STUB="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
-K11_ARG="$K11_STUB"
-if [ "$REVOKE_MASTER" = "0" ]; then
-  # Agent revoke — empty bytes accepted.
+# K11 assertion per arch.md §22b.1 — only required for master revoke.
+if [ "$REVOKE_MASTER" = "1" ]; then
+  if [ "$USE_WEBAUTHN" = "1" ]; then
+    msg_hex=$(printf 'agentkeys:device-revoke:%s:%s:%s' \
+      "$OPERATOR_OMNI" "$DEVICE_KEY_HASH" "$AGENTKEYS_CHAIN" \
+      | xxd -p -c 65536 | tr -d '\n')
+    log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
+    K11_ARG=$(agentkeys k11 assert --webauthn \
+      --operator-omni "0x$OPERATOR_OMNI" \
+      --message-hex "$msg_hex" 2>/dev/null) \
+      || die "agentkeys k11 assert --webauthn failed"
+  else
+    K11_ARG="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
+  fi
+else
+  # Agent revoke — empty bytes accepted (agents never hold K11).
   K11_ARG="0x"
 fi
 

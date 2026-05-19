@@ -30,6 +30,8 @@ MAX_TOTAL="0"
 PERIOD_SECONDS="0"
 DRY_RUN=0
 SCOPE_CONTRACT=""
+USE_WEBAUTHN=0  # 0 = stub bytes (CI-friendly); 1 = real Touch ID ceremony
+                # via `agentkeys k11 assert --webauthn` (arch.md §22b.1).
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,6 +51,7 @@ while [ $# -gt 0 ]; do
     --scope-address)    SCOPE_CONTRACT="$2"; shift 2 ;;
     --scope-address=*)  SCOPE_CONTRACT="${1#*=}"; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
+    --webauthn)         USE_WEBAUTHN=1; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
     *) echo "unknown flag: $1 (try --help)" >&2; exit 1 ;;
@@ -133,7 +136,31 @@ SERVICES_ARG+="]"
 # Stage-1 K11 assertion stub. Non-empty (contract requires
 # k11Assertion.length != 0) but not P-256-verified on-chain yet.
 # Format: ASCII "stage1-k11-stub:" || OPERATOR_OMNI as hex.
-K11_STUB="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
+# K11 assertion bytes — two modes per arch.md §22b.1:
+#   USE_WEBAUTHN=1 → derive a deterministic message hash binding to the
+#     exact (operator, agent, services, caps) tuple; call
+#     `agentkeys k11 assert --webauthn` which opens browser + Touch ID
+#     and returns the real WebAuthn assertion (authData||clientData||sig).
+#   USE_WEBAUTHN=0 → deterministic stub bytes for CI / non-attested envs.
+if [ "$USE_WEBAUTHN" = "1" ]; then
+  # Domain-separated message bound to this exact scope-set call. The
+  # signer's clientDataJSON.challenge will equal sha256(message) so the
+  # resulting assertion is cryptographically bound to these arguments.
+  msg_hex=$(printf 'agentkeys:scope-set:%s:%s:%s:%s:%s:%s:%s:%s:%s' \
+    "$OPERATOR_OMNI" "$ACTOR_OMNI" "$SERVICES_ARG" "$READ_ONLY" \
+    "$MAX_PER_CALL" "$MAX_PER_PERIOD" "$MAX_TOTAL" "$PERIOD_SECONDS" \
+    "$AGENTKEYS_CHAIN" | xxd -p -c 65536 | tr -d '\n')
+  log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
+  K11_BYTES=$(agentkeys k11 assert --webauthn \
+    --operator-omni "0x$OPERATOR_OMNI" \
+    --message-hex "$msg_hex" 2>/dev/null) \
+    || die "agentkeys k11 assert --webauthn failed — run agentkeys k11 enroll --webauthn first?"
+else
+  # Stage-1 stub. Non-empty bytes satisfy on-chain length!=0 gate.
+  K11_BYTES="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
+fi
+# Backwards-compat alias for the existing variable name used downstream.
+K11_STUB="$K11_BYTES"
 
 log "Inputs"
 echo "    AGENTKEYS_CHAIN  = $AGENTKEYS_CHAIN (chain_id $LIVE_CHAIN_ID)" >&2

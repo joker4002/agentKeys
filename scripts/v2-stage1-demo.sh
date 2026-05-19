@@ -49,6 +49,14 @@
 #   --skip-deploy         skip the chain bring-up (contract deploy)
 #   --confirm             pause for Enter before chain deploy
 #   --debug               enable `set -x` (very chatty)
+#   --webauthn            use REAL WebAuthn ceremony for K11 enroll (step 14)
+#                         and master-mutation K11 assertions (step 12 scope-set).
+#                         Opens the operator's default browser and prompts
+#                         Touch ID (macOS) / Windows Hello / platform passkey.
+#                         Without this flag, K11 uses deterministic stub bytes
+#                         that satisfy the on-chain `length != 0` gate but
+#                         are NOT cryptographically bound — CI-friendly,
+#                         see arch.md §22b.1 stage-1 simplifications.
 #   --help                this message
 #
 # Resumability:
@@ -120,6 +128,11 @@ SKIP_SMOKE=0
 SKIP_DEPLOY=0
 CONFIRM=0
 DEBUG=0
+# WEBAUTHN_MODE: 0 = stage-1 stub (CI-friendly, no Touch ID prompt — default).
+#                1 = real WebAuthn ceremony (opens browser + Touch ID prompt
+#                    on macOS via `agentkeys k11 enroll/assert --webauthn`).
+# Per arch.md §22b.1 stage-1 simplifications inventory.
+WEBAUTHN_MODE=0
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
@@ -145,6 +158,7 @@ while [ $# -gt 0 ]; do
     --skip-deploy)     SKIP_DEPLOY=1; shift ;;
     --confirm)         CONFIRM=1; shift ;;
     --debug)           DEBUG=1; shift ;;
+    --webauthn)        WEBAUTHN_MODE=1; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'
       exit 0 ;;
@@ -598,10 +612,11 @@ do_step_12() {
     info "skipping — no AgentKeysScope address yet"
     return 0
   fi
-  bash "$REPO_ROOT/scripts/heima-scope-set.sh" \
-    --agent "$label" \
-    --services "$services" \
-    --scope-address "$scope_addr" \
+  local scope_set_args=(--agent "$label" --services "$services" --scope-address "$scope_addr")
+  if [ "$WEBAUTHN_MODE" = "1" ]; then
+    scope_set_args+=(--webauthn)
+  fi
+  bash "$REPO_ROOT/scripts/heima-scope-set.sh" "${scope_set_args[@]}" \
     || die "heima-scope-set.sh failed"
   ok "scope set for agent '$label' (or already matched)"
 }
@@ -627,9 +642,22 @@ do_step_13() {
   ok "audit entry appended"
 }
 
-# ─── Step 14: K11 enrollment (stage-1 stub) ────────────────────────────────
+# ─── Step 14: K11 enrollment ───────────────────────────────────────────────
+# --webauthn → real ceremony: `agentkeys k11 enroll --webauthn` opens the
+#              browser, prompts Touch ID (macOS) / Windows Hello (Windows),
+#              persists real attested credential to ~/.agentkeys/k11/<omni>.json
+#              with mode="webauthn".
+# default    → CI-friendly stub: writes deterministic bytes that satisfy
+#              the on-chain `k11Assertion.length != 0` gate. Stub WARN
+#              fires on AGENTKEYS_CHAIN=heima per arch.md §22b.1.
 do_step_14() {
-  step "K11 enrollment (stage-1 stub — real WebAuthn lands in stage 2 / #90)"
+  local mode_label
+  if [ "$WEBAUTHN_MODE" = "1" ]; then
+    mode_label="real WebAuthn — Touch ID prompt"
+  else
+    mode_label="stage-1 stub — CI-friendly; pass --webauthn for real Touch ID"
+  fi
+  step "K11 enrollment ($mode_label)"
   local profile_uc registry_addr master_addr operator_omni
   profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
   registry_addr=$(eval "echo \${SIDECAR_REGISTRY_ADDRESS_${profile_uc}:-}")
@@ -642,13 +670,30 @@ do_step_14() {
   master_lc=$(printf '%s' "$master_addr" | tr '[:upper:]' '[:lower:]')
   operator_omni=$(printf 'agentkeysevm%s' "$master_lc" | shasum -a 256 | awk '{print $1}')
   local enrollment_file="$HOME/.agentkeys/k11/${operator_omni}.json"
-  if [ -f "$enrollment_file" ]; then
-    ok "K11 enrollment already exists at $enrollment_file (stage-1 stub)"
+
+  if [ "$WEBAUTHN_MODE" = "1" ]; then
+    # Real WebAuthn — re-enroll iff the stored credential isn't already
+    # webauthn-mode (so stub→webauthn upgrade is one re-run).
+    local current_mode=""
+    [ -f "$enrollment_file" ] && current_mode=$(jq -r '.mode // "missing"' "$enrollment_file" 2>/dev/null || echo "missing")
+    if [ "$current_mode" = "webauthn" ]; then
+      ok "K11 enrollment already real WebAuthn at $enrollment_file"
+      return 0
+    fi
+    info "running real WebAuthn ceremony — browser will open, Touch ID will prompt"
+    info "operator_omni = 0x$operator_omni"
+    # `agentkeys k11 enroll --webauthn` writes to ~/.agentkeys/k11/<omni>.json
+    # itself with mode="webauthn" (k11_webauthn::persist_enrollment).
+    agentkeys k11 enroll --webauthn --operator-omni "0x$operator_omni" \
+      || die "real WebAuthn enrollment failed — re-run without --webauthn for stub mode, or check browser pop-up + Touch ID"
+    ok "real K11 enrollment written ($enrollment_file, mode=webauthn)"
   else
+    if [ -f "$enrollment_file" ]; then
+      ok "K11 enrollment already exists at $enrollment_file"
+      return 0
+    fi
     info "writing stage-1 K11 stub enrollment for operator_omni=0x$operator_omni"
     mkdir -p "$(dirname "$enrollment_file")"
-    # cred_id = sha256("agentkeys-k11-stub-cred:0x$omni")
-    # cose    = sha256("agentkeys-k11-stub-cose:0x$omni")
     local cred_id cose ts
     cred_id=$(printf 'agentkeys-k11-stub-cred:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
     cose=$(printf 'agentkeys-k11-stub-cose:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
@@ -687,7 +732,8 @@ do_step_15() {
     printf "    bash scripts/heima-scope-set.sh       --agent demo-agent --services openrouter\n" >&2
     printf "    bash scripts/heima-credential-audit.sh --actor demo-agent --service openrouter --op store\n" >&2
     printf "    bash scripts/heima-scope-revoke.sh    --agent demo-agent      # teardown\n" >&2
-    printf "    bash scripts/heima-device-revoke.sh   --agent demo-agent      # recovery scaffold\n\n" >&2
+    printf "    bash scripts/heima-device-revoke.sh   --agent demo-agent      # recovery scaffold\n" >&2
+    printf "    (pass --webauthn to either for real Touch ID K11 assertion)\n\n" >&2
     printf "  Rust CLI subcommands wrapping the same flows arrive in stage 2 (#90).\n\n" >&2
   fi
   printf "  Re-run individual phases (idempotent):\n" >&2
