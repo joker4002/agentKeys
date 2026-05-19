@@ -9,6 +9,7 @@ interface ISidecarRegistry {
         bytes32 operatorOmni;
         bytes32 actorOmni;
         bytes32 k11CredId;
+        bytes32 k11RpIdHash;
         uint256 k11PubX;
         uint256 k11PubY;
         uint8 tier;
@@ -224,6 +225,7 @@ contract AgentKeysScope {
 
         bool ok = k11Verifier.verifyAssertion(
             expectedChallenge,
+            entry.k11RpIdHash,
             a.authenticatorData,
             a.clientDataJSON,
             a.challengeLocation,

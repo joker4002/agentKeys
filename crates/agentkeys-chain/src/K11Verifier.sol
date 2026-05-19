@@ -43,9 +43,24 @@ contract K11Verifier {
     /// @notice Length of base64url-encoded 32-byte challenge (no padding).
     uint256 internal constant CHALLENGE_B64_LEN = 43;
 
+    /// @notice authData flag bits (per WebAuthn spec).
+    uint8 internal constant FLAG_UP = 0x01; // User Present
+    uint8 internal constant FLAG_UV = 0x04; // User Verified
+
+    /// @notice Bytes 1..21 of a canonical webauthn.get clientDataJSON:
+    ///         `"type":"webauthn.get"` — used as a prefix-anchor for the
+    ///         on-chain type check. The opening `{` is byte 0; this string
+    ///         starts at byte 1. We compare byte-by-byte to reject
+    ///         `webauthn.create` assertions being replayed as `.get`.
+    bytes internal constant TYPE_FIELD_WEBAUTHN_GET =
+        bytes('"type":"webauthn.get"');
+
     error ChallengeMismatch();
     error MalformedAuthenticatorData();
     error MalformedClientDataJSON();
+    error RpIdHashMismatch();
+    error UserPresenceMissing();
+    error WrongClientDataType();
 
     constructor(address p256Addr) {
         p256 = P256Verifier(p256Addr);
@@ -63,6 +78,7 @@ contract K11Verifier {
     /// @param pubX,pubY          P-256 public key for the credential.
     function verifyAssertion(
         bytes32 expectedChallenge,
+        bytes32 expectedRpIdHash,
         bytes calldata authenticatorData,
         bytes calldata clientDataJSON,
         uint256 challengeLocation,
@@ -72,8 +88,34 @@ contract K11Verifier {
         uint256 pubY
     ) external view returns (bool) {
         if (authenticatorData.length < 37) revert MalformedAuthenticatorData();
+        // clientDataJSON must hold at least: `{"type":"webauthn.get","challenge":"<43>"`.
+        // That's 1 (opening `{`) + 21 (TYPE_FIELD_WEBAUTHN_GET) + 1 (`,`) +
+        // 14 (`"challenge":"`) + 43 (challenge) = 80 bytes minimum.
+        if (clientDataJSON.length < 80) revert MalformedClientDataJSON();
         if (challengeLocation + CHALLENGE_B64_LEN > clientDataJSON.length) {
             revert MalformedClientDataJSON();
+        }
+
+        // Codex H1 step A: authData[0:32] must equal expectedRpIdHash.
+        // Without this, an assertion signed under a different RP (e.g.
+        // attacker-controlled `evil.localhost`) could pass as `localhost`.
+        for (uint256 i = 0; i < 32; ++i) {
+            if (authenticatorData[i] != expectedRpIdHash[i]) revert RpIdHashMismatch();
+        }
+
+        // Codex H1 step B: authData[32] flags must include UP (user-present)
+        // and UV (user-verified). Otherwise a stolen K11 device without
+        // biometric/PIN proof could mint assertions silently.
+        uint8 flags = uint8(authenticatorData[32]);
+        if ((flags & (FLAG_UP | FLAG_UV)) != (FLAG_UP | FLAG_UV)) revert UserPresenceMissing();
+
+        // Codex H1 step C: clientDataJSON must start with `{"type":"webauthn.get"`.
+        // Rejects `webauthn.create` (enrollment) assertions being replayed
+        // as `.get` (authentication). Byte 0 is `{`; the type field begins
+        // at byte 1.
+        bytes memory expectedType = TYPE_FIELD_WEBAUTHN_GET;
+        for (uint256 i = 0; i < expectedType.length; ++i) {
+            if (clientDataJSON[i + 1] != expectedType[i]) revert WrongClientDataType();
         }
 
         // Step 1: encode expectedChallenge to base64url (43 chars, no padding).

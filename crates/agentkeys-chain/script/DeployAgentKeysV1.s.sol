@@ -34,7 +34,8 @@ contract DeployAgentKeysV1 is Script {
         SidecarRegistry registry = new SidecarRegistry(address(k11));
         AgentKeysScope scope = new AgentKeysScope(address(registry), address(k11));
         K3EpochCounter epoch = new K3EpochCounter(signerGov);
-        CredentialAudit audit = new CredentialAudit();
+        // Audit appendRoot gates on operator-master via the registry (codex M1).
+        CredentialAudit audit = new CredentialAudit(address(registry));
 
         vm.stopBroadcast();
 

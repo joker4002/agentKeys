@@ -5,71 +5,111 @@ import {Test, console} from "forge-std/Test.sol";
 import {P256Verifier} from "../src/P256Verifier.sol";
 import {K11Verifier} from "../src/K11Verifier.sol";
 
-/// @title K11VerifierTest — smoke tests for challenge-binding logic.
-/// @dev   Full end-to-end (real WebAuthn assertion bytes) is tested via the
-///        Rust integration tests in `crates/agentkeys-cli/tests/`, where we can
-///        actually run navigator.credentials.get() against a software P-256
-///        authenticator and feed the result into the contract.
-///
-///        Here we test:
-///          - base64url encoding is correct (using a known fixture).
-///          - challenge mismatch reverts as expected.
-///          - malformed inputs revert with the right errors.
+/// @title K11VerifierTest — smoke tests for challenge-binding + WebAuthn
+///        envelope checks (rpIdHash, UP|UV flags, type prefix).
 contract K11VerifierTest is Test {
     K11Verifier verifier;
+
+    /// Test fixtures used across the suite. authData has the right layout so
+    /// each test only changes the bit it's exercising.
+    bytes32 constant RP_ID_HASH = keccak256("localhost");
+    uint8 constant FLAGS_OK = 0x05; // UP=0x01 | UV=0x04
 
     function setUp() public {
         P256Verifier p256 = new P256Verifier();
         verifier = new K11Verifier(address(p256));
     }
 
+    /// Build a 37-byte authData with the right rpIdHash + flags + zero counter.
+    function _authData(bytes32 rpIdHash, uint8 flags) internal pure returns (bytes memory) {
+        bytes memory ad = new bytes(37);
+        for (uint256 i = 0; i < 32; ++i) ad[i] = rpIdHash[i];
+        ad[32] = bytes1(flags);
+        // bytes 33..37 = sign count (zero)
+        return ad;
+    }
+
     function test_challenge_mismatch_reverts() public {
         bytes32 expectedChallenge = keccak256("op:1");
-        bytes memory authData = new bytes(37);
-        // clientDataJSON shape mirroring a real WebAuthn payload, but with a
-        // WRONG challenge embedded.
-        // base64url("zzz...") ≠ base64url(expectedChallenge).
+        bytes memory authData = _authData(RP_ID_HASH, FLAGS_OK);
         string memory wrongJSON =
             '{"type":"webauthn.get","challenge":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","origin":"https://localhost"}';
-        uint256 challengeLocation = 36; // byte offset of the value's first char
+        uint256 challengeLocation = 36;
 
         vm.expectRevert(K11Verifier.ChallengeMismatch.selector);
         verifier.verifyAssertion(
-            expectedChallenge,
-            authData,
-            bytes(wrongJSON),
-            challengeLocation,
-            1,
-            1,
-            1,
-            1
+            expectedChallenge, RP_ID_HASH, authData, bytes(wrongJSON),
+            challengeLocation, 1, 1, 1, 1
         );
     }
 
     function test_short_authData_reverts() public {
         bytes32 expectedChallenge = keccak256("op:1");
-        bytes memory shortAuthData = new bytes(36); // < 37 = invalid
-        string memory json = '{"type":"webauthn.get","challenge":"aaa"}';
+        bytes memory shortAuthData = new bytes(36);
+        string memory json =
+            '{"type":"webauthn.get","challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","origin":"https://localhost"}';
         vm.expectRevert(K11Verifier.MalformedAuthenticatorData.selector);
         verifier.verifyAssertion(
-            expectedChallenge, shortAuthData, bytes(json), 36, 1, 1, 1, 1
+            expectedChallenge, RP_ID_HASH, shortAuthData, bytes(json), 36, 1, 1, 1, 1
         );
     }
 
     function test_clientDataJSON_too_short_reverts() public {
         bytes32 expectedChallenge = keccak256("op:1");
-        bytes memory authData = new bytes(37);
-        // 36 bytes total - challengeLocation 36 + 43 > 36 - revert
-        string memory tooShort = "012345678901234567890123456789012345";
+        bytes memory authData = _authData(RP_ID_HASH, FLAGS_OK);
+        string memory tooShort = "0123456789";
         vm.expectRevert(K11Verifier.MalformedClientDataJSON.selector);
         verifier.verifyAssertion(
-            expectedChallenge, authData, bytes(tooShort), 0, 1, 1, 1, 1
+            expectedChallenge, RP_ID_HASH, authData, bytes(tooShort), 0, 1, 1, 1, 1
+        );
+    }
+
+    function test_rpIdHash_mismatch_reverts() public {
+        bytes32 expectedChallenge = bytes32(0);
+        // authData has rpIdHash = sha256("evil.localhost") (wrong)
+        bytes memory authData = _authData(keccak256("evil.localhost"), FLAGS_OK);
+        string memory goodJSON =
+            '{"type":"webauthn.get","challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","origin":"https://localhost"}';
+        vm.expectRevert(K11Verifier.RpIdHashMismatch.selector);
+        verifier.verifyAssertion(
+            expectedChallenge, RP_ID_HASH, authData, bytes(goodJSON), 36, 1, 1, 1, 1
+        );
+    }
+
+    function test_missing_user_presence_reverts() public {
+        bytes32 expectedChallenge = bytes32(0);
+        // authData has rpIdHash OK but flags=0 (no UP, no UV)
+        bytes memory authData = _authData(RP_ID_HASH, 0x00);
+        string memory goodJSON =
+            '{"type":"webauthn.get","challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","origin":"https://localhost"}';
+        vm.expectRevert(K11Verifier.UserPresenceMissing.selector);
+        verifier.verifyAssertion(
+            expectedChallenge, RP_ID_HASH, authData, bytes(goodJSON), 36, 1, 1, 1, 1
+        );
+
+        // UP only (no UV) still reverts.
+        authData = _authData(RP_ID_HASH, 0x01);
+        vm.expectRevert(K11Verifier.UserPresenceMissing.selector);
+        verifier.verifyAssertion(
+            expectedChallenge, RP_ID_HASH, authData, bytes(goodJSON), 36, 1, 1, 1, 1
+        );
+    }
+
+    function test_wrong_clientData_type_reverts() public {
+        bytes32 expectedChallenge = bytes32(0);
+        bytes memory authData = _authData(RP_ID_HASH, FLAGS_OK);
+        // type = webauthn.create (enrollment) → should be rejected when used
+        // for assertion verification (replay-across-mode attack).
+        string memory createJSON =
+            '{"type":"webauthn.create","challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","origin":"https://localhost"}';
+        vm.expectRevert(K11Verifier.WrongClientDataType.selector);
+        verifier.verifyAssertion(
+            expectedChallenge, RP_ID_HASH, authData, bytes(createJSON), 39, 1, 1, 1, 1
         );
     }
 
     function test_readSignCount() public view {
-        bytes memory authData = new bytes(37);
-        // 33..37 are big-endian uint32. Set counter = 0x12345678.
+        bytes memory authData = _authData(RP_ID_HASH, FLAGS_OK);
         authData[33] = 0x12;
         authData[34] = 0x34;
         authData[35] = 0x56;
@@ -80,30 +120,22 @@ contract K11VerifierTest is Test {
 
     function test_readSignCount_zero() public view {
         bytes memory authData = new bytes(37);
-        // Default-zero authData → counter 0.
         uint32 count = verifier.readSignCount(authData);
         assertEq(count, 0);
     }
 
     function test_base64_encoding_of_zero_challenge() public {
-        // bytes32(0) = 0x000...000 (32 bytes of 0)
-        // base64url encoding: 32 bytes of 0 → 43 chars of 'A'
-        // Verify by constructing a valid clientDataJSON with 43 'A's at the
-        // challenge location and checking it does NOT revert with
-        // ChallengeMismatch (it should revert on P-256 verify instead since
-        // r/s/pubkey are bogus).
+        // All-zero challenge → 43 'A's in base64url. All envelope checks
+        // pass; P-256 verify returns false on bogus r/s/pubkey.
         bytes32 expectedChallenge = bytes32(0);
-        bytes memory authData = new bytes(37);
-        // 43 A's = base64url(32 zero bytes)
+        bytes memory authData = _authData(RP_ID_HASH, FLAGS_OK);
         string memory goodJSON =
             '{"type":"webauthn.get","challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","origin":"https://localhost"}';
         uint256 challengeLocation = 36;
-
-        // Should NOT revert with ChallengeMismatch — encoding matches.
-        // P-256 verify will return false on bogus inputs but won't revert.
         bool ok = verifier.verifyAssertion(
-            expectedChallenge, authData, bytes(goodJSON), challengeLocation, 1, 1, 1, 1
+            expectedChallenge, RP_ID_HASH, authData, bytes(goodJSON),
+            challengeLocation, 1, 1, 1, 1
         );
-        assertFalse(ok); // bogus sig
+        assertFalse(ok);
     }
 }

@@ -110,6 +110,13 @@ K11_PUB_Y="0x${COSE_NOPREFIX:66:64}"
 CRED_B64URL=$(jq -r .credential_id_b64url "$K11_FILE")
 K11_CRED_ID=$(printf '%s' "$CRED_B64URL" | shasum -a 256 | awk '{print "0x"$1}')
 
+# Codex H1: contract enforces authData[0:32] == sha256(rp_id). Bind the
+# stored value to the rp_id this credential was actually enrolled under
+# so cross-RP replays are impossible.
+RP_ID=$(jq -r .rp_id "$K11_FILE")
+[ -n "$RP_ID" ] && [ "$RP_ID" != "null" ] || RP_ID="localhost"
+K11_RP_ID_HASH=$(printf '%s' "$RP_ID" | shasum -a 256 | awk '{print "0x"$1}')
+
 log "Inputs"
 echo "    chain         = $AGENTKEYS_CHAIN (chain_id $LIVE_CHAIN_ID)" >&2
 echo "    registry      = $REGISTRY" >&2
@@ -140,8 +147,8 @@ ok "first master not yet registered → proceeding"
 
 CAST_ARGS=(
   send "$REGISTRY"
-  "registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8)"
-  "$DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" "$K11_CRED_ID" \
+  "registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8)"
+  "$DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" "$K11_CRED_ID" "$K11_RP_ID_HASH" \
   "$K11_PUB_X" "$K11_PUB_Y" "0x00" "$ROLES"
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" --private-key "$MASTER_KEY"
 )

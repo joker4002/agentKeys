@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
 
+/// @notice Minimal SidecarRegistry surface CredentialAudit needs to gate
+///         tier-A `appendRoot` against the operator's master wallet.
+interface ISidecarRegistryForAudit {
+    function operatorMasterWallet(bytes32 operatorOmni) external view returns (address);
+}
+
 /// @title CredentialAudit — append-only audit log for credential CRUD
 /// @notice Per arch.md §15.3 tier C (sovereign default), each credential
 ///         CRUD operation lands on chain as an append. Block-explorer
@@ -18,6 +24,18 @@ contract CredentialAudit {
     uint8 public constant OP_STORE = 0;
     uint8 public constant OP_READ = 1;
     uint8 public constant OP_TEARDOWN = 2;
+
+    /// @notice SidecarRegistry — used to gate `appendRoot` so only the
+    ///         operator's master wallet can commit a Merkle root for
+    ///         that operator (codex review finding M1: prevent any
+    ///         account from polluting an operator's root list).
+    ISidecarRegistryForAudit public immutable registry;
+
+    error NotOperatorMaster(address caller, address expected);
+
+    constructor(address registryAddr) {
+        registry = ISidecarRegistryForAudit(registryAddr);
+    }
 
     struct AuditEntry {
         bytes32 actorOmni; // who did it (the agent, not the operator)
@@ -108,6 +126,13 @@ contract CredentialAudit {
     function appendRoot(bytes32 operatorOmni, bytes32 merkleRoot, uint64 batchEntryCount)
         external
     {
+        // Codex review M1: prevent any caller from appending roots for an
+        // arbitrary operator. Only the operator's master wallet (per the
+        // SidecarRegistry's first-call-wins bootstrap) can commit roots.
+        address master = registry.operatorMasterWallet(operatorOmni);
+        if (master == address(0) || msg.sender != master) {
+            revert NotOperatorMaster(msg.sender, master);
+        }
         AuditRoot memory r = AuditRoot({
             merkleRoot: merkleRoot,
             entryCount: batchEntryCount,
@@ -133,8 +158,13 @@ contract CredentialAudit {
     /// @notice Verify a single audit event is included in a previously
     ///         committed Merkle root. `leaf` is the application-level hash
     ///         of the audit event (e.g. keccak256(abi.encode(actor, service,
-    ///         opType, payloadHash, timestamp))). `proof` is a standard
-    ///         sorted-pairs Merkle proof.
+    ///         opType, payloadHash, timestamp))). `proof` is a sorted-pairs
+    ///         Merkle proof.
+    ///
+    /// @dev    Domain-separated hashing (codex M2): leaves are prefixed with
+    ///         0x00 and internal nodes with 0x01 before keccak256, so an
+    ///         internal node digest cannot impersonate a leaf at a shorter
+    ///         depth. Workers MUST mirror this scheme when producing proofs.
     function verifyEntryInRoot(
         bytes32 operatorOmni,
         uint256 rootIndex,
@@ -143,13 +173,14 @@ contract CredentialAudit {
     ) external view returns (bool) {
         if (rootIndex >= roots[operatorOmni].length) return false;
         bytes32 root = roots[operatorOmni][rootIndex].merkleRoot;
-        bytes32 computed = leaf;
+        // Domain-prefix the leaf.
+        bytes32 computed = keccak256(abi.encodePacked(bytes1(0x00), leaf));
         for (uint256 i = 0; i < proof.length; ++i) {
             bytes32 sibling = proof[i];
             if (computed < sibling) {
-                computed = keccak256(abi.encodePacked(computed, sibling));
+                computed = keccak256(abi.encodePacked(bytes1(0x01), computed, sibling));
             } else {
-                computed = keccak256(abi.encodePacked(sibling, computed));
+                computed = keccak256(abi.encodePacked(bytes1(0x01), sibling, computed));
             }
         }
         return computed == root;

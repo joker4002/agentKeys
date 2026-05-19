@@ -434,10 +434,17 @@ fi
 if should_run_step 6; then
   step "Register companion as 2nd master (heima-device-add.sh)"
   if [ "$USE_WEBAUTHN" = "1" ]; then
-    if ! bash "$REPO_ROOT/harness/scripts/heima-device-add.sh" \
-         --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -5 >&2; then
-      warn "device-add failed (already-registered re-runs return non-zero — check log)"
-    fi
+    # Codex H2: fail-fast. Silent device-add failure breaks the
+    # invariant that step 9 has 2 active masters available for quorum.
+    bash "$REPO_ROOT/harness/scripts/heima-device-add.sh" \
+      --companion-url "http://127.0.0.1:$COMPANION_PORT" 2>&1 | tail -5 >&2 \
+      || die "device-add failed — chain doesn't have a 2nd master, refusing to advance"
+    # Verify companion is now active on chain.
+    COMP_HASH_NOW=$(curl -sS "http://127.0.0.1:$COMPANION_PORT/v1/companion/whoami" 2>/dev/null | jq -r .device_key_hash)
+    IS_ACTIVE=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$COMP_HASH_NOW" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "false")
+    [ "$IS_ACTIVE" = "true" ] \
+      || die "post-step-6 companion isActive($COMP_HASH_NOW) = $IS_ACTIVE (expected true)"
+    ok "on-chain companion isActive confirmed = true"
   else
     skip "stub mode — would call heima-device-add.sh (real K11 ceremony required)"
   fi
@@ -447,9 +454,16 @@ fi
 if should_run_step 7; then
   step "Set recoveryThreshold = 2 on $AGENTKEYS_CHAIN"
   if [ "$USE_WEBAUTHN" = "1" ]; then
-    if ! bash "$REPO_ROOT/harness/scripts/heima-set-recovery-threshold.sh" --threshold 2 2>&1 | tail -5 >&2; then
-      warn "set-threshold failed (re-runs are idempotent)"
-    fi
+    # Codex H2: must fail-fast. A silently-failed threshold-set leaves the
+    # chain at threshold=1 while later steps falsely claim 2-of-2 quorum.
+    bash "$REPO_ROOT/harness/scripts/heima-set-recovery-threshold.sh" --threshold 2 2>&1 | tail -5 >&2 \
+      || die "set-recovery-threshold failed — chain may still be at threshold=1, refusing to advance"
+    # Verify on chain. If the operator was already at threshold=2, the
+    # script skip'd (rc=0) and this assertion confirms the state matches.
+    POST=$(cast call "$REGISTRY" "recoveryThreshold(bytes32)(uint8)" "0x$OPERATOR_OMNI" --rpc-url "$RPC_HTTP" 2>/dev/null || echo 0)
+    [ "$POST" = "2" ] \
+      || die "post-step-7 recoveryThreshold = $POST (expected 2). Refusing to advance to M-of-N revoke step."
+    ok "on-chain recoveryThreshold confirmed = 2"
   else
     skip "stub mode — would call heima-set-recovery-threshold.sh --threshold 2"
   fi

@@ -36,6 +36,7 @@ contract SidecarRegistry {
         bytes32 operatorOmni;
         bytes32 actorOmni;
         bytes32 k11CredId; // WebAuthn cred id (indexer hint; 0 for agents)
+        bytes32 k11RpIdHash; // sha256(rpId) — bound at register time, checked on every K11 verify (codex H1)
         uint256 k11PubX; // P-256 X for on-chain verify (0 for agents)
         uint256 k11PubY; // P-256 Y for on-chain verify (0 for agents)
         uint8 tier;
@@ -105,6 +106,7 @@ contract SidecarRegistry {
         bytes32 operatorOmni,
         bytes32 actorOmni,
         bytes32 k11CredId,
+        bytes32 k11RpIdHash,
         uint256 k11PubX,
         uint256 k11PubY,
         bytes calldata attestation,
@@ -126,6 +128,7 @@ contract SidecarRegistry {
             operatorOmni: operatorOmni,
             actorOmni: actorOmni,
             k11CredId: k11CredId,
+            k11RpIdHash: k11RpIdHash,
             k11PubX: k11PubX,
             k11PubY: k11PubY,
             tier: TIER_MASTER,
@@ -147,6 +150,7 @@ contract SidecarRegistry {
         bytes32 operatorOmni,
         bytes32 newActorOmni,
         bytes32 newK11CredId,
+        bytes32 newK11RpIdHash,
         uint256 newK11PubX,
         uint256 newK11PubY,
         bytes calldata attestation,
@@ -178,6 +182,7 @@ contract SidecarRegistry {
             operatorOmni: operatorOmni,
             actorOmni: newActorOmni,
             k11CredId: newK11CredId,
+            k11RpIdHash: newK11RpIdHash,
             k11PubX: newK11PubX,
             k11PubY: newK11PubY,
             tier: TIER_MASTER,
@@ -214,6 +219,7 @@ contract SidecarRegistry {
             operatorOmni: operatorOmni,
             actorOmni: actorOmni,
             k11CredId: bytes32(0),
+            k11RpIdHash: bytes32(0),
             k11PubX: 0,
             k11PubY: 0,
             tier: TIER_AGENT,
@@ -248,6 +254,13 @@ contract SidecarRegistry {
     /// @notice Revoke a master device. Requires M-of-N K11 assertions where M =
     ///         recoveryThreshold[operator]. Each assertion must come from a
     ///         distinct registered MASTER device with the RECOVERY role.
+    ///
+    /// @dev    Refuses to revoke if doing so would leave fewer than 1
+    ///         active master with the RECOVERY role for the operator —
+    ///         that would permanently strand the operator (no surviving
+    ///         master means no future master mutations are possible).
+    ///         Same applies to keeping enough recovery-capable masters
+    ///         to satisfy the current threshold.
     function revokeMasterDevice(
         bytes32 targetDeviceKeyHash,
         K11Assertion[] calldata recoveryAssertions
@@ -265,6 +278,15 @@ contract SidecarRegistry {
         if (threshold == 0) threshold = 1;
         if (recoveryAssertions.length < threshold) {
             revert InsufficientQuorum(uint8(recoveryAssertions.length), threshold);
+        }
+
+        // Post-revoke must leave at least max(1, threshold) recovery-capable
+        // masters — never strand the operator. Codex review finding C1.
+        uint8 activeRecovery = _activeRecoveryMasterCount(operatorOmni);
+        uint8 remainingAfter = activeRecovery - 1;
+        uint8 minRequired = threshold > 1 ? threshold : 1;
+        if (remainingAfter < minRequired) {
+            revert InsufficientQuorum(remainingAfter, minRequired);
         }
 
         bytes32 expectedChallenge = keccak256(
@@ -291,6 +313,11 @@ contract SidecarRegistry {
 
     /// @notice Update the per-operator recovery threshold. Master-only,
     ///         K11-gated (single sig from any master with RECOVERY role).
+    ///
+    /// @dev    Cannot set threshold higher than the current count of
+    ///         active masters with the RECOVERY role — that would create
+    ///         an unsatisfiable quorum and permanently freeze future
+    ///         master mutations. Codex review finding C2.
     function setRecoveryThreshold(
         bytes32 operatorOmni,
         uint8 newThreshold,
@@ -300,6 +327,8 @@ contract SidecarRegistry {
         if (master == address(0)) revert OperatorNotRegistered(operatorOmni);
         if (msg.sender != master) revert NotAuthorized(msg.sender, master);
         if (newThreshold == 0) revert InvalidRecoveryThreshold();
+        uint8 activeRecovery = _activeRecoveryMasterCount(operatorOmni);
+        if (newThreshold > activeRecovery) revert InvalidRecoveryThreshold();
 
         bytes32 expectedChallenge = keccak256(
             abi.encode(
@@ -331,6 +360,37 @@ contract SidecarRegistry {
     }
 
     // ─── K11 verification helpers ────────────────────────────────────────
+    /// @dev Count active master devices with the RECOVERY role for an
+    ///      operator. Used by revokeMasterDevice + setRecoveryThreshold to
+    ///      enforce the "never strand the operator" invariant. O(N) over
+    ///      the operator's device list; N is small (operators run a handful
+    ///      of master devices typically).
+    function _activeRecoveryMasterCount(bytes32 operatorOmni) internal view returns (uint8) {
+        bytes32[] storage list = operatorDevices[operatorOmni];
+        uint256 count = 0;
+        for (uint256 i = 0; i < list.length; ++i) {
+            DeviceEntry storage e = devices[list[i]];
+            if (
+                e.registeredAt != 0
+                    && !e.revoked
+                    && e.tier == TIER_MASTER
+                    && (e.roles & ROLE_RECOVERY) != 0
+            ) {
+                unchecked { count += 1; }
+            }
+        }
+        // Saturate at u8 max — operators with > 255 active masters are not a
+        // real shape (UX collapses long before).
+        return count > 255 ? 255 : uint8(count);
+    }
+
+    /// @notice Public view for off-chain tooling — operators inspecting
+    ///         "how many active recovery-capable masters do I have right
+    ///         now?" before raising the recovery threshold.
+    function activeRecoveryMasterCount(bytes32 operatorOmni) external view returns (uint8) {
+        return _activeRecoveryMasterCount(operatorOmni);
+    }
+
     /// @dev Verify single K11 assertion + bump per-operator nonce + sign-count.
     function _verifyAndConsumeK11(
         bytes32 expectedChallenge,
@@ -369,6 +429,7 @@ contract SidecarRegistry {
 
         bool ok = k11Verifier.verifyAssertion(
             expectedChallenge,
+            entry.k11RpIdHash,
             a.authenticatorData,
             a.clientDataJSON,
             a.challengeLocation,

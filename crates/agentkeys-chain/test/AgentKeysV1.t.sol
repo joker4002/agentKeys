@@ -36,6 +36,7 @@ contract AgentKeysV1Test is Test {
     bytes32 deviceKeyHash2ndMaster = keccak256("D_pub_master2");
 
     bytes32 k11CredId = keccak256("k11-cred-master");
+    bytes32 k11RpIdHash = keccak256("localhost"); // codex H1: bound at register time
 
     // Stub pubkey coords. Bogus values — the contracts only check liveness
     // semantics in this test file; signature verification with real P-256
@@ -52,7 +53,7 @@ contract AgentKeysV1Test is Test {
         registry = new SidecarRegistry(address(k11));
         scope = new AgentKeysScope(address(registry), address(k11));
         epoch = new K3EpochCounter(address(this));
-        audit = new CredentialAudit();
+        audit = new CredentialAudit(address(registry));
     }
 
     // ─── SidecarRegistry: first-master bootstrap ─────────────────────────
@@ -66,6 +67,7 @@ contract AgentKeysV1Test is Test {
             operatorOmni,
             actorOmniMaster,
             k11CredId,
+            k11RpIdHash,
             k11PubX,
             k11PubY,
             hex"cafe",
@@ -84,7 +86,7 @@ contract AgentKeysV1Test is Test {
     function test_RegisterFirstMaster_RejectsDuplicateBootstrap() public {
         vm.prank(master);
         registry.registerFirstMasterDevice(
-            deviceKeyHashMaster, operatorOmni, actorOmniMaster, k11CredId, k11PubX, k11PubY, "", 7
+            deviceKeyHashMaster, operatorOmni, actorOmniMaster, k11CredId, k11RpIdHash, k11PubX, k11PubY, "", 7
         );
         // Second bootstrap with a different device hash → rejected because
         // operatorMasterWallet is now set.
@@ -99,6 +101,7 @@ contract AgentKeysV1Test is Test {
             operatorOmni,
             actorOmniMaster,
             k11CredId,
+            k11RpIdHash,
             k11PubX,
             k11PubY,
             "",
@@ -119,6 +122,7 @@ contract AgentKeysV1Test is Test {
             operatorOmni,
             actorOmniMaster,
             k11CredId,
+            k11RpIdHash,
             k11PubX,
             k11PubY,
             hex"cafe",
@@ -141,6 +145,7 @@ contract AgentKeysV1Test is Test {
             operatorOmni,
             actorOmniMaster,
             k11CredId,
+            k11RpIdHash,
             k11PubX,
             k11PubY,
             hex"cafe",
@@ -280,34 +285,69 @@ contract AgentKeysV1Test is Test {
 
     // ─── CredentialAudit tier-A Merkle root path (#90 follow-up) ────────
     function test_CredentialAudit_AppendRoot_AndVerifyMembership() public {
-        // Build a 4-leaf Merkle tree of audit events.
-        bytes32 leaf0 = keccak256("audit-event-0");
-        bytes32 leaf1 = keccak256("audit-event-1");
-        bytes32 leaf2 = keccak256("audit-event-2");
-        bytes32 leaf3 = keccak256("audit-event-3");
+        _registerFirstMaster(); // operatorMasterWallet must be set for appendRoot auth (codex M1).
+
+        // Build a 4-leaf Merkle tree of audit events with domain separation
+        // (codex M2): 0x00 prefix on leaves, 0x01 on internal nodes.
+        bytes32 raw0 = keccak256("audit-event-0");
+        bytes32 raw1 = keccak256("audit-event-1");
+        bytes32 raw2 = keccak256("audit-event-2");
+        bytes32 raw3 = keccak256("audit-event-3");
+        bytes32 leaf0 = _leafPrefix(raw0);
+        bytes32 leaf1 = _leafPrefix(raw1);
+        bytes32 leaf2 = _leafPrefix(raw2);
+        bytes32 leaf3 = _leafPrefix(raw3);
         bytes32 h01 = _hashPair(leaf0, leaf1);
         bytes32 h23 = _hashPair(leaf2, leaf3);
         bytes32 root = _hashPair(h01, h23);
 
+        vm.prank(master);
         audit.appendRoot(operatorOmni, root, 4);
         assertEq(audit.rootCount(operatorOmni), 1);
 
         // Verify leaf2 is in the root via proof [leaf3, h01].
+        // Note: pass the RAW leaf to verifyEntryInRoot — the contract
+        // applies the prefix internally.
         bytes32[] memory proof = new bytes32[](2);
         proof[0] = leaf3;
         proof[1] = h01;
-        assertTrue(audit.verifyEntryInRoot(operatorOmni, 0, proof, leaf2));
+        assertTrue(audit.verifyEntryInRoot(operatorOmni, 0, proof, raw2));
 
         // Reject a tampered leaf.
         assertFalse(audit.verifyEntryInRoot(operatorOmni, 0, proof, keccak256("nope")));
 
         // Reject out-of-range root index.
         bytes32[] memory emptyProof = new bytes32[](0);
-        assertFalse(audit.verifyEntryInRoot(operatorOmni, 99, emptyProof, leaf0));
+        assertFalse(audit.verifyEntryInRoot(operatorOmni, 99, emptyProof, raw0));
+
+        // Attacker tries to pass an internal-node digest as a leaf — the
+        // domain prefix makes it impossible. Codex M2 fix.
+        bytes32[] memory shortProof = new bytes32[](1);
+        shortProof[0] = h23;
+        // Try: claim h01 (internal node) is a leaf. verifyEntryInRoot
+        // prefixes it with 0x00 → keccak(0x00 || h01) ≠ h01.
+        assertFalse(audit.verifyEntryInRoot(operatorOmni, 0, shortProof, h01));
+    }
+
+    function test_CredentialAudit_AppendRoot_RejectsNonMaster() public {
+        _registerFirstMaster();
+        bytes32 root = keccak256("dummy");
+        vm.prank(attacker);
+        vm.expectRevert(
+            abi.encodeWithSelector(CredentialAudit.NotOperatorMaster.selector, attacker, master)
+        );
+        audit.appendRoot(operatorOmni, root, 1);
     }
 
     function _hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
-        return a < b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
+        // Internal-node prefix per codex M2.
+        return a < b
+            ? keccak256(abi.encodePacked(bytes1(0x01), a, b))
+            : keccak256(abi.encodePacked(bytes1(0x01), b, a));
+    }
+
+    function _leafPrefix(bytes32 raw) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(bytes1(0x00), raw));
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────
@@ -320,6 +360,7 @@ contract AgentKeysV1Test is Test {
             operatorOmni,
             actorOmniMaster,
             k11CredId,
+            k11RpIdHash,
             k11PubX,
             k11PubY,
             "",

@@ -154,10 +154,16 @@ R_HEX=$(echo "$ASSERTION_JSON" | jq -r .r_hex)
 S_HEX=$(echo "$ASSERTION_JSON" | jq -r .s_hex)
 TUPLE="($PRIMARY_DEVICE_KEY_HASH,$AUTH_DATA,$CDJ_HEX,$CHALL_LOC,$R_HEX,$S_HEX)"
 
+# Codex H1: rpIdHash for the synthetic spare. The spare never signs (it
+# only gets registered, then revoked), so the stored value is never
+# checked. Use a sentinel hash bound to the synthetic identity for
+# audit trail clarity.
+SPARE_RP_ID_HASH=$(cast keccak "$SPARE_DEVICE_KEY_HASH")
+
 log "Submitting registerAdditionalMasterDevice tx (target: spare) …"
 CAST_OUT=$(cast send "$REGISTRY" \
-  'registerAdditionalMasterDevice(bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8,(bytes32,bytes,bytes,uint256,uint256,uint256))' \
-  "$SPARE_DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" "$SPARE_CRED_ID" \
+  'registerAdditionalMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8,(bytes32,bytes,bytes,uint256,uint256,uint256))' \
+  "$SPARE_DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" "$SPARE_CRED_ID" "$SPARE_RP_ID_HASH" \
   "$SPARE_PUB_X" "$SPARE_PUB_Y" "0x00" "$ROLES" \
   "$TUPLE" \
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" --private-key "$MASTER_KEY" 2>&1) \

@@ -183,12 +183,17 @@ for pair in "COMP_DEVICE_KEY_HASH=$COMP_DEVICE_KEY_HASH" \
   fi
 done
 
+# Codex H1: compute sha256(companion rp_id) so the contract enforces
+# authData[0:32] match against this stored value on every future K11
+# assertion from the companion.
+COMP_K11_RP_ID_HASH="0x$(printf '%s' "$COMP_RP_ID" | shasum -a 256 | awk '{print $1}')"
+
 log "Submitting registerAdditionalMasterDevice tx …"
 CAST_ARGS=(
   send "$REGISTRY"
-  'registerAdditionalMasterDevice(bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8,(bytes32,bytes,bytes,uint256,uint256,uint256))'
+  'registerAdditionalMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8,(bytes32,bytes,bytes,uint256,uint256,uint256))'
   "$COMP_DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" \
-  "$COMP_K11_CRED_ID" \
+  "$COMP_K11_CRED_ID" "$COMP_K11_RP_ID_HASH" \
   "$COMP_K11_PUB_X" "$COMP_K11_PUB_Y" \
   "0x00" "$ROLES" \
   "$TUPLE"
