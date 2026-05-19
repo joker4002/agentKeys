@@ -360,11 +360,22 @@ if should_run_step 5; then
     sleep 1
   fi
 
+  # Compute companion's on-chain device_key_hash from its K11 pubkey so
+  # registration + later revoke can find it. Falls back to all-zeros in
+  # stub mode (no K11 file).
+  COMP_DEVICE_KEY_HASH="0x0000000000000000000000000000000000000000000000000000000000000000"
+  if [ -f "$COMP_FILE" ]; then
+    COSE_HEX=$(jq -r .cose_pubkey_hex "$COMP_FILE")
+    COMP_DEVICE_KEY_HASH=$(cast keccak "$COSE_HEX")
+    info "companion device_key_hash = $COMP_DEVICE_KEY_HASH"
+  fi
+
   COMP_LOG="/tmp/agentkeys-companion-$$.log"
   info "starting: $DAEMON_BIN --master-companion --companion-bind 127.0.0.1:$COMPANION_PORT"
   "$DAEMON_BIN" --master-companion \
     --companion-bind "127.0.0.1:$COMPANION_PORT" \
     --companion-operator-omni "0x$OPERATOR_OMNI" \
+    --companion-device-key-hash "$COMP_DEVICE_KEY_HASH" \
     >"$COMP_LOG" 2>&1 &
   COMP_PID=$!
   sleep 1
@@ -422,14 +433,24 @@ if should_run_step 8; then
       skip "--revoke-master only honoured with --webauthn"
     fi
   else
-    info "no --revoke-master <hash> — sanity-checking recovery script existence"
+    info "no --revoke-master <hash> given — sanity-checking script presence only"
+    info "(revoke is destructive — won't pick a default target; pass --revoke-master 0x<hash>)"
     if [ -x "$REPO_ROOT/harness/scripts/heima-recovery.sh" ]; then
-      ok "scripts/heima-recovery.sh is executable"
+      ok "harness/scripts/heima-recovery.sh is executable"
       bash "$REPO_ROOT/harness/scripts/heima-recovery.sh" --help 2>&1 | head -1 >&2 || true
     else
-      die "scripts/heima-recovery.sh missing"
+      die "harness/scripts/heima-recovery.sh missing"
     fi
-    skip "real revoke requires --revoke-master <hash> + --webauthn"
+    if [ "$USE_WEBAUTHN" = 1 ]; then
+      # Surface the companion's hash so the operator can copy-paste it.
+      if [ -f /tmp/agentkeys-companion-whoami.json ] 2>/dev/null \
+         || curl -sSf "http://127.0.0.1:$COMPANION_PORT/v1/companion/whoami" >/tmp/agentkeys-companion-whoami.json 2>/dev/null; then
+        WHOAMI_HASH=$(jq -r .device_key_hash /tmp/agentkeys-companion-whoami.json 2>/dev/null || echo "?")
+        info "to revoke the companion, re-run:"
+        info "  bash harness/v2-stage2-demo.sh --webauthn --only-step 8 --revoke-master $WHOAMI_HASH"
+      fi
+    fi
+    skip "no target specified — pass --revoke-master <hash> to actually revoke"
   fi
 fi
 
