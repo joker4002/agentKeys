@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::state::SharedMemoryWorkerState;
+use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds};
 use agentkeys_worker_creds::envelope;
 use agentkeys_worker_creds::errors::{err_400, err_403, err_500, err_502, ApiError};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken};
@@ -76,6 +77,7 @@ pub struct TeardownResponse {
 
 async fn memory_put(
     State(state): State<SharedMemoryWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<PutRequest>,
 ) -> Result<Json<PutResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Store).await?;
@@ -95,9 +97,8 @@ async fn memory_put(
         .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    state
-        .s3
-        .put_object()
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    s3.put_object()
         .bucket(&state.config.memory_bucket)
         .key(&key)
         .body(env_bytes.clone().into())
@@ -109,13 +110,14 @@ async fn memory_put(
 
 async fn memory_get(
     State(state): State<SharedMemoryWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<GetRequest>,
 ) -> Result<Json<GetResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Fetch).await?;
 
     let key = s3_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
-    let resp = state
-        .s3
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let resp = s3
         .get_object()
         .bucket(&state.config.memory_bucket)
         .key(&key)
@@ -144,13 +146,14 @@ async fn memory_get(
 
 async fn memory_teardown(
     State(state): State<SharedMemoryWorkerState>,
+    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<TeardownRequest>,
 ) -> Result<Json<TeardownResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Teardown).await?;
 
     let prefix = s3_prefix(&req.cap.payload.actor_omni);
-    let list = state
-        .s3
+    let s3 = s3_for_request(&state.s3, &state.config.region, creds.as_ref()).await;
+    let list = s3
         .list_objects_v2()
         .bucket(&state.config.memory_bucket)
         .prefix(&prefix)
@@ -164,9 +167,7 @@ async fn memory_teardown(
         .collect();
     let mut deleted = 0usize;
     for k in &keys {
-        if state
-            .s3
-            .delete_object()
+        if s3.delete_object()
             .bucket(&state.config.memory_bucket)
             .key(k)
             .send()
