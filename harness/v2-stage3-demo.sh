@@ -57,12 +57,24 @@ STEP_TOTAL=16
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
+# Strict mode (default): unmet prerequisites = demo failure. Operator
+# must satisfy them before running. Use --allow-skip to opt into the
+# previous behavior (skip prereq-missing steps and continue) when
+# iterating against a partial environment.
+#
+# Codex adversarial review fix: prior demo could report "16/16 green"
+# while internally skipping the actual encrypt/decrypt + cross-class
+# rejection assertions. That's exactly the "hardcoded bypass" pattern
+# we want to forbid in CI.
+ALLOW_SKIP=0
+STEP_OUTCOMES=()    # filled in per-step: "ok|skip|fail" — drives final summary
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-step)     FROM_STEP="$2"; shift 2 ;;
     --to-step)       TO_STEP="$2"; shift 2 ;;
     --only-step)     ONLY_STEP="$2"; shift 2 ;;
+    --allow-skip)    ALLOW_SKIP=1; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
@@ -84,6 +96,23 @@ ok()   { printf "    ${C_OK}ok${C_RESET}    %s\n" "$*" >&2; }
 info() { printf "    ${C_WARN}info${C_RESET}  %s\n" "$*" >&2; }
 skip() { printf "    ${C_WARN}skip${C_RESET}  %s\n" "$*" >&2; }
 die()  { printf "    ${C_ERR}fail${C_RESET}  %s\n" "$*" >&2; exit 1; }
+
+# Codex review fix (high): unmet-prereq paths must FAIL in strict mode.
+# In --allow-skip mode they still skip (dev iteration). The final summary
+# distinguishes ok vs skip vs fail per step so the demo can't claim
+# coverage for paths it didn't actually exercise.
+prereq_missing() {
+  local msg="$1"
+  if [ "$ALLOW_SKIP" = "1" ]; then
+    skip "$msg  (--allow-skip set)"
+    STEP_OUTCOMES+=("$STEP_NUM:skip:$msg")
+    return 0
+  fi
+  printf "    ${C_ERR}fail${C_RESET}  %s\n" "prereq missing — $msg (set --allow-skip to ignore for dev iteration)" >&2
+  STEP_OUTCOMES+=("$STEP_NUM:fail:$msg")
+  return 1
+}
+record_ok() { STEP_OUTCOMES+=("$STEP_NUM:ok:$1"); }
 should_run_step() { [ "$1" -ge "$FROM_STEP" ] && [ "$1" -le "$TO_STEP" ]; }
 
 # ─── Env ────────────────────────────────────────────────────────────────────
@@ -245,6 +274,7 @@ expect_access_denied() {
   local out="$1" what="$2"
   if grep -qiE "An error occurred \([^)]*AccessDenied[^)]*\)|HTTP 403|AccessDeniedException" "$out"; then
     ok "$what correctly rejected with AccessDenied"
+    record_ok "$what (AccessDenied)"
   elif grep -qi "Unable to locate credentials\|NoSuchBucket\|InvalidAccessKeyId\|TokenRefreshRequired\|RequestExpired" "$out"; then
     cat "$out" >&2
     die "$what failed for a non-IAM reason — likely setup bug (creds/bucket/region). Inspect $out."
@@ -266,6 +296,7 @@ if should_run_step 4; then
       --body "$PAYLOAD_FILE" \
       --output json >"$STATE_DIR/put.vault.positive.json" 2>&1; then
     ok "PUT succeeded at s3://$VAULT_BUCKET/$OWN_VAULT_KEY"
+    record_ok "vault PUT own prefix (200)"
   else
     cat "$STATE_DIR/put.vault.positive.json" >&2
     die "vault PUT to own prefix FAILED — IAM trust policy or tag binding misconfigured"
@@ -322,6 +353,7 @@ if should_run_step 7; then
       --body "$PAYLOAD_FILE" \
       --output json >"$STATE_DIR/put.mem.positive.json" 2>&1; then
     ok "memory PUT succeeded at s3://$MEMORY_BUCKET/$OWN_MEM_KEY"
+    record_ok "memory PUT own prefix (200)"
   else
     cat "$STATE_DIR/put.mem.positive.json" >&2
     die "memory PUT to own prefix FAILED — MEMORY_ROLE_ARN inline policy / bucket policy misconfigured"
@@ -442,7 +474,7 @@ cred_memory_roundtrip() {
   local agent_pk
   agent_pk=$(jq -r '.agent_private_key // empty' "$AGENT_FILE")
   if [ -z "$agent_pk" ] || [ "$agent_pk" = "null" ]; then
-    skip "agent file missing agent_private_key — cannot mint agent STS creds"
+    prereq_missing "agent file missing agent_private_key — cannot mint agent STS creds" || return 1
     return 0
   fi
   local agent_addr
@@ -495,14 +527,17 @@ cred_memory_roundtrip() {
     agent_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
   fi
   if [ -z "${agent_actor:-}" ] || [ "$agent_actor" = "null" ]; then
-    skip "no demo-agent file at $AGENT_FILE — run stage-1 step 12 first"
+    prereq_missing "no demo-agent file at $AGENT_FILE — run stage-1 step 12 first" || return 1
     return 0
   fi
   if [ -z "${agent_dkh:-}" ]; then
     # Derive from agent address.
     local agent_addr
     agent_addr=$(jq -r '.agent_address // .wallet_address // empty' "$AGENT_FILE")
-    [ -z "$agent_addr" ] && { skip "agent file missing agent_address"; return 0; }
+    if [ -z "$agent_addr" ]; then
+      prereq_missing "agent file missing agent_address" || return 1
+      return 0
+    fi
     agent_dkh=$(cast keccak "$(printf '%s' "$agent_addr" | tr '[:upper:]' '[:lower:]')")
   fi
 
@@ -525,19 +560,19 @@ cred_memory_roundtrip() {
   body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
   if [ "$rc" != "200" ]; then
     if echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope|service not in scope"; then
-      skip "agent scope not set on chain — run \`bash harness/v2-stage1-demo.sh --webauthn\` (Touch ID at steps 11 + 13) first"
+      prereq_missing "agent scope not set on chain — run \`bash harness/v2-stage1-demo.sh --webauthn\` (Touch ID at steps 11 + 13) first" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP"; then
-      skip "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host: \`ssh broker && bash scripts/setup-broker-host.sh --yes\` (now bakes the chain RPC env)"
+      prereq_missing "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA|K3_EPOCH_COUNTER_ADDRESS_HEIMA.*unset"; then
-      skip "broker missing contract address env — redeploy broker host: \`ssh broker && bash scripts/setup-broker-host.sh --yes\` (now bakes contract addresses from operator-workstation.env)"
+      prereq_missing "broker missing contract address env — redeploy broker host" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "DeviceRoleMissing|role_missing|cap_mint role"; then
-      skip "device not granted ROLE_CAP_MINT on chain — needs operator action via stage-2 K11-signed registerAdditionalMasterDevice; out-of-scope here"
+      prereq_missing "device not granted ROLE_CAP_MINT on chain — operator must register-with-role first" || return 1
       return 0
     fi
     cat <<EOF >&2
@@ -599,6 +634,7 @@ EOF
   fetched=$(printf '%s' "$fetched_b64" | base64 -d 2>/dev/null || echo "")
   if [ "$fetched" = "$SMOKE_PLAINTEXT" ]; then
     ok "$kind ROUNDTRIP: '$SMOKE_PLAINTEXT' encrypted → S3 → decrypted ✓ byte-for-byte match"
+    record_ok "$kind worker encrypt/decrypt byte-for-byte roundtrip"
   else
     die "$kind roundtrip FAILED: expected '$SMOKE_PLAINTEXT', got '$fetched'"
   fi
@@ -656,26 +692,28 @@ if should_run_step 13; then
 EOF
     die "broker isolation gate FAILED"
   fi
+  # Codex review fix (medium): require the canonical OperatorMismatch
+  # error — any other rejection (502 broker-stale, 404 wrong route, 401
+  # unauthenticated, generic 403) is NOT proof that the session-omni
+  # gate fired. Only the canonical error proves the upstream isolation
+  # boundary worked.
   case "$rc" in
     400|401|403)
       if echo "$body" | grep -qiE "OperatorMismatch|operator.*mismatch|session.*operator"; then
         ok "broker correctly returned HTTP $rc with OperatorMismatch — session JWT cannot mint caps for other actors"
+        record_ok "broker rejected cross-actor cap-mint with OperatorMismatch ($rc)"
       else
-        info "broker returned HTTP $rc but error text is non-canonical (body: $body) — accepting; broker rejected, which is the security property"
+        die "broker returned HTTP $rc but error text is NOT canonical OperatorMismatch (body: $body) — cannot confirm session-omni gate fired"
       fi
       ;;
-    502|*)
-      # 502 likely means RPC unreachable (broker missing AGENTKEYS_CHAIN_RPC_HTTP).
-      # The OperatorMismatch check runs BEFORE the chain check in cap.rs, so this
-      # really should be 400/401/403. If we get 502, the broker may be testing
-      # device-binding before session-omni — log it but don't fail (broker
-      # still rejected the request).
-      if echo "$body" | grep -qiE "AGENTKEYS_CHAIN_RPC_HTTP|RPC URL"; then
-        skip "broker stale — got 502 (chain RPC not set) instead of 401. Session-omni-mismatch isn't reaching the test surface here. Redeploy broker to retest cleanly."
-      else
-        info "broker rejected with HTTP $rc — body: $body"
-        ok "broker rejected the cross-actor cap-mint (non-200 = pass for this negative test)"
+    502)
+      if echo "$body" | grep -qiE "AGENTKEYS_CHAIN_RPC_HTTP|RPC URL|SIDECAR_REGISTRY|SCOPE_CONTRACT"; then
+        die "broker config missing (502): $body — cannot prove the OperatorMismatch gate fires. Redeploy broker via setup-broker-host.sh and re-run."
       fi
+      die "broker returned 502 — body: $body. Negative test cannot pass on an unrelated failure."
+      ;;
+    *)
+      die "broker returned unexpected HTTP $rc — body: $body. Expected 400/401/403 with OperatorMismatch."
       ;;
   esac
 fi
@@ -728,12 +766,23 @@ if should_run_step 14; then
         cat "$STATE_DIR/cross.cred-to-mem.json" >&2
         die "CRITICAL: memory worker accepted a cred-class cap — data-class isolation broken!"
       fi
-      if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
-        ok "memory worker correctly rejected cred-class cap with cap_data_class_mismatch ($rc)"
-      else
-        info "memory worker rejected ($rc) but error text didn't mention data_class: $body"
-        ok "memory worker rejected the cred-class cap (non-200 = pass for negative test)"
-      fi
+      # Codex review fix (high): only the canonical cap_data_class_mismatch
+      # error proves the worker's check_data_class() guard fired. Any other
+      # rejection (404 route, 401, generic 403, curl failure) means the
+      # data-class isolation check might not have run.
+      case "$rc" in
+        400|401|403)
+          if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
+            ok "memory worker correctly rejected cred-class cap with cap_data_class_mismatch ($rc)"
+            record_ok "memory worker rejected cred-class cap ($rc cap_data_class_mismatch)"
+          else
+            die "memory worker rejected with HTTP $rc but error is NOT canonical cap_data_class_mismatch (body: $body) — cannot confirm the data-class isolation gate fired"
+          fi
+          ;;
+        *)
+          die "memory worker returned unexpected HTTP $rc (expected 400/401/403 with cap_data_class_mismatch) — body: $body"
+          ;;
+      esac
     fi
   fi
 fi
@@ -768,12 +817,20 @@ if should_run_step 15; then
         cat "$STATE_DIR/cross.mem-to-cred.json" >&2
         die "CRITICAL: cred worker accepted a memory-class cap — data-class isolation broken!"
       fi
-      if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
-        ok "cred worker correctly rejected memory-class cap with cap_data_class_mismatch ($rc)"
-      else
-        info "cred worker rejected ($rc) but error text didn't mention data_class: $body"
-        ok "cred worker rejected the memory-class cap (non-200 = pass for negative test)"
-      fi
+      # Codex review fix (high): require canonical error (symmetric with step 14).
+      case "$rc" in
+        400|401|403)
+          if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
+            ok "cred worker correctly rejected memory-class cap with cap_data_class_mismatch ($rc)"
+            record_ok "cred worker rejected memory-class cap ($rc cap_data_class_mismatch)"
+          else
+            die "cred worker rejected with HTTP $rc but error is NOT canonical cap_data_class_mismatch (body: $body) — cannot confirm the data-class isolation gate fired"
+          fi
+          ;;
+        *)
+          die "cred worker returned unexpected HTTP $rc (expected 400/401/403 with cap_data_class_mismatch) — body: $body"
+          ;;
+      esac
     fi
   fi
 fi
@@ -794,41 +851,44 @@ if should_run_step 16; then
         --key "bots/${OWN_ACTOR_OMNI}/memory/stage3-positive.bin" >/dev/null 2>&1; then
     ok "deleted s3://$MEMORY_BUCKET/bots/${OWN_ACTOR_OMNI}/memory/stage3-positive.bin"
   fi
-  cat <<EOF >&2
+  # Codex review fix: print ACTUAL outcomes per step, not a static
+  # "coverage" table that lies about what ran.
+  printf "\n${C_OK}=== v2 stage-3 demo summary ===${C_RESET}\n" >&2
+  printf "  chain          : %s\n" "${AGENTKEYS_CHAIN:-heima}" >&2
+  printf "  issuer         : %s\n" "$OIDC_ISSUER" >&2
+  printf "  vault bucket   : %s   (role: %s)\n" "$VAULT_BUCKET" "$VAULT_ROLE_ARN" >&2
+  printf "  memory bucket  : %s  (role: %s)\n" "$MEMORY_BUCKET" "$MEMORY_ROLE_ARN" >&2
+  printf "  wallet         : %s\n" "$WALLET_ADDR" >&2
+  printf "  own omni       : 0x%s\n\n" "$OWN_ACTOR_OMNI" >&2
 
-${C_OK}=== v2 stage-3 demo complete ===${C_RESET}
-  chain          : ${AGENTKEYS_CHAIN:-heima}
-  issuer         : $OIDC_ISSUER
-  vault bucket   : $VAULT_BUCKET   (role: $VAULT_ROLE_ARN)
-  memory bucket  : $MEMORY_BUCKET  (role: $MEMORY_ROLE_ARN)
-  wallet         : $WALLET_ADDR
-  own omni       : 0x$OWN_ACTOR_OMNI
+  local nstep noutcome nmsg nok=0 nskip=0 nfail=0
+  printf "  Per-step outcome (from actual execution, not claimed coverage):\n" >&2
+  for entry in "${STEP_OUTCOMES[@]:-}"; do
+    [ -z "$entry" ] && continue
+    nstep="${entry%%:*}"
+    rest="${entry#*:}"
+    noutcome="${rest%%:*}"
+    nmsg="${rest#*:}"
+    case "$noutcome" in
+      ok)   printf "    [%2d] ${C_OK}ok${C_RESET}    %s\n" "$nstep" "$nmsg" >&2; nok=$((nok+1)) ;;
+      skip) printf "    [%2d] ${C_WARN}skip${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nskip=$((nskip+1)) ;;
+      fail) printf "    [%2d] ${C_ERR}fail${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nfail=$((nfail+1)) ;;
+    esac
+  done
+  printf "\n  Totals: %sok=%d%s  %sskip=%d%s  %sfail=%d%s\n" \
+    "$C_OK" "$nok" "$C_RESET" "$C_WARN" "$nskip" "$C_RESET" "$C_ERR" "$nfail" "$C_RESET" >&2
 
-  Coverage:
-    [4]  vault PUT  own prefix       → SUCCEEDED
-    [5]  vault PUT  other prefix     → AccessDenied
-    [6]  vault LIST other prefix     → AccessDenied (codex P2 fix)
-    [7]  memory PUT own prefix       → SUCCEEDED
-    [8]  memory PUT other prefix     → AccessDenied
-    [9]  memory LIST other prefix    → AccessDenied (codex P2 fix)
-    [10] vault creds → memory bucket → AccessDenied (per-data-class isolation)
-    [10] memory creds → vault bucket → AccessDenied (per-data-class isolation)
-    [11] cred worker:  store → fetch → byte-for-byte roundtrip (AES-256-GCM)
-    [12] memory worker: put → get → byte-for-byte roundtrip (AES-256-GCM)
-    [13] broker rejects cross-actor cap-mint        → OperatorMismatch (4xx)
-    [14] cred-class cap → memory worker             → cap_data_class_mismatch
-    [15] memory-class cap → cred worker             → cap_data_class_mismatch
-
-  Conclusion: OIDC + IAM PrincipalTag scoping is enforced both within
-              a bucket (per-actor) AND across buckets (per-data-class).
-              The worker AES-256-GCM envelope (KEK + AAD-bound) round-
-              trips end-to-end through the broker cap-mint flow.
-              The broker's session-omni → operator-omni gate blocks
-              cross-actor cap-mint, the upstream cut that any
-              storage-layer compromise would have to break first.
-              The data_class field is signed into the cap payload by
-              the broker, so a cred cap cannot pollute the memory bucket
-              and vice versa — defended at the cap layer (steps 14+15)
-              independently of the AWS IAM cross-bucket gate (step 10).
-EOF
+  if [ "$nfail" -gt 0 ]; then
+    printf "\n${C_ERR}DEMO FAILED${C_RESET}: %d step(s) failed.\n" "$nfail" >&2
+    exit 1
+  fi
+  if [ "$nskip" -gt 0 ] && [ "$ALLOW_SKIP" != "1" ]; then
+    printf "\n${C_ERR}DEMO INCOMPLETE${C_RESET}: %d step(s) skipped in strict mode (this shouldn't happen — strict mode should fail-hard).\n" "$nskip" >&2
+    exit 1
+  fi
+  if [ "$nskip" -gt 0 ]; then
+    printf "\n${C_WARN}DEMO PARTIAL${C_RESET}: %d step(s) skipped (--allow-skip mode). Coverage is NOT complete; do not treat this run as a release gate.\n" "$nskip" >&2
+  else
+    printf "\n${C_OK}DEMO COMPLETE${C_RESET}: all %d steps exercised — full isolation + roundtrip coverage proven.\n" "$nok" >&2
+  fi
 fi
