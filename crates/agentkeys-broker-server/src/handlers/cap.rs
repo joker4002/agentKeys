@@ -406,18 +406,29 @@ async fn call_get_device(
 ///   bool    revoked         (word 6, right-aligned)
 fn parse_device_entry(raw: &str) -> Result<DeviceEntry, CapError> {
     let hex = raw.trim_start_matches("0x");
-    if hex.len() < 7 * 64 {
+    // DeviceEntry post codex H1 (SidecarRegistry.sol) has 11 ABI words:
+    //   word 0  operatorOmni     bytes32
+    //   word 1  actorOmni        bytes32
+    //   word 2  k11CredId        bytes32
+    //   word 3  k11RpIdHash      bytes32  (NEW, codex H1)
+    //   word 4  k11PubX          uint256  (NEW, codex H1)
+    //   word 5  k11PubY          uint256  (NEW, codex H1)
+    //   word 6  tier             uint8 (padded)
+    //   word 7  roles            uint8 (padded)
+    //   word 8  registeredAt     uint64 (padded)
+    //   word 9  lastSignCount    uint32 (padded)
+    //   word 10 revoked          bool (padded)
+    if hex.len() < 11 * 64 {
         return Err(CapError::ChainRpc(format!(
-            "getDevice returned {} bytes; expected ≥ 7×32",
+            "getDevice returned {} bytes; expected ≥ 11×32 (post codex H1 struct)",
             hex.len() / 2
         )));
     }
     let operator_omni = hex[0..64].to_lowercase();
     let actor_omni = hex[64..128].to_lowercase();
-    // word 3 = tier (skip); word 4 = roles; word 5 = registeredAt; word 6 = revoked
-    let roles_hex = &hex[4 * 64..5 * 64];
-    let registered_hex = &hex[5 * 64..6 * 64];
-    let revoked_hex = &hex[6 * 64..7 * 64];
+    let roles_hex = &hex[7 * 64..8 * 64];
+    let registered_hex = &hex[8 * 64..9 * 64];
+    let revoked_hex = &hex[10 * 64..11 * 64];
     // Take last 2 hex chars (uint8) of the roles word.
     let roles = u8::from_str_radix(&roles_hex[62..64], 16).unwrap_or(0);
     let registered_at = u64::from_str_radix(&registered_hex[48..64], 16).unwrap_or(0);
@@ -619,17 +630,22 @@ mod tests {
 
     #[test]
     fn parse_device_entry_decodes_well_formed() {
-        // Hand-built: 7 words of 32 bytes each. operator/actor are
-        // `0xaa…` and `0xbb…`; tier=1, roles=7 (CAP_MINT|RECOVERY|SCOPE_MGMT),
+        // 11 ABI words (post codex H1): operator + actor + k11{CredId,
+        // RpIdHash, PubX, PubY} + tier + roles + registeredAt +
+        // lastSignCount + revoked. roles=7 (CAP_MINT|RECOVERY|SCOPE_MGMT),
         // registeredAt=42, revoked=false.
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64)); // operatorOmni
-        raw.push_str(&"b".repeat(64)); // actorOmni
-        raw.push_str(&"0".repeat(64)); // k11CredId (zero)
-        raw.push_str(&format!("{:0>64x}", 1u64)); // tier=1
-        raw.push_str(&format!("{:0>64x}", 7u64)); // roles=7
-        raw.push_str(&format!("{:0>64x}", 42u64)); // registeredAt=42
-        raw.push_str(&"0".repeat(64)); // revoked=false
+        raw.push_str(&"a".repeat(64));               // operatorOmni
+        raw.push_str(&"b".repeat(64));               // actorOmni
+        raw.push_str(&"0".repeat(64));               // k11CredId
+        raw.push_str(&"0".repeat(64));               // k11RpIdHash
+        raw.push_str(&"0".repeat(64));               // k11PubX
+        raw.push_str(&"0".repeat(64));               // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64));    // tier=1
+        raw.push_str(&format!("{:0>64x}", 7u64));    // roles=7
+        raw.push_str(&format!("{:0>64x}", 42u64));   // registeredAt=42
+        raw.push_str(&"0".repeat(64));               // lastSignCount=0
+        raw.push_str(&"0".repeat(64));               // revoked=false
         let entry = parse_device_entry(&raw).unwrap();
         assert_eq!(entry.operator_omni, "a".repeat(64));
         assert_eq!(entry.actor_omni, "b".repeat(64));
@@ -641,13 +657,17 @@ mod tests {
     #[test]
     fn parse_device_entry_detects_revoked() {
         let mut raw = String::from("0x");
-        raw.push_str(&"a".repeat(64));
-        raw.push_str(&"b".repeat(64));
-        raw.push_str(&"0".repeat(64));
-        raw.push_str(&format!("{:0>64x}", 1u64));
-        raw.push_str(&format!("{:0>64x}", 1u64));
-        raw.push_str(&format!("{:0>64x}", 100u64));
-        raw.push_str(&format!("{:0>64x}", 1u64)); // revoked=true
+        raw.push_str(&"a".repeat(64));               // operatorOmni
+        raw.push_str(&"b".repeat(64));               // actorOmni
+        raw.push_str(&"0".repeat(64));               // k11CredId
+        raw.push_str(&"0".repeat(64));               // k11RpIdHash
+        raw.push_str(&"0".repeat(64));               // k11PubX
+        raw.push_str(&"0".repeat(64));               // k11PubY
+        raw.push_str(&format!("{:0>64x}", 1u64));    // tier
+        raw.push_str(&format!("{:0>64x}", 1u64));    // roles
+        raw.push_str(&format!("{:0>64x}", 100u64));  // registeredAt
+        raw.push_str(&"0".repeat(64));               // lastSignCount
+        raw.push_str(&format!("{:0>64x}", 1u64));    // revoked=true
         let entry = parse_device_entry(&raw).unwrap();
         assert!(entry.revoked);
     }
