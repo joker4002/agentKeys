@@ -494,16 +494,30 @@ EOF
   store_cap="$body"
   ok "Store cap minted"
 
-  # POST plaintext to worker
+  # Pick the right STS session for this data class. Workers fall back
+  # to the broker EC2 instance profile (broker-wide S3 perms, which we
+  # deliberately don't grant — codex P2 downgrade defense), so the
+  # worker REQUIRES per-request STS creds to actually touch S3.
+  local sts_label
+  if [ "$kind" = "cred" ]; then sts_label="vault"; else sts_label="memory"; fi
+  local aki sak sst
+  aki=$(cat "$STATE_DIR/aki.${sts_label}" 2>/dev/null) || die "no $sts_label STS creds — re-run step 3"
+  sak=$(cat "$STATE_DIR/sak.${sts_label}")
+  sst=$(cat "$STATE_DIR/sst.${sts_label}")
+
+  # POST plaintext to worker (with STS creds for the right data-class role)
   local plaintext_b64
   plaintext_b64=$(printf '%s' "$SMOKE_PLAINTEXT" | base64 | tr -d '\n')
   local store_body
   store_body=$(jq -n --argjson cap "$store_cap" --arg pt "$plaintext_b64" \
                  '{cap: $cap, plaintext_b64: $pt}')
-  info "POST ${worker_url}${store_route}"
+  info "POST ${worker_url}${store_route}  (with X-Aws-* headers for $sts_label role)"
   rc=$(curl -sS -o /tmp/store.$$.json -w '%{http_code}' \
     -X POST "${worker_url}${store_route}" \
     -H 'content-type: application/json' \
+    -H "x-aws-access-key-id: $aki" \
+    -H "x-aws-secret-access-key: $sak" \
+    -H "x-aws-session-token: $sst" \
     -d "$store_body" 2>&1 || echo "000")
   body=$(cat /tmp/store.$$.json 2>/dev/null || true); rm -f /tmp/store.$$.json
   if [ "$rc" != "200" ]; then
@@ -521,13 +535,16 @@ EOF
   local fetch_cap; fetch_cap="$body"
   ok "Fetch cap minted"
 
-  # GET plaintext back from worker
+  # GET plaintext back from worker (with same STS creds)
   local fetch_body
   fetch_body=$(jq -n --argjson cap "$fetch_cap" '{cap: $cap}')
-  info "POST ${worker_url}${fetch_route}"
+  info "POST ${worker_url}${fetch_route}  (with X-Aws-* headers for $sts_label role)"
   rc=$(curl -sS -o /tmp/fetch.$$.json -w '%{http_code}' \
     -X POST "${worker_url}${fetch_route}" \
     -H 'content-type: application/json' \
+    -H "x-aws-access-key-id: $aki" \
+    -H "x-aws-secret-access-key: $sak" \
+    -H "x-aws-session-token: $sst" \
     -d "$fetch_body" 2>&1 || echo "000")
   body=$(cat /tmp/fetch.$$.json 2>/dev/null || true); rm -f /tmp/fetch.$$.json
   if [ "$rc" != "200" ]; then
