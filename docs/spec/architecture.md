@@ -804,10 +804,15 @@ Callers: broker + workers only. Daemons never talk to the signer directly — al
 /derive-cred-kek {operator_omni, k3_epoch}            → KEK
 /sts-credentials {actor_omni, role_arn, ttl}          → AWS STS creds
 /sign/siwe {actor_omni, siwe_message}                 → EIP-191 sig
+/sign/typed-data {actor_omni, typed_data}             → EIP-712 sig + digest + type_hash + domain_sep (issue #82)
 /sign/audit-row {actor_omni, audit_row}               → audit-chain sig
 /verify/k10-sig {device_pubkey, payload, sig}         → bool
 /verify/k11-assertion {cred_id, payload, assertion}   → bool
 ```
+
+The mock-server backend exposes `/sign/typed-data` under the legacy
+`/dev/sign-typed-data` path alongside `/dev/sign-message`. TEE-worker
+swap-in MUST preserve both shapes; see [`signer-protocol.md`](signer-protocol.md).
 
 ### 14.3 K3 rotation handling
 
@@ -866,6 +871,20 @@ Three tiers, operator-selected per deployment.
 V2 default: tier C. Tier A is the gas-subsidy escape hatch. Tier B is for operators who want self-sovereignty without `current_master_wallet` exposure.
 
 The audit-service worker is stateless for tier C (every event independently signed); maintains a relay batcher for tiers A/B that drains to chain at configurable cadence (default 1 minute or 256 events, whichever first).
+
+**Audit-row schema with intent commitment (issue #82).** Each audit row carries two optional fields when the underlying event was a typed-data sign (`/sign/typed-data` on the signer):
+
+| Field | Type | Source | Use |
+|---|---|---|---|
+| `signed_intent_text` | string | rendered ERC-7730 `interpolatedIntent` (e.g. `"Approve USDC 1000.00 to Uniswap v4 router"`) | Operator-readable record of *what was authorized*, not just *that something was signed* |
+| `signed_intent_hash` | 32-byte hex | `keccak256(intent_text || "\|" || digest)` | Cryptographically commits the rendered intent to the EIP-712 digest the signer produced. Auditors verifying a sign event re-render the intent from the same ERC-7730 file and check the commitment matches. |
+
+Backward compatible: pre-#82 audit rows have these fields absent; tier C
+chain events keep their current shape (the commitment is stored in
+`signed_intent_hash` only — the rendered text is off-chain in the worker's
+S3 row). A future contract revision will extend `CredentialAudit.append`
+to take the commitment hash as a 33rd byte; until then, tier C chain
+events index the audit-row by `signed_intent_hash` via S3 path.
 
 ### 15.4 email-service
 
@@ -1364,6 +1383,7 @@ The architecture is intentionally pluggable on six axes. Each axis has a default
 | **Chain layer** | Litentry/Heima parachain (built-in profile `heima`, chain ID 212013) | Any EVM-compatible chain (Base, Ethereum, Optimism, Arbitrum, Moonbeam, Astar, permissioned substrates like Aliyun BaaS / Hyperledger / Quorum) | **Named chain profiles** — `crates/agentkeys-core/src/chain_profile.rs` ships 7 built-ins (heima, heima-paseo, base, base-sepolia, ethereum, sepolia, anvil); operator-custom chains via `$AGENTKEYS_CHAIN_PROFILE_FILE` JSON. CLI `--chain <name>`; daemon / broker / workers all read the same profile. See §22a below. |
 | **Worker runtime** | AWS Lambda + API Gateway | axum microservice (vendor-neutral); Cloudflare Worker (edge); Tencent SCF (China) | Worker shape per §15 is uniform across runtimes |
 | **Payment rail** | Per mode: P-1 service-pool / P-2 escrow / P-3 direct | Mode + upstream (Stripe, USDC, SOL, fiat) | Per-mode plugins layer on the §15.5 wire shape |
+| **Clear-signing metadata** (issue #82) | Bundled ERC-7730 v2 set under `agentkeys-core::clear_signing::fixtures/` (USDC permit + curated DEX routers + permit2) | Registry fetch from `github.com/ethereum/clear-signing-erc7730-registry` at daemon startup; on-chain registry / IPFS-pinned + signature-verified | `ClearSigningCatalog` trait in [`crates/agentkeys-core/src/clear_signing/`](../../crates/agentkeys-core/src/clear_signing/); bundled → registry-cached → on-chain progression. Operator-custom files via `$AGENTKEYS_7730_DIR` env var |
 
 **Pluggability is the point.** No single backend is load-bearing for the architecture; the contracts (auth-plugin trait, signer-protocol, audit trait, worker shape, chain ABI) are. This is what lets:
 
