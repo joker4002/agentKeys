@@ -882,7 +882,6 @@ Environment=HOME=/var/lib/agentkeys
 Environment=ACCOUNT_ID=$ACCOUNT_ID
 Environment=REGION=$REGION
 Environment=BROKER_AWS_REGION=$REGION
-Environment=BROKER_BACKEND_URL=http://127.0.0.1:8090
 Environment=BROKER_OIDC_ISSUER=$ISSUER_URL
 # Email-link auth (Pass 2 of Option B — see crates/agentkeys-broker-server
 # /src/plugins/auth/email_link.rs). Comma-separated method list now includes
