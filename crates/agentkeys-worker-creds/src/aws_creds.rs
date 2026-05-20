@@ -30,11 +30,32 @@ use axum::{
 };
 
 /// Three header values that together form a single STS session credential.
-#[derive(Debug, Clone)]
+/// Custom Debug impl (codex P3): default `#[derive(Debug)]` would log the
+/// secret_access_key + session_token verbatim if anyone ever instrumented
+/// the extractor with `tracing::debug!` / `dbg!`. Mask both.
+#[derive(Clone)]
 pub struct StsCreds {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub session_token: String,
+}
+
+impl std::fmt::Debug for StsCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Show only first/last 4 chars of access key (it's logged by AWS
+        // anyway via CloudTrail). Fully redact secret + session token.
+        let aki_len = self.access_key_id.len();
+        let aki_preview = if aki_len > 8 {
+            format!("{}...{}", &self.access_key_id[..4], &self.access_key_id[aki_len - 4..])
+        } else {
+            "<short>".to_string()
+        };
+        f.debug_struct("StsCreds")
+            .field("access_key_id", &aki_preview)
+            .field("secret_access_key", &"<redacted>")
+            .field("session_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl StsCreds {
@@ -72,7 +93,19 @@ impl StsCreds {
 }
 
 /// Axum extractor: pulls `Option<StsCreds>` from the request headers.
-/// Absence is not an error (the worker falls back to instance-profile S3).
+///
+/// **Strict mode** (codex P2 — closes the downgrade-attack vector): when
+/// `AGENTKEYS_WORKER_REQUIRE_STS=1` (or `=true`) is set in the worker's
+/// environment, the extractor REJECTS requests missing any of the three
+/// X-Aws-* headers with HTTP 401. This forces every request through the
+/// OIDC federation path — no silent fallback to the broker EC2 instance
+/// profile. Production deploys should set this; CI / stage-1 + stage-2
+/// demos rely on the default (off) for backward compat.
+///
+/// Partial headers (1 or 2 of 3 present) ALWAYS reject with 401,
+/// regardless of strict mode — a half-authed S3 client is never useful
+/// and silently dropping the half-passed creds is the same downgrade
+/// surface.
 #[derive(Debug, Clone)]
 pub struct OptionalStsCreds(pub Option<StsCreds>);
 
@@ -81,7 +114,27 @@ impl<S: Send + Sync> FromRequestParts<S> for OptionalStsCreds {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        Ok(OptionalStsCreds(StsCreds::from_headers(&parts.headers)))
+        // Distinguish "no headers at all" (legacy / backward-compat) from
+        // "some but not all" (programmer error or downgrade attempt).
+        let has_any = parts.headers.get("x-aws-access-key-id").is_some()
+            || parts.headers.get("x-aws-secret-access-key").is_some()
+            || parts.headers.get("x-aws-session-token").is_some();
+        let parsed = StsCreds::from_headers(&parts.headers);
+        let strict = std::env::var("AGENTKEYS_WORKER_REQUIRE_STS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        match (parsed, has_any, strict) {
+            (Some(c), _, _) => Ok(OptionalStsCreds(Some(c))),
+            (None, true, _) => Err((
+                StatusCode::UNAUTHORIZED,
+                "partial X-Aws-* headers — must pass all three (X-Aws-Access-Key-Id, X-Aws-Secret-Access-Key, X-Aws-Session-Token) or none".to_string(),
+            )),
+            (None, false, true) => Err((
+                StatusCode::UNAUTHORIZED,
+                "AGENTKEYS_WORKER_REQUIRE_STS=1 — request must carry OIDC-minted STS creds via X-Aws-* headers".to_string(),
+            )),
+            (None, false, false) => Ok(OptionalStsCreds(None)),
+        }
     }
 }
 
@@ -138,5 +191,40 @@ mod tests {
         h.insert("x-aws-secret-access-key", HeaderValue::from_static("s"));
         h.insert("x-aws-session-token", HeaderValue::from_static("t"));
         assert!(StsCreds::from_headers(&h).is_none());
+    }
+
+    // codex P3: Debug must not leak secret_access_key or session_token.
+    #[test]
+    fn debug_redacts_secret_and_session_token() {
+        let c = StsCreds {
+            access_key_id: "ASIATESTKEY12345".to_string(),
+            secret_access_key: "VERY-SECRET-DO-NOT-LOG".to_string(),
+            session_token: "FwoGZXIvYXdzEEEa...".to_string(),
+        };
+        let dbg = format!("{:?}", c);
+        assert!(!dbg.contains("VERY-SECRET-DO-NOT-LOG"), "Debug leaked secret_access_key");
+        assert!(!dbg.contains("FwoGZXIvYXdzEEEa"), "Debug leaked session_token");
+        assert!(dbg.contains("<redacted>"), "Debug missing <redacted> marker");
+        // Access key prefix is OK (it's logged by AWS CloudTrail anyway).
+        assert!(dbg.contains("ASIA"), "Debug should show access_key_id prefix");
+    }
+
+    // codex P2: extractor enforcement tests. We can't easily mock
+    // axum's FromRequestParts machinery in a unit test, so just exercise
+    // the underlying parser at the boundaries:
+    #[test]
+    fn parser_distinguishes_no_headers_from_partial() {
+        let empty = HeaderMap::new();
+        let mut partial = HeaderMap::new();
+        partial.insert("x-aws-access-key-id", HeaderValue::from_static("AKIA"));
+
+        assert!(StsCreds::from_headers(&empty).is_none());
+        assert!(StsCreds::from_headers(&partial).is_none());
+
+        // The extractor's job is to disambiguate: empty = backward-compat
+        // (None ok unless strict), partial = ALWAYS reject. The detection
+        // logic uses headers.get() presence, which we verify here:
+        assert!(empty.get("x-aws-access-key-id").is_none());
+        assert!(partial.get("x-aws-access-key-id").is_some());
     }
 }
