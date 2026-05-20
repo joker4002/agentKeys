@@ -477,6 +477,10 @@ cred_memory_roundtrip() {
       skip "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host: \`ssh broker && bash scripts/setup-broker-host.sh --yes\` (now bakes the chain RPC env)"
       return 0
     fi
+    if echo "$body" | grep -qiE "SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA|K3_EPOCH_COUNTER_ADDRESS_HEIMA.*unset"; then
+      skip "broker missing contract address env — redeploy broker host: \`ssh broker && bash scripts/setup-broker-host.sh --yes\` (now bakes contract addresses from operator-workstation.env)"
+      return 0
+    fi
     if echo "$body" | grep -qiE "DeviceRoleMissing|role_missing|cap_mint role"; then
       skip "device not granted ROLE_CAP_MINT on chain — needs operator action via stage-2 K11-signed registerAdditionalMasterDevice; out-of-scope here"
       return 0

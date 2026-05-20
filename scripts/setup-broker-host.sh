@@ -899,6 +899,15 @@ Environment=BROKER_EMAIL_FROM_ADDRESS=$BROKER_EMAIL_FROM_ADDRESS
 # in the stage-3 worker encrypt/decrypt roundtrip test (#90 followup).
 Environment=AGENTKEYS_CHAIN=heima
 Environment=AGENTKEYS_CHAIN_RPC_HTTP=https://rpc.heima-parachain.heima.network
+# Contract addresses for cap-mint chain checks. handlers/cap.rs reads
+# {SIDECAR_REGISTRY,SCOPE_CONTRACT,K3_EPOCH_COUNTER}_ADDRESS_HEIMA at
+# request time to check device + scope + k3_epoch on chain before
+# signing a cap-token. Values flow from scripts/operator-workstation.env
+# (sourced earlier in this script) — keeps the laptop's contract
+# registry as the single source of truth.
+Environment=SIDECAR_REGISTRY_ADDRESS_HEIMA=$REGISTRY_ADDR
+Environment=SCOPE_CONTRACT_ADDRESS_HEIMA=$SCOPE_ADDR
+Environment=K3_EPOCH_COUNTER_ADDRESS_HEIMA=$K3_COUNTER_ADDR
 $CRED_LINE
 ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1 \
   --export-session-pubkey-to /var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem
