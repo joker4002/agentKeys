@@ -433,6 +433,61 @@ cred_memory_roundtrip() {
     fetch_route="/v1/memory/get"
   fi
 
+  # The cap's actor_omni is the AGENT's (operator authorized agent for
+  # this service). The worker writes to bots/<agent_omni>/<class>/...,
+  # so the STS creds MUST be tagged with agent's actor_omni. Mint a
+  # fresh STS session SIGNED BY THE AGENT (agent_private_key from the
+  # agent file), not the operator. This is the architecturally correct
+  # flow: each actor authenticates as itself.
+  local agent_pk
+  agent_pk=$(jq -r '.agent_private_key // empty' "$AGENT_FILE")
+  if [ -z "$agent_pk" ] || [ "$agent_pk" = "null" ]; then
+    skip "agent file missing agent_private_key — cannot mint agent STS creds"
+    return 0
+  fi
+  local agent_addr
+  agent_addr=$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE")
+
+  # Helper: SIWE-sign as the AGENT and mint STS creds for a given role.
+  local agent_role_arn
+  if [ "$kind" = "cred" ]; then agent_role_arn="$VAULT_ROLE_ARN"; else agent_role_arn="$MEMORY_ROLE_ARN"; fi
+
+  info "minting agent-side STS for $kind role (SIWE as agent $agent_addr)"
+  local sresp request_id siwe_msg sig vresp session_jwt
+  sresp=$(curl -sSf -X POST "$OIDC_ISSUER/v1/auth/wallet/start" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg a "$agent_addr" --argjson c 1 '{address: $a, chain_id: $c}')") \
+    || die "agent wallet/start failed"
+  request_id=$(echo "$sresp" | jq -r .request_id)
+  siwe_msg=$(echo "$sresp" | jq -r .siwe_message)
+  sig=$(cast wallet sign --private-key "$agent_pk" "$siwe_msg")
+  vresp=$(curl -sSf -X POST "$OIDC_ISSUER/v1/auth/wallet/verify" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg rid "$request_id" --arg sig "$sig" '{request_id: $rid, signature: $sig}')") \
+    || die "agent wallet/verify failed"
+  session_jwt=$(echo "$vresp" | jq -r '.session_jwt // .jwt // empty')
+  [ -z "$session_jwt" ] && die "agent SIWE didn't return session JWT"
+
+  local oidc_resp agent_oidc_jwt sts_resp
+  oidc_resp=$(curl -sSf -X POST "$OIDC_ISSUER/v1/mint-oidc-jwt" \
+    -H "authorization: Bearer $session_jwt") || die "agent mint-oidc-jwt failed"
+  agent_oidc_jwt=$(echo "$oidc_resp" | jq -r .jwt)
+
+  sts_resp=$(aws sts assume-role-with-web-identity \
+    --region "$REGION" \
+    --role-arn "$agent_role_arn" \
+    --role-session-name "stage3-agent-${kind}-$(date +%s)" \
+    --web-identity-token "$agent_oidc_jwt" \
+    --duration-seconds 900 \
+    --output json 2>&1) || die "agent AssumeRoleWithWebIdentity ($kind) failed: $sts_resp"
+  local aki sak sst
+  aki=$(echo "$sts_resp" | jq -r .Credentials.AccessKeyId)
+  sak=$(echo "$sts_resp" | jq -r .Credentials.SecretAccessKey)
+  sst=$(echo "$sts_resp" | jq -r .Credentials.SessionToken)
+  local arn
+  arn=$(echo "$sts_resp" | jq -r .AssumedRoleUser.Arn)
+  ok "agent STS minted (AKI=${aki:0:10}…, AssumedArn=$arn)"
+
   # Resolve actor_omni + device_key_hash.
   local agent_actor agent_dkh
   if [ -f "$AGENT_FILE" ]; then
@@ -494,24 +549,13 @@ EOF
   store_cap="$body"
   ok "Store cap minted"
 
-  # Pick the right STS session for this data class. Workers fall back
-  # to the broker EC2 instance profile (broker-wide S3 perms, which we
-  # deliberately don't grant — codex P2 downgrade defense), so the
-  # worker REQUIRES per-request STS creds to actually touch S3.
-  local sts_label
-  if [ "$kind" = "cred" ]; then sts_label="vault"; else sts_label="memory"; fi
-  local aki sak sst
-  aki=$(cat "$STATE_DIR/aki.${sts_label}" 2>/dev/null) || die "no $sts_label STS creds — re-run step 3"
-  sak=$(cat "$STATE_DIR/sak.${sts_label}")
-  sst=$(cat "$STATE_DIR/sst.${sts_label}")
-
-  # POST plaintext to worker (with STS creds for the right data-class role)
+  # POST plaintext to worker (with agent-side STS creds in headers)
   local plaintext_b64
   plaintext_b64=$(printf '%s' "$SMOKE_PLAINTEXT" | base64 | tr -d '\n')
   local store_body
   store_body=$(jq -n --argjson cap "$store_cap" --arg pt "$plaintext_b64" \
                  '{cap: $cap, plaintext_b64: $pt}')
-  info "POST ${worker_url}${store_route}  (with X-Aws-* headers for $sts_label role)"
+  info "POST ${worker_url}${store_route}  (with agent-side X-Aws-* headers)"
   rc=$(curl -sS -o /tmp/store.$$.json -w '%{http_code}' \
     -X POST "${worker_url}${store_route}" \
     -H 'content-type: application/json' \
@@ -535,10 +579,10 @@ EOF
   local fetch_cap; fetch_cap="$body"
   ok "Fetch cap minted"
 
-  # GET plaintext back from worker (with same STS creds)
+  # GET plaintext back from worker (with the same agent-side STS creds)
   local fetch_body
   fetch_body=$(jq -n --argjson cap "$fetch_cap" '{cap: $cap}')
-  info "POST ${worker_url}${fetch_route}  (with X-Aws-* headers for $sts_label role)"
+  info "POST ${worker_url}${fetch_route}  (with agent-side X-Aws-* headers)"
   rc=$(curl -sS -o /tmp/fetch.$$.json -w '%{http_code}' \
     -X POST "${worker_url}${fetch_route}" \
     -H 'content-type: application/json' \
