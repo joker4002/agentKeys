@@ -722,8 +722,19 @@ fi
 # This is the cap-token-explicit isolation gate — symmetric to the
 # AWS IAM cross-bucket gate in step 10, but at the broker-signed
 # capability layer.
+#
+# Codex round-4 fix (high): MUST include valid X-Aws-* headers for the
+# TARGET worker. With AGENTKEYS_WORKER_REQUIRE_STS=1 (the production
+# deployment setting), the OptionalStsCreds axum extractor runs BEFORE
+# the handler body and rejects header-less requests with HTTP 401 —
+# `verify_cap` never gets to call `check_data_class`. So the negative
+# test could pass against the current dev broker (non-strict workers)
+# while silently failing to exercise the data-class guard under prod.
+# Sending valid STS creds makes the extractor pass; verify_cap then
+# runs check_data_class and rejects with cap_data_class_mismatch.
 post_cross_class() {
   local cap_blob="$1" worker_route="$2" out_file="$3"
+  local aki="$4" sak="$5" sst="$6"
   local plaintext_b64
   plaintext_b64=$(printf 'cross-class probe' | base64 | tr -d '\n')
   local body
@@ -732,8 +743,54 @@ post_cross_class() {
   rc=$(curl -sS -o "$out_file" -w '%{http_code}' \
     -X POST "$worker_route" \
     -H 'content-type: application/json' \
+    -H "x-aws-access-key-id: $aki" \
+    -H "x-aws-secret-access-key: $sak" \
+    -H "x-aws-session-token: $sst" \
     -d "$body" 2>&1 || echo "000")
   echo "$rc"
+}
+
+# Helper: mint agent-side STS for a given role (codex round-4). Reused
+# by both cred_memory_roundtrip and cross_class_rejection so the cross-
+# class test exercises the worker with valid extractor-passing creds.
+# Prints "AKI;SAK;SST" on stdout (semicolons because these tokens don't
+# contain that char).
+mint_agent_sts_for_role() {
+  local role_arn="$1" label="$2"
+  local agent_pk agent_addr
+  agent_pk=$(jq -r '.agent_private_key // empty' "$AGENT_FILE")
+  agent_addr=$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE")
+  [ -z "$agent_pk" ] || [ "$agent_pk" = "null" ] && return 1
+  local sresp request_id siwe_msg sig vresp session_jwt
+  sresp=$(curl -sSf -X POST "$OIDC_ISSUER/v1/auth/wallet/start" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg a "$agent_addr" --argjson c 1 '{address: $a, chain_id: $c}')") \
+    || return 2
+  request_id=$(echo "$sresp" | jq -r .request_id)
+  siwe_msg=$(echo "$sresp" | jq -r .siwe_message)
+  sig=$(cast wallet sign --private-key "$agent_pk" "$siwe_msg")
+  vresp=$(curl -sSf -X POST "$OIDC_ISSUER/v1/auth/wallet/verify" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg rid "$request_id" --arg sig "$sig" '{request_id: $rid, signature: $sig}')") \
+    || return 3
+  session_jwt=$(echo "$vresp" | jq -r '.session_jwt // .jwt // empty')
+  [ -z "$session_jwt" ] && return 4
+  local oidc_resp agent_oidc_jwt sts_resp
+  oidc_resp=$(curl -sSf -X POST "$OIDC_ISSUER/v1/mint-oidc-jwt" \
+    -H "authorization: Bearer $session_jwt") || return 5
+  agent_oidc_jwt=$(echo "$oidc_resp" | jq -r .jwt)
+  sts_resp=$(aws sts assume-role-with-web-identity \
+    --region "$REGION" \
+    --role-arn "$role_arn" \
+    --role-session-name "stage3-cross-${label}-$(date +%s)" \
+    --web-identity-token "$agent_oidc_jwt" \
+    --duration-seconds 900 \
+    --output json 2>&1) || return 6
+  local aki sak sst
+  aki=$(echo "$sts_resp" | jq -r .Credentials.AccessKeyId)
+  sak=$(echo "$sts_resp" | jq -r .Credentials.SecretAccessKey)
+  sst=$(echo "$sts_resp" | jq -r .Credentials.SessionToken)
+  printf '%s;%s;%s' "$aki" "$sak" "$sst"
 }
 
 # Helper: NEGATIVE cross-data-class rejection test.
@@ -786,7 +843,23 @@ cross_class_rejection() {
   local the_cap art_path
   the_cap=$(cat /tmp/cap.$$.json); rm -f /tmp/cap.$$.json
   art_path="$STATE_DIR/cross.${art}.json"
-  rc=$(post_cross_class "$the_cap" "$worker_full_url" "$art_path")
+
+  # Mint agent-side STS creds for the TARGET worker's role. Needed so
+  # the worker's OptionalStsCreds extractor passes under
+  # AGENTKEYS_WORKER_REQUIRE_STS=1 (production setting) — the
+  # data-class guard runs AFTER the extractor, so missing headers
+  # would short-circuit before verify_cap and the negative test would
+  # silently not prove the guard fired (codex round-4 finding).
+  local target_role
+  if [ "$worker_label" = "memory" ]; then target_role="$MEMORY_ROLE_ARN"; else target_role="$VAULT_ROLE_ARN"; fi
+  local sts_blob aki sak sst
+  if ! sts_blob=$(mint_agent_sts_for_role "$target_role" "cross-$art"); then
+    prereq_missing "agent STS mint failed for $worker_label target — auth chain broken (broker?  agent file?)" || return 1
+    return 0
+  fi
+  aki="${sts_blob%%;*}"; rest="${sts_blob#*;}"; sak="${rest%%;*}"; sst="${rest#*;}"
+
+  rc=$(post_cross_class "$the_cap" "$worker_full_url" "$art_path" "$aki" "$sak" "$sst")
   body=$(cat "$art_path" 2>/dev/null || true)
   if [ "$rc" = "200" ]; then
     cat "$art_path" >&2
