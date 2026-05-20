@@ -112,41 +112,44 @@ The OIDC + cap-token + IAM stack enforces a defense-in-depth chain across **four
 
 **Test-discipline rule**: any PR that adds a NEW worker, a NEW data class (e.g. a payments worker), or a NEW broker auth method MUST extend the stage-3 demo with negative cross-isolation tests for ALL four layers. Don't ship the feature with only POSITIVE-path tests.
 
-### Why there's no `/v1/cap/memory-*` endpoint (and why the existing one suffices)
+### Cap-tokens are data-class-explicit (issue #90 followup)
 
-The broker mints exactly two cap endpoints today: `/v1/cap/cred-store` and `/v1/cap/cred-fetch`. There is no `/v1/cap/memory-{put,get}` because the data class is NOT part of the cap-token's signed payload — it's the URL the cap is submitted to.
+The broker mints FOUR cap endpoints — two per data class — and the `data_class` is a SIGNED FIELD in the cap payload. Workers reject caps whose `data_class` doesn't match their bucket. This is the cap-layer isolation gate, symmetric with the AWS IAM cross-bucket gate (layer 4) but at the broker-signed capability layer.
 
-Concrete example:
-
-```bash
-# Operator A mints a Store cap. The broker signs this CapToken:
-{
-  "payload": {
-    "operator_omni": "0x941c…",
-    "actor_omni":    "0x82a0…",
-    "service":       "openrouter",
-    "device_key_hash": "0xb808…",
-    "op":            "store",
-    "k3_epoch":      6,
-    "issued_at":     1779280000,
-    "expires_at":    1779280300
-  },
-  "broker_sig": "<P-256 over keccak256(json(payload))>"
-}
-
-# The same cap-token can be POSTed to either worker:
-curl -X POST https://cred.litentry.org/v1/cred/store   -d '{"cap": <token>, "plaintext_b64": "..."}'
-#   → writes s3://agentkeys-vault-<acct>/bots/82a0…/credentials/openrouter.enc
-
-curl -X POST https://memory.litentry.org/v1/memory/put -d '{"cap": <token>, "plaintext_b64": "..."}'
-#   → writes s3://agentkeys-memory-<acct>/bots/82a0…/memory/openrouter.enc
+```
+POST /v1/cap/cred-store    → mints CapPayload { op: Store,    data_class: Credentials, ... }
+POST /v1/cap/cred-fetch    → mints CapPayload { op: Fetch,    data_class: Credentials, ... }
+POST /v1/cap/memory-put    → mints CapPayload { op: Store,    data_class: Memory,      ... }
+POST /v1/cap/memory-get    → mints CapPayload { op: Fetch,    data_class: Memory,      ... }
 ```
 
-Each worker's URL determines the bucket and prefix — the cap-token just authorizes the operation. The CapToken structure is intentionally data-class-agnostic so a single broker call can authorize any worker action with the same op_type.
+What this prevents:
 
-This isn't a security hole because **isolation comes from the IAM layer (layer 3) + the worker's bucket configuration**, not from the cap. A compromised cap for `service="openrouter"` Store op submitted to the memory worker writes to `bots/<actor>/memory/openrouter.enc` (NOT `credentials/`), still bound to the cap's actor, still scoped by the per-data-class IAM role.
+```bash
+# Operator A mints a credentials Store cap:
+cred_cap=$(curl -X POST $BROKER/v1/cap/cred-store -d ...)
+# → CapPayload { ..., op: store, data_class: credentials }
 
-The only thing a separate `/v1/cap/memory-*` endpoint would add is **audit clarity** — a row in the cap-issue audit log saying "this cap was minted intending memory access." For that benefit, we'd take a 2x increase in broker API surface area. Net: deferred. If/when audit clarity matters more (likely when payments-worker lands as a third data class), revisit.
+# Tries to abuse it against the memory worker:
+curl -X POST https://memory.litentry.org/v1/memory/put -d '{"cap": '"$cred_cap"', "plaintext_b64": "..."}'
+# → HTTP 403 cap_data_class_mismatch
+#   The memory worker's verify_cap() calls check_data_class(cap, DataClass::Memory),
+#   sees cap.payload.data_class == Credentials, rejects.
+```
+
+The reverse (memory cap submitted to cred worker) is symmetrically blocked.
+
+**Why two endpoints per data class, not just one + a `data_class` query param**: by making the route the source of truth, the broker can't ever mint a `Memory` cap from a request that hit `/v1/cap/cred-*` — the variant is statically derived in `handlers/cap.rs`, not from user input. Mistakes-on-the-broker-side are impossible to construct.
+
+**Why this matters beyond the IAM layer**: AWS IAM (layer 3+4) enforces cross-actor + cross-bucket isolation at the AWS-API call site. The `data_class` cap binding enforces it at the cap-authz site — earlier in the trust chain, before the worker even calls AWS. If the AWS IAM grants were ever accidentally too broad, the cap-layer check still rejects. Defense in depth.
+
+Verified live:
+
+- `harness/v2-stage3-demo.sh` step 14 — cred-class cap → memory worker → `cap_data_class_mismatch`
+- `harness/v2-stage3-demo.sh` step 15 — memory-class cap → cred worker → `cap_data_class_mismatch`
+- Unit tests: `crates/agentkeys-worker-creds/src/verify.rs::check_data_class_rejects_cross_class` + serialization test for `DataClass`
+
+**When a third data class lands** (e.g. payments-audit per arch.md §15.6): mint two more endpoints (`/v1/cap/payaudit-store` + `/v1/cap/payaudit-fetch`), add `DataClass::PaymentsAudit` variant, plumb to the new worker. The pattern is closed-extension: existing data classes don't need to know about the new one.
 
 ## Development Workflow (Anthropic Harness Pattern)
 

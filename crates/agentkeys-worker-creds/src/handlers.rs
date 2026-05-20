@@ -25,7 +25,7 @@ use crate::aws_creds::{s3_for_request, OptionalStsCreds};
 use crate::envelope;
 use crate::errors::{err_400, err_403, err_500, err_502, ApiError};
 use crate::state::SharedWorkerState;
-use crate::verify::{self, CapOp, CapToken};
+use crate::verify::{self, CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedWorkerState) -> Router {
     Router::new()
@@ -209,6 +209,10 @@ async fn verify_cap(
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
     verify::check_op(cap, expected_op)
         .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
+    // Per-data-class isolation gate (issue #90 followup): a memory-class
+    // cap MUST NOT be honoured at the credentials worker.
+    verify::check_data_class(cap, DataClass::Credentials)
+        .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
     verify::check_freshness(cap)
         .map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
     verify::check_chain_device(

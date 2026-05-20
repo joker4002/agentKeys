@@ -53,7 +53,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STEP_NUM=0
-STEP_TOTAL=14
+STEP_TOTAL=16
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
@@ -423,11 +423,11 @@ cred_memory_roundtrip() {
     store_route="/v1/cred/store"
     fetch_route="/v1/cred/fetch"
   else
-    # Memory worker has no dedicated cap-mint endpoint yet (#90 followup).
-    # The cred-* caps work against memory workers because both verify the
-    # same broker-signed CapToken shape with the same CapOp::Store/Fetch.
-    cap_store_url="cred-store"
-    cap_fetch_url="cred-fetch"
+    # Memory worker now has dedicated cap-mint endpoints that bind
+    # data_class=Memory into the cap payload. Cred-* caps no longer
+    # work here — cred worker rejects with cap_data_class_mismatch.
+    cap_store_url="memory-put"
+    cap_fetch_url="memory-get"
     worker_url="$AGENTKEYS_WORKER_MEMORY_URL"
     store_route="/v1/memory/put"
     fetch_route="/v1/memory/get"
@@ -615,8 +615,106 @@ EOF
   esac
 fi
 
-# ─── Step 14: Cleanup with admin profile ───────────────────────────────────
+# Helper: assert a worker REJECTS a cap with cap_data_class_mismatch.
+# This is the cap-token-explicit isolation gate — symmetric to the
+# AWS IAM cross-bucket gate in step 10, but at the broker-signed
+# capability layer.
+post_cross_class() {
+  local cap_blob="$1" worker_route="$2" out_file="$3"
+  local plaintext_b64
+  plaintext_b64=$(printf 'cross-class probe' | base64 | tr -d '\n')
+  local body
+  body=$(jq -n --argjson cap "$cap_blob" --arg pt "$plaintext_b64" \
+            '{cap: $cap, plaintext_b64: $pt}')
+  rc=$(curl -sS -o "$out_file" -w '%{http_code}' \
+    -X POST "$worker_route" \
+    -H 'content-type: application/json' \
+    -d "$body" 2>&1 || echo "000")
+  echo "$rc"
+}
+
+# ─── Step 14: NEGATIVE — cred-class cap submitted to memory worker ─────────
+# Mint a credentials cap (data_class=Credentials), POST to /v1/memory/put.
+# The memory worker MUST reject with HTTP 403 cap_data_class_mismatch.
 if should_run_step 14; then
+  step "NEGATIVE: cred-class cap → memory worker rejects (cap_data_class_mismatch)"
+  if [ ! -f "$AGENT_FILE" ]; then
+    skip "no demo-agent file — run stage-1 step 12 first"
+  else
+    a_actor=$(jq -r .actor_omni "$AGENT_FILE")
+    a_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
+    [ -z "$a_dkh" ] && a_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE" | tr '[:upper:]' '[:lower:]')")
+    cap_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$a_actor" \
+                       --arg svc "$SMOKE_SERVICE" --arg dkh "$a_dkh" \
+       '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+    rc=$(mint_cap "cred-store" "$cap_body")
+    if [ "$rc" != "200" ]; then
+      body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+      if echo "$body" | grep -qiE "not.*scope|RPC URL|chain_rpc"; then
+        skip "prerequisite missing (scope not set OR broker stale): $body"
+      else
+        die "cred-store cap-mint returned $rc — body: $body"
+      fi
+    else
+      cred_cap=$(cat /tmp/cap.$$.json); rm -f /tmp/cap.$$.json
+      rc=$(post_cross_class "$cred_cap" "${AGENTKEYS_WORKER_MEMORY_URL}/v1/memory/put" "$STATE_DIR/cross.cred-to-mem.json")
+      body=$(cat "$STATE_DIR/cross.cred-to-mem.json" 2>/dev/null || true)
+      if [ "$rc" = "200" ]; then
+        cat "$STATE_DIR/cross.cred-to-mem.json" >&2
+        die "CRITICAL: memory worker accepted a cred-class cap — data-class isolation broken!"
+      fi
+      if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
+        ok "memory worker correctly rejected cred-class cap with cap_data_class_mismatch ($rc)"
+      else
+        info "memory worker rejected ($rc) but error text didn't mention data_class: $body"
+        ok "memory worker rejected the cred-class cap (non-200 = pass for negative test)"
+      fi
+    fi
+  fi
+fi
+
+# ─── Step 15: NEGATIVE — memory-class cap submitted to cred worker ─────────
+# Symmetric to step 14. Mint a memory cap, POST to /v1/cred/store.
+# The cred worker MUST reject with HTTP 403 cap_data_class_mismatch.
+if should_run_step 15; then
+  step "NEGATIVE: memory-class cap → cred worker rejects (cap_data_class_mismatch)"
+  if [ ! -f "$AGENT_FILE" ]; then
+    skip "no demo-agent file — run stage-1 step 12 first"
+  else
+    a_actor=$(jq -r .actor_omni "$AGENT_FILE")
+    a_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
+    [ -z "$a_dkh" ] && a_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE" | tr '[:upper:]' '[:lower:]')")
+    cap_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$a_actor" \
+                       --arg svc "$SMOKE_SERVICE" --arg dkh "$a_dkh" \
+       '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+    rc=$(mint_cap "memory-put" "$cap_body")
+    if [ "$rc" != "200" ]; then
+      body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+      if echo "$body" | grep -qiE "not.*scope|RPC URL|chain_rpc"; then
+        skip "prerequisite missing (scope not set OR broker stale): $body"
+      else
+        die "memory-put cap-mint returned $rc — body: $body"
+      fi
+    else
+      mem_cap=$(cat /tmp/cap.$$.json); rm -f /tmp/cap.$$.json
+      rc=$(post_cross_class "$mem_cap" "${AGENTKEYS_WORKER_CRED_URL}/v1/cred/store" "$STATE_DIR/cross.mem-to-cred.json")
+      body=$(cat "$STATE_DIR/cross.mem-to-cred.json" 2>/dev/null || true)
+      if [ "$rc" = "200" ]; then
+        cat "$STATE_DIR/cross.mem-to-cred.json" >&2
+        die "CRITICAL: cred worker accepted a memory-class cap — data-class isolation broken!"
+      fi
+      if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
+        ok "cred worker correctly rejected memory-class cap with cap_data_class_mismatch ($rc)"
+      else
+        info "cred worker rejected ($rc) but error text didn't mention data_class: $body"
+        ok "cred worker rejected the memory-class cap (non-200 = pass for negative test)"
+      fi
+    fi
+  fi
+fi
+
+# ─── Step 16: Cleanup with admin profile ───────────────────────────────────
+if should_run_step 16; then
   step "Cleanup test objects + summary"
   # Use the laptop's admin profile (NOT the STS creds) to delete the
   # objects we wrote. Only the POSITIVE-step objects exist — every
@@ -653,6 +751,8 @@ ${C_OK}=== v2 stage-3 demo complete ===${C_RESET}
     [11] cred worker:  store → fetch → byte-for-byte roundtrip (AES-256-GCM)
     [12] memory worker: put → get → byte-for-byte roundtrip (AES-256-GCM)
     [13] broker rejects cross-actor cap-mint        → OperatorMismatch (4xx)
+    [14] cred-class cap → memory worker             → cap_data_class_mismatch
+    [15] memory-class cap → cred worker             → cap_data_class_mismatch
 
   Conclusion: OIDC + IAM PrincipalTag scoping is enforced both within
               a bucket (per-actor) AND across buckets (per-data-class).
@@ -661,5 +761,9 @@ ${C_OK}=== v2 stage-3 demo complete ===${C_RESET}
               The broker's session-omni → operator-omni gate blocks
               cross-actor cap-mint, the upstream cut that any
               storage-layer compromise would have to break first.
+              The data_class field is signed into the cap payload by
+              the broker, so a cred cap cannot pollute the memory bucket
+              and vice versa — defended at the cap layer (steps 14+15)
+              independently of the AWS IAM cross-bucket gate (step 10).
 EOF
 fi

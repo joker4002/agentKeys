@@ -34,12 +34,29 @@ pub enum CapOp {
     Teardown,
 }
 
+/// Data class the cap-token is bound to. Each worker MUST verify
+/// `cap.payload.data_class` matches its own class before touching S3.
+/// Without this, a cred-store cap could be submitted to /v1/memory/put
+/// (or vice versa) and pollute the wrong bucket at the cap-authz layer.
+/// The IAM PrincipalTag enforces per-actor scoping at the AWS layer
+/// (defense in depth); this binding is the cryptographic per-class gate
+/// at the cap layer (issue #90 followup, codified in CLAUDE.md).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClass {
+    Credentials,
+    Memory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapPayload {
     pub operator_omni: String,
     pub actor_omni: String,
     pub service: String,
     pub op: CapOp,
+    /// Data class the cap is bound to. REQUIRED — workers reject caps
+    /// whose data_class doesn't match the URL's bucket.
+    pub data_class: DataClass,
     pub device_key_hash: String,
     pub k3_epoch: u64,
     pub issued_at: u64,
@@ -73,6 +90,8 @@ pub enum VerifyError {
     Future { issued_at: u64, now: u64 },
     #[error("cap op {got:?} does not match endpoint {expected:?}")]
     OpMismatch { expected: CapOp, got: CapOp },
+    #[error("cap data_class {got:?} does not match endpoint {expected:?}")]
+    DataClassMismatch { expected: DataClass, got: DataClass },
     #[error("chain RPC error: {0}")]
     ChainRpc(String),
     #[error("requested service not in agent's on-chain scope")]
@@ -108,6 +127,24 @@ pub fn verify_signature(
 pub fn check_op(token: &CapToken, expected: CapOp) -> Result<(), VerifyError> {
     if token.payload.op != expected {
         return Err(VerifyError::OpMismatch { expected, got: token.payload.op });
+    }
+    Ok(())
+}
+
+/// Per-data-class isolation check (issue #90 followup). Workers reject
+/// caps whose data_class doesn't match the URL's bucket — a cred-store
+/// cap MUST NOT be honored at /v1/memory/put, even though both endpoints
+/// expect the same CapOp::Store. The data_class binding is signed into
+/// the cap payload by the broker, so it cannot be forged downstream.
+pub fn check_data_class(
+    token: &CapToken,
+    expected: DataClass,
+) -> Result<(), VerifyError> {
+    if token.payload.data_class != expected {
+        return Err(VerifyError::DataClassMismatch {
+            expected,
+            got: token.payload.data_class,
+        });
     }
     Ok(())
 }
@@ -313,12 +350,17 @@ mod tests {
     use super::*;
 
     fn sample_token(op: CapOp) -> CapToken {
+        sample_token_with_class(op, DataClass::Credentials)
+    }
+
+    fn sample_token_with_class(op: CapOp, data_class: DataClass) -> CapToken {
         CapToken {
             payload: CapPayload {
                 operator_omni: format!("0x{}", "a".repeat(64)),
                 actor_omni: format!("0x{}", "b".repeat(64)),
                 service: "openrouter".into(),
                 op,
+                data_class,
                 device_key_hash: format!("0x{}", "c".repeat(64)),
                 k3_epoch: 1,
                 issued_at: 1,
@@ -326,6 +368,46 @@ mod tests {
                 nonce: "00".repeat(16),
             },
             broker_sig: "x".into(),
+        }
+    }
+
+    #[test]
+    fn data_class_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&DataClass::Credentials).unwrap(),
+            "\"credentials\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DataClass::Memory).unwrap(),
+            "\"memory\""
+        );
+    }
+
+    #[test]
+    fn check_data_class_accepts_match() {
+        let t = sample_token_with_class(CapOp::Store, DataClass::Credentials);
+        assert!(check_data_class(&t, DataClass::Credentials).is_ok());
+    }
+
+    #[test]
+    fn check_data_class_rejects_cross_class() {
+        // Cred-class cap submitted to memory worker (expected = Memory).
+        let cred_cap = sample_token_with_class(CapOp::Store, DataClass::Credentials);
+        match check_data_class(&cred_cap, DataClass::Memory) {
+            Err(VerifyError::DataClassMismatch { expected, got }) => {
+                assert_eq!(expected, DataClass::Memory);
+                assert_eq!(got, DataClass::Credentials);
+            }
+            other => panic!("expected DataClassMismatch, got {:?}", other),
+        }
+        // Memory-class cap submitted to cred worker (expected = Credentials).
+        let mem_cap = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        match check_data_class(&mem_cap, DataClass::Credentials) {
+            Err(VerifyError::DataClassMismatch { expected, got }) => {
+                assert_eq!(expected, DataClass::Credentials);
+                assert_eq!(got, DataClass::Memory);
+            }
+            other => panic!("expected DataClassMismatch, got {:?}", other),
         }
     }
 
