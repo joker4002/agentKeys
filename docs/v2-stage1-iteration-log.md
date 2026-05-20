@@ -442,3 +442,19 @@ forward-only invariant of `K3EpochCounter` is enforced — there is no
 the signer enclave for decrypt of pre-rotation blobs, not on chain).
 
 No errors surfaced. `K3EpochCounter` now at epoch 6 on Heima Mainnet.
+
+## Phase 1 — issue #90 Q3 + codex review final verification (2026-05-20 12:30 UTC)
+
+Re-verification pass after the two codex-review fix commits (18e709b + e9926ed) on PR #92. The harness skill ran all three demos sequentially against Heima Mainnet in stub mode. Acceptance: all three exit 0, all steps land green, clippy clean.
+
+| Demo | Steps | Result | Notes |
+|---|---|---|---|
+| `harness/v2-stage3-demo.sh` | 11 / 11 | ✅ all green | NEW. Steps 5/6/8/9/10 prove cross-actor + cross-data-class IAM isolation via AccessDenied. Steps 4/7 succeed (same-actor writes). Closes codex P2 (memory worker OIDC) + codex P2 (ListBucket whole-bucket). |
+| `harness/v2-stage1-demo.sh` | 16 / 16 | ✅ all green | Step 10 skip (already-registered), 12 skip (already-registered), 13 skip (stub-mode-refuses-touchid). Step 15 (NEW): tier-A audit relay → on-chain `CredentialAudit.appendRoot`. |
+| `harness/v2-stage2-demo.sh` | 11 / 11 | ✅ all green | Steps 1-9 stage-2 hardening flow. Step 10 (NEW): tier-A worker smoke same as stage-1 step 15. Step 11 cleanup. |
+
+Other phase-1 gates:
+- `cargo clippy -p agentkeys-worker-creds -p agentkeys-worker-memory --no-deps` → zero warnings.
+- Backward compat verified: workers without `X-Aws-*` headers fall back to instance profile (existing stage-1 step 8 S3 smoke + stage-1 step 15 + stage-2 step 10 worker-smoke all use the fallback path and remain green).
+
+No regressions introduced by commits `18e709b` (downgrade-attack fix + credential redaction) or `e9926ed` (memory bucket+role + ListBucket scoping). PR #92 is phase-1-ready.
