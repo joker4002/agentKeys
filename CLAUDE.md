@@ -99,6 +99,55 @@ Switch with `awsp <profile>`; verify with `aws sts get-caller-identity`.
 ### Caller-ARN matching in scripts must be case-insensitive
 Lowercase the caller_arn before matching, since the remote IAM user is `agentKeys-admin` (capital K) but operator scripts canonicalize on `agentkeys-admin`. Use `tr '[:upper:]' '[:lower:]'` (portable to /bin/bash 3.2) — not `${var,,}` (bash 4+).
 
+## Per-actor + per-data-class isolation invariants (issue #90)
+
+The OIDC + cap-token + IAM stack enforces a defense-in-depth chain across **four layers**. Every PR that touches storage, OIDC, the broker cap-mint flow, or the worker handlers MUST verify these invariants explicitly in a demo step. A change that doesn't add a corresponding test for the layer it touches is incomplete.
+
+| Layer | Invariant | Enforced by | Canonical test |
+|---|---|---|---|
+| **1. Broker cap-mint** | The session JWT's `agentkeys.omni_account` claim MUST match the request's `operator_omni`. Also: `device.operator_omni == session_omni`, `device.actor_omni == req.actor_omni`, `device.roles & ROLE_CAP_MINT`, `isServiceInScope(operator, actor, service) == true`. Returns `OperatorMismatch` / `DeviceBindingMismatch` / `DeviceRoleMissing` / `ServiceNotInScope` otherwise. | [`handlers/cap.rs`](crates/agentkeys-broker-server/src/handlers/cap.rs) — `mint_cap()` | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) step 13 (NEGATIVE cap-mint with cross-actor `operator_omni` → HTTP 4xx) |
+| **2. Worker chain-verify** | Independent re-check of layer-1 invariants from the worker's perspective — defense-in-depth against broker compromise. `verify_signature` (broker cap-sig), `check_chain_device`, `check_chain_scope`, `check_chain_k3_epoch`. | [`crates/agentkeys-worker-creds/src/verify.rs`](crates/agentkeys-worker-creds/src/verify.rs) + 26 unit tests | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) steps 11+12 (full HTTP roundtrip exercises every verify hook) |
+| **3. AWS IAM PrincipalTag scoping** | STS creds minted via `AssumeRoleWithWebIdentity` carry `PrincipalTag/agentkeys_actor_omni`. S3 resources scoped via `${aws:PrincipalTag/agentkeys_actor_omni}` resource-ARN interpolation. `s3:ListBucket` MUST carry an `s3:prefix=bots/${PrincipalTag}/<class>/*` condition (codex P2 — split-statement v3 bucket policy). | [`scripts/provision-vault-role.sh`](scripts/provision-vault-role.sh) + [`scripts/provision-memory-role.sh`](scripts/provision-memory-role.sh) + [`scripts/apply-vault-bucket-policy.sh`](scripts/apply-vault-bucket-policy.sh) + [`scripts/apply-memory-bucket-policy.sh`](scripts/apply-memory-bucket-policy.sh) | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) steps 4-9: POSITIVE write to own prefix, NEGATIVE write + LIST to cross-actor prefix → AccessDenied |
+| **4. Per-data-class bucket separation** | Vault-role's IAM permissions MUST be scoped to the vault bucket only; memory-role to the memory bucket only. Vault creds in the wrong bucket → AccessDenied; memory creds in the vault bucket → AccessDenied. Per arch.md §17.2 ("sharing one role across data classes collapses blast radius"). | Per-data-class IAM roles (`agentkeys-vault-role`, `agentkeys-memory-role`) | [`harness/v2-stage3-demo.sh`](harness/v2-stage3-demo.sh) step 10 (vault creds → memory bucket, memory creds → vault bucket, both AccessDenied) |
+
+**Test-discipline rule**: any PR that adds a NEW worker, a NEW data class (e.g. a payments worker), or a NEW broker auth method MUST extend the stage-3 demo with negative cross-isolation tests for ALL four layers. Don't ship the feature with only POSITIVE-path tests.
+
+### Why there's no `/v1/cap/memory-*` endpoint (and why the existing one suffices)
+
+The broker mints exactly two cap endpoints today: `/v1/cap/cred-store` and `/v1/cap/cred-fetch`. There is no `/v1/cap/memory-{put,get}` because the data class is NOT part of the cap-token's signed payload — it's the URL the cap is submitted to.
+
+Concrete example:
+
+```bash
+# Operator A mints a Store cap. The broker signs this CapToken:
+{
+  "payload": {
+    "operator_omni": "0x941c…",
+    "actor_omni":    "0x82a0…",
+    "service":       "openrouter",
+    "device_key_hash": "0xb808…",
+    "op":            "store",
+    "k3_epoch":      6,
+    "issued_at":     1779280000,
+    "expires_at":    1779280300
+  },
+  "broker_sig": "<P-256 over keccak256(json(payload))>"
+}
+
+# The same cap-token can be POSTed to either worker:
+curl -X POST https://cred.litentry.org/v1/cred/store   -d '{"cap": <token>, "plaintext_b64": "..."}'
+#   → writes s3://agentkeys-vault-<acct>/bots/82a0…/credentials/openrouter.enc
+
+curl -X POST https://memory.litentry.org/v1/memory/put -d '{"cap": <token>, "plaintext_b64": "..."}'
+#   → writes s3://agentkeys-memory-<acct>/bots/82a0…/memory/openrouter.enc
+```
+
+Each worker's URL determines the bucket and prefix — the cap-token just authorizes the operation. The CapToken structure is intentionally data-class-agnostic so a single broker call can authorize any worker action with the same op_type.
+
+This isn't a security hole because **isolation comes from the IAM layer (layer 3) + the worker's bucket configuration**, not from the cap. A compromised cap for `service="openrouter"` Store op submitted to the memory worker writes to `bots/<actor>/memory/openrouter.enc` (NOT `credentials/`), still bound to the cap's actor, still scoped by the per-data-class IAM role.
+
+The only thing a separate `/v1/cap/memory-*` endpoint would add is **audit clarity** — a row in the cap-issue audit log saying "this cap was minted intending memory access." For that benefit, we'd take a 2x increase in broker API surface area. Net: deferred. If/when audit clarity matters more (likely when payments-worker lands as a third data class), revisit.
+
 ## Development Workflow (Anthropic Harness Pattern)
 
 On every session start:
