@@ -861,7 +861,7 @@ if should_run_step 16; then
   printf "  wallet         : %s\n" "$WALLET_ADDR" >&2
   printf "  own omni       : 0x%s\n\n" "$OWN_ACTOR_OMNI" >&2
 
-  local nstep noutcome nmsg nok=0 nskip=0 nfail=0
+  nstep=""; noutcome=""; nmsg=""; rest=""; nok=0; nskip=0; nfail=0
   printf "  Per-step outcome (from actual execution, not claimed coverage):\n" >&2
   for entry in "${STEP_OUTCOMES[@]:-}"; do
     [ -z "$entry" ] && continue
@@ -870,9 +870,9 @@ if should_run_step 16; then
     noutcome="${rest%%:*}"
     nmsg="${rest#*:}"
     case "$noutcome" in
-      ok)   printf "    [%2d] ${C_OK}ok${C_RESET}    %s\n" "$nstep" "$nmsg" >&2; nok=$((nok+1)) ;;
-      skip) printf "    [%2d] ${C_WARN}skip${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nskip=$((nskip+1)) ;;
-      fail) printf "    [%2d] ${C_ERR}fail${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nfail=$((nfail+1)) ;;
+      ok)   printf "    [%2s] ${C_OK}ok${C_RESET}    %s\n" "$nstep" "$nmsg" >&2; nok=$((nok+1)) ;;
+      skip) printf "    [%2s] ${C_WARN}skip${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nskip=$((nskip+1)) ;;
+      fail) printf "    [%2s] ${C_ERR}fail${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nfail=$((nfail+1)) ;;
     esac
   done
   printf "\n  Totals: %sok=%d%s  %sskip=%d%s  %sfail=%d%s\n" \
@@ -888,7 +888,9 @@ if should_run_step 16; then
   fi
   if [ "$nskip" -gt 0 ]; then
     printf "\n${C_WARN}DEMO PARTIAL${C_RESET}: %d step(s) skipped (--allow-skip mode). Coverage is NOT complete; do not treat this run as a release gate.\n" "$nskip" >&2
+  elif [ "$nok" -gt 0 ]; then
+    printf "\n${C_OK}DEMO COMPLETE${C_RESET}: %d steps exercised — full isolation + roundtrip coverage proven.\n" "$nok" >&2
   else
-    printf "\n${C_OK}DEMO COMPLETE${C_RESET}: all %d steps exercised — full isolation + roundtrip coverage proven.\n" "$nok" >&2
+    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 16); run full demo to prove coverage.\n" >&2
   fi
 fi
