@@ -154,23 +154,19 @@ echo "    operator_omni    = 0x$OPERATOR_OMNI" >&2
 echo "    actor_omni       = 0x$ACTOR_OMNI" >&2
 echo "    deviceKeyHash    = $DEVICE_KEY_HASH" >&2
 
-# Idempotency: read the current device entry. If registeredAt != 0, skip.
-log "Idempotency check: is this agent device already registered?"
-EXISTING=$(cast call "$REGISTRY" "getDevice(bytes32)" "$DEVICE_KEY_HASH" --rpc-url "$RPC_HTTP" 2>&1 || echo "")
-if [ -n "$EXISTING" ] && [ "$EXISTING" != "0x" ]; then
-  HEX_PAYLOAD=$(printf '%s' "$EXISTING" | tr -d '\n' | sed 's/^0x//')
-  if [ "${#HEX_PAYLOAD}" -ge 448 ]; then
-    REGISTERED_AT_HEX="${HEX_PAYLOAD:320:64}"
-    REGISTERED_AT_DEC=$(printf '%d' "0x$REGISTERED_AT_HEX" 2>/dev/null || echo 0)
-    if [ "$REGISTERED_AT_DEC" -gt 0 ]; then
-      skip "agent device already registered at timestamp $REGISTERED_AT_DEC — no-op"
-      # Update agent file with the prior tx info if missing.
-      echo "{\"ok\":true,\"skipped\":\"already-registered\",\"label\":\"$LABEL\",\"agent_address\":\"$AGENT_ADDR\",\"actor_omni\":\"0x$ACTOR_OMNI\",\"device_key_hash\":\"$DEVICE_KEY_HASH\",\"registered_at\":$REGISTERED_AT_DEC}"
-      exit 0
-    fi
-  fi
+# Idempotency: use the contract's typed isActive view instead of slicing
+# the raw getDevice() tuple at hard-coded hex offsets. The DeviceEntry
+# struct grew in codex H1 (k11RpIdHash + k11PubX + k11PubY), shifting
+# registeredAt's offset from 320 to 512 — silently breaking re-runs of the
+# previous offset-based check. isActive(bytes32)(bool) is struct-agnostic.
+log "Idempotency check: is this agent device already active?"
+IS_ACTIVE=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$DEVICE_KEY_HASH" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "false")
+if [ "$IS_ACTIVE" = "true" ]; then
+  skip "agent device already active on-chain — no-op"
+  echo "{\"ok\":true,\"skipped\":\"already-registered\",\"label\":\"$LABEL\",\"agent_address\":\"$AGENT_ADDR\",\"actor_omni\":\"0x$ACTOR_OMNI\",\"device_key_hash\":\"$DEVICE_KEY_HASH\"}"
+  exit 0
 fi
-ok "agent device not yet registered → proceeding"
+ok "agent device not yet active → proceeding"
 
 # Build the agentPopSig: agent_wallet signs keccak("agentkeys-agent-pop:" || device_key_hash).
 # This is the proof-of-possession: only the holder of agent_private_key can produce this sig.

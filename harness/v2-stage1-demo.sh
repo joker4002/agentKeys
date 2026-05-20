@@ -91,7 +91,7 @@ fi
 # Bash-3.2 (macOS default) does NOT support `local -n`, so step counters
 # live as plain globals.
 STEP_NUM=0
-STEP_TOTAL=15
+STEP_TOTAL=16
 CURRENT_STEP_NAME=""
 
 step()    { STEP_NUM=$((STEP_NUM+1)); CURRENT_STEP_NAME="$1"
@@ -728,6 +728,21 @@ do_step_11() {
 
 # ─── Step 15: final summary ────────────────────────────────────────────────
 do_step_15() {
+  step "Tier-A audit relay + email-inbox smoke (workers co-located on broker host)"
+  local label="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
+  local smoke_args=()
+  # Use the agent file created in step 12 when present (real actor_omni).
+  # Falls back to synthesized actor_omni when the file is absent.
+  if [ -f "$HOME/.agentkeys/agents/${label}.json" ]; then
+    smoke_args+=(--actor "$label")
+  fi
+  if ! bash "$REPO_ROOT/scripts/heima-worker-smoke.sh" "${smoke_args[@]}"; then
+    die "heima-worker-smoke.sh failed — workers deployed? Run scripts/verify-workers.sh from this laptop."
+  fi
+  ok "tier-A Merkle root committed on-chain (CredentialAudit.appendRoot); email worker /healthz green"
+}
+
+do_step_16() {
   step "Summary + next steps"
   local profile_uc registry_addr session_file
   profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
@@ -785,6 +800,7 @@ main() {
   in_scope 13 && do_step_13
   in_scope 14 && do_step_14
   in_scope 15 && do_step_15
+  in_scope 16 && do_step_16
 
   return 0
 }

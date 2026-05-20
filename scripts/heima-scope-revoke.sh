@@ -81,28 +81,57 @@ AGENT_FILE="$HOME/.agentkeys/agents/${LABEL}.json"
 ACTOR_OMNI=$(jq -r .actor_omni "$AGENT_FILE")
 [ "$ACTOR_OMNI" = "null" ] && die "agent file missing actor_omni"
 
-MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-[ -f "$MNEMONIC_FILE" ] || die "missing mnemonic"
-if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
-  npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund || die "npm install failed"
-fi
-DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-MASTER_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
-MASTER_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
+# Master key via shared _lib.sh (raw-hex or mnemonic).
+. "$REPO_ROOT/harness/scripts/_lib.sh"
+MASTER_KEY=$(resolve_master_key) || die "could not resolve deployer key"
+MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
 MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
 OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
 
-if [ "$USE_WEBAUTHN" = "1" ]; then
-  msg_hex=$(printf 'agentkeys:scope-revoke:%s:%s:%s' \
-    "$OPERATOR_OMNI" "$ACTOR_OMNI" "$AGENTKEYS_CHAIN" | xxd -p -c 65536 | tr -d '\n')
-  log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
-  K11_STUB=$("$AGENTKEYS_BIN" k11 assert --webauthn \
-    --operator-omni "0x$OPERATOR_OMNI" \
-    --message-hex "$msg_hex" 2>/dev/null) \
-    || die "agentkeys k11 assert --webauthn failed"
-else
-  K11_STUB="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
+# Stage-2 K11 assertion: real WebAuthn ceremony required. CI/no-Touch-ID
+# environments skip cleanly rather than block — stage-2 contract gates on
+# real K11 by design, no way around the Touch ID prompt for chain mutation.
+PRIMARY_DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
+PRIMARY_K11_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json"
+if [ ! -f "$PRIMARY_K11_FILE" ] || [ "$(jq -r .mode "$PRIMARY_K11_FILE" 2>/dev/null)" != "webauthn" ]; then
+  skip "primary K11 not enrolled with mode=webauthn — stage-2 revokeScope requires real K11 sig"
+  echo "{\"ok\":true,\"skipped\":\"no-webauthn-k11\"}"
+  exit 0
 fi
+# Stub-mode caller (no --webauthn) on a laptop with a stale webauthn K11
+# enrollment: skip cleanly instead of triggering Touch ID.
+if [ "$USE_WEBAUTHN" = "0" ]; then
+  skip "stub mode (no --webauthn) — refusing to trigger a Touch ID ceremony for revokeScope. Re-run with --webauthn to actually revoke, or accept the skip in CI."
+  echo "{\"ok\":true,\"skipped\":\"stub-mode-refuses-touchid\"}"
+  exit 0
+fi
+MODE=$(jq -r .mode "$PRIMARY_K11_FILE")
+
+# Compute expected challenge per contract: keccak256(abi.encode(
+#   OP_REVOKE_SCOPE, operatorOmni, agentOmni, chainid, scopeNonce))
+SCOPE_NONCE=$(cast call "$SCOPE_CONTRACT" \
+  "scopeNonce(bytes32,bytes32)(uint256)" "0x$OPERATOR_OMNI" "$ACTOR_OMNI" \
+  --rpc-url "$RPC_HTTP")
+OP_KIND=$(cast call "$SCOPE_CONTRACT" "OP_REVOKE_SCOPE()(bytes32)" --rpc-url "$RPC_HTTP")
+CHALLENGE=$(cast keccak "$(cast abi-encode \
+  'revokeScope(bytes32,bytes32,bytes32,uint256,uint256)' \
+  "$OP_KIND" "0x$OPERATOR_OMNI" "$ACTOR_OMNI" "$LIVE_CHAIN_ID" "$SCOPE_NONCE")")
+log "expected_challenge = $CHALLENGE"
+
+log "Requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
+ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
+  --webauthn --rp-id localhost --emit-chain-payload \
+  --operator-omni "0x$OPERATOR_OMNI" \
+  --message-hex "$CHALLENGE" 2>/dev/null) \
+  || die "primary K11 ceremony failed"
+
+K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
+K11_CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)
+K11_CDJ_HEX="0x$(printf '%s' "$K11_CDJ_UTF8" | xxd -p -c 65536 | tr -d '\n')"
+K11_CHALL_LOC=$(echo "$ASSERTION_JSON" | jq -r .challenge_location)
+K11_R_HEX=$(echo "$ASSERTION_JSON" | jq -r .r_hex)
+K11_S_HEX=$(echo "$ASSERTION_JSON" | jq -r .s_hex)
+K11_TUPLE="($PRIMARY_DEVICE_KEY_HASH,$K11_AUTH_DATA,$K11_CDJ_HEX,$K11_CHALL_LOC,$K11_R_HEX,$K11_S_HEX)"
 
 log "Inputs"
 echo "    chain         = $AGENTKEYS_CHAIN" >&2
@@ -163,8 +192,8 @@ ok "scope is live → revoking"
 
 CAST_ARGS=(
   send "$SCOPE_CONTRACT"
-  "revokeScope(bytes32,bytes32,bytes)"
-  "0x$OPERATOR_OMNI" "$ACTOR_OMNI" "$K11_STUB"
+  "revokeScope(bytes32,bytes32,(bytes32,bytes,bytes,uint256,uint256,uint256))"
+  "0x$OPERATOR_OMNI" "$ACTOR_OMNI" "$K11_TUPLE"
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" --private-key "$MASTER_KEY"
 )
 

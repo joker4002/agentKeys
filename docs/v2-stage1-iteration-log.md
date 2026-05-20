@@ -378,3 +378,113 @@ Codex verified:
 **Errors + fixes**:
 
 (populated during stage-2 execution)
+
+---
+
+## K3 rotation test — 2026-05-19 (Heima Mainnet)
+
+Driver: `scripts/heima-k3-rotate.sh` against
+`K3EpochCounter = 0xeacc97d4e7854c52d4736e5fba2dc7c2c2b147d9` on Heima Mainnet.
+Per the contract design `advanceEpoch()` is forward-only, so the "back and forth"
+test is bounded to forward-path correctness + idempotency.
+
+### Round 1 — single advance
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh`
+
+**Pre**: `currentEpoch() = 1`
+
+**Tx**: `0xda25e5f340f66a9d08ff8d35c354a6cd62ce34508a8286c5797c64c16f47ed6b`
+
+**Post**: `currentEpoch() = 2` ✓
+
+### Round 2 — second single advance
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh`
+
+**Pre**: `currentEpoch() = 2`
+
+**Tx**: `0x8e8deab538b921b6ca67ea88eadce40e487e3aaee6cf99c93e3a38ab2881b059`
+
+**Post**: `currentEpoch() = 3` ✓
+
+### Round 3 — idempotency skip
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh --target-epoch 3`
+
+**Pre**: `currentEpoch() = 3`
+
+**Behaviour**: script pre-reads currentEpoch (3) vs target (3), logs
+`skip currentEpoch (3) already >= target (3)`, exits 0 with
+`{"ok":true,"skipped":"already-at-target","current_epoch":3}`. No tx submitted.
+
+**Post**: `currentEpoch() = 3` ✓
+
+### Round 4 — multi-step advance
+
+**Cmd**: `bash scripts/heima-k3-rotate.sh --target-epoch 6`
+
+**Pre**: `currentEpoch() = 3`
+
+**Behaviour**: script computes 3 steps (3 → 6), sends 3 sequential
+`advanceEpoch()` txs:
+- step 1: `0x0e42480835d5000143db8101b16c7108e618530f72b87e336fd5551d852a0c3e`
+- step 2: `0x7479495b1055884602cd596d076e8acb8b56de2f944ec630060330373ef30c74`
+- step 3: `0x66c00a8d46b173ff206257df5ebabe89c2636a2efd466777f21fd7d625cac00d`
+
+**Post**: `currentEpoch() = 6` ✓
+
+### Verdict
+
+5 real txs landed; script idempotent + multi-step both work. The
+forward-only invariant of `K3EpochCounter` is enforced — there is no
+"rotate back" by contract design (historical epochs are retained inside
+the signer enclave for decrypt of pre-rotation blobs, not on chain).
+
+No errors surfaced. `K3EpochCounter` now at epoch 6 on Heima Mainnet.
+
+## Phase 1 — issue #90 Q3 + codex review final verification (2026-05-20 12:30 UTC)
+
+Re-verification pass after the two codex-review fix commits (18e709b + e9926ed) on PR #92. The harness skill ran all three demos sequentially against Heima Mainnet in stub mode. Acceptance: all three exit 0, all steps land green, clippy clean.
+
+| Demo | Steps | Result | Notes |
+|---|---|---|---|
+| `harness/v2-stage3-demo.sh` | 11 / 11 | ✅ all green | NEW. Steps 5/6/8/9/10 prove cross-actor + cross-data-class IAM isolation via AccessDenied. Steps 4/7 succeed (same-actor writes). Closes codex P2 (memory worker OIDC) + codex P2 (ListBucket whole-bucket). |
+| `harness/v2-stage1-demo.sh` | 16 / 16 | ✅ all green | Step 10 skip (already-registered), 12 skip (already-registered), 13 skip (stub-mode-refuses-touchid). Step 15 (NEW): tier-A audit relay → on-chain `CredentialAudit.appendRoot`. |
+| `harness/v2-stage2-demo.sh` | 11 / 11 | ✅ all green | Steps 1-9 stage-2 hardening flow. Step 10 (NEW): tier-A worker smoke same as stage-1 step 15. Step 11 cleanup. |
+
+Other phase-1 gates:
+- `cargo clippy -p agentkeys-worker-creds -p agentkeys-worker-memory --no-deps` → zero warnings.
+- Backward compat verified: workers without `X-Aws-*` headers fall back to instance profile (existing stage-1 step 8 S3 smoke + stage-1 step 15 + stage-2 step 10 worker-smoke all use the fallback path and remain green).
+
+No regressions introduced by commits `18e709b` (downgrade-attack fix + credential redaction) or `e9926ed` (memory bucket+role + ListBucket scoping). PR #92 is phase-1-ready.
+
+## Phase 1+2 — codex round-2 adversarial review fix + verification (2026-05-20 18:00 UTC)
+
+After PR #92's data-class-explicit isolation work, the codex adversarial review of stage-3 returned `needs-attention` with three findings (one high, two medium):
+
+| # | Severity | Finding |
+|---|---|---|
+| 1 | high | Worker roundtrip checks could be `skip; return 0` and still appear as "byte-for-byte AES-256-GCM coverage" in the summary table |
+| 2 | high | Negative cap-class tests accepted ANY non-200 as pass (404 route, 502 broker stale, generic 403 — all silently green) |
+| 3 | medium | Cross-actor cap-mint test accepted generic rejection; 502 (broker stale) was a `skip` instead of a fail |
+
+All three closed in commit `c55ea29`:
+
+- STRICT default mode + `--allow-skip` opt-in for dev iteration
+- Steps 14+15 (cross-class) require canonical `cap_data_class_mismatch` + HTTP 4xx
+- Step 13 (cross-actor) requires canonical `OperatorMismatch` + HTTP 4xx; 502 with config-missing body is now a hard fail
+- Final summary built from per-step `STEP_OUTCOMES[]` array — reflects actual execution, no hardcoded coverage claims
+- Summary exits non-zero if any step failed OR if any step skipped in strict mode
+
+Live-verified on Heima Mainnet (2026-05-20):
+
+| Demo | Steps recorded | Outcome |
+|---|---|---|
+| `harness/v2-stage3-demo.sh` | 13/13 ok (steps 4-15) | DEMO COMPLETE — full isolation + roundtrip coverage proven |
+| `harness/v2-stage1-demo.sh` | 16/16 green | unchanged (backward compat) |
+| `harness/v2-stage2-demo.sh` | 11/11 green | unchanged |
+
+Step 11+12 (worker encrypt/decrypt) recorded canonical `byte-for-byte roundtrip` outcomes for both cred + memory workers using agent-side SIWE + STS creds. Step 13 (cross-actor) returned HTTP 403 + OperatorMismatch. Steps 14+15 (cross-data-class) returned HTTP 403 + cap_data_class_mismatch.
+
+After commit `5b0516b` (summary-block bug fix), the strict-mode summary renders correctly: per-step outcome list + totals + final verdict.

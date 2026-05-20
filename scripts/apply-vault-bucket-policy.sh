@@ -74,15 +74,17 @@ else
   ok "current policy retrieved ($(echo -n "$current_policy" | wc -c | tr -d ' ') bytes)"
 fi
 
-# Idempotency check
-already_v2=0
+# Idempotency check (v3 marker — codex review P2: split ListBucket from
+# object actions so ListBucket can carry the s3:prefix condition; v2
+# allowed any tagged session to enumerate the entire bucket).
+already_v3=0
 if [ -n "$current_policy" ]; then
-  has_v2_sid=$(echo "$current_policy" \
-    | jq '[.Statement[] | select(.Sid == "VaultPolicyV2")] | length' 2>/dev/null || echo 0)
-  if [ "${has_v2_sid:-0}" -gt 0 ]; then already_v2=1; fi
+  has_v3_sid=$(echo "$current_policy" \
+    | jq '[.Statement[] | select(.Sid == "VaultListV3" or .Sid == "VaultObjectsV3")] | length' 2>/dev/null || echo 0)
+  if [ "${has_v3_sid:-0}" -gt 1 ]; then already_v3=1; fi
 fi
-if [ "$already_v2" = "1" ]; then
-  skip "policy already has v2 marker (Sid VaultPolicyV2)"
+if [ "$already_v3" = "1" ]; then
+  skip "policy already has v3 markers (VaultListV3 + VaultObjectsV3)"
   exit 0
 fi
 
@@ -94,28 +96,47 @@ if [ -n "$current_policy" ]; then
   ok "backed up to $backup"
 fi
 
-# Build v2 policy. One statement (the role's inline policy already does
-# the heavy lifting per §17.2; the bucket policy is the second line of
-# defense). PrincipalTag-scoped resource ARN enforces per-actor isolation.
+# Build v3 policy (codex review P2 fix): SPLIT ListBucket from object
+# actions into two statements so ListBucket can carry an `s3:prefix`
+# condition. v2 grouped all four actions under one statement with
+# Resource[bucket, bucket/...] and no prefix condition — meaning any
+# tagged session could list the entire bucket, enumerating every
+# actor's key names even though Get/Put were tag-scoped.
+#
+# v3:
+#   VaultListV3   — s3:ListBucket on the bucket ARN, conditioned on
+#                   s3:prefix matching the caller's PrincipalTag prefix.
+#   VaultObjectsV3 — Get/Put/Delete on the bucket/bots/${tag}/credentials/* ARN.
+#
+# IAM evaluates resource and identity policy allows as a union, so this
+# layer must independently scope cross-actor listing — relying on the
+# role's inline policy alone is insufficient defense.
 new_policy=$(jq -n \
   --arg bucket "$VAULT_BUCKET" \
   --arg role_arn "$VAULT_ROLE_ARN" '{
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "VaultPolicyV2",
+        Sid: "VaultListV3",
+        Effect: "Allow",
+        Principal: { AWS: $role_arn },
+        Action: "s3:ListBucket",
+        Resource: "arn:aws:s3:::\($bucket)",
+        Condition: {
+          Null: { "aws:PrincipalTag/agentkeys_actor_omni": "false" },
+          StringLike: { "s3:prefix": "bots/${aws:PrincipalTag/agentkeys_actor_omni}/credentials/*" }
+        }
+      },
+      {
+        Sid: "VaultObjectsV3",
         Effect: "Allow",
         Principal: { AWS: $role_arn },
         Action: [
           "s3:GetObject",
           "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:ListBucket"
+          "s3:DeleteObject"
         ],
-        Resource: [
-          "arn:aws:s3:::\($bucket)",
-          "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_actor_omni}/credentials/*"
-        ],
+        Resource: "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_actor_omni}/credentials/*",
         Condition: {
           Null: { "aws:PrincipalTag/agentkeys_actor_omni": "false" }
         }
