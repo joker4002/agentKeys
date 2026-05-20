@@ -1,22 +1,13 @@
 #!/usr/bin/env bash
-# scripts/apply-vault-bucket-policy.sh — apply the v2 PrincipalTag
-# policy to $VAULT_BUCKET (the credentials-only bucket, per arch.md §17).
+# scripts/apply-memory-bucket-policy.sh — apply the v3 PrincipalTag
+# policy to $MEMORY_BUCKET (the memory-only bucket, per arch.md §17.2).
 #
-# Replaces the older scripts/bucket-policy-v2-migrate.sh which mistakenly
-# targeted the shared mail bucket. The cleanup of the mail bucket
-# policy (stripping any stray credentials grants) lives in a sibling
-# script: scripts/cleanup-mail-bucket-policy.sh.
+# Mirror of scripts/apply-vault-bucket-policy.sh, scoped to memory.
 #
-# Idempotent: re-running is a no-op once the v2 markers
-# (Sid VaultPolicyV2 + tag key agentkeys_actor_omni) are present.
+# Idempotent: re-running is a no-op once the v3 markers
+# (MemoryListV3 + MemoryObjectsV3) are present.
 #
-# What it does:
-#   1. Read current bucket policy on $VAULT_BUCKET.
-#   2. If a v2-marker Sid is already present, skip.
-#   3. Otherwise, back up the current policy (if any) to
-#      /tmp/vault-bucket-policy-backup-*.json and apply the v2 shape.
-#
-# Required env: ACCOUNT_ID, REGION, VAULT_BUCKET
+# Required env: ACCOUNT_ID, REGION, MEMORY_BUCKET
 # Required AWS profile: agentkeys-admin
 
 set -euo pipefail
@@ -51,8 +42,8 @@ set -a; . "$ENV_FILE"; set +a
 
 ACCOUNT_ID="${ACCOUNT_ID:?ACCOUNT_ID required}"
 REGION="${REGION:?REGION required}"
-VAULT_BUCKET="${VAULT_BUCKET:?VAULT_BUCKET required}"
-VAULT_ROLE_ARN="${VAULT_ROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-vault-role}"
+MEMORY_BUCKET="${MEMORY_BUCKET:?MEMORY_BUCKET required}"
+MEMORY_ROLE_ARN="${MEMORY_ROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-memory-role}"
 
 # Caller identity
 caller_arn=$(aws sts get-caller-identity --query Arn --output text 2>&1) \
@@ -64,71 +55,57 @@ case "$arn_lc" in
 esac
 
 # Read current
-log "Reading current bucket policy on s3://$VAULT_BUCKET"
+log "Reading current bucket policy on s3://$MEMORY_BUCKET"
 current_policy=$(aws s3api get-bucket-policy \
-                   --bucket "$VAULT_BUCKET" --region "$REGION" \
+                   --bucket "$MEMORY_BUCKET" --region "$REGION" \
                    --query Policy --output text 2>/dev/null || echo '')
 if [ -z "$current_policy" ]; then
-  warn "no policy yet — applying v2 shape from scratch"
+  warn "no policy yet — applying v3 shape from scratch"
 else
   ok "current policy retrieved ($(echo -n "$current_policy" | wc -c | tr -d ' ') bytes)"
 fi
 
-# Idempotency check (v3 marker — codex review P2: split ListBucket from
-# object actions so ListBucket can carry the s3:prefix condition; v2
-# allowed any tagged session to enumerate the entire bucket).
+# Idempotency check (v3 markers)
 already_v3=0
 if [ -n "$current_policy" ]; then
   has_v3_sid=$(echo "$current_policy" \
-    | jq '[.Statement[] | select(.Sid == "VaultListV3" or .Sid == "VaultObjectsV3")] | length' 2>/dev/null || echo 0)
+    | jq '[.Statement[] | select(.Sid == "MemoryListV3" or .Sid == "MemoryObjectsV3")] | length' 2>/dev/null || echo 0)
   if [ "${has_v3_sid:-0}" -gt 1 ]; then already_v3=1; fi
 fi
 if [ "$already_v3" = "1" ]; then
-  skip "policy already has v3 markers (VaultListV3 + VaultObjectsV3)"
+  skip "policy already has v3 markers (MemoryListV3 + MemoryObjectsV3)"
   exit 0
 fi
 
 # Backup
 ts=$(date -u +%Y%m%dT%H%M%SZ)
 if [ -n "$current_policy" ]; then
-  backup="/tmp/vault-bucket-policy-backup-${VAULT_BUCKET}-${ts}.json"
+  backup="/tmp/memory-bucket-policy-backup-${MEMORY_BUCKET}-${ts}.json"
   echo "$current_policy" | jq . > "$backup"
   ok "backed up to $backup"
 fi
 
-# Build v3 policy (codex review P2 fix): SPLIT ListBucket from object
-# actions into two statements so ListBucket can carry an `s3:prefix`
-# condition. v2 grouped all four actions under one statement with
-# Resource[bucket, bucket/...] and no prefix condition — meaning any
-# tagged session could list the entire bucket, enumerating every
-# actor's key names even though Get/Put were tag-scoped.
-#
-# v3:
-#   VaultListV3   — s3:ListBucket on the bucket ARN, conditioned on
-#                   s3:prefix matching the caller's PrincipalTag prefix.
-#   VaultObjectsV3 — Get/Put/Delete on the bucket/bots/${tag}/credentials/* ARN.
-#
-# IAM evaluates resource and identity policy allows as a union, so this
-# layer must independently scope cross-actor listing — relying on the
-# role's inline policy alone is insufficient defense.
+# Build v3 policy (codex review P2): SPLIT ListBucket from object actions
+# so ListBucket can carry an `s3:prefix` condition. Same shape as the
+# v3 vault-bucket policy.
 new_policy=$(jq -n \
-  --arg bucket "$VAULT_BUCKET" \
-  --arg role_arn "$VAULT_ROLE_ARN" '{
+  --arg bucket "$MEMORY_BUCKET" \
+  --arg role_arn "$MEMORY_ROLE_ARN" '{
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "VaultListV3",
+        Sid: "MemoryListV3",
         Effect: "Allow",
         Principal: { AWS: $role_arn },
         Action: "s3:ListBucket",
         Resource: "arn:aws:s3:::\($bucket)",
         Condition: {
           Null: { "aws:PrincipalTag/agentkeys_actor_omni": "false" },
-          StringLike: { "s3:prefix": "bots/${aws:PrincipalTag/agentkeys_actor_omni}/credentials/*" }
+          StringLike: { "s3:prefix": "bots/${aws:PrincipalTag/agentkeys_actor_omni}/memory/*" }
         }
       },
       {
-        Sid: "VaultObjectsV3",
+        Sid: "MemoryObjectsV3",
         Effect: "Allow",
         Principal: { AWS: $role_arn },
         Action: [
@@ -136,7 +113,7 @@ new_policy=$(jq -n \
           "s3:PutObject",
           "s3:DeleteObject"
         ],
-        Resource: "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_actor_omni}/credentials/*",
+        Resource: "arn:aws:s3:::\($bucket)/bots/${aws:PrincipalTag/agentkeys_actor_omni}/memory/*",
         Condition: {
           Null: { "aws:PrincipalTag/agentkeys_actor_omni": "false" }
         }
@@ -150,15 +127,15 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-log "Applying v2 vault-bucket policy"
-aws s3api put-bucket-policy --bucket "$VAULT_BUCKET" --region "$REGION" \
+log "Applying v3 memory-bucket policy"
+aws s3api put-bucket-policy --bucket "$MEMORY_BUCKET" --region "$REGION" \
   --policy "$new_policy" \
   || die "put-bucket-policy failed"
 
 log "Confirming write"
-applied=$(aws s3api get-bucket-policy --bucket "$VAULT_BUCKET" --region "$REGION" \
+applied=$(aws s3api get-bucket-policy --bucket "$MEMORY_BUCKET" --region "$REGION" \
             --query Policy --output text 2>&1)
 sid_count=$(echo "$applied" | jq '[.Statement[].Sid] | length')
 ok "policy applied; $sid_count statement(s) live"
 
-ok "vault-bucket policy applied"
+ok "memory-bucket policy applied"
