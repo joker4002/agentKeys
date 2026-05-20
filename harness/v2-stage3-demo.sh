@@ -736,55 +736,83 @@ post_cross_class() {
   echo "$rc"
 }
 
+# Helper: NEGATIVE cross-data-class rejection test.
+# Args: $1 = cap_mint endpoint slug (cred-store | memory-put)
+#       $2 = worker URL to POST against (e.g. $AGENTKEYS_WORKER_MEMORY_URL/v1/memory/put)
+#       $3 = label for the worker being defended (memory | cred)
+#       $4 = label for the cap class being submitted (cred | memory)
+#       $5 = artifact file basename for diagnostics
+#
+# Codex round-3 fix (high): all skip paths route through prereq_missing
+# so strict mode fails-hard and STEP_OUTCOMES tracks every actual or
+# skipped negative test. Prior code called bare `skip` here, letting
+# the summary report DEMO COMPLETE while the cross-class assertion
+# silently never ran.
+cross_class_rejection() {
+  local cap_url="$1" worker_full_url="$2" worker_label="$3" cap_label="$4" art="$5"
+  if [ ! -f "$AGENT_FILE" ]; then
+    prereq_missing "no demo-agent file — run stage-1 step 12 first" || return 1
+    return 0
+  fi
+  local a_actor a_dkh cap_body
+  a_actor=$(jq -r .actor_omni "$AGENT_FILE")
+  a_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
+  [ -z "$a_dkh" ] && a_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE" | tr '[:upper:]' '[:lower:]')")
+  cap_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$a_actor" \
+                     --arg svc "$SMOKE_SERVICE" --arg dkh "$a_dkh" \
+     '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+  local rc body
+  rc=$(mint_cap "$cap_url" "$cap_body")
+  if [ "$rc" != "200" ]; then
+    body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+    if echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope"; then
+      prereq_missing "agent scope not set on chain — stage-1 step 13 setScopeWithWebauthn required" || return 1
+      return 0
+    fi
+    if echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP"; then
+      prereq_missing "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host" || return 1
+      return 0
+    fi
+    if echo "$body" | grep -qiE "SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA|K3_EPOCH_COUNTER_ADDRESS_HEIMA.*unset"; then
+      prereq_missing "broker missing contract address env — redeploy broker host" || return 1
+      return 0
+    fi
+    if echo "$body" | grep -qiE "DeviceRoleMissing|role_missing|cap_mint role"; then
+      prereq_missing "device not granted ROLE_CAP_MINT on chain" || return 1
+      return 0
+    fi
+    die "$cap_url cap-mint returned HTTP $rc — body: $body"
+  fi
+  local the_cap art_path
+  the_cap=$(cat /tmp/cap.$$.json); rm -f /tmp/cap.$$.json
+  art_path="$STATE_DIR/cross.${art}.json"
+  rc=$(post_cross_class "$the_cap" "$worker_full_url" "$art_path")
+  body=$(cat "$art_path" 2>/dev/null || true)
+  if [ "$rc" = "200" ]; then
+    cat "$art_path" >&2
+    die "CRITICAL: $worker_label worker accepted a $cap_label-class cap — data-class isolation broken!"
+  fi
+  case "$rc" in
+    400|401|403)
+      if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
+        ok "$worker_label worker correctly rejected $cap_label-class cap with cap_data_class_mismatch ($rc)"
+        record_ok "$worker_label worker rejected $cap_label-class cap ($rc cap_data_class_mismatch)"
+        return 0
+      fi
+      die "$worker_label worker rejected with HTTP $rc but error is NOT canonical cap_data_class_mismatch (body: $body) — cannot confirm the data-class isolation gate fired"
+      ;;
+    *)
+      die "$worker_label worker returned unexpected HTTP $rc (expected 400/401/403 with cap_data_class_mismatch) — body: $body"
+      ;;
+  esac
+}
+
 # ─── Step 14: NEGATIVE — cred-class cap submitted to memory worker ─────────
 # Mint a credentials cap (data_class=Credentials), POST to /v1/memory/put.
 # The memory worker MUST reject with HTTP 403 cap_data_class_mismatch.
 if should_run_step 14; then
   step "NEGATIVE: cred-class cap → memory worker rejects (cap_data_class_mismatch)"
-  if [ ! -f "$AGENT_FILE" ]; then
-    skip "no demo-agent file — run stage-1 step 12 first"
-  else
-    a_actor=$(jq -r .actor_omni "$AGENT_FILE")
-    a_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
-    [ -z "$a_dkh" ] && a_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE" | tr '[:upper:]' '[:lower:]')")
-    cap_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$a_actor" \
-                       --arg svc "$SMOKE_SERVICE" --arg dkh "$a_dkh" \
-       '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
-    rc=$(mint_cap "cred-store" "$cap_body")
-    if [ "$rc" != "200" ]; then
-      body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
-      if echo "$body" | grep -qiE "not.*scope|RPC URL|chain_rpc"; then
-        skip "prerequisite missing (scope not set OR broker stale): $body"
-      else
-        die "cred-store cap-mint returned $rc — body: $body"
-      fi
-    else
-      cred_cap=$(cat /tmp/cap.$$.json); rm -f /tmp/cap.$$.json
-      rc=$(post_cross_class "$cred_cap" "${AGENTKEYS_WORKER_MEMORY_URL}/v1/memory/put" "$STATE_DIR/cross.cred-to-mem.json")
-      body=$(cat "$STATE_DIR/cross.cred-to-mem.json" 2>/dev/null || true)
-      if [ "$rc" = "200" ]; then
-        cat "$STATE_DIR/cross.cred-to-mem.json" >&2
-        die "CRITICAL: memory worker accepted a cred-class cap — data-class isolation broken!"
-      fi
-      # Codex review fix (high): only the canonical cap_data_class_mismatch
-      # error proves the worker's check_data_class() guard fired. Any other
-      # rejection (404 route, 401, generic 403, curl failure) means the
-      # data-class isolation check might not have run.
-      case "$rc" in
-        400|401|403)
-          if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
-            ok "memory worker correctly rejected cred-class cap with cap_data_class_mismatch ($rc)"
-            record_ok "memory worker rejected cred-class cap ($rc cap_data_class_mismatch)"
-          else
-            die "memory worker rejected with HTTP $rc but error is NOT canonical cap_data_class_mismatch (body: $body) — cannot confirm the data-class isolation gate fired"
-          fi
-          ;;
-        *)
-          die "memory worker returned unexpected HTTP $rc (expected 400/401/403 with cap_data_class_mismatch) — body: $body"
-          ;;
-      esac
-    fi
-  fi
+  cross_class_rejection cred-store "${AGENTKEYS_WORKER_MEMORY_URL}/v1/memory/put" memory cred cred-to-mem
 fi
 
 # ─── Step 15: NEGATIVE — memory-class cap submitted to cred worker ─────────
@@ -792,47 +820,7 @@ fi
 # The cred worker MUST reject with HTTP 403 cap_data_class_mismatch.
 if should_run_step 15; then
   step "NEGATIVE: memory-class cap → cred worker rejects (cap_data_class_mismatch)"
-  if [ ! -f "$AGENT_FILE" ]; then
-    skip "no demo-agent file — run stage-1 step 12 first"
-  else
-    a_actor=$(jq -r .actor_omni "$AGENT_FILE")
-    a_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
-    [ -z "$a_dkh" ] && a_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE" | tr '[:upper:]' '[:lower:]')")
-    cap_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$a_actor" \
-                       --arg svc "$SMOKE_SERVICE" --arg dkh "$a_dkh" \
-       '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
-    rc=$(mint_cap "memory-put" "$cap_body")
-    if [ "$rc" != "200" ]; then
-      body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
-      if echo "$body" | grep -qiE "not.*scope|RPC URL|chain_rpc"; then
-        skip "prerequisite missing (scope not set OR broker stale): $body"
-      else
-        die "memory-put cap-mint returned $rc — body: $body"
-      fi
-    else
-      mem_cap=$(cat /tmp/cap.$$.json); rm -f /tmp/cap.$$.json
-      rc=$(post_cross_class "$mem_cap" "${AGENTKEYS_WORKER_CRED_URL}/v1/cred/store" "$STATE_DIR/cross.mem-to-cred.json")
-      body=$(cat "$STATE_DIR/cross.mem-to-cred.json" 2>/dev/null || true)
-      if [ "$rc" = "200" ]; then
-        cat "$STATE_DIR/cross.mem-to-cred.json" >&2
-        die "CRITICAL: cred worker accepted a memory-class cap — data-class isolation broken!"
-      fi
-      # Codex review fix (high): require canonical error (symmetric with step 14).
-      case "$rc" in
-        400|401|403)
-          if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
-            ok "cred worker correctly rejected memory-class cap with cap_data_class_mismatch ($rc)"
-            record_ok "cred worker rejected memory-class cap ($rc cap_data_class_mismatch)"
-          else
-            die "cred worker rejected with HTTP $rc but error is NOT canonical cap_data_class_mismatch (body: $body) — cannot confirm the data-class isolation gate fired"
-          fi
-          ;;
-        *)
-          die "cred worker returned unexpected HTTP $rc (expected 400/401/403 with cap_data_class_mismatch) — body: $body"
-          ;;
-      esac
-    fi
-  fi
+  cross_class_rejection memory-put "${AGENTKEYS_WORKER_CRED_URL}/v1/cred/store" cred memory mem-to-cred
 fi
 
 # ─── Step 16: Cleanup with admin profile ───────────────────────────────────
