@@ -458,3 +458,33 @@ Other phase-1 gates:
 - Backward compat verified: workers without `X-Aws-*` headers fall back to instance profile (existing stage-1 step 8 S3 smoke + stage-1 step 15 + stage-2 step 10 worker-smoke all use the fallback path and remain green).
 
 No regressions introduced by commits `18e709b` (downgrade-attack fix + credential redaction) or `e9926ed` (memory bucket+role + ListBucket scoping). PR #92 is phase-1-ready.
+
+## Phase 1+2 — codex round-2 adversarial review fix + verification (2026-05-20 18:00 UTC)
+
+After PR #92's data-class-explicit isolation work, the codex adversarial review of stage-3 returned `needs-attention` with three findings (one high, two medium):
+
+| # | Severity | Finding |
+|---|---|---|
+| 1 | high | Worker roundtrip checks could be `skip; return 0` and still appear as "byte-for-byte AES-256-GCM coverage" in the summary table |
+| 2 | high | Negative cap-class tests accepted ANY non-200 as pass (404 route, 502 broker stale, generic 403 — all silently green) |
+| 3 | medium | Cross-actor cap-mint test accepted generic rejection; 502 (broker stale) was a `skip` instead of a fail |
+
+All three closed in commit `c55ea29`:
+
+- STRICT default mode + `--allow-skip` opt-in for dev iteration
+- Steps 14+15 (cross-class) require canonical `cap_data_class_mismatch` + HTTP 4xx
+- Step 13 (cross-actor) requires canonical `OperatorMismatch` + HTTP 4xx; 502 with config-missing body is now a hard fail
+- Final summary built from per-step `STEP_OUTCOMES[]` array — reflects actual execution, no hardcoded coverage claims
+- Summary exits non-zero if any step failed OR if any step skipped in strict mode
+
+Live-verified on Heima Mainnet (2026-05-20):
+
+| Demo | Steps recorded | Outcome |
+|---|---|---|
+| `harness/v2-stage3-demo.sh` | 13/13 ok (steps 4-15) | DEMO COMPLETE — full isolation + roundtrip coverage proven |
+| `harness/v2-stage1-demo.sh` | 16/16 green | unchanged (backward compat) |
+| `harness/v2-stage2-demo.sh` | 11/11 green | unchanged |
+
+Step 11+12 (worker encrypt/decrypt) recorded canonical `byte-for-byte roundtrip` outcomes for both cred + memory workers using agent-side SIWE + STS creds. Step 13 (cross-actor) returned HTTP 403 + OperatorMismatch. Steps 14+15 (cross-data-class) returned HTTP 403 + cap_data_class_mismatch.
+
+After commit `5b0516b` (summary-block bug fix), the strict-mode summary renders correctly: per-step outcome list + totals + final verdict.
