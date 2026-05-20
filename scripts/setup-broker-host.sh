@@ -892,6 +892,13 @@ Environment=BROKER_OIDC_ISSUER=$ISSUER_URL
 Environment=BROKER_AUTH_METHODS=wallet_sig,email_link
 Environment=BROKER_EMAIL_SENDER=ses
 Environment=BROKER_EMAIL_FROM_ADDRESS=$BROKER_EMAIL_FROM_ADDRESS
+# Chain RPC for cap-mint chain-verification (handlers/cap.rs reads
+# AGENTKEYS_CHAIN_RPC_HTTP at request time to check device + scope +
+# k3_epoch on chain before signing a cap-token). Without these, every
+# /v1/cap/cred-{store,fetch} returns 502 "RPC URL not set" — surfaced
+# in the stage-3 worker encrypt/decrypt roundtrip test (#90 followup).
+Environment=AGENTKEYS_CHAIN=heima
+Environment=AGENTKEYS_CHAIN_RPC_HTTP=https://rpc.heima-parachain.heima.network
 $CRED_LINE
 ExecStart=/usr/local/bin/agentkeys-broker-server --port 8091 --bind 127.0.0.1 \
   --export-session-pubkey-to /var/lib/agentkeys/.agentkeys/broker/session-keypair.pub.pem

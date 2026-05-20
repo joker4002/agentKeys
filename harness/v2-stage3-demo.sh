@@ -23,7 +23,18 @@
 #      against the MEMORY bucket → AccessDenied (each role only covers
 #      its own bucket). Mirror: MEMORY creds tried against VAULT bucket
 #      → AccessDenied.
-#  11. Cleanup with admin creds — delete the test objects
+#  11. (NEW) Worker encrypt/decrypt roundtrip — credentials:
+#      mint cap-token via /v1/cap/cred-store → POST plaintext to
+#      cred worker /v1/cred/store (KEK-encrypts, S3 PUTs envelope) →
+#      mint /v1/cap/cred-fetch cap → POST to /v1/cred/fetch (S3 GETs,
+#      KEK-decrypts) → assert plaintext roundtrips byte-for-byte.
+#      SKIPS cleanly when on-chain scope isn't set yet (need --webauthn
+#      via stage-1 step 13 first). This is the test that actually
+#      exercises the worker-side AES-256-GCM envelope (the unit tests
+#      in envelope.rs cover the primitive; this proves the HTTP path).
+#  12. (NEW) Worker encrypt/decrypt roundtrip — memory: same shape
+#      against the memory worker (/v1/memory/put + /v1/memory/get).
+#  13. Cleanup with admin creds — delete the test objects
 #
 # Proves OIDC + IAM-tag-based S3 scoping works at the AWS layer:
 #  - per-actor isolation within a bucket (steps 5, 6, 8, 9)
@@ -42,7 +53,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STEP_NUM=0
-STEP_TOTAL=11
+STEP_TOTAL=13
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
@@ -377,8 +388,172 @@ if should_run_step 10; then
   fi
 fi
 
-# ─── Step 11: Cleanup with admin profile ───────────────────────────────────
+# ─── Step 11: Worker encrypt/decrypt roundtrip — credentials ───────────────
+# Exercises the cred worker's AES-256-GCM envelope through the full HTTP
+# path: cap-mint → /v1/cred/store (KEK-encrypt + S3 PUT) → cap-mint →
+# /v1/cred/fetch (S3 GET + KEK-decrypt) → assert plaintext roundtrips.
+# Skips cleanly when on-chain scope isn't set yet (stub-mode runs that
+# never landed stage-1 step 13's setScopeWithWebauthn).
+SMOKE_SERVICE="${SMOKE_TEST_SERVICE:-openrouter}"
+SMOKE_PLAINTEXT="${SMOKE_TEST_SECRET:-stage3-roundtrip-secret-$(date +%s)}"
+
+# Resolve the demo agent's actor_omni + device_key_hash. Prefer the
+# agent file (created by stage-1 step 12) so the cap binds to a real
+# agent device on chain.
+AGENT_LABEL="${AGENTKEYS_AGENT_LABEL:-demo-agent}"
+AGENT_FILE="$HOME/.agentkeys/agents/${AGENT_LABEL}.json"
+
+mint_cap() {
+  local op_url="$1"
+  local body="$2"
+  curl -sS -o /tmp/cap.$$.json -w '%{http_code}' \
+    -X POST "$OIDC_ISSUER/v1/cap/$op_url" \
+    -H "authorization: Bearer $(cat "$STATE_DIR/session.jwt")" \
+    -H 'content-type: application/json' \
+    -d "$body" 2>&1 || echo "000"
+}
+
+cred_memory_roundtrip() {
+  local kind="$1"            # cred | memory
+  local cap_store_url cap_fetch_url worker_url store_route fetch_route
+  if [ "$kind" = "cred" ]; then
+    cap_store_url="cred-store"
+    cap_fetch_url="cred-fetch"
+    worker_url="$AGENTKEYS_WORKER_CRED_URL"
+    store_route="/v1/cred/store"
+    fetch_route="/v1/cred/fetch"
+  else
+    # Memory worker has no dedicated cap-mint endpoint yet (#90 followup).
+    # The cred-* caps work against memory workers because both verify the
+    # same broker-signed CapToken shape with the same CapOp::Store/Fetch.
+    cap_store_url="cred-store"
+    cap_fetch_url="cred-fetch"
+    worker_url="$AGENTKEYS_WORKER_MEMORY_URL"
+    store_route="/v1/memory/put"
+    fetch_route="/v1/memory/get"
+  fi
+
+  # Resolve actor_omni + device_key_hash.
+  local agent_actor agent_dkh
+  if [ -f "$AGENT_FILE" ]; then
+    agent_actor=$(jq -r .actor_omni "$AGENT_FILE")
+    agent_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
+  fi
+  if [ -z "${agent_actor:-}" ] || [ "$agent_actor" = "null" ]; then
+    skip "no demo-agent file at $AGENT_FILE — run stage-1 step 12 first"
+    return 0
+  fi
+  if [ -z "${agent_dkh:-}" ]; then
+    # Derive from agent address.
+    local agent_addr
+    agent_addr=$(jq -r '.agent_address // .wallet_address // empty' "$AGENT_FILE")
+    [ -z "$agent_addr" ] && { skip "agent file missing agent_address"; return 0; }
+    agent_dkh=$(cast keccak "$(printf '%s' "$agent_addr" | tr '[:upper:]' '[:lower:]')")
+  fi
+
+  local cap_body
+  cap_body=$(jq -n \
+    --arg op "0x$OWN_ACTOR_OMNI" \
+    --arg actor "$agent_actor" \
+    --arg svc "$SMOKE_SERVICE" \
+    --arg dkh "$agent_dkh" '{
+      operator_omni: $op,
+      actor_omni: $actor,
+      service: $svc,
+      device_key_hash: $dkh
+    }')
+
+  # Mint Store cap
+  info "minting $cap_store_url cap"
+  rc=$(mint_cap "$cap_store_url" "$cap_body")
+  local body
+  body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+  if [ "$rc" != "200" ]; then
+    if echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope|service not in scope"; then
+      skip "agent scope not set on chain — run \`bash harness/v2-stage1-demo.sh --webauthn\` (Touch ID at steps 11 + 13) first"
+      return 0
+    fi
+    if echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP"; then
+      skip "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host: \`ssh broker && bash scripts/setup-broker-host.sh --yes\` (now bakes the chain RPC env)"
+      return 0
+    fi
+    if echo "$body" | grep -qiE "DeviceRoleMissing|role_missing|cap_mint role"; then
+      skip "device not granted ROLE_CAP_MINT on chain — needs operator action via stage-2 K11-signed registerAdditionalMasterDevice; out-of-scope here"
+      return 0
+    fi
+    cat <<EOF >&2
+    fail cap-mint returned HTTP $rc — body: $body
+EOF
+    return 1
+  fi
+  local store_cap
+  store_cap="$body"
+  ok "Store cap minted"
+
+  # POST plaintext to worker
+  local plaintext_b64
+  plaintext_b64=$(printf '%s' "$SMOKE_PLAINTEXT" | base64 | tr -d '\n')
+  local store_body
+  store_body=$(jq -n --argjson cap "$store_cap" --arg pt "$plaintext_b64" \
+                 '{cap: $cap, plaintext_b64: $pt}')
+  info "POST ${worker_url}${store_route}"
+  rc=$(curl -sS -o /tmp/store.$$.json -w '%{http_code}' \
+    -X POST "${worker_url}${store_route}" \
+    -H 'content-type: application/json' \
+    -d "$store_body" 2>&1 || echo "000")
+  body=$(cat /tmp/store.$$.json 2>/dev/null || true); rm -f /tmp/store.$$.json
+  if [ "$rc" != "200" ]; then
+    die "${worker_url}${store_route} returned $rc — body: $body"
+  fi
+  local s3_key
+  s3_key=$(echo "$body" | jq -r '.s3_key // empty')
+  ok "encrypted + stored at s3://.../$s3_key (envelope $(echo "$body" | jq -r .envelope_size) bytes)"
+
+  # Mint Fetch cap
+  info "minting $cap_fetch_url cap"
+  rc=$(mint_cap "$cap_fetch_url" "$cap_body")
+  body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+  [ "$rc" = "200" ] || die "fetch cap-mint returned HTTP $rc — body: $body"
+  local fetch_cap; fetch_cap="$body"
+  ok "Fetch cap minted"
+
+  # GET plaintext back from worker
+  local fetch_body
+  fetch_body=$(jq -n --argjson cap "$fetch_cap" '{cap: $cap}')
+  info "POST ${worker_url}${fetch_route}"
+  rc=$(curl -sS -o /tmp/fetch.$$.json -w '%{http_code}' \
+    -X POST "${worker_url}${fetch_route}" \
+    -H 'content-type: application/json' \
+    -d "$fetch_body" 2>&1 || echo "000")
+  body=$(cat /tmp/fetch.$$.json 2>/dev/null || true); rm -f /tmp/fetch.$$.json
+  if [ "$rc" != "200" ]; then
+    die "${worker_url}${fetch_route} returned $rc — body: $body"
+  fi
+  local fetched_b64 fetched
+  fetched_b64=$(echo "$body" | jq -r '.plaintext_b64 // empty')
+  fetched=$(printf '%s' "$fetched_b64" | base64 -d 2>/dev/null || echo "")
+  if [ "$fetched" = "$SMOKE_PLAINTEXT" ]; then
+    ok "$kind ROUNDTRIP: '$SMOKE_PLAINTEXT' encrypted → S3 → decrypted ✓ byte-for-byte match"
+  else
+    die "$kind roundtrip FAILED: expected '$SMOKE_PLAINTEXT', got '$fetched'"
+  fi
+}
+
 if should_run_step 11; then
+  step "Cred worker encrypt/decrypt roundtrip (cap-mint → /v1/cred/store → /v1/cred/fetch)"
+  : "${AGENTKEYS_WORKER_CRED_URL:?AGENTKEYS_WORKER_CRED_URL unset}"
+  cred_memory_roundtrip cred
+fi
+
+# ─── Step 12: Worker encrypt/decrypt roundtrip — memory ────────────────────
+if should_run_step 12; then
+  step "Memory worker encrypt/decrypt roundtrip (cap-mint → /v1/memory/put → /v1/memory/get)"
+  : "${AGENTKEYS_WORKER_MEMORY_URL:?AGENTKEYS_WORKER_MEMORY_URL unset}"
+  cred_memory_roundtrip memory
+fi
+
+# ─── Step 13: Cleanup with admin profile ───────────────────────────────────
+if should_run_step 13; then
   step "Cleanup test objects + summary"
   # Use the laptop's admin profile (NOT the STS creds) to delete the
   # objects we wrote. Only the POSITIVE-step objects exist — every
@@ -412,8 +587,12 @@ ${C_OK}=== v2 stage-3 demo complete ===${C_RESET}
     [9]  memory LIST other prefix    → AccessDenied (codex P2 fix)
     [10] vault creds → memory bucket → AccessDenied (per-data-class isolation)
     [10] memory creds → vault bucket → AccessDenied (per-data-class isolation)
+    [11] cred worker:  store → fetch → byte-for-byte roundtrip (AES-256-GCM)
+    [12] memory worker: put → get → byte-for-byte roundtrip (AES-256-GCM)
 
   Conclusion: OIDC + IAM PrincipalTag scoping is enforced both within
               a bucket (per-actor) AND across buckets (per-data-class).
+              The worker AES-256-GCM envelope (KEK + AAD-bound) round-
+              trips end-to-end through the broker cap-mint flow.
 EOF
 fi
