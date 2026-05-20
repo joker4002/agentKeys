@@ -844,12 +844,14 @@ Each data class gets its own worker — independent IAM, independent deploy life
 - **IAM:** `s3:GetObject` + `s3:PutObject` on `bots/<actor_omni_hex>/credentials/*`; signer mTLS for KEK derivation
 - **`master_wallet` on chain?** No — S3 only, no chain submissions (audit events flow through audit-service)
 - **Operations:** `fetch-cred(cap, service)` → plaintext; `store-cred(cap, service, plaintext)` → ack; `teardown-actor(cap, target_actor)` → wipes prefix
+- **OIDC federation (issue #90):** Caller passes agent-side OIDC-minted STS creds via `X-Aws-Access-Key-Id` / `X-Aws-Secret-Access-Key` / `X-Aws-Session-Token` headers. Worker uses those for the S3 call so the AWS IAM PrincipalTag scoping fires at the AWS layer (defense in depth on top of the cap-token verify). With `AGENTKEYS_WORKER_REQUIRE_STS=1` (production setting), header-less requests get HTTP 401 — closes the [codex downgrade attack vector](#175-per-data-class-cap-token-binding-issue-90).
 
 ### 15.2 memory-service
 
 - **IAM:** `s3:GetObject` + `s3:PutObject` on `bots/<actor_omni_hex>/memory/*`
 - **`master_wallet` on chain?** No
 - **Operations:** R/W agent state at high frequency. **STS session policies enable direct S3 access** from the agent process for the duration of the session — the worker is NOT in the LLM-call hot path. The worker mints a TTL-bounded STS session at session start; the agent's localhost SDK uses STS creds for many ops within the TTL.
+- **OIDC federation (issue #90):** Same `X-Aws-*` header passthrough as creds. Each data-class has its own IAM role (`agentkeys-memory-role`); memory-role STS creds are rejected at the vault bucket and vice versa. See §17.5.
 
 ### 15.3 audit-service
 
@@ -1137,6 +1139,34 @@ AWS PrincipalTag `agentkeys_actor_omni = <actor_omni_hex>` scopes IAM access to 
 ### 17.4 Why `$<CLASS>_BUCKET` is a variable
 
 S3 bucket names are **globally unique across AWS**. Each operator account picks its own (`acme-agentkeys-vault-prod`, `litentry-agentkeys-vault-dev`, etc.). The bucket-name-as-variable absorbs global-namespace + multi-env reality, totally independent of per-actor isolation.
+
+### 17.5 Per-data-class cap-token binding (issue #90)
+
+The cap-token carries a signed `data_class: Credentials | Memory` field. The broker mints four endpoints, one per (data-class, op-type) pair:
+
+| Endpoint | Mints CapPayload |
+|---|---|
+| `POST /v1/cap/cred-store` | `op: Store, data_class: Credentials` |
+| `POST /v1/cap/cred-fetch` | `op: Fetch, data_class: Credentials` |
+| `POST /v1/cap/memory-put` | `op: Store, data_class: Memory` |
+| `POST /v1/cap/memory-get` | `op: Fetch, data_class: Memory` |
+
+Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 403 `cap_data_class_mismatch`. This is the cap-layer isolation gate — symmetric with the AWS IAM cross-bucket gate (§17.2) but enforced at the broker-signed capability layer, **before** the worker touches AWS at all.
+
+**Four-layer defense in depth:**
+
+| Layer | Invariant | Enforced by | Canonical test |
+|---|---|---|---|
+| 1. Broker cap-mint | session JWT's omni == request's operator_omni; device-binding; ROLE_CAP_MINT; service in scope | `handlers/cap.rs` | `harness/v2-stage3-demo.sh` step 13 |
+| 2. Worker chain-verify | independent re-check of broker_sig + device + scope + k3_epoch + **data_class** | `verify::check_*` | steps 11+12+14+15 |
+| 3. AWS IAM PrincipalTag | per-actor STS creds scope S3 ARN via `${aws:PrincipalTag/agentkeys_actor_omni}` + `s3:prefix` condition on ListBucket | role inline + v3 bucket policy | steps 4-9 |
+| 4. Per-data-class buckets | vault-role can't reach memory bucket; memory-role can't reach vault bucket | per-data-class IAM roles | step 10 |
+
+**Test discipline:** any PR adding a new data class (e.g., payments-audit) MUST extend the cap-token enum, add two new broker endpoints, and extend the stage-3 demo with negative isolation tests for all four layers. CLAUDE.md codifies this rule.
+
+**Why route-per-class beats a single endpoint with a `data_class` parameter:** the broker statically derives the variant from the URL, so a programmer error in the cap-mint handler cannot produce a cap with the wrong class. A query-param would carry the variant through user input, expanding the attack surface for nothing.
+
+**Why agent-side STS creds (not operator-side):** the cap binds to `actor_omni` (the agent's), so the S3 PUT path is `bots/<agent>/...`. The IAM PrincipalTag on the STS creds must match — only the agent's session JWT produces STS creds tagged with the agent's omni. The operator authorises via cap-mint; the agent identifies via SIWE+STS. Both must agree on actor_omni for the IAM resource ARN to allow the op.
 
 ---
 
