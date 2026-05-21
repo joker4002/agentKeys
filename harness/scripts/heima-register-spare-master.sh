@@ -141,10 +141,37 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 ok "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt at localhost)…"
+# Typed K11 intent — Role bitfield gets decoded ("CAP_MINT | RECOVERY"
+# for ROLES=3) by the shared formatter in k11_intent.rs.
+INTENT_JSON=$(jq -n \
+  --arg op_omni "0x${OPERATOR_OMNI}" \
+  --arg asserting_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+  --arg spare_hash "${SPARE_DEVICE_KEY_HASH}" \
+  --argjson roles "${ROLES}" \
+  --argjson chain_id "${LIVE_CHAIN_ID}" \
+  --argjson nonce "${NONCE}" \
+  '{
+    kind: "register_spare_master",
+    operator_omni: $op_omni,
+    new_device_key_hash: $spare_hash,
+    roles: $roles,
+    chain_id: $chain_id,
+    operator_nonce: $nonce,
+    asserting: { kind: "primary", device_key_hash: $asserting_hash }
+  }')
+K11_ERR=$(mktemp -t heima-spare-master-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
-  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>/dev/null) \
-  || die "primary K11 ceremony failed"
+  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
+  --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "primary K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)

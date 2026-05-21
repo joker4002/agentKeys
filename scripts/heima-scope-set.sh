@@ -194,11 +194,56 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 log "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt at localhost)…"
+# Typed K11 intent — wiki/k11-intent-conventions.md. The shared
+# k11_intent.rs renderer collapses the three "Max *" rows to a
+# single "Spending limits: unlimited" when all are 0, decodes
+# read_only to "read-only" / "read + write", and renders the period
+# duration as "1h" instead of "3600s".
+# Convert comma-separated services list to a JSON array.
+SERVICES_JSON=$(printf '%s' "$SERVICES_RAW" | jq -R 'split(",") | map(. | gsub("^\\s+|\\s+$";""))')
+READ_ONLY_BOOL=$([ "$READ_ONLY" = "true" ] && echo true || echo false)
+INTENT_JSON=$(jq -n \
+  --arg op_omni "0x${OPERATOR_OMNI}" \
+  --arg asserting_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+  --arg agent_label "${LABEL}" \
+  --arg agent_omni "${ACTOR_OMNI}" \
+  --argjson services "${SERVICES_JSON}" \
+  --argjson read_only "${READ_ONLY_BOOL}" \
+  --arg max_per_call "${MAX_PER_CALL}" \
+  --arg max_per_period "${MAX_PER_PERIOD}" \
+  --argjson period_seconds "${PERIOD_SECONDS}" \
+  --arg max_total "${MAX_TOTAL}" \
+  --argjson chain_id "${LIVE_CHAIN_ID}" \
+  --argjson nonce "${SCOPE_NONCE}" \
+  '{
+    kind: "set_scope_grant",
+    operator_omni: $op_omni,
+    agent_label: $agent_label,
+    agent_omni: $agent_omni,
+    services: $services,
+    read_only: $read_only,
+    max_per_call: $max_per_call,
+    max_per_period: $max_per_period,
+    period_seconds: $period_seconds,
+    max_total: $max_total,
+    chain_id: $chain_id,
+    scope_nonce: $nonce,
+    asserting: { kind: "primary", device_key_hash: $asserting_hash }
+  }')
+K11_ERR=$(mktemp -t heima-scope-set-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" \
-  --message-hex "$CHALLENGE" 2>/dev/null) \
-  || die "primary K11 ceremony failed"
+  --message-hex "$CHALLENGE" \
+  --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "primary K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 K11_CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)
