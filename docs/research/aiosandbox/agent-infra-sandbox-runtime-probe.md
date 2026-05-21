@@ -5,7 +5,7 @@
 **Parent docs:**
 - [`./1-step-analysis.md`](1-step-analysis.md) §3.3a (original Round 6 kernel-hardening design) and §3.3b (Round 12 source-only reality check)
 - [`./agent-infra-sandbox-analysis.md`](agent-infra-sandbox-analysis.md) (Round 12 source-only analysis, **now partially superseded by this doc**)
-- [`./architecture.md`](architecture.md) (component inventory and language split)
+- [`../../arch.md`](../../arch.md) (component inventory and language split)
 - [`./open-source-posture.md`](open-source-posture.md) (security posture, threat model)
 
 ---
@@ -412,7 +412,7 @@ These remain for a future conversation with `agent-infra/sandbox` maintainers (a
 - **§3.3a original Round 6 kernel-hardening design:** [`./1-step-analysis.md`](1-step-analysis.md) §3.3a
 - **§3.3b Round 12 source-only reality check:** [`./1-step-analysis.md`](1-step-analysis.md) §3.3b (to be updated with Round 13 deltas)
 - **Round 12 source analysis:** [`./agent-infra-sandbox-analysis.md`](agent-infra-sandbox-analysis.md)
-- **Component inventory / language split:** [`./architecture.md`](architecture.md)
+- **Component inventory / language split:** [`../../arch.md`](../../arch.md)
 - **Security posture / threat model:** [`./open-source-posture.md`](open-source-posture.md)
 - **Kai meeting agenda (TEE worker questions):** [`./heima-open-questions.md`](heima-open-questions.md)
 

@@ -571,7 +571,7 @@ Both the policy resource ARN (`bucket/bots/${tag}/*`) and the
 omit it on either and the other half of the policy denies even legit
 reads.
 
-`StringLike "bots/${tag}/*"` (not `StringEquals "bots/${tag}/"`) lets the daemon list sub-prefixes like `bots/<wallet>/inbox/` and `bots/<wallet>/sent/2026-05/`, not just the exact root `bots/<wallet>/`. Matches the shape in [`docs/spec/ses-email-architecture.md` §10.4](spec/ses-email-architecture.md) and [`wiki/tag-based-access`](../wiki/tag-based-access.md).
+`StringLike "bots/${tag}/*"` (not `StringEquals "bots/${tag}/"`) lets the daemon list sub-prefixes like `bots/<wallet>/inbox/` and `bots/<wallet>/sent/2026-05/`, not just the exact root `bots/<wallet>/`. Matches the shape in [`docs/spec/ses-email-architecture.md` §10.4](spec/ses-email-architecture.md) and [`wiki/tag-based-access`](wiki/tag-based-access.md).
 
 ### 4.4.1 Strip the §3 broad-bucket grant from the role's inline policy
 

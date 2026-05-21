@@ -16,7 +16,7 @@ When you finish this guide you will have:
 3. Walked the **managed-wallet** SIWE auth flow end-to-end without
    ever holding a private key locally — the dev_key_service signs on
    behalf of the operator's `omni_account` (the master actor omni
-   per [`architecture.md` §4](spec/architecture.md)).
+   per [`architecture.md` §4](arch.md)).
 4. Minted real AWS STS credentials via the post-issue-#71 daemon-side
    flow (`/v1/mint-oidc-jwt` + client-side `AssumeRoleWithWebIdentity`).
 5. **Proven cloud-enforced per-user isolation** — `omni_A`'s derived
@@ -45,7 +45,7 @@ If you're on a pre-issue-#74 build, run
 > 1b), bespoke per-identity PoP shapes (step 1c v1c-interim). The
 > v0.2 target — HDKD per-agent omni + uniform WebAuthn binding
 > for masters — is documented in
-> [`docs/spec/architecture.md`](spec/architecture.md) §4 (HDKD
+> [`docs/arch.md`](arch.md) §4 (HDKD
 > actor tree), §4a (mental model), and §5a (per-actor binding
 > ceremonies) but is **not yet implemented**. See
 > [step-1c plan](spec/plans/issue-74-step-1c-device-key-auth.md)
@@ -94,24 +94,24 @@ inline `# === ON … ===` banner.
 
 | Machine | What it has | Used for |
 |---|---|---|
-| **Operator workstation (master role)** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS. The operator running these commands IS the master per [`architecture.md` §4a](spec/architecture.md). |
+| **Operator workstation (master role)** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS. The operator running these commands IS the master per [`architecture.md` §4a](arch.md). |
 | **Broker host (EC2)** | `agentkeys-broker-server` and `agentkeys-mock-server` binaries at `/usr/local/bin/`, both ES256 keypairs at `/var/lib/agentkeys/.agentkeys/broker/`, systemd services `agentkeys-broker.service` + `agentkeys-backend.service` + `agentkeys-signer.service`, nginx fronting broker on `:8091` at `https://$BROKER_HOST` and signer on `:8092` at `https://signer.<zone>` | Broker process, audit DB, JWT minting, **dev_key_service signer** |
 
 Hop between them with `ssh agentkey@$BROKER_HOST`.
 
 > **Roles + key inventory primer.** This demo exercises the **master**
-> role only (workstation = master per [`architecture.md` §4a](spec/architecture.md)).
+> role only (workstation = master per [`architecture.md` §4a](arch.md)).
 > The **agent** role (sandbox VM / CI runner / `agent-infra/sandbox`
 > container, bootstrapped via link-code from a master) is documented
-> in [`architecture.md` §5a.2](spec/architecture.md) and the
-> [agent wiki page](../.omc/wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
+> in [`architecture.md` §5a.2](arch.md) and the
+> [agent wiki page](wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
 > but is **not exercised here** — the v0.2 `agentkeys agent create`
 > endpoint isn't shipped yet (tracked in
 > [#76](https://github.com/litentry/agentKeys/issues/76)). For the
 > K-numbered key inventory referenced throughout (K1 = broker session
 > keypair, K3 = dev-signer master secret, K4 = per-actor derived
 > wallet, K6 = session JWT, K7 = OIDC JWT, K10 = device key, K11 =
-> WebAuthn credential), see [`architecture.md` §3](spec/architecture.md).
+> WebAuthn credential), see [`architecture.md` §3](arch.md).
 
 ---
 
@@ -448,7 +448,7 @@ working is one `--email` round-trip.
 >    + `BROKER_EMAIL_SENDER=ses` in the systemd unit. Without this, the
 >    broker returns 404 on `/v1/auth/email/request` and
 >    `agentkeys init --email` fails. (No HMAC key — magic-link is
->    stateful per [`architecture.md`](spec/architecture.md) §5a.1.M:
+>    stateful per [`architecture.md`](arch.md) §5a.1.M:
 >    CSPRNG token → SHA256 in EmailTokenStore → single-use within TTL.)
 >
 >    **Broker IAM role: `agentkeys-broker-host`** (canonical, per
@@ -553,7 +553,7 @@ actually wrote to disk and which of the THREE wallets the rest of the
 demo refers to. The shell-var spellings (`OMNI_A`, `ADDR_A`,
 `MASTER_WALLET_A`) are local to this demo; the **arch.md canonical
 names** in the table below are the source-of-truth spellings used in
-[`architecture.md` §3a Canonical names](spec/architecture.md#3a-canonical-names-one-concept-one-canonical-spelling)
+[`architecture.md` §3a Canonical names](arch.md#3a-canonical-names-one-concept-one-canonical-spelling)
 and in the broker / CLI source. Any future doc / runbook / commit
 should use the arch.md spellings; this demo keeps the `_A` / `_B`
 shell vars because they're embedded across §0.4–§4 + scripts.

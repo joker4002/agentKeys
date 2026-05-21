@@ -2,7 +2,7 @@
 
 The K11 WebAuthn ceremony at AgentKeys binds master-only mutations (scope grant/revoke, device add/revoke, K10 rotation, recovery) to a hardware-attested Touch ID / Face ID / Windows Hello assertion. Without operator-readable text on the confirmation page, the operator sees only the 32-byte challenge hex and has to trust the daemon that the bytes mean what it claims — exactly the same "agent signed `0xdead…beef` without me knowing what it was" failure mode that arch.md §15.3a calls out for typed-data signs.
 
-This page is the design rationale + integration recipe for the K11 confirmation page's intent block. See [`crates/agentkeys-cli/src/k11_webauthn.rs`](../crates/agentkeys-cli/src/k11_webauthn.rs) for the implementation.
+This page is the design rationale + integration recipe for the K11 confirmation page's intent block. See [`crates/agentkeys-cli/src/k11_webauthn.rs`](../../crates/agentkeys-cli/src/k11_webauthn.rs) for the implementation.
 
 ## The OS-level constraint
 
@@ -31,11 +31,11 @@ Rendered as a CSS-bordered section above the raw challenge block, the intent blo
 3. **Per-field rows** (`intent.fields`): `(label, value)` pairs. Common rows: service, agent, K3 epoch, max_calls, expires_at.
 4. **Caveat** (static): "Review the above BEFORE pressing Sign. The Touch ID prompt itself cannot show this text — your eyes are the last line of defense."
 
-The headline + fields are HTML-escaped before interpolation — a malicious daemon-supplied intent string cannot inject `<script>` to manipulate the page (see [`html_escape`](../crates/agentkeys-cli/src/k11_webauthn.rs) + the `html_escape_neutralizes_script_injection` test).
+The headline + fields are HTML-escaped before interpolation — a malicious daemon-supplied intent string cannot inject `<script>` to manipulate the page (see [`html_escape`](../../crates/agentkeys-cli/src/k11_webauthn.rs) + the `html_escape_neutralizes_script_injection` test).
 
 ## Public API
 
-[`crates/agentkeys-cli/src/k11_webauthn.rs`](../crates/agentkeys-cli/src/k11_webauthn.rs) exposes:
+[`crates/agentkeys-cli/src/k11_webauthn.rs`](../../crates/agentkeys-cli/src/k11_webauthn.rs) exposes:
 
 ```rust
 pub struct K11IntentContext {
@@ -186,7 +186,7 @@ Rule of thumb: **if the K11 assertion authorizes anything an operator could mean
 
 ## Tests
 
-[`crates/agentkeys-cli/src/k11_webauthn.rs::tests`](../crates/agentkeys-cli/src/k11_webauthn.rs):
+[`crates/agentkeys-cli/src/k11_webauthn.rs::tests`](../../crates/agentkeys-cli/src/k11_webauthn.rs):
 
 - `html_escape_neutralizes_script_injection` — malicious daemon-supplied intent rendered as text, not JS.
 - `html_escape_handles_quote_chars` — quote/apostrophe escape correctness.
@@ -199,9 +199,9 @@ End-to-end visual verification: open the K11 confirmation page during `harness/v
 ## Cross-references
 
 - [`wiki/k11-intent-conventions.md`](./k11-intent-conventions.md) — **content convention** for what the intent text + rows MUST contain, per-operation canonical headline table, and the uniformity rule across all K11-emitting sites (the rule this page's mechanism enforces).
-- [`docs/spec/architecture.md`](../docs/spec/architecture.md) §10.1 — master init + K11 binding.
-- [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3a — `AuditEnvelope` intent_text + intent_commitment fields.
-- [`crates/agentkeys-cli/src/k11_webauthn.rs`](../crates/agentkeys-cli/src/k11_webauthn.rs) — implementation.
-- [`crates/agentkeys-core/src/audit/mod.rs`](../crates/agentkeys-core/src/audit/mod.rs) — `commit_intent` helper (mirror of `clear_signing::commit_intent`).
-- [`crates/agentkeys-core/src/clear_signing/`](../crates/agentkeys-core/src/clear_signing) — ERC-7730 typed-data preview that supplies the intent text for typed-data signs.
+- [`docs/arch.md`](../arch.md) §10.1 — master init + K11 binding.
+- [`docs/arch.md`](../arch.md) §15.3a — `AuditEnvelope` intent_text + intent_commitment fields.
+- [`crates/agentkeys-cli/src/k11_webauthn.rs`](../../crates/agentkeys-cli/src/k11_webauthn.rs) — implementation.
+- [`crates/agentkeys-core/src/audit/mod.rs`](../../crates/agentkeys-core/src/audit/mod.rs) — `commit_intent` helper (mirror of `clear_signing::commit_intent`).
+- [`crates/agentkeys-core/src/clear_signing/`](../../crates/agentkeys-core/src/clear_signing) — ERC-7730 typed-data preview that supplies the intent text for typed-data signs.
 - [`wiki/audit-envelope-add-op-kind.md`](./audit-envelope-add-op-kind.md) — process for adding a new audit op_kind (every new master-mutation op_kind should also wire `assert_webauthn_*_with_intent`).

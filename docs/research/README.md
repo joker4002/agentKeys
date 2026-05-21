@@ -21,7 +21,7 @@ The three plans grew out of a single question — *"what does `agentkeys init` a
 3. But `dexs-backend` and Heima TEE worker are tightly coupled — porting one drags in assumptions from the other.
 4. Heima TEE worker is single-tenant today (`client_id == CLIENT_ID_WILDMETA` hardcoded in [`tee-worker/omni-executor/rpc-server/src/methods/omni/user_login.rs`](https://github.com/litentry/heima/blob/main/tee-worker/omni-executor/rpc-server/src/methods/omni/user_login.rs)). Multi-tenant support requires an upstream patch.
 5. The patch cost is asymmetric across Options A / B / C.
-6. [`docs/spec/architecture.md` §11](../spec/architecture.md#11-audit-destination-is-pluggable) already established that **audit anchoring is pluggable**. Option C extends the same principle to two more layers.
+6. [`docs/arch.md` §11](../arch.md#11-audit-destination-is-pluggable) already established that **audit anchoring is pluggable**. Option C extends the same principle to two more layers.
 
 ## Tracking issues
 

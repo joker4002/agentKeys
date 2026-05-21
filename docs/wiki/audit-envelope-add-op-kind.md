@@ -1,6 +1,6 @@
 # Adding a new audit op_kind
 
-This is the operator-facing detailed guide for extending the AgentKeys audit envelope with a new op_kind. Defers to [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3a (canonical schema + 8 non-break invariants) and §15.3b (the 5-step ritual). This page walks through a worked example + the complete PR checklist.
+This is the operator-facing detailed guide for extending the AgentKeys audit envelope with a new op_kind. Defers to [`docs/arch.md`](../arch.md) §15.3a (canonical schema + 8 non-break invariants) and §15.3b (the 5-step ritual). This page walks through a worked example + the complete PR checklist.
 
 ## The current op design (one-paragraph recap)
 
@@ -8,7 +8,7 @@ Every audit-producing surface in AgentKeys (creds, memory, signer, broker, payme
 
 ## Worked example: adding `PaymentRefund` (byte 32)
 
-Suppose the payment-service ([`crates/agentkeys-worker-payment`](../crates/agentkeys-worker-payment) — hypothetical) now supports refund flows. The existing payment family has `PaymentEscrowRedeem=30` and `PaymentDirect=31`. We claim byte `32` for `PaymentRefund`.
+Suppose the payment-service ([`crates/agentkeys-worker-payment`](../../crates/agentkeys-worker-payment) — hypothetical) now supports refund flows. The existing payment family has `PaymentEscrowRedeem=30` and `PaymentDirect=31`. We claim byte `32` for `PaymentRefund`.
 
 ### Step 1 — pick the byte
 
@@ -22,7 +22,7 @@ Reserved-but-unused bytes in the payments family: 33-39. Use the lowest unused.
 
 ### Step 2 — append the row to arch.md §15.3a canonical op_kind table
 
-Edit [`docs/spec/architecture.md`](../docs/spec/architecture.md) — find the canonical table in §15.3a, append (do NOT reorder existing rows):
+Edit [`docs/arch.md`](../arch.md) — find the canonical table in §15.3a, append (do NOT reorder existing rows):
 
 ```markdown
 | `PaymentRefund` | 32 | `{original_op_envelope_hash: [u8;32], reason_code: u8, amount_returned: U256}` | payment-service |
@@ -32,9 +32,9 @@ The schema column lists every field in the typed `op_body`. Naming convention: s
 
 ### Step 3 — add the Rust variant
 
-Three files in [`crates/agentkeys-core/src/audit/`](../crates/agentkeys-core/src/audit):
+Three files in [`crates/agentkeys-core/src/audit/`](../../crates/agentkeys-core/src/audit):
 
-**[`op_kind.rs`](../crates/agentkeys-core/src/audit/op_kind.rs):**
+**[`op_kind.rs`](../../crates/agentkeys-core/src/audit/op_kind.rs):**
 
 ```rust
 pub enum AuditOpKind {
@@ -67,7 +67,7 @@ impl AuditOpKind {
 }
 ```
 
-**[`bodies.rs`](../crates/agentkeys-core/src/audit/bodies.rs):**
+**[`bodies.rs`](../../crates/agentkeys-core/src/audit/bodies.rs):**
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,7 +83,7 @@ pub struct PaymentRefundBody {
 }
 ```
 
-And re-export from `bodies::*` at the top of [`mod.rs`](../crates/agentkeys-core/src/audit/mod.rs):
+And re-export from `bodies::*` at the top of [`mod.rs`](../../crates/agentkeys-core/src/audit/mod.rs):
 
 ```rust
 pub use bodies::{
@@ -95,7 +95,7 @@ pub use bodies::{
 };
 ```
 
-**[`mod.rs`](../crates/agentkeys-core/src/audit/mod.rs) — `TypedAuditBody` enum + decoder:**
+**[`mod.rs`](../../crates/agentkeys-core/src/audit/mod.rs) — `TypedAuditBody` enum + decoder:**
 
 ```rust
 pub enum TypedAuditBody {
@@ -125,7 +125,7 @@ impl TypedAuditBody {
 
 ### Step 4 — wire the emit site
 
-In the payment-service worker (e.g. [`crates/agentkeys-worker-payment/src/handlers.rs`](../crates/agentkeys-worker-payment) — hypothetical):
+In the payment-service worker (e.g. [`crates/agentkeys-worker-payment/src/handlers.rs`](../../crates/agentkeys-worker-payment) — hypothetical):
 
 ```rust
 use agentkeys_core::audit::{
@@ -170,7 +170,7 @@ The worker stores the envelope by hash. Later (batched or immediate), the same w
 
 ### Step 5 — ship the three required tests
 
-**Test A — worker CBOR roundtrip** in [`crates/agentkeys-core/src/audit/bodies.rs`](../crates/agentkeys-core/src/audit/bodies.rs):
+**Test A — worker CBOR roundtrip** in [`crates/agentkeys-core/src/audit/bodies.rs`](../../crates/agentkeys-core/src/audit/bodies.rs):
 
 ```rust
 #[test]
@@ -193,11 +193,11 @@ A unit test that crafts an envelope with `op_kind=32` against an older explorer 
 - Renders the row as `Unknown(32)` with envelope-level fields visible (actor, operator, timestamp, intent_text).
 - Does NOT 5xx or drop the event.
 
-**Test C — arch.md row uniqueness check.** This is enforced from the Rust side already by [`audit::op_kind::tests::all_byte_values_unique`](../crates/agentkeys-core/src/audit/op_kind.rs) — adding the new variant at byte 32 will fail this test if 32 was already claimed. Keep the doc + code in sync; the test is the regression guard.
+**Test C — arch.md row uniqueness check.** This is enforced from the Rust side already by [`audit::op_kind::tests::all_byte_values_unique`](../../crates/agentkeys-core/src/audit/op_kind.rs) — adding the new variant at byte 32 will fail this test if 32 was already claimed. Keep the doc + code in sync; the test is the regression guard.
 
 ## Explorer-side update (parallel track, separate repos)
 
-The agentKeys-side PR ships independently of the explorer-side PR — that's the whole point of the [non-break design](../docs/spec/architecture.md) §15.3a invariant #4 (the explorer always renders `Unknown(byte)` fallback for op_kinds it doesn't recognize yet). Until the explorer-side PR lands, operators see a generic row instead of a typed one; nothing crashes, nothing is dropped.
+The agentKeys-side PR ships independently of the explorer-side PR — that's the whole point of the [non-break design](../arch.md) §15.3a invariant #4 (the explorer always renders `Unknown(byte)` fallback for op_kinds it doesn't recognize yet). Until the explorer-side PR lands, operators see a generic row instead of a typed one; nothing crashes, nothing is dropped.
 
 The explorer work lives in **two separate GitHub repos** with their own PR / review / deploy cadence:
 
@@ -383,7 +383,7 @@ The UI's audit-row component dispatches via the registry. A missing entry MUST r
 
 To prevent encoder drift between Rust (agentKeys), Go (subscan-essentials), and TypeScript (subscan-essentials-ui-react), maintain a small **shared test-vector file** that all three repos consume:
 
-- Location (canonical): [`crates/agentkeys-core/src/audit/test-vectors/`](../crates/agentkeys-core/src/audit/) (TBD — to be added in a follow-up PR alongside the next new op_kind).
+- Location (canonical): [`crates/agentkeys-core/src/audit/test-vectors/`](../../crates/agentkeys-core/src/audit/) (TBD — to be added in a follow-up PR alongside the next new op_kind).
 - Format: JSON files, one per op_kind, with `{envelope_json, canonical_cbor_hex, envelope_hash_hex}`.
 - All three repos read these files and verify their encoder produces matching `canonical_cbor_hex` + `envelope_hash_hex` from the JSON.
 
@@ -410,10 +410,10 @@ Three parallel PRs total — one against agentKeys, one against subscan-essentia
 ### agentKeys-side PR ([`litentry/agentKeys`](https://github.com/litentry/agentKeys))
 
 - [ ] Bytes claimed in the right family range; never reused; never reordered.
-- [ ] [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3a canonical table row appended.
-- [ ] [`crates/agentkeys-core/src/audit/op_kind.rs`](../crates/agentkeys-core/src/audit/op_kind.rs) variant + `from_u8` arm + `label` arm added.
-- [ ] [`crates/agentkeys-core/src/audit/bodies.rs`](../crates/agentkeys-core/src/audit/bodies.rs) typed body struct + serde derives + (optional) roundtrip test.
-- [ ] [`crates/agentkeys-core/src/audit/mod.rs`](../crates/agentkeys-core/src/audit/mod.rs) `TypedAuditBody` variant + `from_envelope` arm + re-export.
+- [ ] [`docs/arch.md`](../arch.md) §15.3a canonical table row appended.
+- [ ] [`crates/agentkeys-core/src/audit/op_kind.rs`](../../crates/agentkeys-core/src/audit/op_kind.rs) variant + `from_u8` arm + `label` arm added.
+- [ ] [`crates/agentkeys-core/src/audit/bodies.rs`](../../crates/agentkeys-core/src/audit/bodies.rs) typed body struct + serde derives + (optional) roundtrip test.
+- [ ] [`crates/agentkeys-core/src/audit/mod.rs`](../../crates/agentkeys-core/src/audit/mod.rs) `TypedAuditBody` variant + `from_envelope` arm + re-export.
 - [ ] Emit site wired in the appropriate worker / broker / signer / hook.
 - [ ] `cargo test -p agentkeys-core --lib audit` passes (the `all_byte_values_unique` test catches collisions).
 - [ ] `ENVELOPE_VERSION` UNCHANGED — adding an op_kind never bumps the envelope version.
@@ -451,10 +451,10 @@ See [`wiki/k11-webauthn-intent-rendering.md`](./k11-webauthn-intent-rendering.md
 
 ## Where to look for cross-references
 
-- [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3a — canonical schema, op_kind table, 8 non-break invariants, 6-phase migration plan.
-- [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3b — the 5-step ritual (a more concise summary of this page).
-- [`crates/agentkeys-core/src/audit/mod.rs`](../crates/agentkeys-core/src/audit/mod.rs) — `AuditEnvelope` struct + `commit_intent` helper.
-- [`crates/agentkeys-core/src/audit/client.rs`](../crates/agentkeys-core/src/audit/client.rs) — `AuditClient` HTTP wrapper + `envelope_for` builder.
-- [`crates/agentkeys-chain/src/CredentialAudit.sol`](../crates/agentkeys-chain/src/CredentialAudit.sol) — `appendV2` + `appendRootV2` on-chain surface.
+- [`docs/arch.md`](../arch.md) §15.3a — canonical schema, op_kind table, 8 non-break invariants, 6-phase migration plan.
+- [`docs/arch.md`](../arch.md) §15.3b — the 5-step ritual (a more concise summary of this page).
+- [`crates/agentkeys-core/src/audit/mod.rs`](../../crates/agentkeys-core/src/audit/mod.rs) — `AuditEnvelope` struct + `commit_intent` helper.
+- [`crates/agentkeys-core/src/audit/client.rs`](../../crates/agentkeys-core/src/audit/client.rs) — `AuditClient` HTTP wrapper + `envelope_for` builder.
+- [`crates/agentkeys-chain/src/CredentialAudit.sol`](../../crates/agentkeys-chain/src/CredentialAudit.sol) — `appendV2` + `appendRootV2` on-chain surface.
 - [agentKeys#97](https://github.com/litentry/agentKeys/issues/97) — implementation tracking issue for Phases B + C + F.
 - [subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12) — explorer tracking issue for Phases D + E.

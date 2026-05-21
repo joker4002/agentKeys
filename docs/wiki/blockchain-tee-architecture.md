@@ -13,7 +13,7 @@ Companion docs:
 
 ### Blockchain (Heima parachain)
 
-> **Superseded 2026-04-26.** The "Credential blobs … `pallet-secrets-vault`" row below was the v0.1 design until the threat-model review found that on-chain encrypted ciphertext creates an unbounded harvest-now-decrypt-later window. The canonical position is now **off-chain ciphertext + on-chain hash**, delivered in Stage 8. See [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md) and [`docs/stage8-wip.md`](../docs/stage8-wip.md). The row is preserved for historical context; the new design uses `pallet-vault-pointers` instead.
+> **Superseded 2026-04-26.** The "Credential blobs … `pallet-secrets-vault`" row below was the v0.1 design until the threat-model review found that on-chain encrypted ciphertext creates an unbounded harvest-now-decrypt-later window. The canonical position is now **off-chain ciphertext + on-chain hash**, delivered in Stage 8. See [`docs/spec/threat-model-key-custody.md`](../spec/threat-model-key-custody.md) and [`docs/stage8-wip.md`](../stage8-wip.md). The row is preserved for historical context; the new design uses `pallet-vault-pointers` instead.
 
 The blockchain is the **single source of truth** for all persistent state. It is an append-only, publicly verifiable, tamper-evident ledger that every participant can read and no single party can rewrite.
 
@@ -66,7 +66,7 @@ The TEE is a **stateless computation oracle**. It reads chain state, performs cr
 | Chain state cache (optional)                      | ≤ 1 block (~6s)                                                                               | Read from chain                                                                                                              | Performance optimization. Not authoritative — chain is truth.                                   |
 
 
-> **Desired architecture (this spec):** All long-lived TEE keys are deterministically derived from a single sealed master seed via SLIP-0010 HDKD. This makes the TEE's key surface infinitely extensible (new services add new derivation paths, no new randomness or new storage slots), supports clean disaster recovery (a reprovisioned enclave with the same sealed seed reconstructs every subkey), and matches how we already treat OmniAccount addresses. Current Heima source generates keys independently instead — the gap, its impact, and the migration path are tracked in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md).
+> **Desired architecture (this spec):** All long-lived TEE keys are deterministically derived from a single sealed master seed via SLIP-0010 HDKD. This makes the TEE's key surface infinitely extensible (new services add new derivation paths, no new randomness or new storage slots), supports clean disaster recovery (a reprovisioned enclave with the same sealed seed reconstructs every subkey), and matches how we already treat OmniAccount addresses. Current Heima source generates keys independently instead — the gap, its impact, and the migration path are tracked in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md).
 
 **What it does:**
 
@@ -198,7 +198,7 @@ This is the most common operation. An agent daemon needs an API key to call Open
 
 > **Status:** this example shows the **v0.1** on-chain pair transport. v0 uses a centralized rendezvous relay (SQLite `rendezvous_registrations` + `auth_requests` tables, 6 REST endpoints) — see `docs/spec/plans/development-stages.md` Stage 1 for the v0 implementation. The v0.1 migration is tracked in [#6](https://github.com/litentry/agentKeys/issues/6).
 
-A new daemon in a sandbox wants to pair with the master user's wallet. This is the on-chain pair design from `[docs/spec/plans/development-stages.md](../docs/spec/plans/development-stages.md)` Stage 9.
+A new daemon in a sandbox wants to pair with the master user's wallet. This is the on-chain pair design from `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` Stage 9.
 
 ### Step-by-step
 
@@ -523,13 +523,13 @@ This gets the per-read latency down to pure-TEE-backend levels for hot-path read
 
 ## 6. Summary: the four rules
 
-> **Updated 2026-04-19** to (a) add rule #4 (credential broker, not operation proxy) after the email, knowledge-base, and OIDC-federation design rounds, and (b) re-anchor rule #2 on the DESIRED architecture: a single TEE master seed with SLIP-0010 HDKD for every long-lived subkey (shielding, issuer JWT, per-user wallet, per-domain DKIM). Current Heima source generates these independently — the gap list lives in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md).
+> **Updated 2026-04-19** to (a) add rule #4 (credential broker, not operation proxy) after the email, knowledge-base, and OIDC-federation design rounds, and (b) re-anchor rule #2 on the DESIRED architecture: a single TEE master seed with SLIP-0010 HDKD for every long-lived subkey (shielding, issuer JWT, per-user wallet, per-domain DKIM). Current Heima source generates these independently — the gap list lives in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md).
 > **Corrected 2026-04-12** after verifying against the actual Heima source code (`litentry/heima` on GitHub). The previous version of rule #3 stated "clients hold only their own private keys" — this was wrong. Clients hold JWTs (bearer tokens), not private keys. All private keys live inside the TEE.
 
 The entire AgentKeys v0.1 architecture follows four rules:
 
 1. **Chain stores everything persistent.** Account records, credential blobs (encrypted), pair requests, approvals, audit events, wallet balances, revocation lists. The chain is the single source of truth. If the TEE restarts, if the daemon crashes, if the user switches devices — chain state is always there.
-2. **TEE holds all private keys and does all computation.** The TEE holds a single sealed master seed and deterministically derives every other long-lived key from it via SLIP-0010 HDKD: the shielding key (`shielding/v1`, Curve25519), the session-JWT signing key (`issuer/jwt/v1`, ES256), the OIDC-issuer key (`oidc/issuer/v1`, ES256, separate from the session-JWT key so the publicly-rotatable OIDC trust anchor is isolated from the internal session-JWT trust anchor), per-user custodial wallet keys (`wallet/<chain>/<omni_account>/v1`, per `pallet-bitacross` pattern), and per-domain DKIM signing keys (`dkim/<domain>/v1`, Ed25519, Stage 6). The TEE decrypts credential blobs, issues and verifies JWTs, signs on-chain extrinsics using the user's wallet key, signs outbound mail (BYODKIM — the DKIM key lives in the enclave, not at AWS SES), and enforces scope + rate limits. No private key ever leaves the TEE. (Current Heima source generates these keys independently rather than HD-derived — see [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) for the migration gap.)
+2. **TEE holds all private keys and does all computation.** The TEE holds a single sealed master seed and deterministically derives every other long-lived key from it via SLIP-0010 HDKD: the shielding key (`shielding/v1`, Curve25519), the session-JWT signing key (`issuer/jwt/v1`, ES256), the OIDC-issuer key (`oidc/issuer/v1`, ES256, separate from the session-JWT key so the publicly-rotatable OIDC trust anchor is isolated from the internal session-JWT trust anchor), per-user custodial wallet keys (`wallet/<chain>/<omni_account>/v1`, per `pallet-bitacross` pattern), and per-domain DKIM signing keys (`dkim/<domain>/v1`, Ed25519, Stage 6). The TEE decrypts credential blobs, issues and verifies JWTs, signs on-chain extrinsics using the user's wallet key, signs outbound mail (BYODKIM — the DKIM key lives in the enclave, not at AWS SES), and enforces scope + rate limits. No private key ever leaves the TEE. (Current Heima source generates these keys independently rather than HD-derived — see [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md) for the migration gap.)
 3. **Clients hold only a JWT (bearer token), not private keys.** The master CLI and agent daemon each hold a JWT string issued by the TEE upon authentication. The JWT is a signed bearer token (`AuthTokenClaims { sub, typ, exp, aud }`), not a private key. However, it IS still a bearer credential — anyone with the string can impersonate the user until it expires. **OS keychain is the recommended default** for the master CLI (provides app-level ACL against malware-as-same-user). Plain file (mode 0600) is an acceptable fallback for daemon/sandbox/CI where keychain isn't available. If the JWT leaks, the blast radius is bounded by its expiration time (**30 days**, per [Session Token](session-token)) and the on-chain revocation list (~6s). If the JWT expires, the client re-authenticates and gets a new one. There are three TTLs to keep straight: **30-day session bearer** (this rule), **≤5-min OIDC-federation JWT** (what the daemon exchanges at AWS STS / GCP WIF / Ali RAM for cloud temp creds, per [OIDC Federation](oidc-federation)), and **≤1-hour cloud temp creds** (AWS default). Nested: shortest TTL always wins; revocation still propagates in ≤6s via the chain.
 4. **AgentKeys brokers credentials, not operations.** Our infrastructure mints ephemeral credentials (JWTs, temp cloud creds, decrypted API keys) and emits audit extrinsics at mint time. The daemon then calls remote services (SES, S3, GitHub, Notion, LLM APIs, …) **directly** using those credentials — we never proxy per-operation reads/writes. Compute cost on our side scales with user count, not with operation frequency. Per-user isolation on shared cloud resources is enforced by the cloud itself via PrincipalTag / session-tag conditions derived from JWT claims (see [Tag-Based Access](tag-based-access)). This rule is why the email, knowledge-base, and OIDC-federation designs never build proxies, SaaS feature surfaces, or per-operation compute on our side.
 
@@ -612,9 +612,9 @@ Three rotation paths, each routine under HDKD + the new pallets (7b):
 
 - **OIDC-issuer key rotation** (`oidc/issuer/v1` → `v2`): new derivation path; both keys in JWKS during the grace window; `pallet-oidc-pubkeys` records both `kid`s as active; consumer JWKS cache refreshes naturally. No external party action required.
 - **Session-JWT key rotation** (`issuer/jwt/v1` → `v2`): same pattern, but the session-JWT key is internal (not on public JWKS). Clients re-authenticate gradually as old tokens expire; no coordinated flip.
-- **MRSIGNER rotation** (new enclave-signing key): one attested seed handoff from the old enclave to the new one; `pallet-enclave-successors::authorize_mrsigner(new_mrsigner, ...)` extrinsic lands before the handoff; JWKS / custodial wallets / DKIM DNS are **unchanged** because the master seed survived. Relying parties who pinned on MRSIGNER do a one-time trust-policy update (automatable via the `agentkeys oidc-rotate-trust` CLI — see [`docs/spec/post-v0.1-future-work.md`](../docs/spec/post-v0.1-future-work.md) §3.1).
+- **MRSIGNER rotation** (new enclave-signing key): one attested seed handoff from the old enclave to the new one; `pallet-enclave-successors::authorize_mrsigner(new_mrsigner, ...)` extrinsic lands before the handoff; JWKS / custodial wallets / DKIM DNS are **unchanged** because the master seed survived. Relying parties who pinned on MRSIGNER do a one-time trust-policy update (automatable via the `agentkeys oidc-rotate-trust` CLI — see [`docs/spec/post-v0.1-future-work.md`](../spec/post-v0.1-future-work.md) §3.1).
 
-See [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) §8 and §9 for the pallet specifications and the MRSIGNER-rotation runbook.
+See [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md) §8 and §9 for the pallet specifications and the MRSIGNER-rotation runbook.
 
 ### 7.6 What this section does *not* cover
 
@@ -631,12 +631,12 @@ Narrower surfaces with their own dedicated pages:
 
 ### Spec documents
 
-- `[docs/spec/tech-brief.md](../docs/spec/tech-brief.md)` — v0/v0.1 split, TEE shielding key, pallet-bitacross pattern
-- `[docs/spec/1-step-analysis.md](../docs/spec/1-step-analysis.md)` — session key tiers, Connect flow, storage choices
-- `[docs/spec/heima-cli-exploration.md](../docs/spec/heima-cli-exploration.md)` — per-call signing, audit-as-extrinsic, latency acknowledgement
-- `[docs/spec/heima-open-questions.md](../docs/spec/heima-open-questions.md)` — Q1 (scoped session minting), Q3 (TEE-side scope enforcement), Q9 (revocation latency)
-- `[docs/spec/credential-backend-interface.md](../docs/spec/credential-backend-interface.md)` — CredentialBackend trait, signing model, payment rails
-- `[docs/spec/plans/development-stages.md](../docs/spec/plans/development-stages.md)` — Stage 9 design decisions (Pattern 4, on-chain pair transport)
+- `[docs/spec/tech-brief.md](../spec/tech-brief.md)` — v0/v0.1 split, TEE shielding key, pallet-bitacross pattern
+- `[docs/spec/1-step-analysis.md](../spec/1-step-analysis.md)` — session key tiers, Connect flow, storage choices
+- `[docs/spec/heima-cli-exploration.md](../spec/heima-cli-exploration.md)` — per-call signing, audit-as-extrinsic, latency acknowledgement
+- `[docs/spec/heima-open-questions.md](../spec/heima-open-questions.md)` — Q1 (scoped session minting), Q3 (TEE-side scope enforcement), Q9 (revocation latency)
+- `[docs/spec/credential-backend-interface.md](../spec/credential-backend-interface.md)` — CredentialBackend trait, signing model, payment rails
+- `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` — Stage 9 design decisions (Pattern 4, on-chain pair transport)
 
 ### Wiki
 

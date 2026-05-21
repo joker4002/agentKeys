@@ -63,7 +63,7 @@ gh issue create --repo litentry/agentKeys \
   --body-file docs/spec/plans/issue-credential-storage-s3-oidc.md
 ```
 
-Architecture rationale, wire contract sketch, IAM-delta scope, and 6-step migration plan all in the draft. Reuses the SES Lambda's PrincipalTag-isolated bucket + the §5.1 OIDC workflow — zero new deployable artifacts. Forced by the post-issue-#83 storage failure: provision now succeeds through key mint but the legacy backend at `:8090` (loopback-only per [arch.md §11](docs/spec/architecture.md#L670)) is unreachable from the operator workstation.
+Architecture rationale, wire contract sketch, IAM-delta scope, and 6-step migration plan all in the draft. Reuses the SES Lambda's PrincipalTag-isolated bucket + the §5.1 OIDC workflow — zero new deployable artifacts. Forced by the post-issue-#83 storage failure: provision now succeeds through key mint but the legacy backend at `:8090` (loopback-only per [arch.md §11](docs/arch.md#L670)) is unreachable from the operator workstation.
 
 ### Disable broker's broad S3-full-access (future, after the SES Lambda lands)
 

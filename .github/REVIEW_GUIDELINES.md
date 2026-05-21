@@ -144,7 +144,7 @@ Reference: PR #18 P2, PR #22 v2 P2.
 
 ### 6. Session TTL is 30 days uniformly
 
-Master, agent, sandbox — all sessions are 30 days per `wiki/session-token.md`.
+Master, agent, sandbox — all sessions are 30 days per `docs/wiki/session-token.md`.
 Don't introduce per-type TTL splits; they were tried and reverted.
 
 Reference: PR #23.

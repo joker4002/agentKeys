@@ -1,6 +1,6 @@
 # K11 intent conventions — typed contract, uniform Touch ID prompts
 
-Every K11 WebAuthn ceremony in AgentKeys renders an operator-readable confirmation block on its localhost page. The contract is **typed** — scripts pass a single JSON payload describing the operation, and the shared Rust renderer in [`crates/agentkeys-cli/src/k11_intent.rs`](../crates/agentkeys-cli/src/k11_intent.rs) produces the canonical headline + per-field rows. No more ad-hoc `--intent-field "Label=Value"` strings duplicated across 7 bash scripts; no more drift between "Chain ID" vs "Chain"; no more raw role bitfields ("Role bitfield=3" replaced by "Permissions: CAP_MINT | RECOVERY").
+Every K11 WebAuthn ceremony in AgentKeys renders an operator-readable confirmation block on its localhost page. The contract is **typed** — scripts pass a single JSON payload describing the operation, and the shared Rust renderer in [`crates/agentkeys-cli/src/k11_intent.rs`](../../crates/agentkeys-cli/src/k11_intent.rs) produces the canonical headline + per-field rows. No more ad-hoc `--intent-field "Label=Value"` strings duplicated across 7 bash scripts; no more drift between "Chain ID" vs "Chain"; no more raw role bitfields ("Role bitfield=3" replaced by "Permissions: CAP_MINT | RECOVERY").
 
 See [`wiki/k11-webauthn-intent-rendering.md`](./k11-webauthn-intent-rendering.md) for the underlying rendering mechanism (the `K11IntentContext` type + `assert_webauthn_*_with_intent` entry points). This page covers the *content convention* — the typed enum, JSON wire shape, formatting rules, and per-operation conformance.
 
@@ -10,7 +10,7 @@ Master-mutation ceremonies (scope grant/revoke, device add/revoke, K10 rotation,
 
 ## The typed contract
 
-The single source of truth is the [`K11OpIntent`](../crates/agentkeys-cli/src/k11_intent.rs) enum. One variant per master-mutation operation. Each variant carries its **typed payload** — fields are decoded properly (role bitfields, amounts, hashes) by the renderer, not by per-script string surgery.
+The single source of truth is the [`K11OpIntent`](../../crates/agentkeys-cli/src/k11_intent.rs) enum. One variant per master-mutation operation. Each variant carries its **typed payload** — fields are decoded properly (role bitfields, amounts, hashes) by the renderer, not by per-script string surgery.
 
 ### Wire format (JSON)
 
@@ -123,20 +123,20 @@ This means: the script that orchestrates the multi-party ceremony (`heima-recove
 - Embeds it in the JSON POST body to the companion's `/v1/companion/approve` endpoint (for COMPANION). The companion daemon's handler reads `intent_text` + `intent_fields` from the POST body and renders them on its own Touch ID confirmation page.
 
 Implementation:
-- `ApproveRequest` ([`crates/agentkeys-daemon/src/companion.rs`](../crates/agentkeys-daemon/src/companion.rs)) accepts optional `intent_text: Option<String>` + `intent_fields: Vec<String>` fields. Each `intent_fields` entry is a `Label=Value` string; the handler splits on the first `=`.
+- `ApproveRequest` ([`crates/agentkeys-daemon/src/companion.rs`](../../crates/agentkeys-daemon/src/companion.rs)) accepts optional `intent_text: Option<String>` + `intent_fields: Vec<String>` fields. Each `intent_fields` entry is a `Label=Value` string; the handler splits on the first `=`.
 - The companion's `approve` handler calls `assert_webauthn_for_chain_with_intent()` — same code path that primary uses, so the rendering on the localhost confirmation page is identical apart from the role badge color (purple for companion vs blue for primary).
 
 ## Conformant K11 emit sites
 
 | Site | Operation | Conformant? |
 |---|---|---|
-| [`scripts/heima-scope-set.sh`](../scripts/heima-scope-set.sh) | scope grant | ✅ |
-| [`scripts/heima-scope-revoke.sh`](../scripts/heima-scope-revoke.sh) | scope revoke | ✅ |
-| [`scripts/heima-device-revoke.sh`](../scripts/heima-device-revoke.sh) | revoke device | ✅ |
-| [`harness/scripts/heima-device-add.sh`](../harness/scripts/heima-device-add.sh) | register companion as 2nd master | ✅ |
-| [`harness/scripts/heima-register-spare-master.sh`](../harness/scripts/heima-register-spare-master.sh) | register synthetic 3rd master | ✅ |
-| [`harness/scripts/heima-set-recovery-threshold.sh`](../harness/scripts/heima-set-recovery-threshold.sh) | set recovery threshold | ✅ |
-| [`harness/scripts/heima-recovery.sh`](../harness/scripts/heima-recovery.sh) PRIMARY + COMPANION | M-of-N device revoke | ✅ (both prompts uniform; companion via POST body) |
+| [`scripts/heima-scope-set.sh`](../../scripts/heima-scope-set.sh) | scope grant | ✅ |
+| [`scripts/heima-scope-revoke.sh`](../../scripts/heima-scope-revoke.sh) | scope revoke | ✅ |
+| [`scripts/heima-device-revoke.sh`](../../scripts/heima-device-revoke.sh) | revoke device | ✅ |
+| [`harness/scripts/heima-device-add.sh`](../../harness/scripts/heima-device-add.sh) | register companion as 2nd master | ✅ |
+| [`harness/scripts/heima-register-spare-master.sh`](../../harness/scripts/heima-register-spare-master.sh) | register synthetic 3rd master | ✅ |
+| [`harness/scripts/heima-set-recovery-threshold.sh`](../../harness/scripts/heima-set-recovery-threshold.sh) | set recovery threshold | ✅ |
+| [`harness/scripts/heima-recovery.sh`](../../harness/scripts/heima-recovery.sh) PRIMARY + COMPANION | M-of-N device revoke | ✅ (both prompts uniform; companion via POST body) |
 | Future master-mutation script | (new) | MUST follow this convention before merging |
 
 ## What does NOT count as conformant
@@ -149,7 +149,7 @@ Implementation:
 
 ### Built-in unit tests
 
-The typed renderer ships with regression tests in [`crates/agentkeys-cli/src/k11_intent.rs::tests`](../crates/agentkeys-cli/src/k11_intent.rs):
+The typed renderer ships with regression tests in [`crates/agentkeys-cli/src/k11_intent.rs::tests`](../../crates/agentkeys-cli/src/k11_intent.rs):
 
 - `roles_decode_canonical_combinations` — answers the user-reported "Role bitfield = 3 should show a readable permission" feedback: `format_roles(3) == "CAP_MINT | RECOVERY (raw 3)"`.
 - `roles_surface_unknown_future_bits` — bit3+ surfaces as `bit3(unknown)` so a future role expansion doesn't silently render as "the same 3 permissions."
@@ -190,5 +190,5 @@ becomes mechanically enforced rather than convention-only.
 ## Cross-references
 
 - [`wiki/k11-webauthn-intent-rendering.md`](./k11-webauthn-intent-rendering.md) — the rendering mechanism (`K11IntentContext`, HTML page structure, fallback behavior when no intent is supplied).
-- [`docs/spec/architecture.md`](../docs/spec/architecture.md) §10.1 — master init + K11 binding model.
+- [`docs/arch.md`](../arch.md) §10.1 — master init + K11 binding model.
 - [`wiki/audit-envelope-add-op-kind.md`](./audit-envelope-add-op-kind.md) — when a new master-mutation op_kind PR lands, it MUST also extend the K11 intent table above with the canonical headline + Effect for that op.

@@ -12,7 +12,7 @@ Three rounds of research established that:
 
 The user's reframe (paraphrased): *"Heima should also be pluggable. We could use Solana or Ethereum smart contract for audit. Don't make Heima the spine of AgentKeys."*
 
-This aligns with what `docs/spec/architecture.md §11 "Audit destination is pluggable"` already documents — but extends the principle to **two more layers** that the previous plans (A and B) had silently hardcoded as Heima-bound:
+This aligns with what `docs/arch.md §11 "Audit destination is pluggable"` already documents — but extends the principle to **two more layers** that the previous plans (A and B) had silently hardcoded as Heima-bound:
 
 | Layer | Architecture.md §11 says | Prior plans (A, B) hardcoded |
 |---|---|---|
@@ -318,7 +318,7 @@ Before any code lands:
 - `docs/agentkeys-broker-auth-api.md` (new) — HTTP/RPC contract.
 - `docs/dev-setup.md` (housekeeping changes from the original plan: §3 role table, §4 self-mint framing, §8 troubleshooting).
 - `docs/operator-runbook.md` §1.1 — drop the "stub-backend caveat" entirely; replace with "v0 ships with `WalletSig + EmailLink + ClientSide + SQLite` plug-ins by default."
-- `docs/spec/architecture.md` §11 — extend from "audit destination is pluggable" to "auth, wallet provisioning, and audit are all pluggable behind plug-in traits."
+- `docs/arch.md` §11 — extend from "audit destination is pluggable" to "auth, wallet provisioning, and audit are all pluggable behind plug-in traits."
 
 **v1 — adds (`crates/agentkeys-broker-server/`):**
 - `src/plugins/audit/solana.rs`.
