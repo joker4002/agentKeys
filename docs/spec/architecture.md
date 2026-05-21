@@ -1061,6 +1061,66 @@ Phases B-E are **independent** once A lands — they can ship in parallel
 across the three repos. Phase A is the lock-in moment; everything else
 follows the canonical table.
 
+### 15.3b How to add a new op_kind — the 5-step ritual
+
+Adding a new audit op_kind (e.g. a new worker emits something the
+canonical table doesn't yet cover) is a deliberately small + repeatable
+change. Per the non-break invariants above, each new op_kind costs at
+most "uglier UI temporarily for old explorers" — never "broken explorer
+/ dropped event." Five steps, in this exact order:
+
+1. **Pick the byte.** Claim the next unused byte in the appropriate
+   family range from the canonical table in §15.3a (creds 0-9,
+   memory 10-19, signs 20-29, payments 30-39, scope 40-49, device
+   50-59, email 60-69, K3 70-79). If your op is in a NEW family,
+   claim the next unused 10-block (80-89, 90-99, …). Never reuse a
+   number; never reorder existing rows.
+
+2. **Append a row to §15.3a canonical op_kind table.** Format:
+   `\| KindName \| Byte \| {field: type, …} schema \| Worker that emits \|`.
+   The schema lists every field in the typed `op_body` — exactly the
+   shape the corresponding `XxxBody` struct in
+   [`agentkeys-core::audit::bodies`](../../crates/agentkeys-core/src/audit/bodies.rs)
+   serializes to.
+
+3. **Add the Rust variant.** Three files in
+   [`crates/agentkeys-core/src/audit/`](../../crates/agentkeys-core/src/audit/):
+   - `op_kind.rs`: new variant in the `AuditOpKind` enum at the byte
+     you claimed + arm in `from_u8` + arm in `label`.
+   - `bodies.rs`: new `XxxBody` struct with serde derives, fields
+     matching the arch.md table row.
+   - `mod.rs`: new variant in the `TypedAuditBody` enum + arm in
+     `TypedAuditBody::from_envelope`.
+
+4. **Wire the emit site.** The component that performs the op
+   (credentials-service / memory-service / signer / broker / payment-
+   service / email-service / SidecarRegistry hook / K3EpochCounter
+   hook) calls
+   [`agentkeys_core::audit::envelope_for(...)`](../../crates/agentkeys-core/src/audit/client.rs)
+   to build the envelope, then `AuditClient::append(...)` to emit it
+   to the audit-service worker. The worker stores the envelope by hash
+   and (separately, batched) commits the hash on-chain via
+   `CredentialAudit.appendV2(...)` (after Phase C redeploy).
+
+5. **Ship the three required tests.** Each new op_kind PR MUST ship:
+   - **Worker test**: CBOR encode + decode roundtrip on a canonical
+     fixture for the new body shape.
+   - **Explorer test**: old explorer + envelope with the new op_kind
+     → graceful `Unknown(byte)` fallback render, no crash, no dropped
+     event. Lives in [`subscan-essentials`](https://github.com/litentry/subscan-essentials).
+   - **Doc test / lint**: the new arch.md row's `Byte` is unique
+     across the table (the existing
+     [`audit::op_kind::tests::all_byte_values_unique`](../../crates/agentkeys-core/src/audit/op_kind.rs)
+     enforces this from the Rust side — keep the doc + code in sync).
+
+**Critically:** never bump `ENVELOPE_VERSION` for a new op_kind. The
+version field is reserved for envelope-level changes (adding /
+removing top-level fields). Adding a new op_kind goes through this
+ritual at v1 — that's the whole point of the open-enum design.
+
+**Operator-facing detailed guide:** see [`wiki/audit-envelope-add-op-kind.md`](../../wiki/audit-envelope-add-op-kind.md)
+for a worked example + the full PR checklist.
+
 ### 15.4 email-service
 
 - **IAM:** `ses:SendRawEmail` from operator's domain (e.g., `bots.litentry.org`); `s3:GetObject` + `s3:PutObject` on `bots/<actor_omni_hex>/{inbound,sent}/*`
