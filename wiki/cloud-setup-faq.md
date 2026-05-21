@@ -1,6 +1,11 @@
 # Cloud setup — FAQ
 
-Troubleshooting + edge cases that didn't fit in [`docs/cloud-setup.md`](https://github.com/litentry/agentKeys/blob/main/docs/cloud-setup.md). Use ⌘F to find your error.
+Troubleshooting + edge cases for the two cloud-side operator docs:
+
+- [`docs/cloud-bootstrap.md`](https://github.com/litentry/agentKeys/blob/main/docs/cloud-bootstrap.md) — first-time provisioning (per account or per cloud provider).
+- [`docs/cloud-setup.md`](https://github.com/litentry/agentKeys/blob/main/docs/cloud-setup.md) — ongoing OIDC federation + broker-host re-deploys.
+
+Use ⌘F to find your error.
 
 ## Q. `setup-broker-host.sh` says "BROKER_OIDC_ISSUER mismatch" on re-run
 
