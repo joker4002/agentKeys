@@ -1,39 +1,67 @@
 name: harness CI (no LLM)
 
-# Issue #66 tier-1: deterministic, no-LLM, no-WebAuthn CI that exercises
-# the same code paths the harness scripts run, but against an ephemeral
-# in-CI test environment (anvil + mock-server + stub-STS broker).
+# Issue #66: deterministic, no-LLM, no-WebAuthn CI that runs the SAME
+# production harness scripts (harness/v2-stage{1,2,3}-demo.sh) against
+# a parallel TEST instance of the production environment.
 #
-# Separate from the existing claude.yml / claude-code-review.yml workflows
-# (which invoke @claude on PR comments + reviews). This workflow never
-# spends LLM tokens — it's plain cargo/forge/curl orchestration.
+# "Mirror production" means: same Heima mainnet chain, same Solidity
+# source files, same harness scripts, same broker code, same AWS
+# IAM/STS/S3 surfaces. The only delta is identifiers — a different
+# deployer wallet → different contract addresses; a different OIDC
+# provider URL → different IAM role + bucket. Every test resource
+# carries a -test suffix so a misconfigured run targeting prod fails
+# closed (the role/bucket simply won't exist in prod).
 #
-# Coverage map (matches harness/v2-stage*.sh where ephemeral CI can):
+# Operator-provided GitHub repo secrets (one-shot setup, then immutable
+# for the life of the test environment):
 #
-#   * `cargo fmt --check`                 — formatting gate
-#   * `cargo clippy -D warnings`          — lint gate
-#   * `cargo test --workspace`            — unit + in-process integration
-#                                            tests. The broker tests
-#                                            already spawn a full
-#                                            in-process broker with
-#                                            StubSts + StubEmailSender,
-#                                            so SIWE / OIDC mint / cap
-#                                            verify / multi-master /
-#                                            recovery / per-data-class
-#                                            isolation Rust logic is all
-#                                            covered here. Per CLAUDE.md
-#                                            "all async / #[tokio::test]"
-#                                            convention.
-#   * `harness/ci-ephemeral-stack.sh`     — forge build + forge test +
-#                                            forge script deploy on a
-#                                            fresh anvil + read-only
-#                                            ABI/wiring verification.
-#                                            Plus broker boot smoke +
-#                                            OIDC discovery surface.
+#   TEST_OIDC_AWS_ROLE_ARN  IAM role assumed by this workflow via GitHub
+#                           Actions OIDC. Trust policy:
+#                             "token.actions.githubusercontent.com",
+#                             conditioned on this repo + ref. Grants:
+#                             sts:AssumeRole on the test data roles +
+#                             read-only S3 on the test buckets.
+#   TEST_ACCOUNT_ID         AWS account ID hosting the test infra.
+#                           Same account as prod is fine — isolation is
+#                           by resource name, not by account.
+#   TEST_AWS_REGION         e.g. us-east-1
+#   TEST_BROKER_HOST        test-broker.litentry.org (long-lived; AWS
+#                           validates OIDC issuer URLs byte-for-byte,
+#                           so this must outlast any single CI run).
+#   TEST_VAULT_BUCKET       agentkeys-vault-test-${ACCOUNT_ID}
+#   TEST_MEMORY_BUCKET      agentkeys-memory-test-${ACCOUNT_ID}
+#   TEST_VAULT_ROLE_ARN     arn:aws:iam::${ACCT}:role/agentkeys-vault-role-test
+#   TEST_MEMORY_ROLE_ARN    arn:aws:iam::${ACCT}:role/agentkeys-memory-role-test
+#   TEST_DATA_ROLE_ARN      arn:aws:iam::${ACCT}:role/agentkeys-data-role-test
+#   TEST_HEIMA_DEPLOYER_KEY 0x-prefixed Heima mainnet test wallet private
+#                           key (DIFFERENT from prod deployer). Deploys
+#                           the same crates/agentkeys-chain/src/*.sol to
+#                           new addresses on mainnet via the same
+#                           DeployAgentKeysV1.s.sol script. Solidity
+#                           bytecode is deterministic and contract
+#                           addresses derive from (deployer, nonce), so
+#                           a different key + same source = isolated
+#                           parallel contract set on the production
+#                           chain. Fund this wallet once from the
+#                           operator's personal Heima wallet.
+#   TEST_SCOPE_CONTRACT_ADDRESS_HEIMA      pinned addresses of the
+#   TEST_SIDECAR_REGISTRY_ADDRESS_HEIMA    test-deployer's mainnet deploy
+#   TEST_K3_EPOCH_COUNTER_ADDRESS_HEIMA    (so CI doesn't burn HEI on
+#   TEST_CREDENTIAL_AUDIT_ADDRESS_HEIMA     every run). One-shot deploy
+#   TEST_P256_VERIFIER_ADDRESS_HEIMA        per test-environment refresh.
+#   TEST_K11_VERIFIER_ADDRESS_HEIMA
 #
-# Tier-2 (long-lived test-broker.litentry.org, full stage-3 PrincipalTag
-# isolation, real AWS STS) lives in .github/workflows/harness-e2e.yml
-# and is gated on operator-provisioned infra; see docs/test-environment.md.
+# Gating: until TEST_OIDC_AWS_ROLE_ARN is set, the workflow's preflight
+# job surfaces a ::warning:: skip and exits clean — safe to merge before
+# the operator activates the test infra.
+#
+# WebAuthn: never invoked. harness/v2-stage1-demo.sh defaults to
+# WEBAUTHN_MODE=0 (line 131), v2-stage2-demo.sh accepts --stub, neither
+# this workflow nor the harness scripts call WebAuthn paths in this mode.
+#
+# LLM: never invoked. This workflow is plain cargo/forge/aws-cli/curl —
+# distinct from claude.yml + claude-code-review.yml which DO call @claude
+# on PR comments + reviews. This workflow consumes zero LLM tokens.
 
 on:
   push:
@@ -46,13 +74,22 @@ on:
       - ".github/workflows/harness-ci.yml"
       - "Cargo.toml"
       - "Cargo.lock"
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Which harness stage to run (1, 2, 3, or all)"
+        required: false
+        default: "all"
+        type: choice
+        options: ["1", "2", "3", "all"]
 
-# Allow only one concurrent run per ref so re-pushes cancel stale runs
-# (saves runner minutes; each ephemeral stack spins up anvil + builds the
-# workspace, so wall-clock matters).
 concurrency:
   group: harness-ci-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  id-token: write   # GitHub Actions OIDC → assume TEST_OIDC_AWS_ROLE_ARN
+  contents: read
 
 jobs:
   rust-checks:
@@ -62,78 +99,162 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           shared-key: harness-ci
 
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # --test-threads=1: broker tests mutate shared process env (HOME,
+      # AWS_*) and the keyring tests serialize on a per-process accounts
+      # map — same convention as the existing @claude review workflow.
+      - run: cargo test --workspace -- --test-threads=1
 
-      - name: cargo clippy
-        # -D warnings: any clippy diagnostic blocks merge. Matches the
-        # project's "fix the warning, don't silence it" convention.
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test --workspace
-        # --test-threads=1: the broker tests mutate shared process env
-        # (HOME, AWS_*) and the keyring tests serialize on a per-process
-        # accounts map — same convention as the @claude review workflow.
-        run: cargo test --workspace -- --test-threads=1
-
-  ephemeral-stack:
-    name: ephemeral anvil + chain deploy
+  preflight:
+    # Gate the harness jobs on the test infra credentials being present.
+    # Until the operator sets TEST_OIDC_AWS_ROLE_ARN, the harness jobs
+    # surface as skipped rather than failing.
+    name: gate on test infra availability
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: rust-checks  # don't burn runner minutes on chain checks if Rust is red
+    needs: rust-checks
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - id: gate
+        run: |
+          if [ -n "${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "test infra credentials present; proceeding"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::TEST_OIDC_AWS_ROLE_ARN unset — harness E2E skipped. See workflow header for operator setup."
+          fi
+
+  harness-e2e:
+    name: harness/v2-stage*-demo.sh on Heima mainnet (test deployer)
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
       - uses: actions/checkout@v4
         with:
-          # forge install reads .gitmodules — need submodules for forge-std etc.
-          submodules: recursive
+          submodules: recursive  # forge install reads .gitmodules
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: harness-ci  # share with rust-checks job
+          shared-key: harness-ci
 
-      - name: Install Foundry (anvil + forge + cast)
-        uses: foundry-rs/foundry-toolchain@v1
+      - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
 
-      - name: Verify Foundry toolchain
-        run: |
-          anvil --version
-          forge --version
-          cast --version
-
-      - name: Run ephemeral stack (chain + broker smoke)
-        # The script handles its own anvil + broker bring-up/tear-down via
-        # an EXIT trap. Fails the job if any step (forge build/test/deploy,
-        # contract verification, broker boot, OIDC discovery) fails.
-        run: bash harness/ci-ephemeral-stack.sh
-        env:
-          # Pinned ports so the workflow log is reproducible.
-          ANVIL_PORT: "8545"
-          MOCK_PORT: "8090"
-          BROKER_PORT: "8091"
-          # Fail builds on rustc warnings as well (matches clippy job).
-          RUSTFLAGS: "-D warnings"
-
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Configure AWS credentials via OIDC (test role)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          name: ephemeral-stack-logs
-          path: /tmp/agentkeys-ci-ephemeral-*/
-          if-no-files-found: ignore
-          retention-days: 7
+          role-to-assume: ${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          # Session name shows up in CloudTrail — keep traceable per run.
+          role-session-name: gh-ci-${{ github.run_id }}
+
+      - name: Build agentkeys CLI + workers (release)
+        run: cargo build --release --workspace
+
+      - name: Materialize the production env file with TEST values
+        # The harness scripts source scripts/operator-workstation.env
+        # unchanged. We OVERWRITE it with the test resource names so
+        # the entire production harness flow re-points at the test
+        # infra without modifying a single script — that's what
+        # "mirror production env" means.
+        #
+        # Same chain (heima mainnet), same .sol code, same scripts.
+        # Different deployer key → different contract addresses on the
+        # SAME mainnet → fully isolated parallel contract set.
+        run: |
+          cat > scripts/operator-workstation.env <<EOF
+          ACCOUNT_ID=${{ secrets.TEST_ACCOUNT_ID }}
+          REGION=${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          BROKER_HOST=${{ secrets.TEST_BROKER_HOST }}
+          OIDC_ISSUER=https://${{ secrets.TEST_BROKER_HOST }}
+          OIDC_PROVIDER_ARN=arn:aws:iam::${{ secrets.TEST_ACCOUNT_ID }}:oidc-provider/${{ secrets.TEST_BROKER_HOST }}
+          MAIL_DOMAIN=bots-test.litentry.org
+          MAIL_BUCKET=agentkeys-mail-test-${{ secrets.TEST_ACCOUNT_ID }}
+          BUCKET=agentkeys-mail-test-${{ secrets.TEST_ACCOUNT_ID }}
+          VAULT_BUCKET=${{ secrets.TEST_VAULT_BUCKET }}
+          MEMORY_BUCKET=${{ secrets.TEST_MEMORY_BUCKET }}
+          DATA_ROLE_ARN=${{ secrets.TEST_DATA_ROLE_ARN }}
+          VAULT_ROLE_ARN=${{ secrets.TEST_VAULT_ROLE_ARN }}
+          MEMORY_ROLE_ARN=${{ secrets.TEST_MEMORY_ROLE_ARN }}
+          AGENTKEYS_SIGNER_URL=https://signer-test.litentry.org
+          BACKEND_URL=https://signer-test.litentry.org
+          AGENTKEYS_CHAIN=heima
+          SCOPE_CONTRACT_ADDRESS_HEIMA=${{ secrets.TEST_SCOPE_CONTRACT_ADDRESS_HEIMA }}
+          SIDECAR_REGISTRY_ADDRESS_HEIMA=${{ secrets.TEST_SIDECAR_REGISTRY_ADDRESS_HEIMA }}
+          K3_EPOCH_COUNTER_ADDRESS_HEIMA=${{ secrets.TEST_K3_EPOCH_COUNTER_ADDRESS_HEIMA }}
+          CREDENTIAL_AUDIT_ADDRESS_HEIMA=${{ secrets.TEST_CREDENTIAL_AUDIT_ADDRESS_HEIMA }}
+          P256_VERIFIER_ADDRESS_HEIMA=${{ secrets.TEST_P256_VERIFIER_ADDRESS_HEIMA }}
+          K11_VERIFIER_ADDRESS_HEIMA=${{ secrets.TEST_K11_VERIFIER_ADDRESS_HEIMA }}
+          HEIMA_DEPLOYER_KEY_FILE=$HOME/.agentkeys/heima-deployer.key
+          # Per-run S3 prefix so concurrent runs don't step on each
+          # other's writes. Nightly cleanup script (operator-side) rm's
+          # ci/run-* prefixes older than 7d.
+          CI_S3_PREFIX=ci/run-${{ github.run_id }}
+          EOF
+
+      - name: Materialize test deployer key
+        # Same path the production heima-bring-up.sh writes to. CI
+        # populates from a GitHub secret instead of operator interaction.
+        run: |
+          mkdir -p "$HOME/.agentkeys"
+          umask 077
+          printf '%s\n' '${{ secrets.TEST_HEIMA_DEPLOYER_KEY }}' \
+            > "$HOME/.agentkeys/heima-deployer.key"
+          chmod 600 "$HOME/.agentkeys/heima-deployer.key"
+
+      - name: Stage 1 — chain reachability + identity bootstrap
+        if: ${{ inputs.stage == 'all' || inputs.stage == '1' || inputs.stage == '' }}
+        # --skip-deploy: contracts are pre-deployed once per test-env
+        # refresh (operator one-shot) and pinned in TEST_*_HEIMA secrets,
+        # so CI doesn't burn HEI on every push.
+        # --skip-email: SES email-link round-trip is exercised separately;
+        # identity bootstrap here uses wallet_sig.
+        # No --webauthn: stub-mode K11 (WEBAUTHN_MODE=0 default).
+        run: |
+          AGENTKEYS_CHAIN=heima \
+            bash harness/v2-stage1-demo.sh --skip-deploy --skip-email
+
+      - name: Stage 2 — multi-master + recovery (stub mode)
+        if: ${{ inputs.stage == 'all' || inputs.stage == '2' || inputs.stage == '' }}
+        run: |
+          AGENTKEYS_CHAIN=heima \
+            bash harness/v2-stage2-demo.sh --stub --skip-build
+
+      - name: Stage 3 — per-actor + per-data-class PrincipalTag isolation
+        if: ${{ inputs.stage == 'all' || inputs.stage == '3' || inputs.stage == '' }}
+        # The capstone: stage-3 is the layer with the highest security
+        # invariant payload (per CLAUDE.md "Per-actor + per-data-class
+        # isolation invariants" table). Requires AWS STS
+        # AssumeRoleWithWebIdentity → which requires AWS to fetch the
+        # OIDC issuer's JWKS over public TLS. The long-lived test broker
+        # (TEST_BROKER_HOST) satisfies that; the same code path proves
+        # the prod IAM trust policy + bucket policy are correctly scoped.
+        run: |
+          AGENTKEYS_CHAIN=heima \
+            bash harness/v2-stage3-demo.sh
+
+      - name: Clean up per-run S3 prefix
+        if: always()
+        run: |
+          PREFIX="ci/run-${{ github.run_id }}/"
+          for bucket in \
+            "${{ secrets.TEST_VAULT_BUCKET }}" \
+            "${{ secrets.TEST_MEMORY_BUCKET }}"; do
+            [ -n "$bucket" ] || continue
+            aws s3 rm "s3://$bucket/$PREFIX" --recursive 2>/dev/null || true
+          done
