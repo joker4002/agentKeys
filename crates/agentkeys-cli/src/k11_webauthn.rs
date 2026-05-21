@@ -1251,6 +1251,43 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
         String::new()
     };
 
+    // Build the cryptographic-primitives block — shown below the intent.
+    // Two shapes:
+    //   (a) intent present → shows ONLY the Challenge (raw) hex, since
+    //       the operator omni is already in the intent block + the RP
+    //       ID is already in the rp-callout AND in the intent's
+    //       "Asserting role" row. Repeating them three times was the
+    //       duplication the user flagged. Slim form uses the same
+    //       intent-block grid styling for visual consistency.
+    //   (b) no intent (legacy callers) → full Operator + RP ID +
+    //       Challenge rows, so callers that haven't migrated still see
+    //       every fact on the page.
+    let crypto_block = if ctx.intent_text.is_some() || !ctx.intent_fields.is_empty() {
+        format!(
+            "  <section class=\"crypto\" aria-label=\"Cryptographic primitives\">\n\
+             \x20   <h2 class=\"crypto-h\">Cryptographic primitives:</h2>\n\
+             \x20   <dl class=\"crypto-fields\">\n\
+             \x20     <dt>Challenge <span class=\"kv-meta\">(raw 32-byte commitment — what WebAuthn actually signs)</span></dt><dd><code class=\"hex msg\">0x{msg}</code></dd>\n\
+             \x20   </dl>\n\
+             \x20 </section>\n",
+            msg = html_escape(msg_hex)
+        )
+    } else {
+        format!(
+            "  <section class=\"kv\">\n\
+             \x20   <dt>Operator</dt>\n\
+             \x20   <dd><code class=\"hex\">{omni}</code></dd>\n\
+             \x20   <dt>RP ID</dt>\n\
+             \x20   <dd><code class=\"hex\">{rp_id}</code></dd>\n\
+             \x20   <dt>Challenge (raw) <span class=\"kv-meta\">32-byte commitment — what WebAuthn actually signs</span></dt>\n\
+             \x20   <dd><code class=\"hex msg\">0x{msg}</code></dd>\n\
+             \x20 </section>\n",
+            omni = html_escape(&ctx.operator_omni),
+            rp_id = html_escape(&ctx.rp_id),
+            msg = html_escape(msg_hex)
+        )
+    };
+
     // Distinguish primary from companion in the UI: the operator may be
     // about to tap Touch ID for either role and the macOS prompt itself
     // doesn't say which credential — so we surface it here loudly.
@@ -1329,6 +1366,40 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
     opacity: 0.75;
     font-style: italic;
   }}
+  /* Crypto-primitives block — neutral gray, visually subordinate to the
+     intent block but using the SAME grid layout for style consistency.
+     Shows only the cryptographic facts unique to this page (the raw
+     challenge) — Operator omni + RP ID + Asserting role are all already
+     in the intent block, so showing them again here would be the
+     duplication the user flagged. */
+  .crypto {{
+    background: rgba(0, 0, 0, 0.03);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+    padding: 0.85em 1.1em;
+    margin: 0 0 1.2em 0;
+    font-size: 0.92em;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    .crypto {{ background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.08); }}
+  }}
+  .crypto-h {{
+    margin: 0 0 0.4em 0;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.6;
+    font-weight: 600;
+  }}
+  .crypto-fields {{
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.3em 1em;
+    margin: 0;
+  }}
+  .crypto-fields dt {{ font-weight: 600; opacity: 0.7; }}
+  .crypto-fields dd {{ margin: 0; word-break: break-all; }}
+  .crypto-fields .kv-meta {{ opacity: 0.55; font-weight: 400; font-size: 0.9em; }}
 </style>
 </head><body>
 <main class="card">
@@ -1343,14 +1414,7 @@ async fn serve_assert_page(State(ctx): State<Arc<ServerCtx>>) -> impl IntoRespon
     </div>
   </header>
 {intent_block}
-  <section class="kv">
-    <dt>Operator</dt>
-    <dd><code class="hex">{omni}</code></dd>
-    <dt>RP ID</dt>
-    <dd><code class="hex">{rp_id_display}</code></dd>
-    <dt>Challenge (raw) <span class="kv-meta">32-byte commitment — what WebAuthn actually signs</span></dt>
-    <dd><code class="hex msg">0x{msg}</code></dd>
-  </section>
+{crypto_block}
   <p id="status" class="status">Press the button below. macOS will prompt for Touch ID.</p>
   <button id="go" class="primary">Sign as {role_label}</button>
 </main>
@@ -1407,10 +1471,8 @@ document.getElementById('go').onclick = async () => {{
 </script>
 </body></html>
 {shared_css_extra}"##,
-        omni = ctx.operator_omni,
         challenge = ctx.challenge_b64url,
         cred_id = cred_id,
-        msg = msg_hex,
         shared_css = SHARED_CSS,
         shared_css_extra = "",
         rp_id_js = ctx.rp_id,
@@ -1421,6 +1483,7 @@ document.getElementById('go').onclick = async () => {{
         role_accent_rgb = role_accent_rgb,
         role_emoji = role_emoji,
         intent_block = intent_block,
+        crypto_block = crypto_block,
     );
     Html(html)
 }
