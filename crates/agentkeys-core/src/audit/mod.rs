@@ -43,7 +43,10 @@
 
 pub mod bodies;
 pub mod cbor;
+pub mod client;
 pub mod op_kind;
+
+pub use client::{envelope_for, AppendV2Response, AuditClient};
 
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
