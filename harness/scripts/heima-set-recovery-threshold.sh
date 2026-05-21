@@ -86,10 +86,30 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 ok "challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID)…"
+# Uniform K11-intent shape — see wiki/k11-intent-conventions.md.
+# Headline = one-line operation summary; rows ALWAYS include Operator
+# omni, Asserting role + device hash, Chain ID, Operator nonce, plus
+# operation-specific detail. stderr → tmpfile so failures surface the
+# real k11 error (same pattern as commit d58aab1).
+K11_ERR=$(mktemp -t heima-set-threshold-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
-  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>/dev/null) \
-  || die "k11 assert failed"
+  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
+  --intent-text "Set recovery threshold to ${THRESHOLD} (M-of-N master quorum)" \
+  --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
+  --intent-field "Asserting role=PRIMARY (key hash ${PRIMARY_DEVICE_KEY_HASH})" \
+  --intent-field "New recovery threshold=${THRESHOLD}" \
+  --intent-field "Effect=future master-device revokes will require this many active master signatures" \
+  --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
+  --intent-field "Operator nonce=${NONCE}" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "k11 assert failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)

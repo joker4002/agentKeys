@@ -141,16 +141,23 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 ok "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt at localhost)…"
-# stderr → tmpfile so failure surfaces the real k11 error instead of
-# swallowing it with `2>/dev/null` (see scripts/heima-scope-set.sh for
-# context). NOTE: this site doesn't yet pass --intent-text + intent
-# fields per K11IntentContext; follow-up to wire a "Register spare
-# master device <hash>" intent so the operator sees what they're
-# authorizing on the Touch ID confirmation page.
+# Uniform K11-intent shape — see wiki/k11-intent-conventions.md.
+# Headline = one-line operation summary; rows ALWAYS include Operator
+# omni, Asserting role + device hash, Chain ID, Operator nonce, plus
+# operation-specific detail (here: the new spare device's hash + role
+# bitfield).
 K11_ERR=$(mktemp -t heima-spare-master-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
-  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>"$K11_ERR") \
+  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
+  --intent-text "Register synthetic 3rd master (spare) device" \
+  --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
+  --intent-field "Asserting role=PRIMARY (key hash ${PRIMARY_DEVICE_KEY_HASH})" \
+  --intent-field "New spare device key hash=${SPARE_DEVICE_KEY_HASH}" \
+  --intent-field "Role bitfield=${ROLES} (bit0=CAP_MINT, bit1=RECOVERY, bit2=SCOPE_MGMT)" \
+  --intent-field "Effect=adds a 3rd master to the operator's quorum (used by harness step 9 to demo M-of-N revoke)" \
+  --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
+  --intent-field "Operator nonce=${NONCE}" 2>"$K11_ERR") \
   || {
     echo "==> K11 assert stderr ↓ ↓ ↓" >&2
     cat "$K11_ERR" >&2

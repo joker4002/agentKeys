@@ -198,6 +198,7 @@ End-to-end visual verification: open the K11 confirmation page during `harness/v
 
 ## Cross-references
 
+- [`wiki/k11-intent-conventions.md`](./k11-intent-conventions.md) — **content convention** for what the intent text + rows MUST contain, per-operation canonical headline table, and the uniformity rule across all K11-emitting sites (the rule this page's mechanism enforces).
 - [`docs/spec/architecture.md`](../docs/spec/architecture.md) §10.1 — master init + K11 binding.
 - [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3a — `AuditEnvelope` intent_text + intent_commitment fields.
 - [`crates/agentkeys-cli/src/k11_webauthn.rs`](../crates/agentkeys-cli/src/k11_webauthn.rs) — implementation.

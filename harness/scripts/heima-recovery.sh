@@ -115,31 +115,82 @@ build_tuple() {
   printf '(%s,%s,%s,%s,%s,%s)' "$device_hash" "$auth" "$cdj_hex" "$chall_loc" "$r_hex" "$s_hex"
 }
 
+# ─── Uniform K11 intent for both masters in the quorum ───────────────
+# Both PRIMARY and COMPANION see the SAME headline + SAME rows on
+# their Touch ID confirmation pages (except for the `Asserting role`
+# row, which is per-master). See wiki/k11-intent-conventions.md.
+INTENT_HEADLINE="Revoke master device via M-of-N recovery quorum"
+# Build the COMPANION's pre-canned intent rows here so we can pass them
+# to the companion daemon via JSON. The PRIMARY row set is identical
+# except Asserting role.
+INTENT_ROWS_SHARED=(
+  "Operator omni=0x${OPERATOR_OMNI}"
+  "Target device key hash=${TARGET}"
+  "Recovery threshold=${THRESHOLD}"
+  "Effect=removes ${TARGET} from the operator's active master set; future cap-mint by this device is rejected on-chain"
+  "Chain ID=${LIVE_CHAIN_ID}"
+  "Operator nonce=${NONCE}"
+)
+
 # Collect PRIMARY assertion.
 log "Step 1/$THRESHOLD: K11 from PRIMARY master (Touch ID prompt)…"
+K11_ERR=$(mktemp -t heima-recovery-primary-k11.XXXXXX) || die "mktemp failed"
 PRIMARY_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
-  --intent-text "Revoke master device via M-of-N recovery quorum" \
+  --intent-text "$INTENT_HEADLINE" \
   --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
+  --intent-field "Asserting role=PRIMARY (key hash ${PRIMARY_DEVICE_KEY_HASH})" \
   --intent-field "Target device key hash=${TARGET}" \
   --intent-field "Recovery threshold=${THRESHOLD}" \
-  --intent-field "Asserting role=PRIMARY (key hash ${PRIMARY_DEVICE_KEY_HASH})" \
-  --intent-field "Chain ID=${LIVE_CHAIN_ID}" 2>/dev/null) \
-  || die "PRIMARY K11 ceremony failed"
+  --intent-field "Effect=removes ${TARGET} from the operator's active master set; future cap-mint by this device is rejected on-chain" \
+  --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
+  --intent-field "Operator nonce=${NONCE}" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "PRIMARY K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 PRIMARY_TUPLE=$(build_tuple "$PRIMARY_DEVICE_KEY_HASH" "$PRIMARY_JSON")
 
 ASSERTIONS_ARRAY="[$PRIMARY_TUPLE"
 
-# If threshold >= 2: collect COMPANION assertion via HTTP.
+# If threshold >= 2: collect COMPANION assertion via HTTP. The companion
+# daemon's /v1/companion/approve handler accepts `intent_text` +
+# `intent_fields` in its POST body and renders them on its own Touch ID
+# confirmation page — same uniform shape as the PRIMARY page, with the
+# Asserting role row updated to COMPANION.
 if [ "$THRESHOLD" -ge 2 ]; then
   log "Step 2/$THRESHOLD: requesting K11 from COMPANION daemon …"
   COMP_WHOAMI=$(curl -sS "$COMPANION_URL/v1/companion/whoami") \
     || die "GET $COMPANION_URL/v1/companion/whoami failed"
   COMP_DEVICE_KEY_HASH=$(echo "$COMP_WHOAMI" | jq -r .device_key_hash)
 
+  # Construct the POST body via jq so multi-word labels, equals signs in
+  # values, and special characters never need shell escaping. The
+  # `intent_fields` array carries one entry per row; the daemon splits
+  # on the first `=` per row.
+  COMP_REQ_JSON=$(jq -n \
+    --arg challenge "$CHALLENGE" \
+    --arg intent "$INTENT_HEADLINE" \
+    --arg op_omni "Operator omni=0x${OPERATOR_OMNI}" \
+    --arg role "Asserting role=COMPANION (key hash ${COMP_DEVICE_KEY_HASH})" \
+    --arg target "Target device key hash=${TARGET}" \
+    --arg thr "Recovery threshold=${THRESHOLD}" \
+    --arg eff "Effect=removes ${TARGET} from the operator's active master set; future cap-mint by this device is rejected on-chain" \
+    --arg chain "Chain ID=${LIVE_CHAIN_ID}" \
+    --arg nonce "Operator nonce=${NONCE}" \
+    '{
+      expected_challenge_hex: $challenge,
+      intent_text: $intent,
+      intent_fields: [$op_omni, $role, $target, $thr, $eff, $chain, $nonce]
+    }')
+
   COMP_RESPONSE=$(curl -sS -X POST -H 'Content-Type: application/json' \
-    -d "{\"expected_challenge_hex\":\"$CHALLENGE\"}" \
+    -d "$COMP_REQ_JSON" \
     "$COMPANION_URL/v1/companion/approve") \
     || die "companion approve failed"
 
