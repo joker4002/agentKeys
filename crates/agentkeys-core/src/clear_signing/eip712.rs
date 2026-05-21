@@ -421,17 +421,23 @@ fn encode_int(
     let mag = parse_uint_string(&magnitude).ok_or_else(|| {
         Eip712Error::IntegerOutOfRange(s.clone(), ty.to_string())
     })?;
-    // Range check: for intN, magnitude must fit in (N-1) bits when positive,
-    // and ≤ 2^(N-1) when negative.
-    if bits < 256 {
-        let pos_max = U256::ONE.shl((bits - 1) as usize);
-        if neg {
-            if mag > pos_max {
-                return Err(Eip712Error::IntegerOutOfRange(s, ty.to_string()));
-            }
-        } else if mag >= pos_max {
+    // Range check: for intN, magnitude must fit in (N-1) bits when positive
+    // (i.e. mag < 2^(N-1)) and ≤ 2^(N-1) when negative (covers int's
+    // asymmetric range: [-2^(N-1), 2^(N-1) - 1]).
+    //
+    // The pos_max boundary 2^(N-1) fits in our U256 (which holds 256
+    // bits) for every supported N from 8 to 256 — including int256,
+    // where pos_max = 2^255 is exactly representable. Codex P2 review on
+    // PR #95 caught the earlier `if bits < 256` guard that skipped the
+    // range check for int256 entirely — letting values >= 2^255 wrap
+    // silently into negative two's-complement.
+    let pos_max = U256::ONE.shl((bits - 1) as usize);
+    if neg {
+        if mag > pos_max {
             return Err(Eip712Error::IntegerOutOfRange(s, ty.to_string()));
         }
+    } else if mag >= pos_max {
+        return Err(Eip712Error::IntegerOutOfRange(s, ty.to_string()));
     }
     let encoded = if neg { mag.neg_twos_complement() } else { mag };
     Ok(encoded.to_be_bytes())
@@ -583,6 +589,24 @@ impl U256 {
     /// Left-shift by `bits`. Caller MUST ensure `bits <= 256`. Bits shifted
     /// out of the top limb are dropped silently — callers only use this with
     /// `Self::ONE` to compute `2^bits`, so overflow is impossible in practice.
+    ///
+    /// **Why the per-limb iteration over input limbs (vs the prior version
+    /// that iterated output limbs):** the prior impl computed
+    /// `self.limbs[3 - src] << bit_shift` and OR'd in
+    /// `self.limbs[3 - (src + 1)] >> (64 - bit_shift)`. When `bit_shift == 0`
+    /// (i.e. `bits` is a multiple of 64), the second term was
+    /// (correctly) skipped — but the first term reduces to a plain limb
+    /// copy without any shift. Codex P2 review on PR #95 caught the
+    /// off-by-one: when `bits = 64`, `src = 1` for `i = 0`, and we copy
+    /// `self.limbs[2]` (zero for `Self::ONE`) into `out[3]` instead of
+    /// `self.limbs[3]` (the value 1) into `out[2]`. The result was
+    /// `U256::ONE.shl(64) == 0` — silently rejecting valid `uint64: 1`
+    /// values as out-of-range in the EIP-712 range check.
+    ///
+    /// This re-impl iterates INPUT limbs LSB-first; each limb's value
+    /// is OR'd into its primary output slot (shifted up by `bit_shift`)
+    /// plus, when `bit_shift > 0`, an extra carry into the next-most-
+    /// significant slot. No off-by-one possible.
     fn shl(self, bits: usize) -> Self {
         if bits == 0 {
             return self;
@@ -593,18 +617,30 @@ impl U256 {
         let limb_shift = bits / 64;
         let bit_shift = bits % 64;
         let mut out = [0u64; 4];
-        for i in 0..4 {
-            let src = i + limb_shift;
-            if src >= 4 {
-                break;
+        // Iterate input limbs LSB-first (most-significant-first storage,
+        // so we go index 3 → 0). For each non-zero limb, compute where
+        // its bits land in the output.
+        for k in (0..4).rev() {
+            let val = self.limbs[k];
+            if val == 0 {
+                continue;
             }
-            let hi = self.limbs[3 - src] << bit_shift;
-            let lo = if bit_shift == 0 || src + 1 >= 4 {
-                0
-            } else {
-                self.limbs[3 - (src + 1)] >> (64 - bit_shift)
-            };
-            out[3 - i] = hi | lo;
+            // Output index for the primary (low) bits of this limb.
+            // limbs are most-sig-first, so shifting LEFT moves a limb
+            // to a SMALLER index.
+            let primary_out = k as i32 - limb_shift as i32;
+            if primary_out >= 0 && primary_out < 4 {
+                out[primary_out as usize] |= val << bit_shift;
+            }
+            // When the shift crosses a 64-bit boundary, the top
+            // (64 - bit_shift) bits carry into the next-most-significant
+            // output limb.
+            if bit_shift > 0 {
+                let secondary_out = primary_out - 1;
+                if secondary_out >= 0 && secondary_out < 4 {
+                    out[secondary_out as usize] |= val >> (64 - bit_shift);
+                }
+            }
         }
         Self { limbs: out }
     }
@@ -828,5 +864,77 @@ mod tests {
         let one = U256::ONE;
         let neg = one.neg_twos_complement();
         assert_eq!(hex::encode(neg.to_be_bytes()), "f".repeat(64));
+    }
+
+    /// Regression for codex P2 finding on PR #95: `U256::ONE.shl(64)` used
+    /// to return ZERO because the prior off-by-one impl copied the wrong
+    /// limb when `bit_shift == 0`. Now: 2^64 is exactly representable in
+    /// U256 (sets bit 64), so shl(64) MUST equal that.
+    #[test]
+    fn u256_shl_at_64_bit_boundary_does_not_drop_to_zero() {
+        let v = U256::ONE.shl(64);
+        let expected = U256::from_dec("18446744073709551616").unwrap(); // 2^64
+        assert_eq!(v, expected);
+        let v128 = U256::ONE.shl(128);
+        let expected128 = U256::from_dec("340282366920938463463374607431768211456").unwrap(); // 2^128
+        assert_eq!(v128, expected128);
+        let v192 = U256::ONE.shl(192);
+        let expected192 = U256::from_hex("1000000000000000000000000000000000000000000000000").unwrap(); // 2^192
+        assert_eq!(v192, expected192);
+    }
+
+    /// Same regression at the encoder layer: `uint64: 1` was rejected as
+    /// out-of-range because the range check used the buggy shl.
+    #[test]
+    fn uint64_accepts_value_one() {
+        let v = serde_json::json!(1);
+        let r = encode_data_for_field(&BTreeMap::new(), "uint64", &v, "x").unwrap();
+        assert_eq!(hex::encode(r), format!("{}01", "0".repeat(62)));
+    }
+
+    /// `uint128: 2^127` should round-trip (well within range).
+    #[test]
+    fn uint128_accepts_mid_range_value() {
+        let v = serde_json::json!("170141183460469231731687303715884105728"); // 2^127
+        let r = encode_data_for_field(&BTreeMap::new(), "uint128", &v, "x").unwrap();
+        assert_eq!(
+            hex::encode(r),
+            "0000000000000000000000000000000080000000000000000000000000000000"
+        );
+    }
+
+    /// Regression for codex P2 finding on PR #95: int256 range check was
+    /// skipped entirely. Values >= 2^255 must be rejected (they'd wrap
+    /// to negative two's-complement silently otherwise).
+    #[test]
+    fn int256_rejects_value_at_or_above_2_pow_255() {
+        // 2^255 (the smallest "wraps to negative" value).
+        let at_max = serde_json::json!(
+            "57896044618658097711785492504343953926634992332820282019728792003956564819968"
+        );
+        let err = encode_data_for_field(&BTreeMap::new(), "int256", &at_max, "x").unwrap_err();
+        assert!(
+            matches!(err, Eip712Error::IntegerOutOfRange(_, _)),
+            "int256 must reject value at 2^255, got {err:?}"
+        );
+    }
+
+    /// int256 accepts the largest valid positive value (2^255 - 1).
+    #[test]
+    fn int256_accepts_max_positive() {
+        // 2^255 - 1
+        let max = serde_json::json!(
+            "57896044618658097711785492504343953926634992332820282019728792003956564819967"
+        );
+        encode_data_for_field(&BTreeMap::new(), "int256", &max, "x").unwrap();
+    }
+
+    /// int256 accepts the smallest valid negative value (-2^255).
+    #[test]
+    fn int256_accepts_min_negative() {
+        let min = serde_json::json!(
+            "-57896044618658097711785492504343953926634992332820282019728792003956564819968"
+        );
+        encode_data_for_field(&BTreeMap::new(), "int256", &min, "x").unwrap();
     }
 }

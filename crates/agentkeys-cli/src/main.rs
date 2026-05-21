@@ -376,7 +376,14 @@ enum SignerAction {
     Preview7730 {
         #[arg(long, help = "Path to a JSON file containing the EIP-712 v4 typed-data")]
         typed_data_file: String,
-        #[arg(long, help = "Optional: pin to a single ERC-7730 file instead of the bundled catalog")]
+        // Explicit `long = "7730-file"` because clap derives the flag
+        // name from the Rust field ident, which would yield
+        // `--seven-thirty-file`. The docs + long_about advertise
+        // `--7730-file`; this override matches. Codex P2 finding on PR #95.
+        #[arg(
+            long = "7730-file",
+            help = "Optional: pin to a single ERC-7730 file instead of the bundled catalog"
+        )]
         seven_thirty_file: Option<String>,
     },
 }

@@ -160,26 +160,17 @@ do_step_3() {
 }
 
 do_step_4() {
-  CUR_STEP=4; step "Generate/reuse deployer key"
-  local key_path="$HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key"
-  if [ -f "$key_path" ]; then
-    skip "deployer key already exists at $key_path"
-  else
-    # Delegate to bring-up's key gen (it persists to the same path).
-    bash "$SCRIPT_DIR/heima-bring-up.sh" --only-step gen-key 2>/dev/null || true
-    [ -f "$key_path" ] || die "deployer key generation failed — see heima-bring-up.sh"
-    ok "deployer key generated at $key_path"
-  fi
-}
-
-do_step_5() {
-  CUR_STEP=5; step "Fund deployer"
-  bash "$SCRIPT_DIR/heima-fund-account.sh" --target deployer
-}
-
-do_step_6() {
-  CUR_STEP=6; step "Deploy stage-1 contracts (idempotent — skip if already on-chain)"
-  # heima-bring-up.sh checks `cast code` on every claimed address before deploying.
+  CUR_STEP=4; step "Chain bring-up: deployer key + funding + contract deploy + address persist"
+  # `heima-bring-up.sh` is the single, idempotent owner of this entire
+  # flow. It pre-checks every mutation (`[ -f key_path ]`, `cast balance`,
+  # `cast code addr`) and short-circuits when state already matches; on a
+  # second run it logs `skip` per step + exits 0. We delegate end-to-end
+  # rather than re-implementing per-substep here, because the previous
+  # version's `--only-step gen-key` + `--target deployer` flags don't
+  # exist on the underlying scripts — and a setup script that calls
+  # non-existent flags silently does the wrong thing (runs the FULL
+  # bring-up when only key-gen was requested; `--target deployer` is
+  # rejected because `heima-fund-account.sh` only accepts `--to <0x…>`).
   if [ "$YES" = "1" ]; then
     bash "$SCRIPT_DIR/heima-bring-up.sh" --yes
   else
@@ -187,9 +178,39 @@ do_step_6() {
   fi
 }
 
+do_step_5() {
+  CUR_STEP=5; step "Top up deployer wallet (if low)"
+  # bring-up.sh's internal funding step runs `cast balance` first + skips
+  # if the deployer already has enough — but on `heima` mainnet it
+  # refuses to auto-spend real HEI per its own safety guard. This step
+  # is a no-op on mainnet (bring-up surfaces a clear "fund manually
+  # from your personal wallet" message instead); on `heima-paseo` it's
+  # the sudo-via-Alice auto-funding.
+  #
+  # We invoke the dedicated helper here in case the operator wants to
+  # top up beyond the bring-up's minimum. Deployer address is derived
+  # from the persisted key.
+  local key_path="$HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key"
+  if [ ! -f "$key_path" ]; then
+    skip "deployer key not present — step 4 should have created it; skipping top-up"
+    return
+  fi
+  local deployer_addr
+  deployer_addr=$(cast wallet address --private-key "0x$(cat "$key_path")" 2>/dev/null) || {
+    skip "could not derive deployer address from $key_path; skipping top-up"
+    return
+  }
+  bash "$SCRIPT_DIR/heima-fund-account.sh" --to "$deployer_addr"
+}
+
+do_step_6() {
+  CUR_STEP=6; step "(reserved — chain bring-up handled by step 4)"
+  ok "no-op — heima-bring-up.sh already deployed contracts in step 4"
+}
+
 do_step_7() {
-  CUR_STEP=7; step "Persist contract addresses (handled inside heima-bring-up)"
-  ok "operator-workstation.env updated by heima-bring-up if needed"
+  CUR_STEP=7; step "(reserved — address persistence handled by step 4)"
+  ok "no-op — heima-bring-up.sh already persisted contract addresses in step 4"
 }
 
 do_step_8() {

@@ -48,33 +48,33 @@
 //!
 //! Key ordering note: under RFC 8949 §4.2.3, sorting is by **lexicographic
 //! comparison of the encoded bytes**, NOT the decoded text. For 9 short
-//! ASCII text keys this happens to equal lexicographic-by-text, so the
-//! ordering above is correct. If we ever add a longer key, re-derive the
-//! order via the algorithm in §4.2.3.
+//! ASCII text keys this happens to encode as `0x60|len || ascii_bytes` —
+//! shorter keys sort before longer keys regardless of alphabetical order
+//! (so `result` (6 chars) sorts BEFORE `actor_omni` (10 chars), and
+//! `op_body` / `op_kind` / `ts_unix` / `version` (all 7 chars) sort
+//! against each other by ASCII bytes). Canonicalize the top-level map
+//! through the same recursive `canonicalize()` helper that handles
+//! `op_body` — that's the single source of truth for byte ordering, so
+//! we can't drift between top-level and nested encoding.
 
 use ciborium::Value;
 
 use super::{AuditEnvelope, AuditError, AuditResult, ENVELOPE_VERSION};
 
 pub fn encode_canonical(env: &AuditEnvelope) -> Result<Vec<u8>, AuditError> {
-    // `op_body` is canonicalized recursively: every nested map's keys are
-    // sorted by canonical CBOR key ordering before encoding. The Rust
-    // ecosystem (serde_json::Value::Object = BTreeMap) happens to produce
-    // sorted maps already, but a Go or TypeScript explorer-side encoder
-    // building op_body with unsorted keys would otherwise produce
-    // different bytes + different envelope_hash. This recursive
-    // canonicalization is what makes the hash truly cross-language.
-    let op_body_canonical = canonicalize(env.op_body.clone());
-
+    // Build the envelope-level map as a plain Value::Map with arbitrary
+    // insertion order — `canonicalize()` re-sorts every map (including
+    // this one and every nested map inside `op_body`) by canonical
+    // CBOR-encoded-byte ordering before encoding. This way the top-level
+    // and nested encoders share the same sort routine; can't drift.
     let map = Value::Map(vec![
+        (Value::Text("version".into()), Value::Integer(env.version.into())),
+        (Value::Text("ts_unix".into()), Value::Integer(env.ts_unix.into())),
         (Value::Text("actor_omni".into()), Value::Bytes(env.actor_omni.to_vec())),
-        (
-            Value::Text("intent_commitment".into()),
-            match env.intent_commitment {
-                Some(c) => Value::Bytes(c.to_vec()),
-                None => Value::Null,
-            },
-        ),
+        (Value::Text("operator_omni".into()), Value::Bytes(env.operator_omni.to_vec())),
+        (Value::Text("op_kind".into()), Value::Integer(env.op_kind.into())),
+        (Value::Text("op_body".into()), env.op_body.clone()),
+        (Value::Text("result".into()), Value::Integer((env.result as u8).into())),
         (
             Value::Text("intent_text".into()),
             match &env.intent_text {
@@ -82,16 +82,18 @@ pub fn encode_canonical(env: &AuditEnvelope) -> Result<Vec<u8>, AuditError> {
                 None => Value::Null,
             },
         ),
-        (Value::Text("op_body".into()), op_body_canonical),
-        (Value::Text("op_kind".into()), Value::Integer(env.op_kind.into())),
-        (Value::Text("operator_omni".into()), Value::Bytes(env.operator_omni.to_vec())),
-        (Value::Text("result".into()), Value::Integer((env.result as u8).into())),
-        (Value::Text("ts_unix".into()), Value::Integer(env.ts_unix.into())),
-        (Value::Text("version".into()), Value::Integer(env.version.into())),
+        (
+            Value::Text("intent_commitment".into()),
+            match env.intent_commitment {
+                Some(c) => Value::Bytes(c.to_vec()),
+                None => Value::Null,
+            },
+        ),
     ]);
+    let canonical = canonicalize(map);
 
     let mut out = Vec::with_capacity(256);
-    ciborium::into_writer(&map, &mut out)
+    ciborium::into_writer(&canonical, &mut out)
         .map_err(|e| AuditError::Cbor(format!("encode: {e}")))?;
     Ok(out)
 }
@@ -350,6 +352,57 @@ mod tests {
         let bytes = encode_canonical(&env).unwrap();
         let err = decode_canonical(&bytes).unwrap_err();
         assert!(format!("{err}").contains("99"));
+    }
+
+    /// Top-level map is also canonicalized by encoded-byte ordering
+    /// (RFC 8949 §4.2.3) — shorter keys MUST sort before longer keys.
+    /// Catches the codex P1 finding from PR #95: the original encoder
+    /// hard-coded a lexicographic-by-text top-level order that put
+    /// `actor_omni` before `result`, which would have made the Rust
+    /// hash diverge from any Go/TS RFC-8949-correct encoder.
+    #[test]
+    fn top_level_map_keys_emitted_in_canonical_cbor_order() {
+        let env = AuditEnvelope {
+            version: ENVELOPE_VERSION,
+            ts_unix: 1,
+            actor_omni: [0xaa; 32],
+            operator_omni: [0xbb; 32],
+            op_kind: 0,
+            op_body: Value::Null,
+            result: AuditResult::Success,
+            intent_text: None,
+            intent_commitment: None,
+        };
+        let bytes = encode_canonical(&env).unwrap();
+        // Decode back to a Value::Map and capture the key order.
+        let decoded: Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let keys: Vec<String> = match decoded {
+            Value::Map(m) => m
+                .into_iter()
+                .map(|(k, _)| match k {
+                    Value::Text(s) => s,
+                    _ => panic!("non-text key"),
+                })
+                .collect(),
+            _ => panic!("expected map"),
+        };
+        // Canonical CBOR encoded-byte order for these 9 ASCII text keys:
+        // 6-char first (`result`), then 7-char alphabetical
+        // (`op_body`, `op_kind`, `ts_unix`, `version`), then 10-char
+        // (`actor_omni`), then 11 (`intent_text`), then 13
+        // (`operator_omni`), then 17 (`intent_commitment`).
+        let expected = [
+            "result",
+            "op_body",
+            "op_kind",
+            "ts_unix",
+            "version",
+            "actor_omni",
+            "intent_text",
+            "operator_omni",
+            "intent_commitment",
+        ];
+        assert_eq!(keys, expected, "top-level keys must be in canonical CBOR encoded-byte order");
     }
 
     /// op_body inner maps are canonicalized recursively — two envelopes
