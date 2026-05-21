@@ -195,9 +195,219 @@ A unit test that crafts an envelope with `op_kind=32` against an older explorer 
 
 **Test C — arch.md row uniqueness check.** This is enforced from the Rust side already by [`audit::op_kind::tests::all_byte_values_unique`](../crates/agentkeys-core/src/audit/op_kind.rs) — adding the new variant at byte 32 will fail this test if 32 was already claimed. Keep the doc + code in sync; the test is the regression guard.
 
+## Explorer-side update (parallel track, separate repos)
+
+The agentKeys-side PR ships independently of the explorer-side PR — that's the whole point of the [non-break design](../docs/spec/architecture.md) §15.3a invariant #4 (the explorer always renders `Unknown(byte)` fallback for op_kinds it doesn't recognize yet). Until the explorer-side PR lands, operators see a generic row instead of a typed one; nothing crashes, nothing is dropped.
+
+The explorer work lives in **two separate GitHub repos** with their own PR / review / deploy cadence:
+
+- **[`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials)** (Go) — indexer + REST API.
+- **[`litentry/subscan-essentials-ui-react`](https://github.com/litentry/subscan-essentials-ui-react)** (React/TypeScript) — UI renderer.
+
+Track follow-ups against [subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12) — the umbrella issue for Phases D + E.
+
+### A. Indexer decoder ([`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials))
+
+Continuing the `PaymentRefund` (byte 32) example:
+
+#### A1. Register the op_kind in the decoder table
+
+`indexer/agentkeys/op_kinds.go` (or equivalent) — add a row to the byte→handler map:
+
+```go
+var OpKindDecoders = map[uint8]OpKindDecoder{
+    // … existing entries …
+    30: &PaymentEscrowRedeemDecoder{},
+    31: &PaymentDirectDecoder{},
+    32: &PaymentRefundDecoder{},  // ← new
+    // … rest …
+}
+```
+
+#### A2. Implement the typed decoder
+
+`indexer/agentkeys/payment_refund.go`:
+
+```go
+type PaymentRefundDecoder struct{}
+
+func (d *PaymentRefundDecoder) OpKind() uint8     { return 32 }
+func (d *PaymentRefundDecoder) Label() string     { return "payment.refund" }
+
+// Body shape — fields must match the arch.md §15.3a canonical table row
+// for byte 32 EXACTLY. Any drift is a non-break-invariant violation.
+type PaymentRefundBody struct {
+    OriginalOpEnvelopeHash string `cbor:"original_op_envelope_hash" json:"original_op_envelope_hash"`
+    ReasonCode             uint8  `cbor:"reason_code"               json:"reason_code"`
+    AmountReturned         string `cbor:"amount_returned"           json:"amount_returned"`  // string-encoded U256
+}
+
+// Decode parses the CBOR-encoded op_body Map into the typed shape.
+// Returns ErrUnknownFields if the body has fields outside the schema
+// (catches drift between explorer + arch.md).
+func (d *PaymentRefundDecoder) Decode(opBody cbor.RawMessage) (any, error) {
+    var body PaymentRefundBody
+    if err := cbor.Unmarshal(opBody, &body); err != nil {
+        return nil, fmt.Errorf("payment_refund decode: %w", err)
+    }
+    return &body, nil
+}
+
+// REST shape — flattened JSON for the explorer's API consumers.
+func (d *PaymentRefundDecoder) RestShape(body any) map[string]any {
+    b := body.(*PaymentRefundBody)
+    return map[string]any{
+        "op_kind":                     "payment.refund",
+        "original_op_envelope_hash":   b.OriginalOpEnvelopeHash,
+        "reason_code":                 b.ReasonCode,
+        "reason_label":                reasonCodeLabel(b.ReasonCode),  // 0=customer_initiated, etc.
+        "amount_returned":             b.AmountReturned,
+    }
+}
+```
+
+#### A3. Wire the chain-event handler
+
+The indexer's `AuditAppendedV2` event handler already does the generic flow (read `(operatorOmni, actorOmni, opKind, envelopeHash)`, fetch envelope by hash from the audit worker, dispatch on `opKind`). Adding the new op_kind just registers the decoder — no event-handler changes needed:
+
+```go
+// indexer/agentkeys/audit_v2_handler.go (existing, unchanged)
+func (h *AuditV2Handler) Handle(ev AuditAppendedV2Event) error {
+    cbor, err := h.workerClient.GetEnvelope(ev.EnvelopeHash)
+    if err != nil { return err }
+
+    decoder, ok := OpKindDecoders[ev.OpKind]
+    if !ok {
+        // Per non-break invariant #1, render as Unknown(byte). Don't drop, don't 5xx.
+        return h.storeRow(ev, "unknown", map[string]any{
+            "op_kind_byte": ev.OpKind,
+            "op_body_b64":  base64.StdEncoding.EncodeToString(cbor.OpBody()),
+        })
+    }
+    body, err := decoder.Decode(cbor.OpBody())
+    if err != nil { return err }
+    return h.storeRow(ev, decoder.Label(), decoder.RestShape(body))
+}
+```
+
+#### A4. Test the explorer
+
+Three tests minimum in subscan-essentials/`indexer/agentkeys/payment_refund_test.go`:
+
+```go
+// 1. Roundtrip — agentKeys-emitted envelope decodes correctly here.
+func TestPaymentRefund_DecodesCanonicalFixture(t *testing.T) {
+    // Use the SAME CBOR bytes from a Rust-side canonical fixture so
+    // the cross-language hash determinism is exercised.
+    cborHex := "…canonical fixture from agentkeys-core test…"
+    body, err := (&PaymentRefundDecoder{}).Decode(mustHex(cborHex))
+    require.NoError(t, err)
+    require.Equal(t, "0x" + strings.Repeat("de", 32), body.(*PaymentRefundBody).OriginalOpEnvelopeHash)
+}
+
+// 2. Unknown-byte non-break — explorer doesn't crash on op_kind=250.
+func TestUnknownOpKind_RendersFallback(t *testing.T) {
+    ev := AuditAppendedV2Event{OpKind: 250, EnvelopeHash: …}
+    err := handler.Handle(ev)
+    require.NoError(t, err)  // MUST NOT error
+    // Stored row should have op_kind_byte=250 and a raw op_body_b64.
+}
+
+// 3. Cross-language hash — explorer can verify the chain commitment.
+func TestEnvelopeHash_MatchesRustImpl(t *testing.T) {
+    cborBytes := mustHex("…fixture from agentkeys-core…")
+    expected  := mustHex("…hash from Rust audit_module test…")
+    require.Equal(t, expected, keccak256(cborBytes))
+}
+```
+
+The third test is the load-bearing one: it proves the Rust + Go encoders produce byte-identical canonical CBOR (and therefore the same `envelope_hash`) for the same logical envelope. Without it, a subtle CBOR encoder drift could silently desynchronize chain commitments from worker envelopes.
+
+### B. UI renderer ([`litentry/subscan-essentials-ui-react`](https://github.com/litentry/subscan-essentials-ui-react))
+
+#### B1. Add a renderer component
+
+`src/agentkeys/op_kinds/PaymentRefund.tsx`:
+
+```tsx
+import { OpKindRenderer } from './types';
+import { Card, Field, AddressLink, AmountWithDecimals } from '../../ui';
+
+export const PaymentRefundRenderer: OpKindRenderer = ({ envelope }) => {
+  const body = envelope.op_body as {
+    original_op_envelope_hash: string;
+    reason_code: number;
+    reason_label: string;
+    amount_returned: string;
+  };
+  return (
+    <Card title="Payment Refund">
+      <Field label="Original op">
+        <EnvelopeHashLink hash={body.original_op_envelope_hash} />
+      </Field>
+      <Field label="Reason">{body.reason_label}</Field>
+      <Field label="Amount returned">
+        <AmountWithDecimals value={body.amount_returned} decimals={18} ticker="HEI" />
+      </Field>
+      <Field label="Intent">{envelope.intent_text ?? "—"}</Field>
+      {/* Envelope-level fields always show, even for op-kinds the renderer doesn't know — see UnknownByteRenderer */}
+      <Field label="Actor">       <AddressLink omni={envelope.actor_omni} /></Field>
+      <Field label="Operator">    <AddressLink omni={envelope.operator_omni} /></Field>
+      <Field label="When">        <RelativeTime ts={envelope.ts_unix} /></Field>
+    </Card>
+  );
+};
+```
+
+#### B2. Register in the op_kind → renderer map
+
+`src/agentkeys/op_kinds/registry.ts`:
+
+```typescript
+import { PaymentRefundRenderer } from './PaymentRefund';
+
+export const OP_KIND_RENDERERS: Record<number, OpKindRenderer> = {
+  // … existing entries …
+  30: PaymentEscrowRedeemRenderer,
+  31: PaymentDirectRenderer,
+  32: PaymentRefundRenderer,  // ← new
+  // … rest …
+};
+```
+
+#### B3. Verify the Unknown(byte) fallback path
+
+The UI's audit-row component dispatches via the registry. A missing entry MUST render `<UnknownByteRenderer />` (which shows envelope-level fields + the op_kind byte + a raw `op_body` expander). Add a Storybook story that renders an envelope with `op_kind=250` and an unknown body — the story is the visual regression guard.
+
+### C. Shared cross-language test vectors
+
+To prevent encoder drift between Rust (agentKeys), Go (subscan-essentials), and TypeScript (subscan-essentials-ui-react), maintain a small **shared test-vector file** that all three repos consume:
+
+- Location (canonical): [`crates/agentkeys-core/src/audit/test-vectors/`](../crates/agentkeys-core/src/audit/) (TBD — to be added in a follow-up PR alongside the next new op_kind).
+- Format: JSON files, one per op_kind, with `{envelope_json, canonical_cbor_hex, envelope_hash_hex}`.
+- All three repos read these files and verify their encoder produces matching `canonical_cbor_hex` + `envelope_hash_hex` from the JSON.
+
+Tracked in [subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12). Until the test vectors land, the cross-language determinism is verified ad-hoc per op_kind (Test #3 in §A4 above).
+
+### Phasing
+
+The explorer-side PRs are **deliberately asynchronous** with the agentKeys-side PR:
+
+| | T=0 (agentKeys PR ships) | T+days (subscan PR ships) | T+more (UI PR ships) |
+|---|---|---|---|
+| Operator emit-site | Emits new op_kind ✅ | (unchanged) | (unchanged) |
+| Chain event log | `AuditAppendedV2(opKind=32, ...)` ✅ | (unchanged) | (unchanged) |
+| Worker `/v1/audit/envelope/<hash>` | Returns canonical CBOR ✅ | (unchanged) | (unchanged) |
+| Indexer REST API | `op_kind=32 → unknown` row | `op_kind=32 → payment.refund` typed ✅ | (unchanged) |
+| Operator-facing UI | Generic `Unknown(32)` card | Generic card | Typed `PaymentRefund` card ✅ |
+
+At every column, nothing crashes, nothing is dropped, and the chain commitment is verifiable. The only visible-to-operator change between columns is "uglier UI temporarily for old explorers" — exactly the trade-off captured in the 8 non-break invariants.
+
 ## PR checklist
 
-Before opening the PR for a new op_kind:
+Three parallel PRs total — one against agentKeys, one against subscan-essentials, one against subscan-essentials-ui-react. The first ships independently; the latter two can land afterward on their own cadence (per the non-break design — old explorers gracefully degrade to `Unknown(byte)`).
+
+### agentKeys-side PR ([`litentry/agentKeys`](https://github.com/litentry/agentKeys))
 
 - [ ] Bytes claimed in the right family range; never reused; never reordered.
 - [ ] [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3a canonical table row appended.
@@ -207,7 +417,24 @@ Before opening the PR for a new op_kind:
 - [ ] Emit site wired in the appropriate worker / broker / signer / hook.
 - [ ] `cargo test -p agentkeys-core --lib audit` passes (the `all_byte_values_unique` test catches collisions).
 - [ ] `ENVELOPE_VERSION` UNCHANGED — adding an op_kind never bumps the envelope version.
-- [ ] Explorer-side PR opened against [`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials) to teach the indexer + UI about the new op_kind. Until that lands, old explorers render `Unknown(byte)` — that's the deliberate non-break design.
+- [ ] Cross-language test-vector file added/updated (see §C above) so the explorer can pin against the same canonical CBOR + hash.
+
+### Indexer-side PR ([`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials))
+
+- [ ] Op_kind registered in the byte→decoder map (`indexer/agentkeys/op_kinds.go`).
+- [ ] Typed `XxxDecoder` implementing `OpKind() / Label() / Decode() / RestShape()` (per §A2 above).
+- [ ] Three tests in `_test.go`: canonical-fixture decode, unknown-byte non-break, cross-language hash match against the shared test vector.
+- [ ] REST shape documented — what JSON fields the explorer surfaces for this op_kind.
+- [ ] No changes to the generic `AuditAppendedV2` event handler (the dispatch table change is the only wiring; the handler stays op-kind-agnostic).
+- [ ] Companion subscan-essentials issue referenced ([subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12)).
+
+### UI-side PR ([`litentry/subscan-essentials-ui-react`](https://github.com/litentry/subscan-essentials-ui-react))
+
+- [ ] New `<XxxRenderer />` component (per §B1 above) that displays the body fields in human-readable form.
+- [ ] Component registered in `OP_KIND_RENDERERS` map (per §B2).
+- [ ] Storybook story for the new renderer + a story for `<UnknownByteRenderer />` against the same op_kind (verifies the fallback path stays functional).
+- [ ] Visual regression check passes — the new op_kind row should look consistent with sibling op_kinds in the same family.
+- [ ] No changes to the audit-row dispatcher — adding the renderer is purely additive.
 
 ## What you DON'T need to do
 
