@@ -183,7 +183,14 @@ else
     --rp-id localhost \
     --emit-chain-payload \
     --operator-omni "0x$OPERATOR_OMNI" \
-    --message-hex "$CHALLENGE" 2>/dev/null) \
+    --message-hex "$CHALLENGE" \
+    --intent-text "Register companion device as 2nd master" \
+    --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
+    --intent-field "New device key hash=${COMP_DEVICE_KEY_HASH}" \
+    --intent-field "Companion RP ID=${COMP_RP_ID}" \
+    --intent-field "Role bitfield=${ROLES} (bit0=CAP_MINT, bit1=RECOVERY, bit2=SCOPE_MGMT)" \
+    --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
+    --intent-field "Operator nonce=${NONCE}" 2>/dev/null) \
     || die "k11 assert ceremony failed"
 
   AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)

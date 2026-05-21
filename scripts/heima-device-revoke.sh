@@ -125,7 +125,13 @@ if [ "$REVOKE_MASTER" = "1" ]; then
     log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
     K11_ARG=$("$AGENTKEYS_BIN" k11 assert --webauthn \
       --operator-omni "0x$OPERATOR_OMNI" \
-      --message-hex "$msg_hex" 2>/dev/null) \
+      --message-hex "$msg_hex" \
+      --intent-text "⚠ REVOKE MASTER device — this disables the operator's master entirely" \
+      --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
+      --intent-field "Master device key hash=${DEVICE_KEY_HASH}" \
+      --intent-field "Master wallet address=${MASTER_ADDR}" \
+      --intent-field "Chain=${AGENTKEYS_CHAIN}" \
+      --intent-field "After revoke=master must be re-bootstrapped via recovery quorum or fresh init" 2>/dev/null) \
       || die "agentkeys k11 assert --webauthn failed"
   else
     K11_ARG="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"

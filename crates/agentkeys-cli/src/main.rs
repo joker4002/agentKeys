@@ -310,6 +310,27 @@ enum K11Action {
         /// these fields as separate args.
         #[arg(long)]
         emit_chain_payload: bool,
+        /// **Operator-readable description** of what's about to be authorized,
+        /// rendered prominently on the WebAuthn confirmation page so the
+        /// operator sees the intent in plain English before pressing Touch ID
+        /// (otherwise they only see the raw 32-byte challenge hex). Only
+        /// applies with `--webauthn`; ignored in stub mode.
+        ///
+        /// Examples:
+        ///   --intent-text "Grant agent demo-agent access to openrouter"
+        ///   --intent-text "Revoke companion master device 0xabcd…1234"
+        #[arg(long, help = "Operator-readable intent shown on the WebAuthn confirmation page (with --webauthn)")]
+        intent_text: Option<String>,
+        /// Per-field detail rows rendered under the headline `--intent-text`,
+        /// repeatable. Each value is `Label=Value`. Common rows: service,
+        /// agent, K3 epoch, max_calls, expires_at.
+        ///
+        /// Examples:
+        ///   --intent-field "Service=openrouter"
+        ///   --intent-field "Max calls / hour=100"
+        ///   --intent-field "K3 epoch=1"
+        #[arg(long = "intent-field", help = "Repeatable per-field detail row as `Label=Value` (with --webauthn)")]
+        intent_fields: Vec<String>,
     },
 }
 
@@ -508,9 +529,34 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
             webauthn,
             rp_id,
             emit_chain_payload,
+            intent_text,
+            intent_fields,
         } => {
             let msg = hex::decode(message_hex.trim_start_matches("0x"))
                 .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
+            // Parse repeatable `Label=Value` rows into a K11IntentContext.
+            // We accept `=` as the separator; values may contain `=` (we
+            // split on the FIRST `=` only). Rows without `=` are rejected
+            // with a clear error so the operator doesn't silently get a
+            // mis-rendered intent field.
+            let mut k11_fields: Vec<(String, String)> = Vec::with_capacity(intent_fields.len());
+            for raw in intent_fields {
+                let (label, value) = match raw.split_once('=') {
+                    Some((l, v)) => (l.trim().to_string(), v.trim().to_string()),
+                    None => anyhow::bail!(
+                        "--intent-field must be `Label=Value` (no `=` found in {raw:?})"
+                    ),
+                };
+                if label.is_empty() {
+                    anyhow::bail!("--intent-field has empty label (in {raw:?})");
+                }
+                k11_fields.push((label, value));
+            }
+            let intent_ctx = agentkeys_cli::k11_webauthn::K11IntentContext {
+                text: intent_text.clone(),
+                fields: k11_fields,
+            };
+
             if *webauthn {
                 if *emit_chain_payload {
                     // The contract reconstructs `expected_challenge` from
@@ -528,24 +574,31 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
                     }
                     let mut challenge = [0u8; 32];
                     challenge.copy_from_slice(&msg);
-                    let payload = agentkeys_cli::k11_webauthn::assert_webauthn_for_chain(
-                        operator_omni,
-                        challenge,
-                        rp_id,
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
+                    let payload =
+                        agentkeys_cli::k11_webauthn::assert_webauthn_for_chain_with_intent(
+                            operator_omni,
+                            challenge,
+                            rp_id,
+                            intent_ctx,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
                     serde_json::to_string_pretty(&payload)
                         .map_err(|e| anyhow::anyhow!("serialize: {e}"))
                 } else {
-                    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_with_rp(
-                        operator_omni, &msg, rp_id,
+                    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_with_intent(
+                        operator_omni,
+                        &msg,
+                        rp_id,
+                        intent_ctx,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
                     Ok(format!("0x{}", hex::encode(assertion)))
                 }
             } else {
+                // Stub mode ignores intent (no UI to render it on).
+                let _ = intent_ctx;
                 let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
                     .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
                 Ok(format!("0x{}", hex::encode(assertion)))

@@ -197,7 +197,17 @@ log "Requesting K11 assertion from PRIMARY master (Touch ID prompt at localhost)
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" \
-  --message-hex "$CHALLENGE" 2>/dev/null) \
+  --message-hex "$CHALLENGE" \
+  --intent-text "Grant agent '${LABEL}' access to: ${SERVICES_RAW}" \
+  --intent-field "Agent label=${LABEL}" \
+  --intent-field "Agent omni=${ACTOR_OMNI}" \
+  --intent-field "Services=${SERVICES_RAW}" \
+  --intent-field "Read-only=${READ_ONLY}" \
+  --intent-field "Max amount per call=${MAX_PER_CALL} (0 = unlimited)" \
+  --intent-field "Max amount per period=${MAX_PER_PERIOD} over ${PERIOD_SECONDS}s (0 = unlimited)" \
+  --intent-field "Max total amount=${MAX_TOTAL} (0 = unlimited)" \
+  --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
+  --intent-field "Scope nonce=${SCOPE_NONCE}" 2>/dev/null) \
   || die "primary K11 ceremony failed"
 
 K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)

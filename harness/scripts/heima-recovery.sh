@@ -119,7 +119,13 @@ build_tuple() {
 log "Step 1/$THRESHOLD: K11 from PRIMARY master (Touch ID prompt)…"
 PRIMARY_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
-  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>/dev/null) \
+  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
+  --intent-text "Revoke master device via M-of-N recovery quorum" \
+  --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
+  --intent-field "Target device key hash=${TARGET}" \
+  --intent-field "Recovery threshold=${THRESHOLD}" \
+  --intent-field "Asserting role=PRIMARY (key hash ${PRIMARY_DEVICE_KEY_HASH})" \
+  --intent-field "Chain ID=${LIVE_CHAIN_ID}" 2>/dev/null) \
   || die "PRIMARY K11 ceremony failed"
 PRIMARY_TUPLE=$(build_tuple "$PRIMARY_DEVICE_KEY_HASH" "$PRIMARY_JSON")
 

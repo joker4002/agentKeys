@@ -122,7 +122,13 @@ log "Requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" \
-  --message-hex "$CHALLENGE" 2>/dev/null) \
+  --message-hex "$CHALLENGE" \
+  --intent-text "Revoke all scope grants for agent '${LABEL}'" \
+  --intent-field "Agent label=${LABEL}" \
+  --intent-field "Agent omni=${ACTOR_OMNI}" \
+  --intent-field "Effect=agent loses access to ALL services this scope previously granted" \
+  --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
+  --intent-field "Scope nonce=${SCOPE_NONCE}" 2>/dev/null) \
   || die "primary K11 ceremony failed"
 
 K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
