@@ -443,6 +443,12 @@ Three parallel PRs total — one against agentKeys, one against subscan-essentia
 - ❌ **Migrate existing envelopes.** The new op_kind is additive — pre-existing envelopes are unaffected.
 - ❌ **Coordinate a synchronous rollout across all components.** The non-break design is asynchronous: workers can emit new op_kinds immediately; old explorers gracefully `Unknown(byte)`-render; new explorers ship later with the typed renderer. Each component upgrades on its own cadence.
 
+## K11 WebAuthn intent rendering (for master-mutation op_kinds)
+
+If your new op_kind authorizes a master mutation (scope, device, K10 rotation, recovery), the call site MUST also call `assert_webauthn_*_with_intent` so the operator sees a human-readable intent on the K11 confirmation page — not just the 32-byte challenge hex. The same `intent_text` value populates both the WebAuthn page AND the audit envelope's `intent_text` + `intent_commitment` fields, so the chain commitment binds to exactly what the operator saw.
+
+See [`wiki/k11-webauthn-intent-rendering.md`](./k11-webauthn-intent-rendering.md) for the full design + worked examples.
+
 ## Where to look for cross-references
 
 - [`docs/spec/architecture.md`](../docs/spec/architecture.md) §15.3a — canonical schema, op_kind table, 8 non-break invariants, 6-phase migration plan.
