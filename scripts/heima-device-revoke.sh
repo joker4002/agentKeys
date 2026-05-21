@@ -123,16 +123,36 @@ if [ "$REVOKE_MASTER" = "1" ]; then
       "$OPERATOR_OMNI" "$DEVICE_KEY_HASH" "$AGENTKEYS_CHAIN" \
       | xxd -p -c 65536 | tr -d '\n')
     log "Requesting real WebAuthn assertion (Touch ID prompt incoming)…"
+    # Typed K11 intent — wiki/k11-intent-conventions.md. This revoke
+    # flow is EOA-signed directly (the master's secp256k1 key authorizes
+    # the cast send below); there's no K11Verifier chain-payload nonce
+    # so `operator_nonce` is null. recovery_threshold_remaining is
+    # likewise omitted — operator already sees the ⚠ warning + Effect
+    # row + must consciously confirm.
+    INTENT_JSON=$(jq -n \
+      --arg op_omni "0x${OPERATOR_OMNI}" \
+      --arg device_hash "${DEVICE_KEY_HASH}" \
+      --argjson chain_id "${LIVE_CHAIN_ID}" \
+      '{
+        kind: "revoke_master_device",
+        operator_omni: $op_omni,
+        target_device_key_hash: $device_hash,
+        chain_id: $chain_id,
+        asserting: { kind: "primary", device_key_hash: $device_hash }
+      }')
+    K11_ERR=$(mktemp -t heima-device-revoke-k11.XXXXXX) || die "mktemp failed"
     K11_ARG=$("$AGENTKEYS_BIN" k11 assert --webauthn \
       --operator-omni "0x$OPERATOR_OMNI" \
       --message-hex "$msg_hex" \
-      --intent-text "⚠ REVOKE MASTER device — this disables the operator's master entirely" \
-      --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
-      --intent-field "Master device key hash=${DEVICE_KEY_HASH}" \
-      --intent-field "Master wallet address=${MASTER_ADDR}" \
-      --intent-field "Chain=${AGENTKEYS_CHAIN}" \
-      --intent-field "After revoke=master must be re-bootstrapped via recovery quorum or fresh init" 2>/dev/null) \
-      || die "agentkeys k11 assert --webauthn failed"
+      --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
+      || {
+        echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+        cat "$K11_ERR" >&2
+        echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+        rm -f "$K11_ERR"
+        die "agentkeys k11 assert --webauthn failed (see stderr above)"
+      }
+    rm -f "$K11_ERR"
   else
     K11_ARG="0x$(printf 'stage1-k11-stub:%s' "$OPERATOR_OMNI" | xxd -p -c 256 | tr -d '\n')"
   fi

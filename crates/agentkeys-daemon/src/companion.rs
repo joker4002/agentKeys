@@ -57,22 +57,21 @@ pub struct WhoAmIResponse {
 #[derive(Debug, Deserialize)]
 pub struct ApproveRequest {
     pub expected_challenge_hex: String,
-    /// Optional operator-readable intent the caller wants surfaced on the
-    /// companion's WebAuthn confirmation page (so the operator sees WHAT
-    /// they're authorizing — not just the 32-byte challenge hex). The
-    /// primary-side script that drives multi-party ceremonies (e.g.
-    /// `heima-recovery.sh`) is the canonical caller: it computes the same
-    /// challenge for both masters, so it ALSO knows the right intent for
-    /// both — and passes it through here so the companion's K11 page is
-    /// uniform with the primary's. See wiki/k11-intent-conventions.md.
+    /// **Preferred** — typed K11 operation intent (per
+    /// `wiki/k11-intent-conventions.md`). Deserializes into
+    /// `K11OpIntent`; rendered via the shared formatter so the
+    /// companion's K11 page is byte-for-byte uniform with the primary's
+    /// rendering of the same op. When present, this field WINS over the
+    /// raw `intent_text` + `intent_fields` below.
+    #[serde(default)]
+    pub intent_op: Option<agentkeys_cli::k11_intent::K11OpIntent>,
+    /// Legacy raw fallback — operator-readable headline + per-field
+    /// rows. Kept for back-compat with callers that haven't migrated to
+    /// `intent_op` yet; ignored when `intent_op` is set.
     #[serde(default)]
     pub intent_text: Option<String>,
-    /// Per-field detail rows (`Label=Value`) rendered under the headline.
-    /// Same uniform-shape convention as the CLI `--intent-field` flag —
-    /// the primary-side caller MUST include the standard rows (Operator
-    /// omni, Asserting role + device hash, Chain ID, Operator nonce) so
-    /// both primary + companion prompts look identical apart from the
-    /// "Asserting role" row.
+    /// Legacy raw fallback — `Label=Value` rows. Ignored when `intent_op`
+    /// is set.
     #[serde(default)]
     pub intent_fields: Vec<String>,
 }
@@ -144,28 +143,31 @@ async fn approve(
     info!(
         operator_omni = %state.operator_omni,
         challenge = %req.expected_challenge_hex,
-        intent = ?req.intent_text,
-        intent_fields = req.intent_fields.len(),
+        typed_op = req.intent_op.is_some(),
+        legacy_intent = ?req.intent_text,
+        legacy_field_count = req.intent_fields.len(),
         "companion received approval request; opening Touch ID prompt"
     );
 
-    // Build the K11IntentContext from the caller-supplied intent. Same
-    // shape the CLI's `--intent-text` + `--intent-field` flags assemble
-    // — `intent_fields` rows are `Label=Value` strings; split on the
-    // first `=` so `Operator omni=0x…` round-trips correctly.
-    let intent = agentkeys_cli::k11_webauthn::K11IntentContext {
-        text: req.intent_text.clone(),
-        fields: req
-            .intent_fields
-            .iter()
-            .map(|raw| match raw.split_once('=') {
-                Some((label, value)) => (label.to_string(), value.to_string()),
-                // Defensive: a malformed row with no `=` is rendered as
-                // the whole string in the label column. Better than
-                // silently dropping; the operator sees it on the page.
-                None => (raw.clone(), String::new()),
-            })
-            .collect(),
+    // Typed-intent path wins: it renders via the shared formatter so
+    // the companion's prompt is byte-for-byte uniform with the
+    // primary's rendering of the same op. Legacy raw `intent_text` +
+    // `intent_fields` are the fallback for callers that haven't
+    // migrated yet.
+    let intent = if let Some(op) = req.intent_op.as_ref() {
+        op.render()
+    } else {
+        agentkeys_cli::k11_webauthn::K11IntentContext {
+            text: req.intent_text.clone(),
+            fields: req
+                .intent_fields
+                .iter()
+                .map(|raw| match raw.split_once('=') {
+                    Some((label, value)) => (label.to_string(), value.to_string()),
+                    None => (raw.clone(), String::new()),
+                })
+                .collect(),
+        }
     };
 
     let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_for_chain_with_intent(

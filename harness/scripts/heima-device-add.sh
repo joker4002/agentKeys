@@ -178,9 +178,26 @@ if [ "$DRY_RUN" = "1" ] && [ ! -f "$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json" ]
   S_HEX="0x0000000000000000000000000000000000000000000000000000000000000001"
 else
   log "Step 4/4: requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
-  # stderr → tmpfile so a failed `k11 assert` surfaces the actual error
-  # (Touch ID cancel, challenge mismatch, signature parse, WebAuthn
-  # timeout, etc.). Previously `2>/dev/null` swallowed the diagnostic.
+  # Typed K11 intent — wiki/k11-intent-conventions.md. Role bitfield
+  # ROLES=3 renders as "CAP_MINT | RECOVERY" (decoded by k11_intent.rs).
+  INTENT_JSON=$(jq -n \
+    --arg op_omni "0x${OPERATOR_OMNI}" \
+    --arg asserting_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+    --arg comp_hash "${COMP_DEVICE_KEY_HASH}" \
+    --arg comp_rp_id "${COMP_RP_ID}" \
+    --argjson roles "${ROLES}" \
+    --argjson chain_id "${LIVE_CHAIN_ID}" \
+    --argjson nonce "${NONCE}" \
+    '{
+      kind: "register_companion_as2nd_master",
+      operator_omni: $op_omni,
+      new_device_key_hash: $comp_hash,
+      companion_rp_id: $comp_rp_id,
+      roles: $roles,
+      chain_id: $chain_id,
+      operator_nonce: $nonce,
+      asserting: { kind: "primary", device_key_hash: $asserting_hash }
+    }')
   K11_ERR=$(mktemp -t heima-device-add-k11.XXXXXX) || die "mktemp failed"
   ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
     --webauthn \
@@ -188,13 +205,7 @@ else
     --emit-chain-payload \
     --operator-omni "0x$OPERATOR_OMNI" \
     --message-hex "$CHALLENGE" \
-    --intent-text "Register companion device as 2nd master" \
-    --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
-    --intent-field "New device key hash=${COMP_DEVICE_KEY_HASH}" \
-    --intent-field "Companion RP ID=${COMP_RP_ID}" \
-    --intent-field "Role bitfield=${ROLES} (bit0=CAP_MINT, bit1=RECOVERY, bit2=SCOPE_MGMT)" \
-    --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
-    --intent-field "Operator nonce=${NONCE}" 2>"$K11_ERR") \
+    --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
     || {
       echo "==> K11 assert stderr ↓ ↓ ↓" >&2
       cat "$K11_ERR" >&2

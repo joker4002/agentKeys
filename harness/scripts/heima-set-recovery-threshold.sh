@@ -86,22 +86,30 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 ok "challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID)…"
-# Uniform K11-intent shape — see wiki/k11-intent-conventions.md.
-# Headline = one-line operation summary; rows ALWAYS include Operator
-# omni, Asserting role + device hash, Chain ID, Operator nonce, plus
-# operation-specific detail. stderr → tmpfile so failures surface the
-# real k11 error (same pattern as commit d58aab1).
+# Typed K11 intent (per wiki/k11-intent-conventions.md). Headline +
+# field rendering live in `crates/agentkeys-cli/src/k11_intent.rs` —
+# scripts pass the typed payload, the CLI renders it uniformly. Role
+# bitfields become readable, hashes are truncated, unlimited amounts
+# render as the word "unlimited", chain IDs get human labels.
+INTENT_JSON=$(jq -n \
+  --arg op_omni "0x${OPERATOR_OMNI}" \
+  --arg device_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+  --argjson threshold "${THRESHOLD}" \
+  --argjson chain_id "${LIVE_CHAIN_ID}" \
+  --argjson nonce "${NONCE}" \
+  '{
+    kind: "set_recovery_threshold",
+    operator_omni: $op_omni,
+    new_threshold: $threshold,
+    chain_id: $chain_id,
+    operator_nonce: $nonce,
+    asserting: { kind: "primary", device_key_hash: $device_hash }
+  }')
 K11_ERR=$(mktemp -t heima-set-threshold-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
-  --intent-text "Set recovery threshold to ${THRESHOLD} (M-of-N master quorum)" \
-  --intent-field "Operator omni=0x${OPERATOR_OMNI}" \
-  --intent-field "Asserting role=PRIMARY (key hash ${PRIMARY_DEVICE_KEY_HASH})" \
-  --intent-field "New recovery threshold=${THRESHOLD}" \
-  --intent-field "Effect=future master-device revokes will require this many active master signatures" \
-  --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
-  --intent-field "Operator nonce=${NONCE}" 2>"$K11_ERR") \
+  --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
   || {
     echo "==> K11 assert stderr ↓ ↓ ↓" >&2
     cat "$K11_ERR" >&2

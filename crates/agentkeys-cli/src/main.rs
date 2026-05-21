@@ -331,6 +331,25 @@ enum K11Action {
         ///   --intent-field "K3 epoch=1"
         #[arg(long = "intent-field", help = "Repeatable per-field detail row as `Label=Value` (with --webauthn)")]
         intent_fields: Vec<String>,
+        /// Typed K11 operation intent (preferred over `--intent-text` +
+        /// `--intent-field`). One JSON blob describing the operation; the
+        /// CLI renders it to a uniform K11IntentContext via the shared
+        /// [`k11_intent`] module, so role bitfields become readable
+        /// permission names ("CAP_MINT | RECOVERY"), 0-means-unlimited
+        /// amounts render as "unlimited", hashes are truncated for the
+        /// prompt, and chain IDs get human-readable labels — all
+        /// without per-script string surgery.
+        ///
+        /// When BOTH `--intent-op-json` and `--intent-text` are passed,
+        /// the typed JSON wins (single source of truth).
+        ///
+        /// Examples:
+        ///   --intent-op-json '{"kind":"set_recovery_threshold","operator_omni":"0x…","new_threshold":2,"chain_id":212013,"operator_nonce":4,"asserting":{"kind":"primary","device_key_hash":"0x…"}}'
+        #[arg(
+            long = "intent-op-json",
+            help = "Typed K11 operation intent as JSON (preferred over --intent-text + --intent-field)"
+        )]
+        intent_op_json: Option<String>,
     },
 }
 
@@ -531,30 +550,41 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
             emit_chain_payload,
             intent_text,
             intent_fields,
+            intent_op_json,
         } => {
             let msg = hex::decode(message_hex.trim_start_matches("0x"))
                 .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
-            // Parse repeatable `Label=Value` rows into a K11IntentContext.
-            // We accept `=` as the separator; values may contain `=` (we
-            // split on the FIRST `=` only). Rows without `=` are rejected
-            // with a clear error so the operator doesn't silently get a
-            // mis-rendered intent field.
-            let mut k11_fields: Vec<(String, String)> = Vec::with_capacity(intent_fields.len());
-            for raw in intent_fields {
-                let (label, value) = match raw.split_once('=') {
-                    Some((l, v)) => (l.trim().to_string(), v.trim().to_string()),
-                    None => anyhow::bail!(
-                        "--intent-field must be `Label=Value` (no `=` found in {raw:?})"
-                    ),
-                };
-                if label.is_empty() {
-                    anyhow::bail!("--intent-field has empty label (in {raw:?})");
+            // Typed-intent path takes precedence over the raw flags. When
+            // `--intent-op-json` is passed, parse to K11OpIntent + render
+            // via the shared formatter. Otherwise fall back to the legacy
+            // `--intent-text` + `--intent-field` raw path.
+            let intent_ctx = if let Some(json) = intent_op_json.as_deref() {
+                let op = agentkeys_cli::k11_intent::K11OpIntent::from_json(json)
+                    .map_err(|e| anyhow::anyhow!("--intent-op-json: {e}"))?;
+                op.render()
+            } else {
+                // Parse repeatable `Label=Value` rows into a K11IntentContext.
+                // Split on the FIRST `=` so values may contain `=`. Rows
+                // without `=` are rejected with a clear error so the
+                // operator doesn't silently get a mis-rendered intent field.
+                let mut k11_fields: Vec<(String, String)> =
+                    Vec::with_capacity(intent_fields.len());
+                for raw in intent_fields {
+                    let (label, value) = match raw.split_once('=') {
+                        Some((l, v)) => (l.trim().to_string(), v.trim().to_string()),
+                        None => anyhow::bail!(
+                            "--intent-field must be `Label=Value` (no `=` found in {raw:?})"
+                        ),
+                    };
+                    if label.is_empty() {
+                        anyhow::bail!("--intent-field has empty label (in {raw:?})");
+                    }
+                    k11_fields.push((label, value));
                 }
-                k11_fields.push((label, value));
-            }
-            let intent_ctx = agentkeys_cli::k11_webauthn::K11IntentContext {
-                text: intent_text.clone(),
-                fields: k11_fields,
+                agentkeys_cli::k11_webauthn::K11IntentContext {
+                    text: intent_text.clone(),
+                    fields: k11_fields,
+                }
             };
 
             if *webauthn {

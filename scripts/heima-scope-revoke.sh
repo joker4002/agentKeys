@@ -119,19 +119,29 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 log "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
-# stderr → tmpfile so failure surfaces the actual k11 error instead of
-# swallowing it with `2>/dev/null` (see heima-scope-set.sh for context).
+# Typed K11 intent — wiki/k11-intent-conventions.md.
+INTENT_JSON=$(jq -n \
+  --arg op_omni "0x${OPERATOR_OMNI}" \
+  --arg asserting_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+  --arg agent_label "${LABEL}" \
+  --arg agent_omni "${ACTOR_OMNI}" \
+  --argjson chain_id "${LIVE_CHAIN_ID}" \
+  --argjson nonce "${SCOPE_NONCE}" \
+  '{
+    kind: "set_scope_revoke",
+    operator_omni: $op_omni,
+    agent_label: $agent_label,
+    agent_omni: $agent_omni,
+    chain_id: $chain_id,
+    scope_nonce: $nonce,
+    asserting: { kind: "primary", device_key_hash: $asserting_hash }
+  }')
 K11_ERR=$(mktemp -t heima-scope-revoke-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" \
   --message-hex "$CHALLENGE" \
-  --intent-text "Revoke all scope grants for agent '${LABEL}'" \
-  --intent-field "Agent label=${LABEL}" \
-  --intent-field "Agent omni=${ACTOR_OMNI}" \
-  --intent-field "Effect=agent loses access to ALL services this scope previously granted" \
-  --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
-  --intent-field "Scope nonce=${SCOPE_NONCE}" 2>"$K11_ERR") \
+  --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
   || {
     echo "==> K11 assert stderr ↓ ↓ ↓" >&2
     cat "$K11_ERR" >&2

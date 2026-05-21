@@ -1,12 +1,81 @@
-# K11 intent conventions — uniform Touch ID prompts across all sites
+# K11 intent conventions — typed contract, uniform Touch ID prompts
 
-Every K11 WebAuthn ceremony in AgentKeys MUST render the same envelope of operator-readable context on its localhost confirmation page. Otherwise operators get into the habit of "tap-to-approve" because some prompts say something and others say nothing — and "tap-to-approve" is exactly the failure mode the K11 binding is supposed to prevent. This page is the canonical convention every K11-emitting script + service MUST follow.
+Every K11 WebAuthn ceremony in AgentKeys renders an operator-readable confirmation block on its localhost page. The contract is **typed** — scripts pass a single JSON payload describing the operation, and the shared Rust renderer in [`crates/agentkeys-cli/src/k11_intent.rs`](../crates/agentkeys-cli/src/k11_intent.rs) produces the canonical headline + per-field rows. No more ad-hoc `--intent-field "Label=Value"` strings duplicated across 7 bash scripts; no more drift between "Chain ID" vs "Chain"; no more raw role bitfields ("Role bitfield=3" replaced by "Permissions: CAP_MINT | RECOVERY").
 
-See [`wiki/k11-webauthn-intent-rendering.md`](./k11-webauthn-intent-rendering.md) for the underlying rendering mechanism (the `K11IntentContext` type + `assert_webauthn_*_with_intent` entry points). This page covers the *content convention* — what the intent text + per-field rows MUST include for the prompt to count as conformant.
+See [`wiki/k11-webauthn-intent-rendering.md`](./k11-webauthn-intent-rendering.md) for the underlying rendering mechanism (the `K11IntentContext` type + `assert_webauthn_*_with_intent` entry points). This page covers the *content convention* — the typed enum, JSON wire shape, formatting rules, and per-operation conformance.
 
 ## Why uniform
 
 Master-mutation ceremonies (scope grant/revoke, device add/revoke, K10 rotation, recovery) all share the same trust-model property: the operator's eyes are the load-bearing safety check. If one ceremony's confirmation page says nothing while a neighbor ceremony's page renders a detailed intent block, the operator learns to ignore the page entirely. The uniform rule means every prompt shows the same envelope — operator confidence comes from "I always see what I'm signing", not from "I sometimes see what I'm signing if the script remembered to pass intent".
+
+## The typed contract
+
+The single source of truth is the [`K11OpIntent`](../crates/agentkeys-cli/src/k11_intent.rs) enum. One variant per master-mutation operation. Each variant carries its **typed payload** — fields are decoded properly (role bitfields, amounts, hashes) by the renderer, not by per-script string surgery.
+
+### Wire format (JSON)
+
+Scripts construct a JSON object matching one of the enum variants and pass it via:
+
+- **CLI**: `agentkeys k11 assert ... --intent-op-json '<JSON>'`
+- **Daemon companion (multi-party ceremonies)**: POST body field `intent_op` to `/v1/companion/approve`
+
+Both surfaces parse the same JSON through `K11OpIntent::from_json()` → `render()` → `K11IntentContext`, so PRIMARY and COMPANION prompts are byte-for-byte uniform for the same operation (only the `Asserting role` row differs).
+
+Tagged-enum discriminator: `kind` field with snake_case variant names.
+
+```json
+{
+  "kind": "set_recovery_threshold",
+  "operator_omni": "0x941cb1c3260518bbf40eac7d02663517fc7cff304d9b03e80d2cc54126c6bef2",
+  "new_threshold": 2,
+  "chain_id": 212013,
+  "operator_nonce": 4,
+  "asserting": { "kind": "primary", "device_key_hash": "0xde64…" }
+}
+```
+
+### Variants + payloads
+
+| `kind` | Operation | Required fields |
+|---|---|---|
+| `set_scope_grant` | `AgentKeysScope.setScopeWithWebauthn` | `operator_omni, agent_label, agent_omni, services[], read_only, max_per_call, max_per_period, period_seconds, max_total, chain_id, scope_nonce, asserting` |
+| `set_scope_revoke` | `AgentKeysScope.revokeScope` | `operator_omni, agent_label, agent_omni, chain_id, scope_nonce, asserting` |
+| `register_companion_as2nd_master` | `SidecarRegistry.registerAdditionalMasterDevice` (companion) | `operator_omni, new_device_key_hash, companion_rp_id, roles, chain_id, operator_nonce, asserting` |
+| `register_spare_master` | `SidecarRegistry.registerAdditionalMasterDevice` (synthetic 3rd master) | `operator_omni, new_device_key_hash, roles, chain_id, operator_nonce, asserting` |
+| `set_recovery_threshold` | `SidecarRegistry.setRecoveryThreshold` | `operator_omni, new_threshold, chain_id, operator_nonce, asserting` |
+| `recovery_device_revoke` | `SidecarRegistry.recoverViaQuorum` | `operator_omni, target_device_key_hash, recovery_threshold, chain_id, operator_nonce, asserting` |
+| `revoke_master_device` | `SidecarRegistry.revokeDevice` (master target — catastrophic) | `operator_omni, target_device_key_hash, chain_id, asserting`; optional: `recovery_threshold_remaining, operator_nonce` |
+| `revoke_agent_device` | `SidecarRegistry.revokeDevice` (agent target) | `operator_omni, target_device_key_hash, chain_id, asserting`; optional: `agent_label, operator_nonce` |
+
+Amount fields (`max_per_call`, `max_per_period`, `max_total`) are **strings** to survive JSON's 53-bit integer range — a U256 value can exceed it. The renderer decodes `"0"` (or `"0x0"` or `""`) as the word `"unlimited"` so operators don't squint at a raw zero.
+
+`asserting` is a sub-discriminated enum:
+
+```json
+{ "kind": "primary",   "device_key_hash": "0xde64…" }
+{ "kind": "companion", "device_key_hash": "0xb322…" }
+```
+
+### Formatting rules (the centralized part)
+
+The renderer applies these transformations to every payload — once, in Rust, instead of repeated across 7 bash scripts:
+
+| Raw input | Rendered output |
+|---|---|
+| `roles: 3` | `Permissions: CAP_MINT \| RECOVERY (raw 3)` |
+| `roles: 7` | `Permissions: CAP_MINT \| RECOVERY \| SCOPE_MGMT (raw 7)` |
+| `roles: 0b1000` | `Permissions: bit3(unknown) (raw 8)` (future-bit surfaces explicitly) |
+| `max_per_call: "0"` | `Max per call: unlimited` |
+| Three zero amounts | Single row `Spending limits: unlimited` (drops the per-row noise) |
+| `operator_omni: 0x941c…6bef2` (66 chars) | `0x941cb1…6bef2` (truncated for prompt width) |
+| `chain_id: 212013` | `Heima Mainnet (212013)` |
+| `chain_id: 31337` | `Anvil local (31337)` |
+| `period_seconds: 86400` | `1d` |
+| `period_seconds: 3700` | `1h 1m 40s` |
+| `read_only: true` | `Access mode: read-only` |
+| `read_only: false` | `Access mode: read + write` |
+
+Single source of truth: change a label or unit once in `k11_intent.rs` and every K11 emit-site picks it up.
 
 ## The envelope (required fields, in this order)
 
@@ -72,30 +141,51 @@ Implementation:
 
 ## What does NOT count as conformant
 
-- Passing only `--intent-text` without the standard `--intent-field` rows. The headline alone is not enough — the operator needs the Operator omni + Asserting role + Chain ID + Nonce footer to verify who/where/what-state context.
-- Passing intent on the primary side but not on the companion side of a multi-party ceremony (the trap the stage-2 step-9 demo hit before the fix). Operators learn from one prompt that intent is shown, then mistrust the companion prompt that hides it.
-- Passing different headlines or different Effect rows across the primary + companion prompts in the same ceremony. They MUST be the same headline + same operation-specific rows; only `Asserting role` differs.
+- **Building ad-hoc `--intent-field "Label=Value"` strings** instead of the typed `--intent-op-json` payload. The raw flags are kept ONLY as an escape hatch for one-off operations not yet wired into the typed enum; production scripts MUST use the typed path so formatting + label drift is impossible.
+- Drifting from the canonical `kind` names in the variant table. A typo'd `"kind": "set_scope_revokes"` deserializes to a "tag mismatch" error — fail-loud, not silent-fallthrough.
+- Passing intent on the primary side but not on the companion side of a multi-party ceremony. Multi-party callers MUST pass the SAME `K11OpIntent` payload to both, with only the `asserting` discriminator differing — `heima-recovery.sh` is the canonical example.
 
 ## Verification
 
-Per-site sanity check during development:
+### Built-in unit tests
+
+The typed renderer ships with regression tests in [`crates/agentkeys-cli/src/k11_intent.rs::tests`](../crates/agentkeys-cli/src/k11_intent.rs):
+
+- `roles_decode_canonical_combinations` — answers the user-reported "Role bitfield = 3 should show a readable permission" feedback: `format_roles(3) == "CAP_MINT | RECOVERY (raw 3)"`.
+- `roles_surface_unknown_future_bits` — bit3+ surfaces as `bit3(unknown)` so a future role expansion doesn't silently render as "the same 3 permissions."
+- `truncate_hash_collapses_long_values` — 64-hex-char omni renders as `0x941cb1…6bef2` instead of full 66 chars.
+- `unlimited_amount_renders_as_word` — `"0"` → `"unlimited"`, non-zero passes through unchanged.
+- `duration_human_units` — `3600 → 1h`, `86400 → 1d`, `86461 → 1d 0h 1m 1s`.
+- `chain_id_labels_known_networks` — 212013 → "Heima Mainnet"; unknown IDs surface as `chain_id N`.
+- `scope_grant_renders_concisely` — when all amounts are `"0"`, a single `Spending limits: unlimited` row replaces the verbose three `Max *` rows.
+- `register_companion_renders_decoded_roles` — end-to-end: JSON in → rendered "Permissions: CAP_MINT | RECOVERY (raw 3)" out.
+- `recovery_uniform_across_primary_and_companion` — both prompts produce identical headline + identical operation rows; only `Asserting role` differs.
+
+Run: `cargo test -p agentkeys-cli --lib k11_intent`.
+
+### Live confirmation page
+
+To sanity-check the typed pipeline end-to-end against the actual Touch ID confirmation page:
 
 ```bash
-# Trigger any K11 ceremony in stub mode (no real Touch ID); the
-# localhost confirmation page renders + the script prints its URL.
-# Open the URL, inspect the intent block, confirm:
-#   - Headline matches the canonical table above.
-#   - Operator omni + Asserting role + Chain ID + Nonce rows all present.
-#   - Effect row reads as plain-English consequence-after-tx.
+# Trigger any K11 ceremony with --webauthn — the localhost server
+# renders the confirmation page + prints its URL to stderr.
+bash harness/v2-stage1-demo.sh --only-step 13 --webauthn
 
-# For multi-party ceremonies, run both daemons + diff the rendered HTML
-# of primary vs companion confirmation pages — only the Asserting role
-# row + the role badge color should differ.
+# Open the URL, confirm:
+#   - Headline is the canonical phrasing from the variant table above.
+#   - Role bitfields render as permission names, not raw integers.
+#   - Operator omni is truncated, not full 66 chars.
+#   - Chain ID has a human label.
+#   - `Spending limits: unlimited` appears when all amounts are 0.
 ```
 
-A future PR will add an integration test that asserts the rendered HTML
-of every K11-emitting site contains all required rows, so the
-convention is mechanically enforced rather than convention-only.
+For multi-party ceremonies (`heima-recovery.sh`), run both daemons + diff
+the rendered HTML of primary vs companion pages — only the `Asserting
+role` row + the role badge color should differ. A future PR will add an
+integration test that crawls the localhost server per operation +
+asserts the rendered DOM matches expected fixtures, so the convention
+becomes mechanically enforced rather than convention-only.
 
 ## Cross-references
 
