@@ -886,6 +886,176 @@ S3 row). A future contract revision will extend `CredentialAudit.append`
 to take the commitment hash as a 33rd byte; until then, tier C chain
 events index the audit-row by `signed_intent_hash` via S3 path.
 
+### 15.3a Unified audit envelope — `AuditEnvelope v1`
+
+The schema documented above (`signed_intent_text` + `signed_intent_hash`) is
+specific to **typed-data signs**. The rest of the audit surface today
+carries only the narrow `(actor_omni, service_hash, op_type ∈ {0,1,2}, payload_hash)`
+shape that [`CredentialAudit.sol`](../../crates/agentkeys-chain/src/CredentialAudit.sol)
+takes — sufficient for credentials CRUD, useless for sign events, scope
+mutations, device mutations, payments, memory ops, or email. An external
+explorer (e.g. [`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials)
+per §22a.6) wanting to render a uniform timeline across all audit-producing
+surfaces has to know N different shapes today.
+
+`AuditEnvelope v1` is the canonical abstract format that every audit-producing
+surface MUST emit going forward, and that the chain + explorer + indexer
+consume.
+
+#### Wire shape (off-chain, served by `agentkeys-worker-audit`)
+
+```
+AuditEnvelope {
+  version:          u8,                // = 1
+  ts_unix:          u64,               // server-side at queue time
+  actor_omni:       [u8; 32],          // who performed the op
+  operator_omni:    [u8; 32],          // whose data-class boundary it touched
+  op_kind:          u8,                // see canonical table below
+  op_body:          CBOR_bytes,        // op-kind-specific (opaque to chain + old indexers)
+  result:           u8,                // 0=Success, 1=Failure, 2=NotPermitted
+  intent_text:      Option<String>,    // operator-readable (PR #95)
+  intent_commitment: Option<[u8; 32]>, // keccak256(intent_text || 0x7c || op_payload_digest)
+}
+```
+
+Encoded canonically as deterministic CBOR (CTAP2 / RFC 8949 §4.2.1). The
+worker computes `envelope_hash = keccak256(canonical_cbor(envelope))` and
+exposes:
+
+- `POST /v1/audit/append` — accept envelope, queue, return `envelope_hash`.
+- `GET /v1/audit/envelope/<hash>` — return the full envelope (used by the
+  explorer to fetch the body after seeing the on-chain hash).
+
+#### On-chain commitment
+
+`CredentialAudit.appendV2(operatorOmni, actorOmni, opKind, envelopeHash)`
+lands alongside the v1 `append` shape (additive — no break). For tier A
+(Merkle batched), `appendRootV2(operatorOmni, merkleRoot, opKindBitmap)`
+carries an `opKindBitmap` (`bytes32`, each bit indexes one of 256 possible
+op_kinds present in the batch) so explorers can filter without fetching
+every leaf.
+
+Events:
+
+```
+event AuditAppendedV2(
+  bytes32 indexed operatorOmni,
+  bytes32 indexed actorOmni,
+  uint8   indexed opKind,
+  bytes32 envelopeHash,
+  uint256 entryIndex
+);
+
+event AuditRootAppendedV2(
+  bytes32 indexed operatorOmni,
+  bytes32 indexed merkleRoot,
+  bytes32 opKindBitmap,
+  uint256 rootIndex,
+  uint64  entryCount
+);
+```
+
+The `indexed opKind` topic lets the explorer query "show all this operator's
+typed-data signs in chain history" with a single `eth_getLogs` filter,
+without scanning every audit row.
+
+#### Canonical `op_kind` byte assignments
+
+PRs adding new op_kinds MUST append a row here; **numbers are never reused
+and never reordered**. Grouped by 10s leaves room for related ops.
+
+| Kind | Byte | `op_body` schema | Worker that emits |
+|---|---|---|---|
+| `CredStore` | 0 | `{service: string, payload_hash: [u8;32]}` | credentials-service |
+| `CredFetch` | 1 | `{service: string, cap_hash: [u8;32]}` | credentials-service |
+| `CredTeardown` | 2 | `{actor_target: [u8;32]}` | credentials-service |
+| `MemoryPut` | 10 | `{key: string, payload_hash: [u8;32]}` | memory-service |
+| `MemoryGet` | 11 | `{key: string, cap_hash: [u8;32]}` | memory-service |
+| `MemoryTeardown` | 12 | `{actor_target: [u8;32]}` | memory-service |
+| `SignEip191` | 20 | `{message_digest: [u8;32], wallet: [u8;20]}` | signer (via daemon callback) |
+| `SignEip712` | 21 | `{chain_id: u64, verifying_contract: [u8;20], primary_type: string, type_hash: [u8;32], domain_separator: [u8;32], digest: [u8;32]}` | signer (via daemon callback) |
+| `PaymentEscrowRedeem` | 30 | `{escrow_addr: [u8;20], amount: U256, recipient: [u8;20], chain_id: u64}` | payment-service (P-2 mode) |
+| `PaymentDirect` | 31 | `{rail: enum, ref: string, amount_minor: u64, currency: string}` | payment-service (P-1/P-3) |
+| `ScopeGrant` | 40 | `{agent_omni: [u8;32], service: string, max_calls: u32, max_amount: U256}` | broker (via callback) |
+| `ScopeRevoke` | 41 | `{agent_omni: [u8;32], service: string}` | broker (via callback) |
+| `DeviceAdd` | 50 | `{device_key_hash: [u8;32], role_bits: u8, attestation_hash: [u8;32]}` | SidecarRegistry hook |
+| `DeviceRevoke` | 51 | `{device_key_hash: [u8;32]}` | SidecarRegistry hook |
+| `K10Rotate` | 52 | `{old_device_key_hash: [u8;32], new_device_key_hash: [u8;32]}` | SidecarRegistry hook |
+| `EmailSend` | 60 | `{to_hash: [u8;32], subject_hash: [u8;32], message_id: string}` | email-service |
+| `EmailReceive` | 61 | `{from_hash: [u8;32], message_id: string, payload_hash: [u8;32]}` | email-service |
+| `K3EpochAdvance` | 70 | `{old_epoch: u64, new_epoch: u64, gov_tx: [u8;32]}` | K3EpochCounter hook |
+
+Byte ranges `8-9`, `13-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `80-255` are reserved for future extensions in the same family.
+
+#### Forward-compat / non-break design
+
+The trade-off when a new op_kind lands is **"uglier UI temporarily for old
+explorers" — never "broken explorer / dropped event"**. Eight design
+invariants make this work:
+
+1. **`op_kind` is a `u8`, not a sealed enum.** Indexers/explorers MUST treat
+   unknown values as `Unknown(byte)` with a generic fallback renderer.
+   Panicking, dropping, or 5xx-ing on an unknown op_kind is a bug, not
+   correct behavior.
+
+2. **Envelope-level fields are stable across all op_kinds.** CBOR-decoding
+   `(version, ts_unix, actor_omni, operator_omni, op_kind, intent_text,
+   intent_commitment, result)` works for **any** op_kind. Only `op_body` is
+   op-kind-specific. The explorer can ALWAYS render a meaningful row from
+   envelope-level fields, even if it can't decode the body.
+
+3. **`version` is gated on envelope-level breakage only.** Bump `version`
+   when the top-level fields change (adding a required field, removing
+   one). Adding a new op_kind does NOT bump version. Old indexers seeing
+   `version: 1` keep working; `version: 2` they skip with a "needs
+   upgrade" log line.
+
+4. **Explorer ships a generic fallback renderer.** Default UI for unknown
+   op_kind: shows the op_kind byte + actor + operator + timestamp +
+   `intent_text` (if present) + a "raw body" expander. New op_kinds never
+   break the timeline page — they just look generic until the explorer
+   ships a kind-specific renderer.
+
+5. **Worker passes through opaque `op_body` bytes.** Older workers that
+   don't recognize a new op_kind variant still know to forward the CBOR
+   blob untouched in `GET /v1/audit/envelope`. Indexers consuming the
+   JSON get `op_body` as base64-encoded opaque bytes (with `intent_text`
+   + `intent_commitment` still readable from envelope level).
+
+6. **Chain contract is op_kind-agnostic.** `appendV2` takes `opKind` as
+   `uint8` and `envelopeHash` as `bytes32`. No on-chain decode of
+   `op_body`. New op_kinds need ZERO contract redeploys.
+
+7. **Canonical op_kind table lives in arch.md.** PRs adding new op_kinds
+   MUST append a row to the table above. Numbers never reused and never
+   reordered. Reviewer can grep arch.md for the new byte to confirm it's
+   not a collision before merging.
+
+8. **Test contract per new op_kind.** Every PR adding an op_kind ships
+   THREE tests minimum:
+   - **Worker**: CBOR encode + decode roundtrip on canonical fixtures.
+   - **Explorer**: "old explorer + envelope with new op_kind →
+     graceful unknown render, no crash, no dropped event."
+   - **Doc**: arch.md table row appended; no number collision.
+
+#### Migration sequencing
+
+| Phase | Where | What lands | Backwards-compat property |
+|---|---|---|---|
+| A | `arch.md` (this section) | The schema + table + non-break invariants. **Lands in PR #95.** | None — doc only. |
+| B | `agentkeys-worker-audit` + `agentkeys-core` | New `AuditEnvelope` struct; existing call sites migrated to emit it; `/v1/audit/envelope/<hash>` endpoint; old `AuditEvent` retained for one cycle. | Old indexers using `/v1/audit/append` v1 shape keep working; envelope-level fields readable from the new endpoint. |
+| C | `crates/agentkeys-chain/src/CredentialAudit.sol` | `appendV2(operatorOmni, actorOmni, opKind, envelopeHash)` + `appendRootV2(... opKindBitmap)` + the two events. Contract redeploy on Heima Mainnet. **Old `append` and `appendRoot` retained on the same contract**, so existing indexers keep working until they migrate. | Old `AuditAppended` event still emitted by `append` callers; new indexers watch `AuditAppendedV2`. |
+| D | [`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials) — tracked as [subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12) | Decoder for `AuditAppendedV2` + `AuditRootAppendedV2` events; HTTP client to fetch `GET /v1/audit/envelope/<hash>` from the worker; per-op_kind renderer plug-in interface. | Old `AuditAppended` decoder retained. |
+| E | [`litentry/subscan-essentials-ui-react`](https://github.com/litentry/subscan-essentials-ui-react) | Per-op_kind renderer components + the generic `Unknown(byte)` fallback. Routes `/agentkeys/audit/<operator_omni>` use the V2 envelope feed. | Old route shapes preserved. |
+| F | Sign / scope / device / payment / email / K3 worker call sites | Each emits its own op_kind via `AuditEnvelope`; the bytes are claimed via PRs that each touch the table in arch.md exactly once. | None — each row is additive. |
+
+Phases B / C / F are tracked at [agentKeys#97](https://github.com/litentry/agentKeys/issues/97).
+Phases D / E are tracked at [subscan-essentials#12](https://github.com/litentry/subscan-essentials/issues/12).
+
+Phases B-E are **independent** once A lands — they can ship in parallel
+across the three repos. Phase A is the lock-in moment; everything else
+follows the canonical table.
+
 ### 15.4 email-service
 
 - **IAM:** `ses:SendRawEmail` from operator's domain (e.g., `bots.litentry.org`); `s3:GetObject` + `s3:PutObject` on `bots/<actor_omni_hex>/{inbound,sent}/*`
