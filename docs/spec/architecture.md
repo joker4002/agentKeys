@@ -942,18 +942,23 @@ event AuditAppendedV2(
   bytes32 indexed operatorOmni,
   bytes32 indexed actorOmni,
   uint8   indexed opKind,
-  bytes32 envelopeHash,
-  uint256 entryIndex
+  bytes32 envelopeHash
 );
 
 event AuditRootAppendedV2(
   bytes32 indexed operatorOmni,
   bytes32 indexed merkleRoot,
   bytes32 opKindBitmap,
-  uint256 rootIndex,
   uint64  entryCount
 );
 ```
+
+V2 is event-only — no on-chain storage of entries or roots. The chain's
+canonical history is the indexed event log; indexers reconstruct the
+per-operator timeline by filtering `AuditAppendedV2` topics. Position
+within the operator's stream (an `entryIndex` analog) is derivable from
+block number + log index pairs, so the contract doesn't need to carry it
+explicitly.
 
 The `indexed opKind` topic lets the explorer query "show all this operator's
 typed-data signs in chain history" with a single `eth_getLogs` filter,

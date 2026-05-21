@@ -57,6 +57,15 @@ use ciborium::Value;
 use super::{AuditEnvelope, AuditError, AuditResult, ENVELOPE_VERSION};
 
 pub fn encode_canonical(env: &AuditEnvelope) -> Result<Vec<u8>, AuditError> {
+    // `op_body` is canonicalized recursively: every nested map's keys are
+    // sorted by canonical CBOR key ordering before encoding. The Rust
+    // ecosystem (serde_json::Value::Object = BTreeMap) happens to produce
+    // sorted maps already, but a Go or TypeScript explorer-side encoder
+    // building op_body with unsorted keys would otherwise produce
+    // different bytes + different envelope_hash. This recursive
+    // canonicalization is what makes the hash truly cross-language.
+    let op_body_canonical = canonicalize(env.op_body.clone());
+
     let map = Value::Map(vec![
         (Value::Text("actor_omni".into()), Value::Bytes(env.actor_omni.to_vec())),
         (
@@ -73,7 +82,7 @@ pub fn encode_canonical(env: &AuditEnvelope) -> Result<Vec<u8>, AuditError> {
                 None => Value::Null,
             },
         ),
-        (Value::Text("op_body".into()), env.op_body.clone()),
+        (Value::Text("op_body".into()), op_body_canonical),
         (Value::Text("op_kind".into()), Value::Integer(env.op_kind.into())),
         (Value::Text("operator_omni".into()), Value::Bytes(env.operator_omni.to_vec())),
         (Value::Text("result".into()), Value::Integer((env.result as u8).into())),
@@ -85,6 +94,37 @@ pub fn encode_canonical(env: &AuditEnvelope) -> Result<Vec<u8>, AuditError> {
     ciborium::into_writer(&map, &mut out)
         .map_err(|e| AuditError::Cbor(format!("encode: {e}")))?;
     Ok(out)
+}
+
+/// Recursively canonicalize a `ciborium::Value`: sort every map's keys by
+/// their canonical CBOR encoding (RFC 8949 §4.2.3 — lexicographic on
+/// encoded bytes). Arrays preserve their order (semantic — arrays are
+/// ordered collections). Primitives are unchanged.
+///
+/// For text keys, canonical CBOR ordering happens to coincide with
+/// lexicographic-by-bytes (which equals UTF-8 byte ordering for ASCII).
+/// For integer keys (rare in this codebase), it sorts by the encoded
+/// length first, then by bytes — also handled by sorting on the
+/// ciborium-encoded form of the key.
+fn canonicalize(v: Value) -> Value {
+    match v {
+        Value::Map(entries) => {
+            let mut canon: Vec<(Value, Value)> = entries
+                .into_iter()
+                .map(|(k, val)| (canonicalize(k), canonicalize(val)))
+                .collect();
+            canon.sort_by(|(a, _), (b, _)| {
+                let mut a_bytes = Vec::new();
+                let mut b_bytes = Vec::new();
+                let _ = ciborium::into_writer(a, &mut a_bytes);
+                let _ = ciborium::into_writer(b, &mut b_bytes);
+                a_bytes.cmp(&b_bytes)
+            });
+            Value::Map(canon)
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize).collect()),
+        other => other,
+    }
 }
 
 pub fn decode_canonical(bytes: &[u8]) -> Result<AuditEnvelope, AuditError> {
@@ -310,6 +350,77 @@ mod tests {
         let bytes = encode_canonical(&env).unwrap();
         let err = decode_canonical(&bytes).unwrap_err();
         assert!(format!("{err}").contains("99"));
+    }
+
+    /// op_body inner maps are canonicalized recursively — two envelopes
+    /// with the SAME op_body content but DIFFERENT insertion order MUST
+    /// produce identical CBOR bytes + identical envelope_hash. This is
+    /// the cross-language property: a Go encoder that builds op_body
+    /// with unsorted keys gets the same hash as the Rust encoder.
+    #[test]
+    fn op_body_key_order_does_not_affect_hash() {
+        let env_a = AuditEnvelope {
+            version: ENVELOPE_VERSION,
+            ts_unix: 1,
+            actor_omni: [0; 32],
+            operator_omni: [0; 32],
+            op_kind: 0,
+            // op_body with keys in alphabetical insertion order.
+            op_body: Value::Map(vec![
+                (Value::Text("aaa".into()), Value::Integer(1.into())),
+                (Value::Text("bbb".into()), Value::Integer(2.into())),
+                (Value::Text("ccc".into()), Value::Integer(3.into())),
+            ]),
+            result: AuditResult::Success,
+            intent_text: None,
+            intent_commitment: None,
+        };
+        // SAME entries in reverse insertion order.
+        let env_b = AuditEnvelope {
+            op_body: Value::Map(vec![
+                (Value::Text("ccc".into()), Value::Integer(3.into())),
+                (Value::Text("bbb".into()), Value::Integer(2.into())),
+                (Value::Text("aaa".into()), Value::Integer(1.into())),
+            ]),
+            ..env_a.clone()
+        };
+        // Same content, different order → same canonical bytes + hash.
+        let bytes_a = encode_canonical(&env_a).unwrap();
+        let bytes_b = encode_canonical(&env_b).unwrap();
+        assert_eq!(bytes_a, bytes_b);
+        assert_eq!(env_a.envelope_hash().unwrap(), env_b.envelope_hash().unwrap());
+    }
+
+    /// Nested op_body maps also get canonical-sorted (recursion check).
+    #[test]
+    fn op_body_nested_map_key_order_does_not_affect_hash() {
+        let inner_a = Value::Map(vec![
+            (Value::Text("x".into()), Value::Integer(1.into())),
+            (Value::Text("y".into()), Value::Integer(2.into())),
+        ]);
+        let inner_b = Value::Map(vec![
+            (Value::Text("y".into()), Value::Integer(2.into())),
+            (Value::Text("x".into()), Value::Integer(1.into())),
+        ]);
+        let env_a = AuditEnvelope {
+            version: ENVELOPE_VERSION,
+            ts_unix: 1,
+            actor_omni: [0; 32],
+            operator_omni: [0; 32],
+            op_kind: 0,
+            op_body: Value::Map(vec![(Value::Text("nested".into()), inner_a)]),
+            result: AuditResult::Success,
+            intent_text: None,
+            intent_commitment: None,
+        };
+        let env_b = AuditEnvelope {
+            op_body: Value::Map(vec![(Value::Text("nested".into()), inner_b)]),
+            ..env_a.clone()
+        };
+        assert_eq!(
+            encode_canonical(&env_a).unwrap(),
+            encode_canonical(&env_b).unwrap()
+        );
     }
 
     /// Decoder ignores unknown envelope-level keys (forward-compat for a
