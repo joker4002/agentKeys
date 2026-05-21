@@ -194,6 +194,12 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 log "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt at localhost)…"
+# Capture stderr to a tmpfile so a failed `k11 assert` surfaces the
+# actual error (Touch ID cancel, challenge mismatch, signature parse,
+# WebAuthn ceremony timeout, etc.). Previously this was `2>/dev/null`
+# which threw the diagnostic away and left operators staring at the
+# unactionable "primary K11 ceremony failed".
+K11_ERR=$(mktemp -t heima-scope-set-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" \
@@ -207,8 +213,15 @@ ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --intent-field "Max amount per period=${MAX_PER_PERIOD} over ${PERIOD_SECONDS}s (0 = unlimited)" \
   --intent-field "Max total amount=${MAX_TOTAL} (0 = unlimited)" \
   --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
-  --intent-field "Scope nonce=${SCOPE_NONCE}" 2>/dev/null) \
-  || die "primary K11 ceremony failed"
+  --intent-field "Scope nonce=${SCOPE_NONCE}" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "primary K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 K11_CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)

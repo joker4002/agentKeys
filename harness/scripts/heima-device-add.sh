@@ -178,6 +178,10 @@ if [ "$DRY_RUN" = "1" ] && [ ! -f "$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json" ]
   S_HEX="0x0000000000000000000000000000000000000000000000000000000000000001"
 else
   log "Step 4/4: requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
+  # stderr → tmpfile so a failed `k11 assert` surfaces the actual error
+  # (Touch ID cancel, challenge mismatch, signature parse, WebAuthn
+  # timeout, etc.). Previously `2>/dev/null` swallowed the diagnostic.
+  K11_ERR=$(mktemp -t heima-device-add-k11.XXXXXX) || die "mktemp failed"
   ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
     --webauthn \
     --rp-id localhost \
@@ -190,8 +194,15 @@ else
     --intent-field "Companion RP ID=${COMP_RP_ID}" \
     --intent-field "Role bitfield=${ROLES} (bit0=CAP_MINT, bit1=RECOVERY, bit2=SCOPE_MGMT)" \
     --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
-    --intent-field "Operator nonce=${NONCE}" 2>/dev/null) \
-    || die "k11 assert ceremony failed"
+    --intent-field "Operator nonce=${NONCE}" 2>"$K11_ERR") \
+    || {
+      echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+      cat "$K11_ERR" >&2
+      echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+      rm -f "$K11_ERR"
+      die "k11 assert ceremony failed (see stderr above for root cause)"
+    }
+  rm -f "$K11_ERR"
 
   AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
   # cast send needs raw bytes; b64url-decode the JSON.

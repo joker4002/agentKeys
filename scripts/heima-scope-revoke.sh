@@ -119,6 +119,9 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 log "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
+# stderr → tmpfile so failure surfaces the actual k11 error instead of
+# swallowing it with `2>/dev/null` (see heima-scope-set.sh for context).
+K11_ERR=$(mktemp -t heima-scope-revoke-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" \
@@ -128,8 +131,15 @@ ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --intent-field "Agent omni=${ACTOR_OMNI}" \
   --intent-field "Effect=agent loses access to ALL services this scope previously granted" \
   --intent-field "Chain ID=${LIVE_CHAIN_ID}" \
-  --intent-field "Scope nonce=${SCOPE_NONCE}" 2>/dev/null) \
-  || die "primary K11 ceremony failed"
+  --intent-field "Scope nonce=${SCOPE_NONCE}" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "primary K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 K11_CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)

@@ -141,10 +141,24 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 ok "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt at localhost)…"
+# stderr → tmpfile so failure surfaces the real k11 error instead of
+# swallowing it with `2>/dev/null` (see scripts/heima-scope-set.sh for
+# context). NOTE: this site doesn't yet pass --intent-text + intent
+# fields per K11IntentContext; follow-up to wire a "Register spare
+# master device <hash>" intent so the operator sees what they're
+# authorizing on the Touch ID confirmation page.
+K11_ERR=$(mktemp -t heima-spare-master-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
-  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>/dev/null) \
-  || die "primary K11 ceremony failed"
+  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "primary K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)
