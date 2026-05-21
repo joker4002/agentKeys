@@ -1,0 +1,204 @@
+name: harness E2E (long-lived test broker)
+
+# Issue #66 tier-2: end-to-end harness exercise against the long-lived
+# test-broker.litentry.org infrastructure provisioned by
+# scripts/provision-test-environment.sh.
+#
+# Gated on TEST_OIDC_AWS_ROLE_ARN being set as a repo secret — until the
+# operator wires it (see docs/test-environment.md §3), the job is inert
+# and surfaces as a no-op rather than failing. This keeps the workflow
+# safe to merge before the parallel infra is up.
+#
+# Coverage delta vs. harness-ci.yml:
+#   * harness-ci.yml: ephemeral anvil + in-process broker + StubSts
+#                     (no public TLS, no real AWS, no real SES)
+#   * harness-e2e.yml: real test-broker.litentry.org + real AWS test
+#                      resources (test bucket, test role) + real Heima
+#                      Paseo chain. Runs the full stage-3 per-actor +
+#                      per-data-class PrincipalTag isolation suite
+#                      that ephemeral CI can't reach.
+#
+# No LLM. No WebAuthn (passes the harness scripts in default stub mode).
+# Schedule + workflow_dispatch only — never on every PR (this hits real
+# AWS API calls + real chain RPC, so it's nightly-cadence).
+
+on:
+  schedule:
+    # Nightly at 06:00 UTC — well after the prior day's PR activity
+    # quiesces but before the operator's morning standup.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Which stage to run (1, 2, 3, or all)"
+        required: false
+        default: "all"
+        type: choice
+        options: ["1", "2", "3", "all"]
+
+# Prevent overlapping runs (each one consumes test AWS resources + chain RPC).
+concurrency:
+  group: harness-e2e
+  cancel-in-progress: false  # let in-flight nightly finish; queue manual runs
+
+# OIDC-only AWS auth via GitHub Actions — never long-lived secrets.
+permissions:
+  id-token: write   # required for aws-actions/configure-aws-credentials
+  contents: read
+
+jobs:
+  preflight:
+    name: gate on test infra availability
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - id: gate
+        run: |
+          if [ -n "${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "test infra credentials present; proceeding"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::TEST_OIDC_AWS_ROLE_ARN unset — skipping. See docs/test-environment.md."
+          fi
+
+  harness-e2e:
+    name: harness/v2-stage*-demo.sh against test-broker
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: harness-e2e
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Configure AWS credentials via OIDC (test role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          # Session name shows up in CloudTrail — keep traceable to the
+          # PR / run for forensic walking.
+          role-session-name: gh-actions-${{ github.repository_id }}-${{ github.run_id }}
+
+      - name: Build agentkeys CLI + workers
+        run: cargo build --release --workspace
+
+      - name: Source test-environment env
+        # The harness scripts source scripts/operator-workstation.env by
+        # default. For the e2e run, overlay scripts/test-environment.env
+        # into that path so the entire harness flow reuses unchanged.
+        # The .example template is committed; the live file lives only
+        # in the runner's filesystem for the duration of the job.
+        run: |
+          cp scripts/test-environment.env.example scripts/operator-workstation.env
+          # Substitute repo secrets into the live env file.
+          {
+            echo "ACCOUNT_ID=${{ secrets.TEST_ACCOUNT_ID }}"
+            echo "REGION=${{ secrets.TEST_AWS_REGION || 'us-east-1' }}"
+            echo "BROKER_HOST=${{ secrets.TEST_BROKER_HOST || 'test-broker.litentry.org' }}"
+            echo "OIDC_ISSUER=https://${{ secrets.TEST_BROKER_HOST || 'test-broker.litentry.org' }}"
+            echo "VAULT_BUCKET=${{ secrets.TEST_VAULT_BUCKET }}"
+            echo "MEMORY_BUCKET=${{ secrets.TEST_MEMORY_BUCKET }}"
+            echo "VAULT_ROLE_ARN=${{ secrets.TEST_VAULT_ROLE_ARN }}"
+            echo "MEMORY_ROLE_ARN=${{ secrets.TEST_MEMORY_ROLE_ARN }}"
+            echo "DATA_ROLE_ARN=${{ secrets.TEST_DATA_ROLE_ARN }}"
+            # Per-run S3 prefix isolation — concurrent runs (manual +
+            # nightly) won't step on each other's writes; nightly
+            # cleanup s3 rm's keys older than 7d.
+            echo "CI_S3_PREFIX=ci/run-${{ github.run_id }}"
+          } >> scripts/operator-workstation.env
+
+      - name: Stage 1 — chain + identity bootstrap
+        if: ${{ inputs.stage == 'all' || inputs.stage == '1' }}
+        # --skip-deploy: contracts are pre-deployed by
+        # scripts/provision-test-environment.sh on Heima-Paseo, and
+        # those addresses are baked into scripts/test-environment.env.
+        # --skip-email: e2e doesn't exercise the SES round-trip
+        # (separate workflow); identity bootstrap uses wallet_sig.
+        # No --webauthn: stub-mode (WEBAUTHN_MODE=0 default).
+        run: |
+          AGENTKEYS_CHAIN=heima-paseo \
+            bash harness/v2-stage1-demo.sh --skip-deploy --skip-email
+
+      - name: Stage 2 — multi-master + recovery (stub mode)
+        if: ${{ inputs.stage == 'all' || inputs.stage == '2' }}
+        run: |
+          AGENTKEYS_CHAIN=heima-paseo \
+            bash harness/v2-stage2-demo.sh --stub --skip-build
+
+      - name: Stage 3 — per-actor + per-data-class PrincipalTag isolation
+        if: ${{ inputs.stage == 'all' || inputs.stage == '3' }}
+        # The tier-2 capstone: stage-3 is the suite ephemeral CI can't
+        # run, since it requires AWS STS AssumeRoleWithWebIdentity, which
+        # in turn requires AWS to fetch the OIDC issuer's JWKS over
+        # public TLS. Now that we have test-broker.litentry.org with a
+        # real Let's Encrypt cert and real test IAM roles, all 11 steps
+        # of v2-stage3-demo.sh execute end-to-end.
+        run: |
+          AGENTKEYS_CHAIN=heima-paseo \
+            bash harness/v2-stage3-demo.sh
+
+      - name: Clean up per-run S3 prefix
+        if: always()
+        # Best-effort: tear down the per-run S3 prefix we wrote to.
+        # The nightly cleanup s3 rm catches any keys we missed.
+        run: |
+          PREFIX="ci/run-${{ github.run_id }}/"
+          for bucket in \
+            "${{ secrets.TEST_VAULT_BUCKET }}" \
+            "${{ secrets.TEST_MEMORY_BUCKET }}"; do
+            [ -n "$bucket" ] || continue
+            aws s3 rm "s3://$bucket/$PREFIX" --recursive || true
+          done
+
+  nightly-prefix-cleanup:
+    # Sweep any per-run S3 prefixes older than 7 days from the test
+    # buckets. Cheap insurance against forgotten prefixes from cancelled
+    # runs; complements the per-job cleanup above.
+    name: cleanup stale CI prefixes
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true' && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          role-session-name: gh-actions-cleanup-${{ github.run_id }}
+
+      - name: Sweep prefixes older than 7d
+        run: |
+          cutoff=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                   || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
+          for bucket in \
+            "${{ secrets.TEST_VAULT_BUCKET }}" \
+            "${{ secrets.TEST_MEMORY_BUCKET }}"; do
+            [ -n "$bucket" ] || continue
+            aws s3api list-objects-v2 --bucket "$bucket" --prefix "ci/" \
+              --query "Contents[?LastModified<\`$cutoff\`].Key" --output text \
+              | tr '\t' '\n' | while read -r key; do
+                [ -n "$key" ] && aws s3 rm "s3://$bucket/$key"
+              done
+          done

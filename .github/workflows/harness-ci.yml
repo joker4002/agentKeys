@@ -1,0 +1,139 @@
+name: harness CI (no LLM)
+
+# Issue #66 tier-1: deterministic, no-LLM, no-WebAuthn CI that exercises
+# the same code paths the harness scripts run, but against an ephemeral
+# in-CI test environment (anvil + mock-server + stub-STS broker).
+#
+# Separate from the existing claude.yml / claude-code-review.yml workflows
+# (which invoke @claude on PR comments + reviews). This workflow never
+# spends LLM tokens — it's plain cargo/forge/curl orchestration.
+#
+# Coverage map (matches harness/v2-stage*.sh where ephemeral CI can):
+#
+#   * `cargo fmt --check`                 — formatting gate
+#   * `cargo clippy -D warnings`          — lint gate
+#   * `cargo test --workspace`            — unit + in-process integration
+#                                            tests. The broker tests
+#                                            already spawn a full
+#                                            in-process broker with
+#                                            StubSts + StubEmailSender,
+#                                            so SIWE / OIDC mint / cap
+#                                            verify / multi-master /
+#                                            recovery / per-data-class
+#                                            isolation Rust logic is all
+#                                            covered here. Per CLAUDE.md
+#                                            "all async / #[tokio::test]"
+#                                            convention.
+#   * `harness/ci-ephemeral-stack.sh`     — forge build + forge test +
+#                                            forge script deploy on a
+#                                            fresh anvil + read-only
+#                                            ABI/wiring verification.
+#                                            Plus broker boot smoke +
+#                                            OIDC discovery surface.
+#
+# Tier-2 (long-lived test-broker.litentry.org, full stage-3 PrincipalTag
+# isolation, real AWS STS) lives in .github/workflows/harness-e2e.yml
+# and is gated on operator-provisioned infra; see docs/test-environment.md.
+
+on:
+  push:
+    branches: [main, evm]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "harness/**"
+      - "scripts/**"
+      - ".github/workflows/harness-ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+# Allow only one concurrent run per ref so re-pushes cancel stale runs
+# (saves runner minutes; each ephemeral stack spins up anvil + builds the
+# workspace, so wall-clock matters).
+concurrency:
+  group: harness-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-checks:
+    name: cargo fmt + clippy + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: harness-ci
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        # -D warnings: any clippy diagnostic blocks merge. Matches the
+        # project's "fix the warning, don't silence it" convention.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        # --test-threads=1: the broker tests mutate shared process env
+        # (HOME, AWS_*) and the keyring tests serialize on a per-process
+        # accounts map — same convention as the @claude review workflow.
+        run: cargo test --workspace -- --test-threads=1
+
+  ephemeral-stack:
+    name: ephemeral anvil + chain deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: rust-checks  # don't burn runner minutes on chain checks if Rust is red
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # forge install reads .gitmodules — need submodules for forge-std etc.
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: harness-ci  # share with rust-checks job
+
+      - name: Install Foundry (anvil + forge + cast)
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Verify Foundry toolchain
+        run: |
+          anvil --version
+          forge --version
+          cast --version
+
+      - name: Run ephemeral stack (chain + broker smoke)
+        # The script handles its own anvil + broker bring-up/tear-down via
+        # an EXIT trap. Fails the job if any step (forge build/test/deploy,
+        # contract verification, broker boot, OIDC discovery) fails.
+        run: bash harness/ci-ephemeral-stack.sh
+        env:
+          # Pinned ports so the workflow log is reproducible.
+          ANVIL_PORT: "8545"
+          MOCK_PORT: "8090"
+          BROKER_PORT: "8091"
+          # Fail builds on rustc warnings as well (matches clippy job).
+          RUSTFLAGS: "-D warnings"
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ephemeral-stack-logs
+          path: /tmp/agentkeys-ci-ephemeral-*/
+          if-no-files-found: ignore
+          retention-days: 7
