@@ -32,6 +32,10 @@ PROFILE_NAME="agentkeys-daemon"
 WITH_NGINX="yes"             # default: install + configure nginx (opt out via --without-nginx)
 WITH_CERTBOT="yes"           # default: install certbot (opt out via --without-certbot)
 ASSUME_YES=false
+TEST_MODE=false              # --test: suffix every derived hostname + bucket with "-test"
+                             # so a single flag replaces the 8 explicit
+                             # --signer-host / --vault-bucket / --email-from / etc.
+                             # overrides for the test broker.
 PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
 SIGNER_HOST=""               # --signer-host: hostname for the dedicated signer listener
 AUDIT_HOST=""                # --audit-host: hostname for tier-A audit-relay worker (default audit.<zone>)
@@ -83,6 +87,7 @@ while (( $# > 0 )); do
     --yes|-y)             ASSUME_YES=true; shift ;;
     --upgrade|--skip-pull) shift ;;        # back-compat no-ops (script is idempotent; --ref drives any pull)
     --ref)                PULL_REF="$2"; shift 2 ;;
+    --test)               TEST_MODE=true; shift ;;
     --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
     --audit-host)         AUDIT_HOST="$2"; shift 2 ;;
     --email-host)         EMAIL_HOST="$2"; shift 2 ;;
@@ -365,11 +370,22 @@ ISSUER_HOST="${ISSUER_HOST%%/*}"
 # audit/email/cred/memory hosts are "audit.foo.com" / "email.foo.com" / etc.
 # If ISSUER_HOST has no dots (unlikely), fall back to "<label>.${ISSUER_HOST}".
 ISSUER_ZONE="${ISSUER_HOST#*.}"   # everything after the first label
+
+# --test mode appends "-test" to every derived hostname/bucket/email so
+# a single flag swaps prod ↔ test without 8 explicit overrides. The
+# operator can still override any individual flag (e.g. --vault-bucket)
+# and that wins.
+if [[ "$TEST_MODE" == "true" ]]; then
+  SUFFIX="-test"
+else
+  SUFFIX=""
+fi
+
 if [[ "$ISSUER_ZONE" == "$ISSUER_HOST" ]]; then
   # No dot — single-label hostname (dev/localhost). Prefix with "<label>.".
-  derive_companion() { echo "${1}.${ISSUER_HOST}"; }
+  derive_companion() { echo "${1}${SUFFIX}.${ISSUER_HOST}"; }
 else
-  derive_companion() { echo "${1}.${ISSUER_ZONE}"; }
+  derive_companion() { echo "${1}${SUFFIX}.${ISSUER_ZONE}"; }
 fi
 if [[ -z "$SIGNER_HOST" ]]; then
   SIGNER_HOST="$(derive_companion signer)"
@@ -384,8 +400,13 @@ if [[ -z "$MEMORY_HOST" ]]; then MEMORY_HOST="$(derive_companion memory)";fi
 # Production will split each service to its own machine + IAM principal;
 # see CLAUDE.md "for production, we will isolate all the services".
 [[ -z "$CHAIN_RPC" ]]       && CHAIN_RPC="https://rpc.heima-parachain.heima.network"
-[[ -z "$VAULT_BUCKET" ]]    && VAULT_BUCKET="agentkeys-vault-${ACCOUNT_ID}"
-[[ -z "$MEMORY_BUCKET" ]]   && MEMORY_BUCKET="agentkeys-memory-${ACCOUNT_ID}"
+[[ -z "$VAULT_BUCKET" ]]    && VAULT_BUCKET="agentkeys-vault${SUFFIX}-${ACCOUNT_ID}"
+[[ -z "$MEMORY_BUCKET" ]]   && MEMORY_BUCKET="agentkeys-memory${SUFFIX}-${ACCOUNT_ID}"
+# Test mode flips the email-from default to the -test subdomain too
+# (operator can still override via --email-from).
+if [[ "$TEST_MODE" == "true" ]] && [[ "$BROKER_EMAIL_FROM_ADDRESS" == "noreply-test@bots.litentry.org" ]]; then
+  BROKER_EMAIL_FROM_ADDRESS="noreply-test@bots-test.${ISSUER_ZONE}"
+fi
 # Contract addresses pulled from operator-workstation.env on Heima Mainnet.
 # Source the repo-committed env file so a fresh broker host inherits the
 # same canonical addresses as the operator laptop (no manual sync needed).
@@ -659,6 +680,34 @@ if ! id -u agentkeys >/dev/null 2>&1; then
   sudo useradd --system --home /var/lib/agentkeys --shell /usr/sbin/nologin agentkeys
 fi
 sudo install -d -m 0700 -o agentkeys -g agentkeys /var/lib/agentkeys
+
+# Operator SSH login user (separate from the `agentkeys` daemon system
+# user). Used by EC2 Instance Connect — the IAM ec2-instance-connect
+# policy condition `ec2:osuser=agentkey` requires this exact username.
+# Idempotent — re-running on a host where the user already exists is a no-op.
+if ! id -u agentkey >/dev/null 2>&1; then
+  log "Creating agentkey SSH login user (for EC2 Instance Connect)"
+  sudo useradd --create-home --shell /bin/bash agentkey
+  echo "agentkey ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/agentkey >/dev/null
+  sudo chmod 0440 /etc/sudoers.d/agentkey
+fi
+
+# Ensure ec2-instance-connect is installed so sshd's AuthorizedKeysCommand
+# can resolve the ephemeral keys pushed via aws ec2-instance-connect
+# send-ssh-public-key. Recent Ubuntu AMIs include it; the install is a
+# no-op when already present.
+if ! [[ -x /usr/share/ec2-instance-connect/eic_run_authorized_keys ]]; then
+  log "Installing ec2-instance-connect (required by ssh-broker.sh non-fallback path)"
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y ec2-instance-connect >/dev/null \
+      || warn "ec2-instance-connect install failed — SSH via Instance Connect will need manual fix"
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y ec2-instance-connect >/dev/null \
+      || warn "ec2-instance-connect install failed — SSH via Instance Connect will need manual fix"
+  else
+    warn "unknown package manager — install ec2-instance-connect manually if SSH via Instance Connect fails"
+  fi
+fi
 
 if [[ "$CRED_MODE" == "profile" ]]; then
   sudo install -d -m 0700 -o agentkeys -g agentkeys /var/lib/agentkeys/.aws

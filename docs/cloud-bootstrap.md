@@ -23,7 +23,7 @@ For each stack (prod and test) you stand up SEPARATELY:
 - Launch an EC2 — **t3.small minimum** (Ubuntu 22.04 LTS recommended). `t3.micro` runs the OS but its 1 GB RAM gets OOM-killed compiling `aws-sdk-s3` during `setup-broker-host.sh`. If you already have a t3.micro you can resize: `aws ec2 stop-instances` → `modify-instance-attribute --instance-type t3.small` → `start-instances` (EIP stays attached, INSTANCE_ID unchanged).
 - Allocate an EIP (or reuse one) and attach it to the EC2.
 - Generate or import an SSH key pair (the `.pem` you'll keep as the fallback when EC2 Instance Connect is down). Confirm SSH works: `ssh -i your.pem ubuntu@<EIP>`.
-- The default `ubuntu` user is enough for now — the `agentkey` system user (used by EC2 Instance Connect later) is created automatically by `setup-broker-host.sh` in step 5.
+- The default `ubuntu` user is enough for now — the `agentkey` SSH login user (used by EC2 Instance Connect later) is created automatically by `setup-broker-host.sh` in step 5, along with the `ec2-instance-connect` package.
 - Note **INSTANCE_ID** + **EIP** — both go into the env files in step 2.
 
 ### 2. Fill in the 4 env files (one-time per environment)
@@ -103,20 +103,13 @@ cd agentKeys
 sudo bash scripts/setup-broker-host.sh \
   --issuer-url https://test-broker.${ZONE} \
   --account-id "${ACCOUNT_ID}" \
-  --signer-host signer-test.${ZONE} \
-  --audit-host  audit-test.${ZONE} \
-  --email-host  email-test.${ZONE} \
-  --cred-host   cred-test.${ZONE} \
-  --memory-host memory-test.${ZONE} \
-  --vault-bucket  agentkeys-vault-test-${ACCOUNT_ID} \
-  --memory-bucket agentkeys-memory-test-${ACCOUNT_ID} \
-  --email-from    noreply-test@bots-test.${ZONE} \
+  --test \
   --yes
 ```
 
-After it completes, `ssh-agentkeys-test` (Instance Connect, no `.pem` needed) starts working — the script created the `agentkey` user with EC2 Instance Connect's `AuthorizedKeysCommand` hook.
+`--test` is the single-flag shortcut: it derives `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`, `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`, and `noreply-test@bots-test.${ZONE}` automatically. Individual flags still override if you need a non-conventional name. For **prod**, drop `--test` and the defaults derive without `-test` suffixes.
 
-For **prod**, drop `-test` everywhere + run without `--test` in step 3.
+After it completes, `ssh-agentkeys-test` (Instance Connect, no `.pem` needed) starts working — the script also creates the `agentkey` SSH login user + installs `ec2-instance-connect` so sshd's `AuthorizedKeysCommand` resolves the ephemeral keys.
 
 ---
 
