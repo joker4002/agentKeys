@@ -96,32 +96,45 @@ MUX_OPTS=(-o "ControlMaster=auto"
 if [ "$FALLBACK" = "1" ]; then
   [ -n "$EIP" ] || { echo "EIP unset in $BROKER_ENV_FILE — required for --fallback" >&2; exit 1; }
   [ -f "$PEM_PATH" ] || { echo "PEM key not found at $PEM_PATH — pass --pem <path>" >&2; exit 1; }
-  # Default to `agentkey` — same user the non-fallback path uses — so both
-  # ssh-broker.sh invocation styles land in /home/agentkey/ and the
-  # operator sees the same files regardless of which alias they used.
-  # setup-broker-host.sh mirrors ubuntu's authorized_keys → agentkey's
-  # so the .pem authenticates as agentkey too. Override with --os-user
-  # ubuntu if you actually want the AMI's default user.
-  : "${OS_USER:=agentkey}"
+  # Default to `ubuntu` — the AMI's default user with the operator's .pem
+  # already in authorized_keys. The fallback path is for first-time
+  # bootstrap (before setup-broker-host.sh has created the agentkey user)
+  # OR for emergency recovery when EC2 Instance Connect is down. Steady-
+  # state operator work goes via ssh-agentkeys-test (non-fallback,
+  # `agentkey` user) — that's where files land in /home/agentkey/.
+  : "${OS_USER:=ubuntu}"
   echo "ssh -i $PEM_PATH $OS_USER@$EIP   (stack=$STACK, instance=$INSTANCE_ID, mux=on)" >&2
-  # ssh takes a remote command directly after host (no separator needed).
-  # ${arr[@]+"${arr[@]}"} avoids the bash 3.2 (macOS default) "unbound
-  # variable" error from `"${arr[@]}"` on an empty array under set -u.
   exec ssh -i "$PEM_PATH" "${MUX_OPTS[@]}" "$OS_USER@$EIP" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 else
   : "${OS_USER:=agentkey}"
-  echo "aws ec2-instance-connect ssh --instance-id $INSTANCE_ID --os-user $OS_USER   (stack=$STACK, profile=$AWS_PROFILE_OVERRIDE, mux=on)" >&2
-  # `aws ec2-instance-connect ssh` parses everything as its own options
-  # unless we insert `--` to terminate AWS CLI flag parsing — only then
-  # do trailing args get passed to the underlying ssh as a remote command.
-  # ControlMaster opts always go first after `--` so they apply regardless
-  # of whether the operator passed extra args.
-  cmd=(aws ec2-instance-connect ssh
-       --instance-id "$INSTANCE_ID"
-       --os-user "$OS_USER"
-       -- "${MUX_OPTS[@]}")
-  if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
-    cmd+=("${EXTRA_ARGS[@]}")
+  # `aws ec2-instance-connect ssh` is a wrapper that doesn't allow
+  # passing arbitrary ssh args (no --ssh-options, doesn't honor `--`).
+  # That blocks ControlMaster multiplexing. Bypass the wrapper:
+  #   1. Generate a stable ephemeral keypair (one-shot per workstation)
+  #   2. Push the pubkey via send-ssh-public-key (API call, valid 60s)
+  #   3. Raw `ssh -i privkey` with ControlMaster opts to $EIP
+  # Once ControlMaster's socket is established, subsequent invocations
+  # in 10 min reuse the socket WITHOUT needing a new pubkey push —
+  # multiplexed connection, ~50ms latency.
+  EIC_KEY="$HOME/.ssh/ec2_instance_connect_id_ed25519"
+  if [[ ! -f "$EIC_KEY" ]]; then
+    ssh-keygen -t ed25519 -N "" -f "$EIC_KEY" -q -C "ec2-instance-connect ($USER@$HOSTNAME)"
   fi
-  exec env AWS_PROFILE="$AWS_PROFILE_OVERRIDE" "${cmd[@]}"
+  [ -n "$EIP" ] || { echo "EIP unset in $BROKER_ENV_FILE — required for direct ssh" >&2; exit 1; }
+  echo "send-ssh-public-key + ssh $OS_USER@$EIP   (stack=$STACK, profile=$AWS_PROFILE_OVERRIDE, mux=on)" >&2
+
+  # Skip the API push if ControlMaster socket is already alive — the
+  # multiplexed connection doesn't need a fresh ephemeral key. ssh -O
+  # check exits 0 if the master is running.
+  if ! ssh -O check -o "ControlPath=/tmp/ssh-agentkeys-%C" "$OS_USER@$EIP" 2>/dev/null; then
+    AWS_PROFILE="$AWS_PROFILE_OVERRIDE" \
+      aws ec2-instance-connect send-ssh-public-key \
+        --instance-id "$INSTANCE_ID" \
+        --instance-os-user "$OS_USER" \
+        --ssh-public-key "file://${EIC_KEY}.pub" \
+        >/dev/null \
+      || { echo "send-ssh-public-key failed for $INSTANCE_ID os-user=$OS_USER" >&2; exit 1; }
+  fi
+
+  exec ssh -i "$EIC_KEY" "${MUX_OPTS[@]}" "$OS_USER@$EIP" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 fi
