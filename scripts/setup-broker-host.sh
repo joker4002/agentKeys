@@ -694,8 +694,8 @@ fi
 
 # Ensure ec2-instance-connect is installed so sshd's AuthorizedKeysCommand
 # can resolve the ephemeral keys pushed via aws ec2-instance-connect
-# send-ssh-public-key. Recent Ubuntu AMIs include it; the install is a
-# no-op when already present.
+# send-ssh-public-key. Recent Ubuntu AMIs include the package but NOT
+# the sshd drop-in config — we add both here, idempotently.
 if ! [[ -x /usr/share/ec2-instance-connect/eic_run_authorized_keys ]]; then
   log "Installing ec2-instance-connect (required by ssh-broker.sh non-fallback path)"
   if command -v apt-get >/dev/null 2>&1; then
@@ -707,6 +707,28 @@ if ! [[ -x /usr/share/ec2-instance-connect/eic_run_authorized_keys ]]; then
   else
     warn "unknown package manager — install ec2-instance-connect manually if SSH via Instance Connect fails"
   fi
+fi
+
+# Wire sshd to resolve ephemeral keys via the Instance Connect helper.
+# On some Ubuntu AMIs the package install doesn't drop the sshd config
+# fragment — when that happens, `sudo sshd -T | grep authorizedkeyscommand`
+# returns "none", and EC2 Instance Connect's SendSSHPublicKey + ssh login
+# fails with "Permission denied (publickey)" even with the right OS user.
+EIC_DROPIN=/etc/ssh/sshd_config.d/60-ec2-instance-connect.conf
+EIC_HELPER=/usr/share/ec2-instance-connect/eic_run_authorized_keys
+if [[ -x "$EIC_HELPER" ]] && ! sudo sshd -T 2>/dev/null | grep -qi "^authorizedkeyscommand $EIC_HELPER"; then
+  log "Writing $EIC_DROPIN to wire sshd → ec2-instance-connect"
+  sudo install -d -m 0755 /etc/ssh/sshd_config.d
+  sudo tee "$EIC_DROPIN" >/dev/null <<EOF
+AuthorizedKeysCommand $EIC_HELPER %u %f
+AuthorizedKeysCommandUser ec2-instance-connect
+EOF
+  # Some Ubuntu sshd_config files don't Include /etc/ssh/sshd_config.d
+  # — add it idempotently so the drop-in is actually picked up.
+  if ! grep -q '^Include /etc/ssh/sshd_config\.d' /etc/ssh/sshd_config 2>/dev/null; then
+    echo 'Include /etc/ssh/sshd_config.d/*.conf' | sudo tee -a /etc/ssh/sshd_config >/dev/null
+  fi
+  sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || warn "sshd reload failed — restart manually"
 fi
 
 if [[ "$CRED_MODE" == "profile" ]]; then
