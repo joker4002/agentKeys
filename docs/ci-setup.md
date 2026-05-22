@@ -46,95 +46,115 @@ Every resource in the test instance is parallel to prod:
 
 **Same code, same chain, isolated storage.** EVM addresses derive from `(deployer, nonce)` and Solidity compiles deterministically — a different deployer key with the same source files produces a parallel contract set that can't see or write to prod contract state.
 
-## One-shot operator bring-up
+## CI activation — what comes AFTER `setup-broker-host.sh` succeeds
 
-### 1. Provision the parallel cloud account (one command)
+**Prereq:** the test stack from [`docs/cloud-bootstrap.md` quick start](cloud-bootstrap.md#quick-start--five-steps-to-a-running-stack) steps 1–5 is complete — `setup-cloud.sh --test` ran clean, the test EC2 is up at `test-broker.${ZONE}`, and `setup-broker-host.sh` finished on the box (broker + signer + 4 workers + nginx + certbot all running).
 
-Same orchestrator as prod (`scripts/setup-cloud.sh`), with a `-test` suffix on every identifier via the `--test` flag. Walks SES domain identity + DKIM/SPF/DMARC/MX + inbound mail bucket + IAM users + IAM roles + per-data-class buckets + bucket policies — idempotent throughout.
+Running `bash scripts/setup-heima.sh` alone is **not enough** for CI. Five more steps:
 
-```bash
-# On the operator's laptop (one-shot, per test-env refresh):
-cp scripts/operator-workstation.env scripts/operator-workstation.env.test     # or maintain a separate file
-$EDITOR scripts/operator-workstation.env.test                                 # set ZONE=, MAIL_DOMAIN=bots-test.${ZONE}, BROKER_HOST=test-broker.${ZONE}, BUCKET=agentkeys-mail-test-${ACCT}, VAULT_BUCKET=...-test-..., MEMORY_BUCKET=...-test-...
+### 1. Activate OIDC federation for the test broker
 
-AWS_PROFILE=agentkeys-admin \
-  bash scripts/setup-cloud.sh \
-    --env-file scripts/operator-workstation.test.env \
-    --test \
-    --yes
-```
-
-The orchestrator outputs the EIP at the end of step 4. Note it for the next step.
-
-### 2. Provision the test broker EC2
-
-Spin up a small dedicated EC2 (t3.small is plenty; ~$15/mo). The test broker hosts every test-side service (broker + signer + 4 workers + nginx + certbot) — same single-tenant pattern as prod. **Don't co-locate with the prod broker** — the broker-host script is single-tenant by design (one set of systemd units, one nginx config, one state dir).
+The broker is reachable, but AWS STS doesn't trust its JWTs yet. Follow [`docs/cloud-bootstrap.md` §9](cloud-bootstrap.md#9-oidc-federation-activation-after-broker-is-publicly-reachable) — register the test OIDC provider in IAM (separate ARN from prod's), swap the three `*-role-test` trust policies to the federated variant, apply PrincipalTag-scoped bucket policies.
 
 ```bash
-# After EC2 is running, attach the EIP from step 1:
-aws ec2 associate-address --region "$REGION" --instance-id <test-instance-id> --public-ip <EIP-from-setup-cloud>
+# Quick form (full explanation in cloud-bootstrap.md §9):
+export BROKER_HOST=test-broker.${ZONE}
+export ACCOUNT_ID=429071895007
 
-# SSH in, clone the repo, then run the same setup script prod uses:
-sudo bash scripts/setup-broker-host.sh \
-  --issuer-url https://test-broker.${ZONE} \
-  --account-id "${ACCOUNT_ID}" \
-  --signer-host signer-test.${ZONE} \
-  --audit-host  audit-test.${ZONE} \
-  --email-host  email-test.${ZONE} \
-  --cred-host   cred-test.${ZONE} \
-  --memory-host memory-test.${ZONE} \
-  --vault-bucket  "agentkeys-vault-test-${ACCOUNT_ID}" \
-  --memory-bucket "agentkeys-memory-test-${ACCOUNT_ID}" \
-  --email-from    "noreply-test@bots-test.${ZONE}" \
-  --yes
-```
+thumb=$(echo | openssl s_client -servername "$BROKER_HOST" -connect "$BROKER_HOST:443" 2>/dev/null \
+        | openssl x509 -fingerprint -noout | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
 
-Both scripts are idempotent — re-run after edits without manual rollback.
-
-### 3. Register the test OIDC provider in IAM
-
-```bash
-thumb=$(echo | openssl s_client -servername "test-broker.${ZONE}" \
-                                 -connect "test-broker.${ZONE}:443" 2>/dev/null \
-          | openssl x509 -fingerprint -noout \
-          | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
-
-aws iam create-open-id-connect-provider \
-  --url "https://test-broker.${ZONE}" \
-  --client-id-list "sts.amazonaws.com" \
+AWS_PROFILE=agentkeys-admin aws iam create-open-id-connect-provider \
+  --url "https://$BROKER_HOST" \
+  --client-id-list sts.amazonaws.com \
   --thumbprint-list "$thumb"
+
+# Then swap each role's trust policy to the OIDC-federated variant
+# (see cloud-bootstrap.md §9.3 for the jq policy body — applies to
+# agentkeys-data-role-test, agentkeys-vault-role-test, agentkeys-memory-role-test).
 ```
 
-### 4. Generate the test deployer wallet + fund it
+Verify with `harness/v2-stage3-demo.sh` — it mints session JWT → OIDC JWT → STS creds and runs the cross-actor isolation matrix.
+
+### 2. Generate + fund the test deployer wallet
+
+Single fresh EVM wallet — its `(deployer, nonce)` is what makes test contracts land at different addresses on the same Heima mainnet.
 
 ```bash
 mkdir -p ~/.agentkeys
-cast wallet new --json \
-  | tee /tmp/test-deployer.json \
-  | jq -r .[0].private_key > ~/.agentkeys/heima-deployer-test.key
+umask 077
+cast wallet new --json | tee /tmp/test-deployer.json \
+  | jq -r '.[0].private_key' > ~/.agentkeys/heima-deployer-test.key
 chmod 600 ~/.agentkeys/heima-deployer-test.key
-# Then fund the address ($(jq -r .[0].address /tmp/test-deployer.json))
-# from your personal Heima wallet — small float is enough for one-shot deploy.
+
+# Print the address so you can fund it:
+jq -r '.[0].address' /tmp/test-deployer.json
+# → 0x…  ← send a small float of HEI from your personal wallet
+#         (deploy gas only — ~0.5 HEI is plenty for the 6 contracts).
 ```
 
-### 5. Deploy the test contracts on Heima mainnet
+### 3. Deploy test contracts via `setup-heima.sh`
 
-Identical Solidity, identical `DeployAgentKeysV1.s.sol`, different deployer → new addresses on the production chain:
+With the key in place + funded, the orchestrator handles the deploy + persists addresses back to the operator env file. **`HEIMA_DEPLOYER_KEY_FILE` is the override** — without it, the script falls back to `~/.agentkeys/heima-deployer.key` (your prod key) and step 6's `cast code` idempotency check sees prod contracts already exist, so nothing new deploys.
 
 ```bash
-AGENTKEYS_CHAIN=heima \
 HEIMA_DEPLOYER_KEY_FILE=~/.agentkeys/heima-deployer-test.key \
 MAINNET_CONFIRM=1 \
   bash scripts/setup-heima.sh --from-step 4 --to-step 8
 ```
 
-That walks steps 4–8: reuse the test key, fund-check, deploy, persist addresses, verify on-chain. Read off the six `*_HEIMA` addresses from the resulting `scripts/operator-workstation.env` for the next step.
+That walks 4 (reuse the test key) → 5 (fund check) → 6 (deploy 6 contracts) → 7 (write `*_HEIMA` addresses back to `operator-workstation.env`) → 8 (read-only RPC verify). For the test instance, source `operator-workstation.test.env` first so the addresses land in the test env file:
 
-### 6. Register the GitHub Actions OIDC role
+```bash
+ENV_FILE=scripts/operator-workstation.test.env \
+HEIMA_DEPLOYER_KEY_FILE=~/.agentkeys/heima-deployer-test.key \
+MAINNET_CONFIRM=1 \
+  bash scripts/setup-heima.sh --from-step 4 --to-step 8
+```
 
-Create one additional IAM role, `github-actions-agentkeys-e2e`, trust-policied on `token.actions.githubusercontent.com` with a condition limiting it to the agentkeys repo. Grant it `sts:AssumeRole` on the three test data roles and read-only S3 on the three test buckets.
+After this completes, the six `*_HEIMA` addresses in `operator-workstation.test.env` are the NEW test contract addresses (different from prod).
 
-### 7. Set the GitHub repo secrets
+### 4. Register the GitHub Actions OIDC role
+
+One additional IAM role, `github-actions-agentkeys-e2e`. Trust policy: federated on `token.actions.githubusercontent.com` with a `sub` condition pinning to the `litentry/agentKeys` repo. Inline policy: `sts:AssumeRole` on the three test data roles + read-only S3 on the three test buckets.
+
+```bash
+AWS_PROFILE=agentkeys-admin aws iam create-role \
+  --role-name github-actions-agentkeys-e2e \
+  --assume-role-policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version:"2012-10-17",
+    Statement:[{
+      Effect:"Allow",
+      Principal:{Federated:"arn:aws:iam::\($acct):oidc-provider/token.actions.githubusercontent.com"},
+      Action:"sts:AssumeRoleWithWebIdentity",
+      Condition:{
+        StringEquals:{"token.actions.githubusercontent.com:aud":"sts.amazonaws.com"},
+        StringLike:{"token.actions.githubusercontent.com:sub":"repo:litentry/agentKeys:*"}
+      }
+    }]
+  }')"
+
+# Then inline policy granting AssumeRole on the test data roles:
+AWS_PROFILE=agentkeys-admin aws iam put-role-policy \
+  --role-name github-actions-agentkeys-e2e \
+  --policy-name agentkeys-e2e-assume-test-roles \
+  --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version:"2012-10-17",
+    Statement:[{
+      Effect:"Allow",
+      Action:"sts:AssumeRole",
+      Resource:[
+        "arn:aws:iam::\($acct):role/agentkeys-data-role-test",
+        "arn:aws:iam::\($acct):role/agentkeys-vault-role-test",
+        "arn:aws:iam::\($acct):role/agentkeys-memory-role-test"
+      ]
+    }]
+  }')"
+```
+
+If the GitHub OIDC provider doesn't exist in the account yet, `aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1` creates it (one-time).
+
+### 5. Set the GitHub repo secrets
 
 In **Settings → Secrets and variables → Actions**:
 

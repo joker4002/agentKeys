@@ -161,13 +161,25 @@ do_step_3() {
 
 do_step_4() {
   CUR_STEP=4; step "Generate/reuse deployer key"
-  local key_path="$HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key"
+  # Path precedence:
+  #   1. HEIMA_DEPLOYER_KEY_FILE env override   (CI / test instance)
+  #   2. $HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key  (default)
+  #
+  # The override lets the test instance use a SEPARATE deployer wallet on
+  # the same Heima mainnet — different (deployer, nonce) → different
+  # contract addresses on the same chain → isolated test contract set.
+  # Without this override, AGENTKEYS_CHAIN=heima always picks up the prod
+  # key, the cast-code idempotency check sees prod contracts already
+  # exist, and step 6 short-circuits with no new deploy.
+  local key_path="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key}"
+  export HEIMA_DEPLOYER_KEY_FILE="$key_path"   # propagate to heima-*.sh helpers
   if [ -f "$key_path" ]; then
     skip "deployer key already exists at $key_path"
   else
-    # Delegate to bring-up's key gen (it persists to the same path).
+    # Delegate to bring-up's key gen (it persists to the same path the
+    # env var points at via the same HEIMA_DEPLOYER_KEY_FILE export).
     bash "$SCRIPT_DIR/heima-bring-up.sh" --only-step gen-key 2>/dev/null || true
-    [ -f "$key_path" ] || die "deployer key generation failed — see heima-bring-up.sh"
+    [ -f "$key_path" ] || die "deployer key generation failed — see heima-bring-up.sh; or pre-create with: cast wallet new --json | jq -r .[0].private_key > $key_path && chmod 600 $key_path"
     ok "deployer key generated at $key_path"
   fi
 }
