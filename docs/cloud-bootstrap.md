@@ -14,32 +14,53 @@ The day-to-day broker re-deploys live in [`docs/cloud-setup.md`](cloud-setup.md)
 
 ## TL;DR — operator flow
 
+The idempotent one-shot orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) walks every step in this doc end-to-end. Same posture as `setup-broker-host.sh` + `setup-heima.sh`: every step pre-checks state and short-circuits when the work is already a no-op.
+
+```bash
+# 1. Configure env on the operator's workstation:
+cp scripts/operator-workstation.env.example scripts/operator-workstation.env   # if not already done
+$EDITOR scripts/operator-workstation.env                                       # fill in ACCOUNT_ID, REGION, ZONE, PARENT_ZONE_ID, BROKER_HOST, MAIL_DOMAIN, BUCKET
+
+# 2. Run the orchestrator (~12 steps, idempotent, ~3 min on a fresh account):
+awsp agentkeys-admin
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
+
+# 3. Launch an EC2 (operator decides instance type + image + key pair) and:
+aws ec2 associate-address --region "$REGION" --instance-id <id> --public-ip <EIP-from-step-2>
+
+# 4. SSH to the host, clone the repo, then:
+sudo bash scripts/setup-broker-host.sh --issuer-url "https://${BROKER_HOST}" --account-id "${ACCOUNT_ID}" --yes
+```
+
+For surgical re-runs after a fix: `bash scripts/setup-cloud.sh --only-step N` (see step list below).
+
 ```
 §1  Identities         — four IAM principals; concept first, then provider commands
 §2  Domain + DNS       — subdomain ownership; parent-zone confirmation
 §3  Email backend      — SES domain identity + receipt rule + S3 inbound bucket
 §4  IAM users + roles  — agentkeys-{admin,broker,daemon} + agentkeys-data-role
-§5  Bucket policy      — static-IAM variant (pre-OIDC; replaced in cloud-setup.md §4)
+§5  Bucket policy      — static-IAM variant (pre-OIDC; replaced in cloud-setup.md §1)
 §6  Instance profile   — agentkeys-broker-host (optional, EC2-only)
 §7  Security audit     — strip legacy over-broad attached policies
 §8  Cloud portability  — AWS → AliCloud / GCP / Tencent Cloud mapping
 ```
 
-```bash
-# Per-account shell vars used throughout. Source from operator-workstation.env
-# wherever possible; placeholders here for clarity.
-awsp agentkeys-admin
-aws sts get-caller-identity                  # → agentkeys-admin
+### Required env (in `scripts/operator-workstation.env`)
 
-export REGION=us-east-1                      # SES inbound regions: us-east-1, us-west-2, eu-west-1
-export MAIL_DOMAIN=bots.${ZONE}              # SES inbound subdomain
-export BROKER_HOST=broker.${ZONE}            # broker TLS-terminating reverse proxy
-export PARENT_ZONE_ID=ZXXXXXXXXXXXXX         # existing parent zone (Route 53 / AliCloud / etc.)
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export BUCKET=agentkeys-mail-${ACCOUNT_ID}   # global-unique by account-id suffix
-```
+| Variable | Example | Used by |
+|---|---|---|
+| `ACCOUNT_ID` | `429071895007` | every step |
+| `REGION` | `us-east-1` | SES + S3 + IAM regional calls |
+| `ZONE` | `litentry.org` | parent DNS zone |
+| `PARENT_ZONE_ID` | `Z09723983CFJOHAE3VC65` | Route 53 zone ID for `$ZONE` |
+| `BROKER_HOST` | `broker.litentry.org` | OIDC issuer hostname |
+| `MAIL_DOMAIN` | `bots.litentry.org` | SES inbound subdomain (must differ from broker; the SES receipt rule routes ALL `*@$MAIL_DOMAIN`) |
+| `BUCKET` | `agentkeys-mail-${ACCOUNT_ID}` | inbound mail bucket |
+| `VAULT_BUCKET` / `MEMORY_BUCKET` | `agentkeys-vault-${ACCOUNT_ID}` / `agentkeys-memory-${ACCOUNT_ID}` | per-data-class buckets (arch.md §17) |
 
-> **Why `jq -n --arg` and not `cat > file.json <<EOF`:** `jq --arg` passes values outside shell parameter expansion, sidestepping the zsh modifier bug (`$VAR:r` etc.) that silently corrupts ARNs. JSON is validated on construction, command substitution feeds straight into `--policy-document`, no file lands on disk. Apply this convention everywhere this doc shows a JSON policy.
+`setup-cloud.sh` validates each at step 2 and dies with a precise pointer if missing.
+
+> **Why `jq -n --arg` and not `cat > file.json <<EOF`:** `jq --arg` passes values outside shell parameter expansion, sidestepping the zsh modifier bug (`$VAR:r` etc.) that silently corrupts ARNs. JSON is validated on construction, command substitution feeds straight into `--policy-document`, no file lands on disk. The orchestrator + every helper script applies this convention.
 
 ## §1 Identities — mental model
 
