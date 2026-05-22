@@ -81,26 +81,41 @@ EIP=$(        grep '^EIP='         "$BROKER_ENV_FILE" | tail -1 | cut -d= -f2)
   exit 1
 }
 
+# Multiplex SSH connections via ControlMaster so subsequent ssh-broker.sh
+# invocations within 10 min reuse the already-authenticated socket. The
+# first connection still does the full SendSSHPublicKey + key exchange +
+# ~5s warmup; every subsequent ssh-agentkeys-test in 10 min completes
+# in ~50ms (no AWS API roundtrip, no ssh handshake).
+#
+# Socket path lives under /tmp (per-operator, per-(user,host,port) via
+# the %C hash) so multiple operators on a shared workstation don't collide.
+MUX_OPTS=(-o "ControlMaster=auto"
+          -o "ControlPath=/tmp/ssh-agentkeys-%C"
+          -o "ControlPersist=10m")
+
 if [ "$FALLBACK" = "1" ]; then
   [ -n "$EIP" ] || { echo "EIP unset in $BROKER_ENV_FILE — required for --fallback" >&2; exit 1; }
   [ -f "$PEM_PATH" ] || { echo "PEM key not found at $PEM_PATH — pass --pem <path>" >&2; exit 1; }
   : "${OS_USER:=ubuntu}"
-  echo "ssh -i $PEM_PATH $OS_USER@$EIP   (stack=$STACK, instance=$INSTANCE_ID)" >&2
+  echo "ssh -i $PEM_PATH $OS_USER@$EIP   (stack=$STACK, instance=$INSTANCE_ID, mux=on)" >&2
   # ssh takes a remote command directly after host (no separator needed).
   # ${arr[@]+"${arr[@]}"} avoids the bash 3.2 (macOS default) "unbound
   # variable" error from `"${arr[@]}"` on an empty array under set -u.
-  exec ssh -i "$PEM_PATH" "$OS_USER@$EIP" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+  exec ssh -i "$PEM_PATH" "${MUX_OPTS[@]}" "$OS_USER@$EIP" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 else
   : "${OS_USER:=agentkey}"
-  echo "aws ec2-instance-connect ssh --instance-id $INSTANCE_ID --os-user $OS_USER   (stack=$STACK, profile=$AWS_PROFILE_OVERRIDE)" >&2
+  echo "aws ec2-instance-connect ssh --instance-id $INSTANCE_ID --os-user $OS_USER   (stack=$STACK, profile=$AWS_PROFILE_OVERRIDE, mux=on)" >&2
   # `aws ec2-instance-connect ssh` parses everything as its own options
   # unless we insert `--` to terminate AWS CLI flag parsing — only then
   # do trailing args get passed to the underlying ssh as a remote command.
+  # ControlMaster opts always go first after `--` so they apply regardless
+  # of whether the operator passed extra args.
   cmd=(aws ec2-instance-connect ssh
        --instance-id "$INSTANCE_ID"
-       --os-user "$OS_USER")
+       --os-user "$OS_USER"
+       -- "${MUX_OPTS[@]}")
   if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
-    cmd+=(-- "${EXTRA_ARGS[@]}")
+    cmd+=("${EXTRA_ARGS[@]}")
   fi
   exec env AWS_PROFILE="$AWS_PROFILE_OVERRIDE" "${cmd[@]}"
 fi
