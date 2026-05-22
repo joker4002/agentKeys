@@ -50,7 +50,7 @@ Every resource in the test instance is parallel to prod:
 
 ### 1. Provision the parallel cloud account (one command)
 
-Same orchestrator as prod (`scripts/setup-cloud.sh`), with a `-test` suffix on every identifier via `AGENTKEYS_TEST=1`. Walks SES domain identity + DKIM/SPF/DMARC/MX + inbound mail bucket + IAM users + IAM roles + per-data-class buckets + bucket policies — idempotent throughout.
+Same orchestrator as prod (`scripts/setup-cloud.sh`), with a `-test` suffix on every identifier via the `--test` flag. Walks SES domain identity + DKIM/SPF/DMARC/MX + inbound mail bucket + IAM users + IAM roles + per-data-class buckets + bucket policies — idempotent throughout.
 
 ```bash
 # On the operator's laptop (one-shot, per test-env refresh):
@@ -58,8 +58,10 @@ cp scripts/operator-workstation.env scripts/operator-workstation.env.test     # 
 $EDITOR scripts/operator-workstation.env.test                                 # set ZONE=, MAIL_DOMAIN=bots-test.${ZONE}, BROKER_HOST=test-broker.${ZONE}, BUCKET=agentkeys-mail-test-${ACCT}, VAULT_BUCKET=...-test-..., MEMORY_BUCKET=...-test-...
 
 AWS_PROFILE=agentkeys-admin \
-AGENTKEYS_TEST=1 \
-  bash scripts/setup-cloud.sh --yes
+  bash scripts/setup-cloud.sh \
+    --env-file scripts/operator-workstation.test.env \
+    --test \
+    --yes
 ```
 
 The orchestrator outputs the EIP at the end of step 4. Note it for the next step.

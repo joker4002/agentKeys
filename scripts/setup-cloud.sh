@@ -22,18 +22,20 @@
 # Usage:
 #   AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh [flags]
 #
-# Required env (sourced from scripts/operator-workstation.env):
-#   ACCOUNT_ID, REGION, ZONE, PARENT_ZONE_ID,
-#   BROKER_HOST, MAIL_DOMAIN, BUCKET (= MAIL_BUCKET)
-#
-# Optional env:
-#   EIP                Reuse this existing EIP instead of allocating
-#   INSTANCE_ID        EC2 instance to attach the EIP to (skipped if absent)
-#   ZONE_SUFFIX        Override the broker subdomain prefix (default: empty)
-#   AGENTKEYS_TEST     Set to "1" to add "-test" suffix to every identifier
-#                      (use when bootstrapping the CI test instance)
+# Env file (sourced — `--env-file` selects which):
+#   Required keys:
+#     ACCOUNT_ID, REGION, ZONE, PARENT_ZONE_ID,
+#     BROKER_HOST, MAIL_DOMAIN, BUCKET (= MAIL_BUCKET)
+#   Optional keys (operator pastes these into the env file BEFORE re-run):
+#     EIP            Reuse this existing EIP instead of allocating a fresh one
+#     INSTANCE_ID    EC2 to attach the EIP to (step 4 skips attach if absent)
 #
 # Flags:
+#   --env-file <path>  env file to source (default: scripts/operator-workstation.env)
+#                      use scripts/operator-workstation.test.env for the test stack
+#   --test             explicit test mode: suffix IAM identifiers with -test
+#                      (auto-set when --env-file path contains "test", but pass
+#                       explicitly if your test env file uses a different name)
 #   --yes              non-interactive (don't pause before destructive)
 #   --from-step N      start at step N (skip 1..N-1)
 #   --to-step N        stop after step N
@@ -74,9 +76,12 @@ else
 fi
 
 # ─── CLI parse ────────────────────────────────────────────────────────────────
+TEST_MODE=0
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --env-file)    ENV_FILE="$2"; shift 2 ;;
+    --test)        TEST_MODE=1; shift ;;
     --yes)         YES=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
     --from-step)   FROM_STEP="$2"; shift 2 ;;
@@ -90,13 +95,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Test-mode suffix is auto-detected from the env file path if it
-# contains "test", and overridable via AGENTKEYS_TEST=1.
-case "$ENV_FILE" in
-  *test*) : "${AGENTKEYS_TEST:=1}" ;;
-esac
+# Test mode = explicit --test flag wins; otherwise auto-detect from env-file
+# path if it contains "test" (ergonomic shortcut for the conventional
+# scripts/operator-workstation.test.env naming).
+if [ "$TEST_MODE" = "0" ]; then
+  case "$ENV_FILE" in
+    *test*) TEST_MODE=1 ;;
+  esac
+fi
 SUFFIX=""
-[ "${AGENTKEYS_TEST:-0}" = "1" ] && SUFFIX="-test"
+[ "$TEST_MODE" = "1" ] && SUFFIX="-test"
 DAEMON_USER="agentkeys-daemon${SUFFIX}"
 DATA_ROLE="agentkeys-data-role${SUFFIX}"
 
@@ -182,7 +190,7 @@ do_step_3() {
 do_step_4() {
   CUR_STEP=4; step "Allocate or reuse Elastic IP (tag: agentkeys-broker-eip)"
   local tag_key="Name" tag_val="agentkeys-broker-eip"
-  [ "${AGENTKEYS_TEST:-0}" = "1" ] && tag_val="agentkeys-broker-eip-test"
+  [ "$TEST_MODE" = "1" ] && tag_val="agentkeys-broker-eip-test"
 
   # Pre-check: tagged EIP already exists?
   local existing_eip
@@ -222,7 +230,7 @@ do_step_4() {
       ok "attached EIP $EIP → $INSTANCE_ID"
     fi
   else
-    warn "INSTANCE_ID unset — EIP unattached (run again with INSTANCE_ID=… once EC2 exists)"
+    warn "INSTANCE_ID unset in $ENV_FILE — EIP unattached. Paste 'INSTANCE_ID=i-…' into the env file once EC2 exists, then re-run: bash $0 --env-file $ENV_FILE --only-step 4"
   fi
 }
 

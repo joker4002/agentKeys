@@ -165,23 +165,32 @@ Launch via AWS console, `aws ec2 run-instances`, or your IaC tool. The script do
 
 **Getting the IP — two workflows:**
 
-**Workflow A (recommended): EC2-first, then attach EIP via `setup-cloud.sh`**
+Both `INSTANCE_ID` and `EIP` live in the env file (`scripts/operator-workstation.env` or `…test.env`) — set them there once, not on the shell every run. The test stack is selected by `--env-file <path>` + the explicit `--test` flag (or auto-detected when the env-file name contains "test").
+
+**Workflow A (recommended): EC2-first, then attach via env-file edit + re-run**
 
 ```bash
 # 1. Launch EC2 → note INSTANCE_ID
 aws ec2 run-instances --instance-type t3.small --image-id <ami> --key-name <key> ...
 
-# 2. Bootstrap (allocates EIP + attaches to your instance + persists EIP to env file)
-INSTANCE_ID=<from-step-1> AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
+# 2. Paste INSTANCE_ID into the env file (one line edit):
+echo 'INSTANCE_ID=<from-step-1>' >> scripts/operator-workstation.env
+#    (or for test: scripts/operator-workstation.test.env)
 
-# 3. SSH (EIP is now in scripts/operator-workstation.env as EIP=…)
+# 3. Bootstrap (allocates EIP + attaches to INSTANCE_ID + persists EIP back to env)
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
+# Test stack:
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh \
+  --env-file scripts/operator-workstation.test.env --test --yes
+
+# 4. SSH (EIP is now in the env file as EIP=…)
 ssh ubuntu@$(grep ^EIP= scripts/operator-workstation.env | cut -d= -f2)
 ```
 
 **Workflow B: EIP-first, attach manually**
 
 ```bash
-# 1. Allocate EIP (printed at §14 summary)
+# 1. Allocate EIP (printed at §14 summary; persisted to env file as EIP=…)
 AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
 
 # 2. Launch EC2
@@ -193,9 +202,7 @@ aws ec2 associate-address --region "$REGION" \
   --public-ip $(grep ^EIP= scripts/operator-workstation.env | cut -d= -f2)
 ```
 
-A is one fewer command; B is sometimes necessary when an existing EC2 needs to be repointed at the EIP later.
-
-**For the TEST broker:** use `--env-file scripts/operator-workstation.test.env` so the EIP is tagged `agentkeys-broker-eip-test` and persisted to the test env file. A and B work identically against the test stack.
+A is one fewer command; B is sometimes necessary when an existing EC2 needs to be repointed at the EIP later. For test, swap in `--env-file scripts/operator-workstation.test.env --test` everywhere — the EIP will be tagged `agentkeys-broker-eip-test` (the test env file has the test placeholders pre-populated).
 
 #### 3. `agentkeys-admin` AWS profile
 
@@ -214,7 +221,7 @@ Same AWS account is fine — isolation comes from the `-test` suffix on every id
 
 | Resource | Prod name | Test name | Created by |
 |---|---|---|---|
-| IAM user (daemon) | `agentkeys-daemon` | `agentkeys-daemon-test` | `setup-cloud.sh` step 10 (auto-suffixed when `AGENTKEYS_TEST=1` or env-file path matches `*test*`) |
+| IAM user (daemon) | `agentkeys-daemon` | `agentkeys-daemon-test` | `setup-cloud.sh` step 10 (suffixed when `--test` flag is passed, or env-file path matches `*test*` as an ergonomic auto-detect) |
 | IAM role (data) | `agentkeys-data-role` | `agentkeys-data-role-test` | `setup-cloud.sh` step 11 (same suffix logic) |
 | IAM role (vault) | `agentkeys-vault-role` | `agentkeys-vault-role-test` | `provision-vault-role.sh` reads `VAULT_ROLE_ARN` from the active env file |
 | IAM role (memory) | `agentkeys-memory-role` | `agentkeys-memory-role-test` | `provision-memory-role.sh` (same env-driven pattern) |
