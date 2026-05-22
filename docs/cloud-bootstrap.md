@@ -100,14 +100,20 @@ ssh-agentkeys-test-fallback   # ssh -i ~/.ssh/your.pem ubuntu@<test EIP>
 git clone https://github.com/litentry/agentKeys.git
 cd agentKeys
 
-sudo bash scripts/setup-broker-host.sh \
-  --issuer-url https://test-broker.${ZONE} \
-  --account-id "${ACCOUNT_ID}" \
-  --test \
-  --yes
+sudo bash scripts/setup-broker-host.sh --test --yes
 ```
 
-`--test` is the single-flag shortcut: it derives `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`, `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`, and `noreply-test@bots-test.${ZONE}` automatically. Individual flags still override if you need a non-conventional name. For **prod**, drop `--test` and the defaults derive without `-test` suffixes.
+Two flags. `--test` triggers the `-test` suffix on every derived hostname / bucket / email; `--issuer-url` + `--account-id` auto-derive from `ZONE` + `ACCOUNT_ID` in `scripts/operator-workstation.env` (which the repo clone ships with). Override any flag explicitly if you need a non-conventional name. For **prod**, drop `--test`:
+
+```bash
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+What `--test` derives automatically:
+- `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`
+- `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`
+- `noreply-test@bots-test.${ZONE}`
+- `https://test-broker.${ZONE}` for the OIDC issuer URL
 
 After it completes, `ssh-agentkeys-test` (Instance Connect, no `.pem` needed) starts working — the script also creates the `agentkey` SSH login user + installs `ec2-instance-connect` so sshd's `AuthorizedKeysCommand` resolves the ephemeral keys.
 

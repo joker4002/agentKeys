@@ -342,6 +342,34 @@ EOF
   #                            --without-certbot to opt out)
 fi
 
+# ─── Auto-derive --issuer-url + --account-id from operator-workstation.env ──
+# When the operator-workstation.env in the repo has ZONE + ACCOUNT_ID set
+# (the default on every clone of this repo), the operator can omit those
+# flags. With --test set, ZONE → "https://test-broker.${ZONE}"; without,
+# → "https://broker.${ZONE}". CLI flags still win when explicitly passed.
+__opw_env="$REPO_ROOT/scripts/operator-workstation.env"
+if [[ -f "$__opw_env" ]]; then
+  if [[ -z "$ISSUER_URL" ]]; then
+    __zone=$(grep '^ZONE=' "$__opw_env" | head -1 | cut -d= -f2)
+    if [[ -n "$__zone" ]]; then
+      if [[ "$TEST_MODE" == "true" ]]; then
+        ISSUER_URL="https://test-broker.${__zone}"
+      else
+        ISSUER_URL="https://broker.${__zone}"
+      fi
+      log "Derived --issuer-url=$ISSUER_URL from ZONE=$__zone in $__opw_env"
+    fi
+  fi
+  if [[ -z "$ACCOUNT_ID" ]]; then
+    __acct=$(grep '^ACCOUNT_ID=' "$__opw_env" | head -1 | cut -d= -f2)
+    if [[ -n "$__acct" ]]; then
+      ACCOUNT_ID="$__acct"
+      log "Derived --account-id=$ACCOUNT_ID from $__opw_env"
+    fi
+  fi
+fi
+unset __opw_env __zone __acct
+
 # ─── Validate inputs ─────────────────────────────────────────────────────────
 [[ -n "$ISSUER_URL" ]] || die "--issuer-url is required (e.g. https://broker.litentry.org). Drop --non-interactive for an interactive walk-through."
 case "$ISSUER_URL" in
