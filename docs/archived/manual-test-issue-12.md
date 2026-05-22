@@ -97,6 +97,6 @@ unset HOME_SANDBOX AGENTKEYS_SESSION_STORE
 - `crates/agentkeys-core/src/session_store.rs` — new shared module
 - `crates/agentkeys-cli/src/lib.rs` — uses `"master"` session_id
 - `crates/agentkeys-daemon/src/main.rs`, `pairing.rs` — uses `daemon-<wallet>` session_id
-- `docs/spec/architecture.md` — daemon session storage section update (follow-up doc pass)
+- `docs/arch.md` — daemon session storage section update (follow-up doc pass)
 - `wiki/key-security.md` — storage table update (follow-up)
 - Related: #14 (daemon --parent), #3 (Stage 8 memory hygiene)

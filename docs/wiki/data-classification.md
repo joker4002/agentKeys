@@ -1,6 +1,6 @@
 # Data Classification: what is encrypted, what is plaintext, where
 
-> **Updated 2026-04-26 — credential storage row.** The "Credential blobs" row in §1 used to read "On chain: encrypted ciphertext." That position is superseded — sensitive ciphertext now lives **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only `(blob_pointer, ciphertext_hash, epoch)`. Architectural rationale: [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md). Operational design: [`docs/stage8-wip.md`](../docs/stage8-wip.md). The change is structural, not cosmetic — it closes the harvest-now-decrypt-later gap that on-chain ciphertext could not.
+> **Updated 2026-04-26 — credential storage row.** The "Credential blobs" row in §1 used to read "On chain: encrypted ciphertext." That position is superseded — sensitive ciphertext now lives **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only `(blob_pointer, ciphertext_hash, epoch)`. Architectural rationale: [`docs/spec/threat-model-key-custody.md`](../spec/threat-model-key-custody.md). Operational design: [`docs/stage8-wip.md`](../stage8-wip.md). The change is structural, not cosmetic — it closes the harvest-now-decrypt-later gap that on-chain ciphertext could not.
 
 Every piece of data in AgentKeys exists in one or more of four locations: the blockchain, the TEE, **off-chain content-addressed storage (S3 today)**, and the client (CLI or daemon). This document maps each data item to its encryption status at each location.
 
@@ -9,7 +9,7 @@ Companion docs:
 - `[wiki/blockchain-tee-architecture.md](./blockchain-tee-architecture.md)` — how the chain and TEE split responsibilities
 - `[wiki/key-security.md](./key-security.md)` — session vs credential security, hardening layers
 - `[wiki/serve-and-audit.md](./serve-and-audit.md)` — audit submission, Pattern 4, fee funding
-- [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md) — why nothing sensitive lives on chain or persistently in TEE; forward-secret epoch rotation
+- [`docs/spec/threat-model-key-custody.md`](../spec/threat-model-key-custody.md) — why nothing sensitive lives on chain or persistently in TEE; forward-secret epoch rotation
 
 ---
 
@@ -268,6 +268,6 @@ Every piece of data in the system falls into one of three categories:
 
 ### Spec
 
-- `[docs/spec/tech-brief.md](../docs/spec/tech-brief.md)` — shielding key model, TEE-chain split
-- `[docs/spec/credential-backend-interface.md](../docs/spec/credential-backend-interface.md)` — signing model, encryption contract
+- `[docs/spec/tech-brief.md](../spec/tech-brief.md)` — shielding key model, TEE-chain split
+- `[docs/spec/credential-backend-interface.md](../spec/credential-backend-interface.md)` — signing model, encryption contract
 

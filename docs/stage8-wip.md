@@ -207,9 +207,9 @@ There are no users today, so no live data to migrate. The migration is doc-and-d
 
 | Doc | Action |
 |---|---|
-| `wiki/blockchain-tee-architecture.md` §1 | Banner + table row update; cross-ref this doc + threat-model |
-| `wiki/data-classification.md` §1 | Update credential-blob row to "off-chain S3 + on-chain hash" |
-| `wiki/key-security.md` §1 | Update v0.1 storage column |
+| `docs/wiki/blockchain-tee-architecture.md` §1 | Banner + table row update; cross-ref this doc + threat-model |
+| `docs/wiki/data-classification.md` §1 | Update credential-blob row to "off-chain S3 + on-chain hash" |
+| `docs/wiki/key-security.md` §1 | Update v0.1 storage column |
 | `docs/spec/credential-backend-interface.md` "Mapping to Heima Primitives" | Replace `pallet-secrets-vault::write_secret` with S3 PUT + `pallet-vault-pointers::register_blob` |
 | `docs/spec/heima-gaps-vs-desired-architecture.md` | New gap entry: "off-chain ciphertext + on-chain pointers, not on-chain encrypted state" |
 | `docs/spec/plans/development-stages.md` | Renumber: new Stage 8 = this doc; old Stage 8 (memory hygiene) → Stage 9; old Stage 9 (Heima holding pen) → Stage 10 |

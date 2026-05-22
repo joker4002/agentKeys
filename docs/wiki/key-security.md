@@ -1,6 +1,6 @@
 # Key Security in AgentKeys
 
-> **Updated 2026-04-26 — v0.1 storage column.** §1 used to say "v0.1 Heima: encrypted blob in `pallet-secrets-vault` (on chain)." That target is superseded. The canonical v0.1 design moves ciphertext **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only pointer + hash. See [`docs/spec/threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md) and [`docs/stage8-wip.md`](../docs/stage8-wip.md). Stage 9 (memory hygiene; renumbered from Stage 8 in the same change) is unaffected.
+> **Updated 2026-04-26 — v0.1 storage column.** §1 used to say "v0.1 Heima: encrypted blob in `pallet-secrets-vault` (on chain)." That target is superseded. The canonical v0.1 design moves ciphertext **off-chain** (S3) under per-epoch DEKs that rotate; chain holds only pointer + hash. See [`docs/spec/threat-model-key-custody.md`](../spec/threat-model-key-custody.md) and [`docs/stage8-wip.md`](../stage8-wip.md). Stage 9 (memory hygiene; renumbered from Stage 8 in the same change) is unaffected.
 
 Reference notes on how AgentKeys stores session tokens and user credentials, what the macOS Keychain prompt behavior actually means, and why our architecture looks different from 1Password-style local vaults.
 
@@ -238,7 +238,7 @@ agentkeys run --agent 0xAGENT -- python my_agent.py
 
 ## 7. Daemon credential lifecycle and the two layers of hardening
 
-The daemon (`agentkeys-daemon`, component #2 in `docs/spec/architecture.md:50`) is the long-lived process that holds credentials between backend fetches and agent deliveries. It is a richer target than the CLI and gets a much stronger hardening posture, split across two stages of work.
+The daemon (`agentkeys-daemon`, component #2 in `docs/arch.md:50`) is the long-lived process that holds credentials between backend fetches and agent deliveries. It is a richer target than the CLI and gets a much stronger hardening posture, split across two stages of work.
 
 ### The credential's path through the daemon
 
@@ -271,7 +271,7 @@ The two surfaces need two different mitigation layers, and they map directly to 
 
 ### Layer 1 — Kernel hardening (already planned in Stage 3)
 
-`docs/spec/plans/development-stages.md:351-358` and `docs/spec/architecture.md:70` already specify the kernel-level defenses. They are required deliverables for Stage 3 (the daemon stage), with passing tests gating stage completion. Reproduced here for reference:
+`docs/spec/plans/development-stages.md:351-358` and `docs/arch.md:70` already specify the kernel-level defenses. They are required deliverables for Stage 3 (the daemon stage), with passing tests gating stage completion. Reproduced here for reference:
 
 
 | Feature                                          | What it blocks                                                            | Verified by                                         |
@@ -472,8 +472,8 @@ This doc focuses on **client-side** credential storage: keychain vs file, memory
 **OIDC URL hijack.** `https://oidc.agentkeys.dev` is a public HTTPS endpoint serving our JWKS. Stage 7's cryptographic trust anchor is URL + TLS + JWKS signature. Attackers who compromise DNS / CA / hosting / deploy pipeline can replace the JWKS and mint JWTs that downstream clouds (AWS / GCP / Ali) accept.
 
 - **Baseline hardening in Stage 7 (no blockchain):** AWS thumbprint pinning, CAA DNS records, DNSSEC where supported, 5-min JWT TTL, short `Cache-Control` on JWKS. These reduce the attack surface but don't close it.
-- **Chain-anchored defense in Stage 7b:** `pallet-oidc-pubkeys` + off-chain watchdog + daemon-side dual-verify for AgentKeys-owned accounts. Detection + auto-revocation in 30–60 s. Full spec in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) §8.
-- **TEE-hosted OIDC endpoint (future work):** defers past v0.1; closes the hole on foreign clouds too. Tracked in [`docs/spec/post-v0.1-future-work.md`](../docs/spec/post-v0.1-future-work.md) §2.1.
+- **Chain-anchored defense in Stage 7b:** `pallet-oidc-pubkeys` + off-chain watchdog + daemon-side dual-verify for AgentKeys-owned accounts. Detection + auto-revocation in 30–60 s. Full spec in [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md) §8.
+- **TEE-hosted OIDC endpoint (future work):** defers past v0.1; closes the hole on foreign clouds too. Tracked in [`docs/spec/post-v0.1-future-work.md`](../spec/post-v0.1-future-work.md) §2.1.
 
 ### How this doc's client-side model interacts with the server-side model
 
@@ -510,7 +510,7 @@ Both should be fixed together. The right fix is to add `agentkeys whoami` (see h
 - `docs/spec/tech-brief.md` — storage tiering, TEE shielding key model, `tech-brief.md:80` and `tech-brief.md:127`
 - `docs/spec/1-step-analysis.md` — "structurally different from 1Password" framing, session-tier table at `1-step-analysis.md:105`
 - `docs/spec/credential-backend-interface.md` — `CredentialBackend` trait definition, `AuthRequestType` enum including `HighValueRelease`
-- `docs/spec/architecture.md` — Rust-first rationale for security-critical paths (`architecture.md:43`)
+- `docs/arch.md` — Rust-first rationale for security-critical paths (`architecture.md:43`)
 
 ### Source
 

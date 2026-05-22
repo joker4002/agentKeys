@@ -84,7 +84,7 @@ Four different statements about where the daemon stores its session:
 
 | Source | Claim |
 |---|---|
-| `docs/spec/architecture.md:50, 139, 216, 254, 257` | Daemon "holds session key in `memfd_secret`" |
+| `docs/arch.md:50, 139, 216, 254, 257` | Daemon "holds session key in `memfd_secret`" |
 | `docs/spec/plans/development-stages.md:359` (Stage 3) | "Session file at `$HOME/.agentkeys/session` (mode 0600)" — plain file only |
 | `wiki/key-security.md:57` (Section 2 table row) | "Plain file (`~/.agentkeys/token`, mode 0600)… No keychain available" |
 | `wiki/blockchain-tee-architecture.md:273` | "memfd_secret under Stage 3 hardening, file at ~/.agentkeys/session mode 0600" |
@@ -103,7 +103,7 @@ Three separate mismatches:
 **Decision (2026-04-14):** Follow issue #12 — daemon uses OS keychain when available (desktop / Mac mini / Raspberry Pi with gnome-keyring/KDE Wallet), wallet-namespaced accounts (`service=agentkeys, account=daemon-<wallet>`), plain-file fallback (`~/.agentkeys/daemon-<wallet>/session.json`, mode 0600) in Docker/sandbox. `memfd_secret` is a **runtime-memory** mechanism for the in-process key copy — not at-rest storage. #12 implementation lands before Stage 8 Priority A begins.
 
 **Applied to:**
-- `docs/spec/architecture.md` row 2 (component inventory) — rewrote to reflect keychain-first-with-file-fallback + wallet-namespacing per #12; clarified `memfd_secret` is runtime key copy.
+- `docs/arch.md` row 2 (component inventory) — rewrote to reflect keychain-first-with-file-fallback + wallet-namespacing per #12; clarified `memfd_secret` is runtime key copy.
 - `wiki/key-security.md` §2 storage table — split "Daemon in sandbox" into two rows: desktop/Mac mini/Raspberry Pi (keychain) vs Docker/cloud sandbox (file fallback).
 - `wiki/blockchain-tee-architecture.md` §3 step 17 — updated storage note to keychain-first per #12 with file fallback and memfd_secret as runtime-copy layer.
 - Code changes (moving `session_store` to `agentkeys-core`, wallet-based session IDs) are the scope of #12 itself.

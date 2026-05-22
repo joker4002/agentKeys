@@ -1,6 +1,6 @@
 # AgentKeys — Wiki
 
-> **This wiki is auto-generated from the `wiki/` folder in the main repo.** Edit the source files there, not through the web UI — direct edits will be overwritten on the next push to `main`. The canonical source is [`wiki/` in `litentry/agentKeys`](https://github.com/litentry/agentKeys/tree/main/wiki).
+> **This wiki is auto-generated from the `docs/wiki/` folder in the main repo.** Edit the source files there, not through the web UI — direct edits will be overwritten on the next push to `main`. The canonical source is [`docs/wiki/` in `litentry/agentKeys`](https://github.com/litentry/agentKeys/tree/main/docs/wiki).
 
 AgentKeys is a credential custody service: a TEE-backed vault that issues long-lived bearer tokens for per-agent credential access, with on-chain audit. **We mint ephemeral credentials; daemons use them to call remote services directly.** Credential broker, not operation proxy.
 
@@ -64,7 +64,7 @@ Canonical design records live in `docs/spec/`:
 - **`docs/spec/ses-email-architecture.md`** — Stage 6 SES email spec.
 - **`docs/spec/email-signing-backends.md`** — generalized backend comparison (SES / DWD / SaaS).
 - **`docs/spec/credential-backend-interface.md`** — the `CredentialBackend` trait.
-- **`docs/spec/architecture.md`** — 13-component system architecture.
+- **`docs/arch.md`** — 13-component system architecture.
 - **`docs/spec/heima-gaps-vs-desired-architecture.md`** — living gap list: where current upstream `litentry/heima` differs from what the wiki describes (HDKD master seed, OIDC provider, BYODKIM, email pallets, session-tag propagation).
 
 Demo / operator docs:
@@ -78,10 +78,10 @@ Demo / operator docs:
 
 ## How to edit this wiki
 
-1. Open `wiki/<Page>.md` in the main repo.
+1. Open `docs/wiki/<Page>.md` in the main repo.
 2. Make changes in a PR.
 3. Merge to `main`.
-4. The `Publish wiki` GitHub Action mirrors `wiki/**` to the wiki repo.
+4. The `Publish wiki` GitHub Action mirrors `docs/wiki/**` to the wiki repo.
 
 A maintainer can also trigger the mirror manually from the repo's Actions tab — the workflow exposes `workflow_dispatch`.
 

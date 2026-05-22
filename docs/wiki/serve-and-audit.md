@@ -76,11 +76,11 @@ The "at some point" is where all the design work is. That's §3.
 
 ## 2. Why audit is load-bearing (and why v0.1 is fundamentally different from v0)
 
-Per `[docs/spec/heima-cli-exploration.md:85](../docs/spec/heima-cli-exploration.md)`:
+Per `[docs/spec/heima-cli-exploration.md:85](../spec/heima-cli-exploration.md)`:
 
 > Every `read_secret` is an extrinsic signed by the agent's ephemeral session key. The block explorer shows: `agent_pubkey 0xabc… (MRENCLAVE 0xdef…, owner OmniAccount 0x123…) read secret S at block N`. **This is cryptographic, not log-shaped. Forging it requires breaking SR25519.**
 
-And from the comparison table at `[docs/spec/heima-cli-exploration.md:105](../docs/spec/heima-cli-exploration.md)`:
+And from the comparison table at `[docs/spec/heima-cli-exploration.md:105](../spec/heima-cli-exploration.md)`:
 
 
 |               | 1Password CLI                           | Heima CLI                                                                              |
@@ -249,7 +249,7 @@ Audit event visible on block explorer
 
 **How it works:** the meta-transaction pattern (EIP-2771 on Ethereum; custom signed extension on Substrate), applied specifically to audit submission.
 
-The critical architectural move: **signer and payer are decoupled**. The audit extrinsic is *signed* by the user's wallet key (which Heima already holds in the TEE per `pallet-bitacross` pattern — see `[docs/spec/1-step-analysis.md:88](../docs/spec/1-step-analysis.md)`) so the on-chain event correctly attributes the read to the user's wallet address. But the *fees* come from a paymaster — no user-side top-up pool, no new fee primitive at the user level, no error path when "the wallet ran out of chain gas."
+The critical architectural move: **signer and payer are decoupled**. The audit extrinsic is *signed* by the user's wallet key (which Heima already holds in the TEE per `pallet-bitacross` pattern — see `[docs/spec/1-step-analysis.md:88](../spec/1-step-analysis.md)`) so the on-chain event correctly attributes the read to the user's wallet address. But the *fees* come from a paymaster — no user-side top-up pool, no new fee primitive at the user level, no error path when "the wallet ran out of chain gas."
 
 **Pros:**
 
@@ -358,7 +358,7 @@ Runtime adds a new primitive: TEE-originated audit extrinsics consume no fees. C
 
 - **Pros:** most architecturally elegant. Zero per-read cost to anyone. No treasury to fund, no fee-management code.
 - **Cons:** blocked on Heima runtime changes. Requires a new pallet primitive for free TEE-originated calls. Cannot ship in v0.1 without coordination with Kai on the runtime side.
-- **Status:** filed for reconsideration once Kai confirms feasibility. Tracked in `[docs/spec/heima-open-questions.md](../docs/spec/heima-open-questions.md)`.
+- **Status:** filed for reconsideration once Kai confirms feasibility. Tracked in `[docs/spec/heima-open-questions.md](../spec/heima-open-questions.md)`.
 
 ### Option C — User wallet pays from its existing USDC balance (FILED)
 
@@ -370,7 +370,7 @@ The TEE signs the audit extrinsic with the user's wallet key, and fees are debit
 
 ### Why Option A for v0.1
 
-The chosen option (A) minimizes Heima-side work and matches the hosted-AgentKeys business model. Options B and C remain open for future reconsideration as the product matures. See `[docs/spec/plans/development-stages.md](../docs/spec/plans/development-stages.md)` Stage 9 for the full decision record.
+The chosen option (A) minimizes Heima-side work and matches the hosted-AgentKeys business model. Options B and C remain open for future reconsideration as the product matures. See `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` Stage 9 for the full decision record.
 
 ---
 
@@ -407,7 +407,7 @@ Full design: [issue #4](https://github.com/litentry/agentKeys/issues/4).
 
 ## 9. Deferred decisions
 
-From the Stage 9 notes in `[docs/spec/plans/development-stages.md](../docs/spec/plans/development-stages.md)`, three things need explicit design work before Pattern 4 implementation starts:
+From the Stage 9 notes in `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)`, three things need explicit design work before Pattern 4 implementation starts:
 
 ### 9.1 Cross-pattern mixing: `--sync-audit` opt-out
 
@@ -453,7 +453,7 @@ Each has different durability-availability tradeoffs. **Decision deferred** unti
 
 - ⏳ **Rate limit ([issue #4](https://github.com/litentry/agentKeys/issues/4))** — must land in v0 mock backend as well as v0.1 TEE, prerequisite for Pattern 4
 - ⏳ **Pattern 4 ([issue #5](https://github.com/litentry/agentKeys/issues/5))** — TEE-side paymaster integration, decoupled serve/audit code path, failure handling strategy (deferred decisions above)
-- ⏳ **Stage 9 design decisions** captured in `[docs/spec/plans/development-stages.md](../docs/spec/plans/development-stages.md)` as a holding pen until v0.1 migration work begins
+- ⏳ **Stage 9 design decisions** captured in `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` as a holding pen until v0.1 migration work begins
 
 ### v0.2+ (future)
 
@@ -487,11 +487,11 @@ The ~50ms target assumes Heima TEE is co-located with the daemon's network reach
 
 ### Spec documents
 
-- `[docs/spec/tech-brief.md](../docs/spec/tech-brief.md)` — v0 / v0.1 split, TEE shielding key model
-- `[docs/spec/1-step-analysis.md](../docs/spec/1-step-analysis.md)` — auth layer design, `pallet-bitacross` pattern for TEE-held wallet keys
-- `[docs/spec/heima-cli-exploration.md](../docs/spec/heima-cli-exploration.md)` — audit-as-extrinsic design (line 85), latency acknowledgement (line 116)
-- `[docs/spec/heima-open-questions.md](../docs/spec/heima-open-questions.md)` — open questions for Kai including paymaster feasibility
-- `[docs/spec/plans/development-stages.md](../docs/spec/plans/development-stages.md)` — Stage 9 design decisions for Pattern 4, Option A fee funding, rate limit rationale
+- `[docs/spec/tech-brief.md](../spec/tech-brief.md)` — v0 / v0.1 split, TEE shielding key model
+- `[docs/spec/1-step-analysis.md](../spec/1-step-analysis.md)` — auth layer design, `pallet-bitacross` pattern for TEE-held wallet keys
+- `[docs/spec/heima-cli-exploration.md](../spec/heima-cli-exploration.md)` — audit-as-extrinsic design (line 85), latency acknowledgement (line 116)
+- `[docs/spec/heima-open-questions.md](../spec/heima-open-questions.md)` — open questions for Kai including paymaster feasibility
+- `[docs/spec/plans/development-stages.md](../spec/plans/development-stages.md)` — Stage 9 design decisions for Pattern 4, Option A fee funding, rate limit rationale
 - `[wiki/key-security.md](./key-security.md)` — companion doc on the broader security architecture
 
 ### Source

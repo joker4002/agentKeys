@@ -9,7 +9,7 @@
 **Reference docs**:
 - Stage 1 deliverable inventory — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
 - Stage 7 demo (parent for §0 prereqs, §1 init, §2 SIWE, §3 OIDC+STS, §4 isolation proof, §5 provision) — [docs/stage7-demo-and-verification.md](stage7-demo-and-verification.md)
-- Architecture v2 (single source of truth) — [docs/spec/architecture.md](spec/architecture.md)
+- Architecture v2 (single source of truth) — [docs/arch.md](arch.md)
 
 ---
 
@@ -1353,7 +1353,7 @@ Per-iteration error → fix log: [`docs/v2-stage1-iteration-log.md`](v2-stage1-i
 ## Cross-references
 
 - **Stage 1 deliverable inventory** — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
-- **Architecture v2 (single source of truth)** — [docs/spec/architecture.md](spec/architecture.md)
+- **Architecture v2 (single source of truth)** — [docs/arch.md](arch.md)
 - **Stage 7 demo (parent for inherited §0 prereqs + §1 init + §3 OIDC/STS)** — [docs/stage7-demo-and-verification.md](stage7-demo-and-verification.md)
 - **Cloud setup (parent for AWS IAM, OIDC provider, bucket policy)** — [docs/cloud-setup.md](cloud-setup.md)
 - **Heima EVM source** — [github.com/litentry/heima/parachain/runtime/heima/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/heima/src/lib.rs) (search `pub ChainId: u64 = 212013`)
