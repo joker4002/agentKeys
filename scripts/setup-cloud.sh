@@ -398,7 +398,7 @@ do_step_6() {
 
 do_step_7() {
   CUR_STEP=7; step "Mail bucket ($BUCKET)"
-  if aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
+  if aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" >/dev/null 2>&1; then
     skip "bucket $BUCKET already exists"
   else
     [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-bucket $BUCKET"; return; }
@@ -423,6 +423,39 @@ do_step_7() {
       Rules: [{ID:"inbound-30d-ttl", Status:"Enabled", Filter:{Prefix:"inbound/"}, Expiration:{Days:30}}]
     }')" >/dev/null || die "put-bucket-lifecycle-configuration failed"
   ok "public-access-block + 30-day inbound/ lifecycle applied"
+
+  # Apply the mail bucket policy here (was step 14 in earlier revisions).
+  # SES validates write access to the receipt-rule target bucket at
+  # `aws ses create-receipt-rule` call time (step 8). If the policy
+  # granting ses.amazonaws.com PutObject isn't already on the bucket,
+  # step 8 fails with `InvalidS3Configuration: Could not write to bucket`.
+  # Pre-existing prod buckets had the policy from a prior run, so the
+  # original step ordering worked by accident; freshly-created test
+  # buckets exposed the bug.
+  local current
+  current=$(aws s3api get-bucket-policy --region "$REGION" --bucket "$BUCKET" \
+    --query 'Policy' --output text 2>/dev/null || echo "{}")
+  if echo "$current" | jq -e '.Statement[]? | select(.Sid=="AllowSESWriteInbound")' >/dev/null 2>&1; then
+    skip "mail bucket policy already grants ses.amazonaws.com PutObject"
+  else
+    [ "$DRY_RUN" = "1" ] && { warn "DRY: would put-bucket-policy on $BUCKET"; return; }
+    aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
+      --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" --arg role "$DATA_ROLE" '{
+        Version:"2012-10-17",
+        Statement:[
+          {Sid:"AllowSESWriteInbound", Effect:"Allow",
+           Principal:{Service:"ses.amazonaws.com"},
+           Action:"s3:PutObject",
+           Resource:"arn:aws:s3:::\($bucket)/*",
+           Condition:{StringEquals:{"aws:Referer":$acct}}},
+          {Sid:"AllowDaemonRead", Effect:"Allow",
+           Principal:{AWS:"arn:aws:iam::\($acct):role/\($role)"},
+           Action:["s3:GetObject","s3:ListBucket"],
+           Resource:["arn:aws:s3:::\($bucket)","arn:aws:s3:::\($bucket)/*"]}
+        ]
+      }')" >/dev/null || die "put-bucket-policy failed"
+    ok "mail bucket policy applied (SES write + daemon read)"
+  fi
 }
 
 do_step_8() {
