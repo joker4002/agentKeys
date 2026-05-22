@@ -112,7 +112,103 @@ The runner doesn't ship with a checked-in env file. `harness-ci.yml` writes one 
 
 Full list + activation flow: [`docs/ci-setup.md`](ci-setup.md) §7. `setup-cloud.sh` validates required keys at step 2 and dies with a precise pointer if missing.
 
-### §0.1 IAM isolation matrix (prod ↔ test, same AWS account)
+### §0.1 Manual prereqs (must exist before `setup-cloud.sh` runs)
+
+`setup-cloud.sh` consumes already-existing identifiers — it does NOT register your domain, create a Route 53 hosted zone, or launch the EC2. Those are operator decisions (instance type, region, key pair, DNS provider choice) and don't belong in an automated script. Three manual prereqs before the orchestrator works:
+
+#### 1. Domain + Route 53 hosted zone
+
+You own a domain (e.g. `litentry.org`). If not, register one with any registrar (Namecheap, GoDaddy, Route 53 Domains, etc.) — fully manual, out of scope here.
+
+Create a Route 53 hosted zone for the domain (idempotent at the `caller-reference` level, but safe to skip if the zone already exists):
+
+```bash
+aws route53 create-hosted-zone \
+  --name "$ZONE" \
+  --caller-reference "agentkeys-$(date +%s)"
+```
+
+Look up the zone ID (strip the `/hostedzone/` prefix):
+
+```bash
+aws route53 list-hosted-zones \
+  --query 'HostedZones[?Name==`'"$ZONE"'.`].Id' --output text \
+  | awk -F/ '{print $NF}'
+# → Z09723983CFJOHAE3VC65
+```
+
+Paste it into `operator-workstation.env` as `PARENT_ZONE_ID=Z…`.
+
+**Delegation:** Route 53 outputs 4 NS records when you create the zone (visible via `aws route53 get-hosted-zone --id $PARENT_ZONE_ID --query 'DelegationSet.NameServers'`). Copy them into your registrar's DNS settings as the authoritative nameservers. Verify after propagation (usually <1h):
+
+```bash
+dig +short NS "$ZONE"
+# Should return 4 ns-XX.awsdns-YY.{com,net,org,co.uk} entries.
+```
+
+If `dig` returns the registrar's default nameservers instead, delegation hasn't propagated. All downstream DNS UPSERTs in §6 will silently miss until it does.
+
+**Non-Route 53 DNS providers:** `setup-cloud.sh` step 6 hardcodes Route 53 API calls. To use Cloudflare / DigitalOcean / etc., skip step 6 (`--to-step 5`) and replicate the same 12 records manually — see [§6](#6-dns-records-dkim--spf--dmarc--mx--6-a-records) below for the canonical record set. Test isolation works identically: a `test-broker.${ZONE}` A record under any DNS provider is the same byte-for-byte trust scope as under Route 53.
+
+#### 2. EC2 instance (or any Linux host)
+
+`setup-broker-host.sh` runs on any Linux box with sudo, systemd, public-internet egress, ports 22/80/443 open inbound. The host is your choice:
+
+| Setting | Prod | Test |
+|---|---|---|
+| Instance type | t3.small minimum | t3.micro is fine |
+| AMI | Ubuntu 22.04 LTS or Amazon Linux 2023 | same |
+| Security group | 22 (SSH), 80 (certbot HTTP-01), 443 (broker + workers TLS), all from `0.0.0.0/0` | same (AWS validates OIDC JWKS over public TLS from AWS IPs that aren't pinnable) |
+| Key pair | SSH key, EC2 Instance Connect, or SSM Session Manager | same |
+
+Launch via AWS console, `aws ec2 run-instances`, or your IaC tool. The script doesn't care which.
+
+**Getting the IP — two workflows:**
+
+**Workflow A (recommended): EC2-first, then attach EIP via `setup-cloud.sh`**
+
+```bash
+# 1. Launch EC2 → note INSTANCE_ID
+aws ec2 run-instances --instance-type t3.small --image-id <ami> --key-name <key> ...
+
+# 2. Bootstrap (allocates EIP + attaches to your instance + persists EIP to env file)
+INSTANCE_ID=<from-step-1> AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
+
+# 3. SSH (EIP is now in scripts/operator-workstation.env as EIP=…)
+ssh ubuntu@$(grep ^EIP= scripts/operator-workstation.env | cut -d= -f2)
+```
+
+**Workflow B: EIP-first, attach manually**
+
+```bash
+# 1. Allocate EIP (printed at §14 summary)
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
+
+# 2. Launch EC2
+aws ec2 run-instances ...
+
+# 3. Attach the EIP
+aws ec2 associate-address --region "$REGION" \
+  --instance-id <new-instance-id> \
+  --public-ip $(grep ^EIP= scripts/operator-workstation.env | cut -d= -f2)
+```
+
+A is one fewer command; B is sometimes necessary when an existing EC2 needs to be repointed at the EIP later.
+
+**For the TEST broker:** use `--env-file scripts/operator-workstation.test.env` so the EIP is tagged `agentkeys-broker-eip-test` and persisted to the test env file. A and B work identically against the test stack.
+
+#### 3. `agentkeys-admin` AWS profile
+
+A long-lived IAM user with `IAMFullAccess` + `AmazonS3FullAccess` + `AmazonSESFullAccess` + `AmazonRoute53FullAccess` permissions. Already provisioned per [CLAUDE.md "AWS local-profile ↔ remote-IAM mapping"](../CLAUDE.md). Switch to it before any bootstrap call:
+
+```bash
+awsp agentkeys-admin
+aws sts get-caller-identity   # → arn:aws:iam::…:user/agentkeys-admin
+```
+
+The bootstrap script intentionally doesn't auto-create the admin user — bootstrapping IAM root credentials onto disk is the kind of thing you only do once, by hand, with the IAM Console open.
+
+### §0.2 IAM isolation matrix (prod ↔ test, same AWS account)
 
 Same AWS account is fine — isolation comes from the `-test` suffix on every identifier, not from the account boundary. Cross-trust is structurally impossible because the trust policy on every test role lists ONLY the test OIDC provider ARN (which is bound byte-for-byte to `test-broker.${ZONE}`, never `broker.${ZONE}`).
 
