@@ -115,7 +115,23 @@ What `--test` derives automatically:
 - `noreply-test@bots-test.${ZONE}`
 - `https://test-broker.${ZONE}` for the OIDC issuer URL
 
-After it completes, `ssh-agentkeys-test` (Instance Connect, no `.pem` needed) starts working — the script also creates the `agentkey` SSH login user + installs `ec2-instance-connect` so sshd's `AuthorizedKeysCommand` resolves the ephemeral keys.
+When the script finishes (~10-15 min on `t3.small` cold; ~30-60s on re-runs), it does three things at the end so steady-state operator work is one keystroke from your laptop:
+
+1. **Creates the `agentkey` SSH login user** (separate from the `agentkeys` daemon system user).
+2. **Installs `ec2-instance-connect`** + writes the sshd `AuthorizedKeysCommand` config so EC2 Instance Connect can push ephemeral keys to `agentkey`.
+3. **Relocates the repo** `/home/ubuntu/agentKeys` → `/home/agentkey/agentKeys` (chowned to `agentkey`) so re-runs + ongoing edits happen as the steady-state user.
+
+Then exit the ubuntu session and reconnect as `agentkey` for everything from here on:
+
+```bash
+exit                       # leave the ubuntu fallback session
+ssh-agentkeys-test         # Instance Connect, no .pem needed
+cd ~/agentKeys             # → /home/agentkey/agentKeys, files visible
+```
+
+Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --test --yes`) happen from `/home/agentkey/agentKeys` — step 10's relocation is idempotent (existence check skips when already in place). The cargo build cache survives the move (it's inside `target/`); the Rust toolchain + registry cache live in `/root/.rustup` + `/root/.cargo` (sudo's home, unaffected by the relocation).
+
+For **prod**, the same flow applies — drop `--test` everywhere and the relocation moves the repo from whichever home dir you bootstrapped in to `/home/agentkey/`.
 
 ---
 
