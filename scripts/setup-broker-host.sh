@@ -1617,6 +1617,26 @@ EOF
   fi
 fi
 
+# ─── 10. Relocate repo from /home/ubuntu/ to /home/agentkey/ ─────────────────
+# When the operator runs setup-broker-host.sh from /home/ubuntu/agentKeys
+# (the documented "ssh as ubuntu fallback → git clone → bootstrap" flow),
+# steady-state operator work (ssh-agentkeys-test as `agentkey`) would
+# otherwise land in /home/agentkey/ which has no repo. Move the source
+# tree there + chown to agentkey so the operator sees their files via
+# the regular SSH path.
+#
+# Idempotent: only relocates if the repo is currently in /home/ubuntu/
+# AND /home/agentkey/agentKeys doesn't already exist. Re-runs from
+# /home/agentkey/agentKeys are no-ops.
+if [[ "$REPO_ROOT" == /home/ubuntu/* ]] && [[ ! -e /home/agentkey/agentKeys ]]; then
+  log "Relocating $REPO_ROOT → /home/agentkey/agentKeys (steady-state agentkey access)"
+  sudo mv "$REPO_ROOT" /home/agentkey/agentKeys
+  sudo chown -R agentkey:agentkey /home/agentkey/agentKeys
+  REPO_MOVED=1
+else
+  REPO_MOVED=0
+fi
+
 cat <<EOF
   Smoke test (from a client machine — NOT this host):
     curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $ISSUER_URL/healthz        # expect: HTTP 200
@@ -1624,8 +1644,20 @@ cat <<EOF
     curl -sf $ISSUER_URL/.well-known/jwks.json | jq '.keys[0].kid'
     curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://$SIGNER_HOST/healthz  # expect: HTTP 200 (after certbot)
 
-  Then continue with docs/cloud-setup.md §4 "OIDC federation" to register
+  Then continue with docs/cloud-bootstrap.md §9 "OIDC federation" to register
   the OIDC provider with AWS IAM and verify cloud-enforced isolation.
 
 ================================================================================
 EOF
+
+if [[ "$REPO_MOVED" == "1" ]]; then
+  cat <<EOF
+
+  NOTE: repo was moved /home/ubuntu/agentKeys → /home/agentkey/agentKeys.
+  Your current shell's \$PWD is now stale. After this script exits:
+    1. exit              # the ubuntu SSH session
+    2. ssh-agentkeys-test  # from your laptop — lands as agentkey
+    3. cd ~/agentKeys      # → /home/agentkey/agentKeys (with the repo)
+================================================================================
+EOF
+fi
