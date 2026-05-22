@@ -80,8 +80,12 @@ STEP_TOTAL=15
 
 # Colors only when stderr is a TTY.
 if [ -t 2 ]; then
-  COLOR_OK='\033[32m'; COLOR_WARN='\033[33m'; COLOR_FAIL='\033[31m'
-  COLOR_HEAD='\033[1m'; COLOR_RESET='\033[0m'
+  # ANSI-C quoting ($'…') so the vars hold the actual ESC byte. This way
+  # `printf '%s' "$COLOR_HEAD"` renders bold instead of printing the literal
+  # six-char string "\033[1m". Format-string interpolation
+  # ("${COLOR_HEAD}…${COLOR_RESET}") works either way.
+  COLOR_OK=$'\033[32m'; COLOR_WARN=$'\033[33m'; COLOR_FAIL=$'\033[31m'
+  COLOR_HEAD=$'\033[1m'; COLOR_RESET=$'\033[0m'
 else
   COLOR_OK=''; COLOR_WARN=''; COLOR_FAIL=''; COLOR_HEAD=''; COLOR_RESET=''
 fi
@@ -115,6 +119,16 @@ if [ "$TEST_MODE" = "0" ]; then
     *test*) TEST_MODE=1 ;;
   esac
 fi
+
+# When --test is set but --env-file is still the prod default, auto-switch
+# to operator-workstation.test.env so a bare `--test` produces an
+# end-to-end test invocation (hostnames + buckets + IAM names all -test),
+# not the half-test trap where --test only suffixed IAM identifiers while
+# BROKER_HOST / MAIL_DOMAIN stayed prod.
+if [ "$TEST_MODE" = "1" ] && [ "$ENV_FILE" = "$SCRIPT_DIR/operator-workstation.env" ]; then
+  ENV_FILE="$SCRIPT_DIR/operator-workstation.test.env"
+fi
+
 SUFFIX=""
 [ "$TEST_MODE" = "1" ] && SUFFIX="-test"
 DAEMON_USER="agentkeys-daemon${SUFFIX}"
