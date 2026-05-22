@@ -269,32 +269,20 @@ Default AWS profiles per stack (least-privilege, one-shot to provision):
 | `prod` | `agentkeys-broker` | `ec2-instance-connect:SendSSHPublicKey` on the prod instance ARN only |
 | `test` | `agentkeys-broker-test` | same, scoped to the test instance ARN |
 
-If `agentkeys-broker-test` doesn't exist yet, create it once (parallel to `agentkeys-broker`):
+If `agentkeys-broker` or `agentkeys-broker-test` doesn't exist yet, `setup-cloud.sh` step 12 creates it idempotently (scoped to whatever `INSTANCE_ID` is set in the corresponding broker env file):
 
 ```bash
-awsp agentkeys-admin
-TEST_INSTANCE_ID=$(grep ^INSTANCE_ID= scripts/broker.test.env | cut -d= -f2)
+# Test stack — creates agentkeys-broker-test, scopes ec2-instance-connect
+# to INSTANCE_ID from broker.test.env, mints an access key ONCE if none
+# active. Re-run is a no-op once the user + policy + key already exist.
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh \
+  --env-file scripts/operator-workstation.test.env --test --only-step 12
 
-aws iam create-user --user-name agentkeys-broker-test
-aws iam put-user-policy --user-name agentkeys-broker-test \
-  --policy-name agentkeys-broker-test-ec2ic \
-  --policy-document "$(jq -n \
-    --arg acct "$ACCOUNT_ID" --arg id "$TEST_INSTANCE_ID" '{
-      Version: "2012-10-17",
-      Statement: [
-        {Effect:"Allow", Action:"ec2-instance-connect:SendSSHPublicKey",
-         Resource:"arn:aws:ec2:*:\($acct):instance/\($id)",
-         Condition:{StringEquals:{"ec2:osuser":"agentkey"}}},
-        {Effect:"Allow",
-         Action:["ec2:DescribeInstances","ec2:DescribeInstanceConnectEndpoints"],
-         Resource:"*"}
-      ]
-    }')"
-aws iam create-access-key --user-name agentkeys-broker-test
-# → paste output into ~/.aws/credentials as [agentkeys-broker-test]
+# Prod stack (the canonical `agentkeys-broker` user from CLAUDE.md):
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --only-step 12
 ```
 
-This user is **not** auto-created by `setup-cloud.sh` because it's an operator-facing IAM principal (your SSH key, not the broker's data-plane key) — same rationale as why `agentkeys-broker` and `agentkeys-admin` are pre-existing per CLAUDE.md "AWS local-profile ↔ remote-IAM mapping" rather than provisioned by automation.
+The script prints the access key once (paste into `~/.aws/credentials` as `[agentkeys-broker]` / `[agentkeys-broker-test]`) — it never re-mints on subsequent runs because the operator already holds the secret. If `INSTANCE_ID` is unset in the broker env file, step 12 skips with a pointer to paste it first.
 
 Shell wrappers (drop in `~/.zshrc`) make the common case one keystroke:
 

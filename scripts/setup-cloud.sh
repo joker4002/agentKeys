@@ -59,8 +59,10 @@
 #   - Step 8 (SES receipt rule): describe-receipt-rule pre-check
 #   - Step 10 (daemon user): get-user pre-check; access key minted ONCE
 #   - Step 11 (data role): get-role pre-check; put-role-policy idempotent
-#   - Step 12 (per-data-class): delegated helpers are all idempotent
-#   - Step 13 (mail bucket policy): get-bucket-policy diff against target
+#   - Step 12 (SSH user): get-user pre-check; access key minted ONCE; grant
+#                          scoped to INSTANCE_ID from $BROKER_ENV_FILE
+#   - Step 13 (per-data-class): delegated helpers are all idempotent
+#   - Step 14 (mail bucket policy): get-bucket-policy diff against target
 
 set -euo pipefail
 
@@ -73,8 +75,8 @@ BROKER_ENV_FILE=""   # resolved post-CLI-parse based on TEST_MODE
 YES=0
 DRY_RUN=0
 FROM_STEP=1
-TO_STEP=14
-STEP_TOTAL=14
+TO_STEP=15
+STEP_TOTAL=15
 
 # Colors only when stderr is a TTY.
 if [ -t 2 ]; then
@@ -117,6 +119,7 @@ SUFFIX=""
 [ "$TEST_MODE" = "1" ] && SUFFIX="-test"
 DAEMON_USER="agentkeys-daemon${SUFFIX}"
 DATA_ROLE="agentkeys-data-role${SUFFIX}"
+SSH_USER="agentkeys-broker${SUFFIX}"
 
 # Resolve BROKER_ENV_FILE default if not set via flag: matches TEST_MODE.
 if [ -z "$BROKER_ENV_FILE" ]; then
@@ -523,7 +526,67 @@ do_step_11() {
 }
 
 do_step_12() {
-  CUR_STEP=12; step "Per-data-class buckets + roles (delegates to provision-*.sh)"
+  CUR_STEP=12; step "IAM user $SSH_USER (operator SSH via EC2 Instance Connect)"
+  if [ -z "${INSTANCE_ID:-}" ]; then
+    skip "INSTANCE_ID unset in $BROKER_ENV_FILE — paste 'INSTANCE_ID=i-…' once EC2 exists, then re-run: bash $0 --env-file $ENV_FILE --broker-env-file $BROKER_ENV_FILE$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "") --only-step 12"
+    return
+  fi
+
+  if aws iam get-user --user-name "$SSH_USER" >/dev/null 2>&1; then
+    skip "IAM user $SSH_USER already exists"
+  else
+    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-user $SSH_USER"; return; }
+    aws iam create-user --user-name "$SSH_USER" >/dev/null \
+      || die "create-user $SSH_USER failed"
+    ok "IAM user $SSH_USER created"
+  fi
+
+  # Inline policy: scoped ec2-instance-connect:SendSSHPublicKey on the
+  # broker's INSTANCE_ID + describe APIs for the AWS CLI tooling to
+  # resolve instance metadata. The Condition pins the OS user to
+  # "agentkey" — Instance Connect refuses calls outside that allowlist.
+  [ "$DRY_RUN" = "1" ] || aws iam put-user-policy --user-name "$SSH_USER" \
+    --policy-name "${SSH_USER}-ec2ic" \
+    --policy-document "$(jq -n \
+      --arg acct "$ACCOUNT_ID" --arg id "$INSTANCE_ID" '{
+        Version:"2012-10-17",
+        Statement:[
+          {Effect:"Allow",
+           Action:"ec2-instance-connect:SendSSHPublicKey",
+           Resource:"arn:aws:ec2:*:\($acct):instance/\($id)",
+           Condition:{StringEquals:{"ec2:osuser":"agentkey"}}},
+          {Effect:"Allow",
+           Action:["ec2:DescribeInstances","ec2:DescribeInstanceConnectEndpoints"],
+           Resource:"*"}
+        ]
+      }')" >/dev/null || die "put-user-policy for $SSH_USER failed"
+  ok "$SSH_USER inline policy applied (scoped to $INSTANCE_ID)"
+
+  local active_keys
+  active_keys=$(aws iam list-access-keys --user-name "$SSH_USER" \
+    --query 'AccessKeyMetadata[?Status==`Active`] | length(@)' --output text)
+  if [ "$active_keys" -ge 1 ]; then
+    skip "$SSH_USER already has $active_keys active access key(s) — operator must already hold them"
+  else
+    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-access-key $SSH_USER"; return; }
+    warn "creating a new access key — SAVE THE SECRET, it is shown ONCE"
+    local key_json key_id key_secret
+    key_json=$(aws iam create-access-key --user-name "$SSH_USER" --output json) \
+      || die "create-access-key failed"
+    key_id=$(echo "$key_json"     | jq -r .AccessKey.AccessKeyId)
+    key_secret=$(echo "$key_json" | jq -r .AccessKey.SecretAccessKey)
+    printf "\n    %sAdd to ~/.aws/credentials as a new profile block:%s\n" \
+      "$COLOR_HEAD" "$COLOR_RESET" >&2
+    printf "      [%s]\n"                  "$SSH_USER"   >&2
+    printf "      aws_access_key_id     = %s\n"     "$key_id"     >&2
+    printf "      aws_secret_access_key = %s\n"     "$key_secret" >&2
+    printf "      region                = %s\n\n"   "$REGION"     >&2
+    ok "access key minted — NEVER commit to git"
+  fi
+}
+
+do_step_13() {
+  CUR_STEP=13; step "Per-data-class buckets + roles (delegates to provision-*.sh)"
   if [ "$DRY_RUN" = "1" ]; then
     warn "DRY: would run provision-{vault,memory}-{bucket,role}.sh + apply-{vault,memory}-bucket-policy.sh"
     return
@@ -537,8 +600,8 @@ do_step_12() {
   ok "per-data-class provisioning complete"
 }
 
-do_step_13() {
-  CUR_STEP=13; step "Initial mail bucket policy (static-IAM variant)"
+do_step_14() {
+  CUR_STEP=14; step "Initial mail bucket policy (static-IAM variant)"
   # Pre-check: policy already contains AllowDaemonRead Sid?
   local current
   current=$(aws s3api get-bucket-policy --region "$REGION" --bucket "$BUCKET" \
@@ -567,8 +630,8 @@ do_step_13() {
   ok "mail bucket policy applied"
 }
 
-do_step_14() {
-  CUR_STEP=14; step "Summary + next steps"
+do_step_15() {
+  CUR_STEP=15; step "Summary + next steps"
   printf "\n${COLOR_OK}═══ Cloud bootstrap complete ═══${COLOR_RESET}\n\n" >&2
   printf "  Operator env file : %s\n" "$ENV_FILE" >&2
   printf "  Broker env file   : %s\n" "$BROKER_ENV_FILE" >&2
@@ -600,7 +663,8 @@ do_step_14() {
 
   printf "  Re-run any step surgically (idempotent):\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 6   # re-UPSERT DNS\n" >&2
-  printf "    bash scripts/setup-cloud.sh --only-step 12  # re-run per-data-class provisioning\n\n" >&2
+  printf "    bash scripts/setup-cloud.sh --only-step 12  # re-create SSH user (e.g. after EC2 replace)\n" >&2
+  printf "    bash scripts/setup-cloud.sh --only-step 13  # re-run per-data-class provisioning\n\n" >&2
 }
 
 main() {
@@ -618,6 +682,7 @@ main() {
   in_scope 12 && do_step_12
   in_scope 13 && do_step_13
   in_scope 14 && do_step_14
+  in_scope 15 && do_step_15
 }
 
 main "$@"
