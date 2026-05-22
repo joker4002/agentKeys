@@ -28,14 +28,21 @@ For each stack (prod and test) you stand up SEPARATELY:
 
 ### 2. Fill in the 4 env files (one-time per environment)
 
-The 2×2 matrix: `{operator-workstation, broker} × {prod, test}` = 4 files. The two operator-workstation files carry account-wide identifiers; the two broker files carry per-machine identifiers (INSTANCE_ID + EIP).
+The 2×2 matrix: `{operator-workstation, broker} × {prod, test}` = 4 files. The two operator-workstation files carry account-wide identifiers; the two broker files carry per-machine identifiers (`INSTANCE_ID` + `EIP`).
 
-| File | Edit | What to set |
+**Both operator-workstation files are pre-populated with `litentry.org` / account `429071895007` defaults**, and every derived value uses bash `${VAR}` substitution off of `ACCOUNT_ID` / `BROKER_HOST` / `ZONE`. The script writes 2 values back automatically — operator never hand-edits them:
+
+- **`EIP=…`** persisted to broker env file by step 4 (after allocate-or-adopt)
+- **`DATA_ROLE_ARN=…`** persisted to operator env file by step 11 (after data role create)
+
+| File | Operator edits | What to set |
 |---|---|---|
-| [`scripts/operator-workstation.env`](../scripts/operator-workstation.env) | Once per prod account | `ACCOUNT_ID`, `REGION`, `ZONE`, `PARENT_ZONE_ID`, `BROKER_HOST`, `MAIL_DOMAIN` (the rest derives) |
-| [`scripts/operator-workstation.test.env`](../scripts/operator-workstation.test.env) | Once per test instance | same shape, `-test` suffix everywhere (file pre-populated; verify `ACCOUNT_ID` + `ZONE` match yours) |
-| [`scripts/broker.env`](../scripts/broker.env) | Per prod EC2 | `INSTANCE_ID=…`, `EIP=…` |
-| [`scripts/broker.test.env`](../scripts/broker.test.env) | Per test EC2 | `INSTANCE_ID=…`, `EIP=…` |
+| [`scripts/operator-workstation.env`](../scripts/operator-workstation.env) | **None** if your account is `litentry.org` / `429071895007`. **5 keys** if you're forking: `ACCOUNT_ID`, `BROKER_HOST`, `ZONE`, `PARENT_ZONE_ID`, `MAIL_DOMAIN` (the other ~20 keys all derive). | account-wide identifiers |
+| [`scripts/operator-workstation.test.env`](../scripts/operator-workstation.test.env) | **None** in the same case. Same 5 keys (or just `ZONE` + `PARENT_ZONE_ID`) for a fork. | `-test` variants pre-derived |
+| [`scripts/broker.env`](../scripts/broker.env) | `INSTANCE_ID=i-…` | `EIP` is written by the script |
+| [`scripts/broker.test.env`](../scripts/broker.test.env) | `INSTANCE_ID=i-…` | `EIP` is written by the script |
+
+In practice: paste `INSTANCE_ID` into the two broker env files. Done.
 
 ### 3. Run `setup-cloud.sh` (~3 min, idempotent)
 
