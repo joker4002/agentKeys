@@ -48,9 +48,15 @@ while [ $# -gt 0 ]; do
       sed -n '2,30p' "$0" | sed 's/^# //; s/^#//'
       exit 0
       ;;
-    *) echo "Unknown arg: $1 (see --help)" >&2; exit 2 ;;
+    --)               shift; break ;;
+    *)                break ;;    # unknown arg → start of remote command passthrough
   esac
 done
+# Anything left in "$@" is forwarded to the SSH session as the remote
+# command — so `ssh-broker.sh test echo hi` runs `echo hi` on the test
+# host. Both `aws ec2-instance-connect ssh` and raw `ssh` accept a
+# trailing command after their flags.
+EXTRA_ARGS=("$@")
 
 # Resolve env file + default profile + default OS user per stack.
 case "$STACK" in
@@ -80,12 +86,19 @@ if [ "$FALLBACK" = "1" ]; then
   [ -f "$PEM_PATH" ] || { echo "PEM key not found at $PEM_PATH — pass --pem <path>" >&2; exit 1; }
   : "${OS_USER:=ubuntu}"
   echo "ssh -i $PEM_PATH $OS_USER@$EIP   (stack=$STACK, instance=$INSTANCE_ID)" >&2
-  exec ssh -i "$PEM_PATH" "$OS_USER@$EIP"
+  # ssh takes a remote command directly after host (no separator needed).
+  exec ssh -i "$PEM_PATH" "$OS_USER@$EIP" "${EXTRA_ARGS[@]}"
 else
   : "${OS_USER:=agentkey}"
   echo "aws ec2-instance-connect ssh --instance-id $INSTANCE_ID --os-user $OS_USER   (stack=$STACK, profile=$AWS_PROFILE_OVERRIDE)" >&2
-  exec env AWS_PROFILE="$AWS_PROFILE_OVERRIDE" \
-    aws ec2-instance-connect ssh \
-      --instance-id "$INSTANCE_ID" \
-      --os-user "$OS_USER"
+  # `aws ec2-instance-connect ssh` parses everything as its own options
+  # unless we insert `--` to terminate AWS CLI flag parsing — only then
+  # do trailing args get passed to the underlying ssh as a remote command.
+  cmd=(aws ec2-instance-connect ssh
+       --instance-id "$INSTANCE_ID"
+       --os-user "$OS_USER")
+  if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
+    cmd+=(-- "${EXTRA_ARGS[@]}")
+  fi
+  exec env AWS_PROFILE="$AWS_PROFILE_OVERRIDE" "${cmd[@]}"
 fi
