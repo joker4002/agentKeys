@@ -87,7 +87,9 @@ if [ "$FALLBACK" = "1" ]; then
   : "${OS_USER:=ubuntu}"
   echo "ssh -i $PEM_PATH $OS_USER@$EIP   (stack=$STACK, instance=$INSTANCE_ID)" >&2
   # ssh takes a remote command directly after host (no separator needed).
-  exec ssh -i "$PEM_PATH" "$OS_USER@$EIP" "${EXTRA_ARGS[@]}"
+  # ${arr[@]+"${arr[@]}"} avoids the bash 3.2 (macOS default) "unbound
+  # variable" error from `"${arr[@]}"` on an empty array under set -u.
+  exec ssh -i "$PEM_PATH" "$OS_USER@$EIP" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 else
   : "${OS_USER:=agentkey}"
   echo "aws ec2-instance-connect ssh --instance-id $INSTANCE_ID --os-user $OS_USER   (stack=$STACK, profile=$AWS_PROFILE_OVERRIDE)" >&2
