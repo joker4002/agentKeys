@@ -12,46 +12,108 @@ After this doc is run, the operator returns here ONLY when:
 
 The day-to-day broker re-deploys live in §10 below (`setup-broker-host.sh`); they re-run that section without touching §§1–9.
 
-## TL;DR — operator flow
+## Quick start — five steps to a running stack
 
-The idempotent one-shot orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) walks every step in this doc end-to-end. Same posture as `setup-broker-host.sh` + `setup-heima.sh`: every step pre-checks state and short-circuits when the work is already a no-op.
+Tight five-step flow. Explanation + per-step reasoning are in §1–§11 below; the same flow works for prod (no `--test`) or test (`--test` swaps in `-test` identifiers everywhere). The orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) is idempotent — re-running is safe.
+
+### 1. Get the EC2 + EIP (manual, ~5 min per stack)
+
+For each stack (prod and test) you stand up SEPARATELY:
+
+- Launch an EC2 — **t3.small minimum** (Ubuntu 22.04 LTS recommended). `t3.micro` runs the OS but its 1 GB RAM gets OOM-killed compiling `aws-sdk-s3` during `setup-broker-host.sh`. If you already have a t3.micro you can resize: `aws ec2 stop-instances` → `modify-instance-attribute --instance-type t3.small` → `start-instances` (EIP stays attached, INSTANCE_ID unchanged).
+- Allocate an EIP (or reuse one) and attach it to the EC2.
+- Generate or import an SSH key pair (the `.pem` you'll keep as the fallback when EC2 Instance Connect is down). Confirm SSH works: `ssh -i your.pem ubuntu@<EIP>`.
+- The default `ubuntu` user is enough for now — the `agentkey` system user (used by EC2 Instance Connect later) is created automatically by `setup-broker-host.sh` in step 5.
+- Note **INSTANCE_ID** + **EIP** — both go into the env files in step 2.
+
+### 2. Fill in the 4 env files (one-time per environment)
+
+The 2×2 matrix: `{operator-workstation, broker} × {prod, test}` = 4 files. The two operator-workstation files carry account-wide identifiers; the two broker files carry per-machine identifiers (INSTANCE_ID + EIP).
+
+| File | Edit | What to set |
+|---|---|---|
+| [`scripts/operator-workstation.env`](../scripts/operator-workstation.env) | Once per prod account | `ACCOUNT_ID`, `REGION`, `ZONE`, `PARENT_ZONE_ID`, `BROKER_HOST`, `MAIL_DOMAIN` (the rest derives) |
+| [`scripts/operator-workstation.test.env`](../scripts/operator-workstation.test.env) | Once per test instance | same shape, `-test` suffix everywhere (file pre-populated; verify `ACCOUNT_ID` + `ZONE` match yours) |
+| [`scripts/broker.env`](../scripts/broker.env) | Per prod EC2 | `INSTANCE_ID=…`, `EIP=…` |
+| [`scripts/broker.test.env`](../scripts/broker.test.env) | Per test EC2 | `INSTANCE_ID=…`, `EIP=…` |
+
+### 3. Run `setup-cloud.sh` (~3 min, idempotent)
 
 ```bash
-# 1. Configure env on the operator's workstation. For prod, edit:
-#      scripts/operator-workstation.env
-#    For test, the parallel file is pre-populated with -test names:
-#      scripts/operator-workstation.test.env
-#    Required keys: ACCOUNT_ID REGION ZONE PARENT_ZONE_ID BROKER_HOST
-#    MAIL_DOMAIN BUCKET (+ VAULT_BUCKET / MEMORY_BUCKET / DATA_ROLE_ARN
-#    / VAULT_ROLE_ARN / MEMORY_ROLE_ARN — already present in the template).
-
 awsp agentkeys-admin
 
-# 2. Launch EC2 (operator decides instance type + image + key pair):
-aws ec2 run-instances --instance-type t3.small --image-id <ami> --key-name <key> ...
-# → note the INSTANCE_ID
+# Prod stack:
+bash scripts/setup-cloud.sh --yes
 
-# 3. Paste INSTANCE_ID into the env file (one line):
-echo 'INSTANCE_ID=<id-from-step-2>' >> scripts/operator-workstation.env
-
-# 4. Run the orchestrator (~14 steps, idempotent, ~3 min on a fresh account).
-#    Step 4 allocates the EIP, attaches to INSTANCE_ID, and writes EIP=…
-#    back to the env file. Subsequent runs reuse it.
-AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
-
-# 5. SSH to the host, clone the repo, then:
-sudo bash scripts/setup-broker-host.sh \
-  --issuer-url "https://${BROKER_HOST}" --account-id "${ACCOUNT_ID}" --yes
+# Test stack — --test auto-selects scripts/operator-workstation.test.env
+# + scripts/broker.test.env and suffixes IAM identifiers with -test:
+bash scripts/setup-cloud.sh --test --yes
 ```
 
-For the **test stack**, swap in `--env-file scripts/operator-workstation.test.env --test` on step 4 and use a SEPARATE test EC2 (single-tenant — don't co-locate with prod):
+The orchestrator walks 15 idempotent steps (cloud-side AWS resources + IAM users + per-data-class roles + bucket policies + DNS UPSERTs). Steps 10 (`agentkeys-daemon[-test]`) and 12 (`agentkeys-broker[-test]`) print **access keys** to copy off — they're shown ONCE.
+
+### 4. Configure local credentials + shell aliases (paste, one-time)
+
+Append the two access-key blocks from step 3 to `~/.aws/credentials`:
+
+```ini
+[agentkeys-daemon-test]
+aws_access_key_id     = AKIA…
+aws_secret_access_key = …
+region                = us-east-1
+
+[agentkeys-broker-test]
+aws_access_key_id     = AKIA…
+aws_secret_access_key = …
+region                = us-east-1
+```
+
+(Drop the `-test` suffix for the prod variants. Account-owner `agentkeys-admin` is shared — no `-test` variant.)
+
+Add to `~/.zshenv` (works in zsh + bash):
+
+```zsh
+export AGENTKEYS_REPO="$HOME/Projects/agentKeys"
+alias ssh-agentkeys='bash $AGENTKEYS_REPO/scripts/ssh-broker.sh prod'
+alias ssh-agentkeys-test='bash $AGENTKEYS_REPO/scripts/ssh-broker.sh test'
+alias ssh-agentkeys-fallback='bash $AGENTKEYS_REPO/scripts/ssh-broker.sh prod --fallback'
+alias ssh-agentkeys-test-fallback='bash $AGENTKEYS_REPO/scripts/ssh-broker.sh test --fallback'
+```
+
+`source ~/.zshenv`. The fallback aliases use the `.pem` key + `ubuntu` user; the non-fallback ones use EC2 Instance Connect + the `agentkey` user (which comes online in step 5).
+
+### 5. SSH in + run `setup-broker-host.sh` on the EC2
+
+First-time SSH: use the **fallback** path (the `agentkey` user doesn't exist yet — `setup-broker-host.sh` creates it):
 
 ```bash
-AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh \
-  --env-file scripts/operator-workstation.test.env --test --yes
+ssh-agentkeys-test-fallback   # ssh -i ~/.ssh/your.pem ubuntu@<test EIP>
+
+# On the EC2 (~10-15 min on t3.small):
+git clone https://github.com/litentry/agentKeys.git
+cd agentKeys
+
+sudo bash scripts/setup-broker-host.sh \
+  --issuer-url https://test-broker.${ZONE} \
+  --account-id "${ACCOUNT_ID}" \
+  --signer-host signer-test.${ZONE} \
+  --audit-host  audit-test.${ZONE} \
+  --email-host  email-test.${ZONE} \
+  --cred-host   cred-test.${ZONE} \
+  --memory-host memory-test.${ZONE} \
+  --vault-bucket  agentkeys-vault-test-${ACCOUNT_ID} \
+  --memory-bucket agentkeys-memory-test-${ACCOUNT_ID} \
+  --email-from    noreply-test@bots-test.${ZONE} \
+  --yes
 ```
 
-For surgical re-runs after a fix: `bash scripts/setup-cloud.sh --only-step N` (see step list below).
+After it completes, `ssh-agentkeys-test` (Instance Connect, no `.pem` needed) starts working — the script created the `agentkey` user with EC2 Instance Connect's `AuthorizedKeysCommand` hook.
+
+For **prod**, drop `-test` everywhere + run without `--test` in step 3.
+
+---
+
+The rest of this doc explains **why** each step exists and how to recover from failures. Operators following the quick start above can skip to [`docs/chain-setup.md`](chain-setup.md) once step 5 completes.
 
 ```
 §1  Identities         — four IAM principals; concept first, then provider commands
@@ -62,7 +124,12 @@ For surgical re-runs after a fix: `bash scripts/setup-cloud.sh --only-step N` (s
 §6  Instance profile   — agentkeys-broker-host (optional, EC2-only)
 §7  Security audit     — strip legacy over-broad attached policies
 §8  Cloud portability  — AWS → AliCloud / GCP / Tencent Cloud mapping
+§9  OIDC federation    — per-broker security upgrade after broker is reachable
+§10 Broker host        — what setup-broker-host.sh does
+§11 Cleanup            — full account teardown
 ```
+
+Surgical re-run of any single step: `bash scripts/setup-cloud.sh --only-step N` (with `--test` for test).
 
 ### Env files reference (4 files + CI runner)
 
