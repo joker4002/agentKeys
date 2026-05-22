@@ -45,20 +45,99 @@ For surgical re-runs after a fix: `bash scripts/setup-cloud.sh --only-step N` (s
 §8  Cloud portability  — AWS → AliCloud / GCP / Tencent Cloud mapping
 ```
 
-### Required env (in `scripts/operator-workstation.env`)
+### Env files reference (4 files + CI runner)
 
-| Variable | Example | Used by |
+Four env files cover the 2×2 matrix of {operator, broker} × {prod, test}. The GitHub Actions runner doesn't get its own file — it materializes the operator-workstation env inline at job start from `TEST_*` secrets.
+
+| File | Lives on | Scope | Sourced by |
+|---|---|---|---|
+| [`scripts/operator-workstation.env`](../scripts/operator-workstation.env) | operator laptop | prod | every helper script + `setup-cloud.sh` + `setup-heima.sh` + `harness/run.sh` |
+| [`scripts/operator-workstation.test.env`](../scripts/operator-workstation.test.env) | operator laptop | test | same scripts, via `--env-file <path>` |
+| [`scripts/broker.env`](../scripts/broker.env) | prod broker host at `/etc/agentkeys/broker.env` | prod | the broker process at boot (also `setup-broker-host.sh` writes equivalent systemd `Environment=` lines) |
+| [`scripts/broker.test.env`](../scripts/broker.test.env) | test broker host at `/etc/agentkeys/broker.env` | test | same |
+| GitHub Actions runner | ephemeral runner per job | test | `harness-ci.yml` writes `scripts/operator-workstation.env` inline from `TEST_*` secrets (see [`docs/ci-setup.md`](ci-setup.md) §7) |
+
+#### Operator env — prod vs test side-by-side
+
+| Variable | Prod | Test | Purpose |
+|---|---|---|---|
+| `ACCOUNT_ID` | `429071895007` | `429071895007` (same) | every cloud step |
+| `REGION` | `us-east-1` | `us-east-1` | regional API calls |
+| `ZONE` | `litentry.org` | `litentry.org` (same) | parent DNS zone |
+| `PARENT_ZONE_ID` | Route 53 zone ID | same | DNS UPSERTs |
+| `BROKER_HOST` | `broker.${ZONE}` | `test-broker.${ZONE}` | OIDC issuer hostname (byte-for-byte distinct → distinct IAM OIDC provider ARN) |
+| `MAIL_DOMAIN` | `bots.${ZONE}` | `bots-test.${ZONE}` | SES inbound subdomain |
+| `BUCKET` / `MAIL_BUCKET` | `agentkeys-mail-${ACCT}` | `agentkeys-mail-test-${ACCT}` | inbound mail bucket |
+| `VAULT_BUCKET` | `agentkeys-vault-${ACCT}` | `agentkeys-vault-test-${ACCT}` | credentials bucket (arch.md §17) |
+| `MEMORY_BUCKET` | `agentkeys-memory-${ACCT}` | `agentkeys-memory-test-${ACCT}` | memory bucket |
+| `DATA_ROLE_ARN` | `…:role/agentkeys-data-role` | `…:role/agentkeys-data-role-test` | OIDC-federated data role |
+| `VAULT_ROLE_ARN` | `…:role/agentkeys-vault-role` | `…:role/agentkeys-vault-role-test` | per-data-class vault role |
+| `MEMORY_ROLE_ARN` | `…:role/agentkeys-memory-role` | `…:role/agentkeys-memory-role-test` | per-data-class memory role |
+| `OIDC_PROVIDER_ARN` | `…:oidc-provider/${BROKER_HOST}` | `…:oidc-provider/test-broker.${ZONE}` | derived from BROKER_HOST |
+| `SIGNER_HOST` + worker hosts | `signer.${ZONE}` etc. | `signer-test.${ZONE}` etc. | per-service public hostnames |
+| `BROKER_EMAIL_FROM_ADDRESS` | `noreply@bots.${ZONE}` | `noreply-test@bots-test.${ZONE}` | SES verified sender |
+| Heima contract `*_HEIMA` addresses | one set | a DIFFERENT set (same chain, different deployer key) | per-deploy pinned addresses |
+
+#### Broker env — prod vs test side-by-side
+
+| Variable | Prod | Test |
 |---|---|---|
-| `ACCOUNT_ID` | `429071895007` | every step |
-| `REGION` | `us-east-1` | SES + S3 + IAM regional calls |
-| `ZONE` | `litentry.org` | parent DNS zone |
-| `PARENT_ZONE_ID` | `Z09723983CFJOHAE3VC65` | Route 53 zone ID for `$ZONE` |
-| `BROKER_HOST` | `broker.litentry.org` | OIDC issuer hostname |
-| `MAIL_DOMAIN` | `bots.litentry.org` | SES inbound subdomain (must differ from broker; the SES receipt rule routes ALL `*@$MAIL_DOMAIN`) |
-| `BUCKET` | `agentkeys-mail-${ACCOUNT_ID}` | inbound mail bucket |
-| `VAULT_BUCKET` / `MEMORY_BUCKET` | `agentkeys-vault-${ACCOUNT_ID}` / `agentkeys-memory-${ACCOUNT_ID}` | per-data-class buckets (arch.md §17) |
+| `ACCOUNT_ID` | same | same |
+| `BROKER_DATA_ROLE_ARN` | `…:role/agentkeys-data-role` | `…:role/agentkeys-data-role-test` |
+| `BROKER_AWS_REGION` | `us-east-1` | `us-east-1` |
+| `BROKER_OIDC_ISSUER` | `https://broker.${ZONE}` | `https://test-broker.${ZONE}` |
+| `BROKER_OIDC_KEYPAIR_PATH` | `/home/ubuntu/.agentkeys/broker/oidc-keypair.json` | same |
+| `BROKER_SESSION_KEYPAIR_PATH` | `/home/ubuntu/.agentkeys/broker/session-keypair.json` | same |
+| `BROKER_AUTH_METHODS` | `wallet_sig,email_link` | same |
+| `BROKER_AUDIT_ANCHORS` | `sqlite` | same |
+| `BROKER_EMAIL_SENDER` | `ses` | `ses` |
+| `BROKER_EMAIL_FROM_ADDRESS` | `noreply@bots.${ZONE}` | `noreply-test@bots-test.${ZONE}` |
 
-`setup-cloud.sh` validates each at step 2 and dies with a precise pointer if missing.
+The broker process never reads operator-workstation env vars directly — separation prevents a laptop value from silently shadowing the broker's own config (per [`scripts/broker.env`](../scripts/broker.env) header comment).
+
+#### CI runner
+
+The runner doesn't ship with a checked-in env file. `harness-ci.yml` writes one inline at job start, mapping `TEST_*` repo secrets into `scripts/operator-workstation.env`:
+
+| TEST secret | Maps to operator var |
+|---|---|
+| `TEST_ACCOUNT_ID` | `ACCOUNT_ID` |
+| `TEST_AWS_REGION` | `REGION` |
+| `TEST_BROKER_HOST` | `BROKER_HOST` |
+| `TEST_VAULT_BUCKET` / `TEST_MEMORY_BUCKET` | `VAULT_BUCKET` / `MEMORY_BUCKET` |
+| `TEST_DATA_ROLE_ARN` / `TEST_VAULT_ROLE_ARN` / `TEST_MEMORY_ROLE_ARN` | `DATA_ROLE_ARN` / `VAULT_ROLE_ARN` / `MEMORY_ROLE_ARN` |
+| `TEST_HEIMA_DEPLOYER_KEY` | written to `~/.agentkeys/heima-deployer.key` |
+| `TEST_*_HEIMA` contract addresses | `*_HEIMA` |
+| `TEST_OIDC_AWS_ROLE_ARN` | the GH Actions OIDC role (gate; not a runtime var) |
+
+Full list + activation flow: [`docs/ci-setup.md`](ci-setup.md) §7. `setup-cloud.sh` validates required keys at step 2 and dies with a precise pointer if missing.
+
+### §0.1 IAM isolation matrix (prod ↔ test, same AWS account)
+
+Same AWS account is fine — isolation comes from the `-test` suffix on every identifier, not from the account boundary. Cross-trust is structurally impossible because the trust policy on every test role lists ONLY the test OIDC provider ARN (which is bound byte-for-byte to `test-broker.${ZONE}`, never `broker.${ZONE}`).
+
+| Resource | Prod name | Test name | Created by |
+|---|---|---|---|
+| IAM user (daemon) | `agentkeys-daemon` | `agentkeys-daemon-test` | `setup-cloud.sh` step 10 (auto-suffixed when `AGENTKEYS_TEST=1` or env-file path matches `*test*`) |
+| IAM role (data) | `agentkeys-data-role` | `agentkeys-data-role-test` | `setup-cloud.sh` step 11 (same suffix logic) |
+| IAM role (vault) | `agentkeys-vault-role` | `agentkeys-vault-role-test` | `provision-vault-role.sh` reads `VAULT_ROLE_ARN` from the active env file |
+| IAM role (memory) | `agentkeys-memory-role` | `agentkeys-memory-role-test` | `provision-memory-role.sh` (same env-driven pattern) |
+| IAM OIDC provider | `…oidc-provider/broker.${ZONE}` | `…oidc-provider/test-broker.${ZONE}` | manual `aws iam create-open-id-connect-provider` per §9.2 (one per broker URL — AWS validates byte-for-byte) |
+| EC2 instance profile | `agentkeys-broker-host` | `agentkeys-broker-host-test` | §6 (optional) |
+| EIP (tag) | `agentkeys-broker-eip` | `agentkeys-broker-eip-test` | `setup-cloud.sh` step 4 |
+| Mail bucket | `agentkeys-mail-${ACCT}` | `agentkeys-mail-test-${ACCT}` | `setup-cloud.sh` step 7 (from `BUCKET` env var) |
+| Vault bucket | `agentkeys-vault-${ACCT}` | `agentkeys-vault-test-${ACCT}` | `provision-vault-bucket.sh` (from `VAULT_BUCKET` env var) |
+| Memory bucket | `agentkeys-memory-${ACCT}` | `agentkeys-memory-test-${ACCT}` | `provision-memory-bucket.sh` (from `MEMORY_BUCKET` env var) |
+| SES sender | `noreply@bots.${ZONE}` | `noreply-test@bots-test.${ZONE}` | `ses-verify-sender.sh` (from `BROKER_EMAIL_FROM_ADDRESS`) |
+| Heima contracts | one set of 6 addresses | a different set of 6 (same chain, different deployer key) | `setup-heima.sh` per deployer key |
+
+**Cross-trust isolation enforced by:**
+
+1. **OIDC provider URL is the trust scope.** Each role's trust policy names exactly one provider ARN. The provider ARN derives from the broker URL. `broker.${ZONE}` and `test-broker.${ZONE}` produce distinct ARNs, so the test OIDC provider literally cannot mint JWTs that prod roles accept.
+2. **PrincipalTag scoping (§9.4) layers on top.** Even if a test JWT somehow reached a prod role, the bucket policy condition `s3:prefix=bots/${aws:PrincipalTag/agentkeys_actor_omni}/*` would still scope reads/writes by actor.
+3. **Per-data-class bucket separation.** Vault role's IAM grants reference vault bucket only; memory role references memory bucket only. Even within one stack, vault creds in the memory bucket → AccessDenied (defense-in-depth for the cap-mint layer).
+
+`setup-cloud.sh` validates required env keys at step 2 and dies with a precise pointer if missing.
 
 > **Why `jq -n --arg` and not `cat > file.json <<EOF`:** `jq --arg` passes values outside shell parameter expansion, sidestepping the zsh modifier bug (`$VAR:r` etc.) that silently corrupts ARNs. JSON is validated on construction, command substitution feeds straight into `--policy-document`, no file lands on disk. The orchestrator + every helper script applies this convention.
 
