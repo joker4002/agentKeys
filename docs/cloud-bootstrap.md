@@ -182,9 +182,32 @@ If `dig` returns the registrar's default nameservers instead, delegation hasn't 
 
 Launch via AWS console, `aws ec2 run-instances`, or your IaC tool. The script doesn't care which.
 
-**Getting the IP — two workflows:**
+**Getting the IP — three workflows:**
 
 Both `INSTANCE_ID` and `EIP` live in the env file (`scripts/operator-workstation.env` or `…test.env`) — set them there once, not on the shell every run. The test stack is selected by `--env-file <path>` + the explicit `--test` flag (or auto-detected when the env-file name contains "test").
+
+**Workflow 0 (you already have EC2 + EIP attached): step 4 adopts the existing EIP**
+
+If the EC2 is already running with an EIP attached (whether allocated via the AWS Console, Terraform, or a previous `setup-cloud.sh` run), there's no need to allocate or re-associate. Step 4's precedence ladder detects it:
+
+```bash
+# 1. Find the existing EC2's instance id:
+aws ec2 describe-instances --region "$REGION" \
+  --filters "Name=ip-address,Values=<YOUR-EXISTING-EIP>" \
+  --query 'Reservations[].Instances[].InstanceId' --output text
+
+# 2. Paste it into the env file (one line edit):
+echo 'INSTANCE_ID=i-0123…' >> scripts/operator-workstation.env
+
+# 3. Run setup-cloud.sh — step 4 prints:
+#      "skip  EIP <ip> already attached to <instance-id> (adopting; no allocation)"
+#      "ok    tagged existing EIP as agentkeys-broker-eip (idempotency for re-runs)"
+#    No new EIP is allocated. No re-association. The existing EIP gets
+#    retroactively tagged so future re-runs find it via tag-lookup too.
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
+```
+
+The precedence inside step 4 is: **A** adopt EIP attached to `$INSTANCE_ID` → **B** reuse tagged EIP → **C** use `$EIP` from env file → **D** allocate fresh. First match wins; no later branch fires if an earlier one resolves. Fully idempotent re-runs even when the operator pre-provisioned EC2 + EIP outside the script.
 
 **Workflow A (recommended): EC2-first, then attach via env-file edit + re-run**
 

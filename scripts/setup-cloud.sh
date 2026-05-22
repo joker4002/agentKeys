@@ -198,16 +198,58 @@ do_step_4() {
   local tag_key="Name" tag_val="agentkeys-broker-eip"
   [ "$TEST_MODE" = "1" ] && tag_val="agentkeys-broker-eip-test"
 
-  # Pre-check: tagged EIP already exists?
+  # Precedence ladder, FIRST-MATCH wins (no allocate fires if any
+  # earlier branch resolved the EIP):
+  #
+  #   A. INSTANCE_ID has an EIP attached → adopt it (no allocate, no
+  #      re-associate; tag retroactively for future idempotency).
+  #   B. Tagged EIP exists in account → reuse.
+  #   C. EIP=… set in env file        → use it.
+  #   D. Allocate fresh.
+
+  # ── A. INSTANCE_ID already has an EIP attached → adopt ──
+  if [ -n "${INSTANCE_ID:-}" ]; then
+    local attached_ip allocation_id
+    attached_ip=$(aws ec2 describe-instances --region "$REGION" \
+      --instance-ids "$INSTANCE_ID" \
+      --query 'Reservations[0].Instances[0].PublicIpAddress' \
+      --output text 2>/dev/null)
+    if [ -n "$attached_ip" ] && [ "$attached_ip" != "None" ]; then
+      # Confirm it's an EIP (has AllocationId), not just an auto-assigned
+      # public IP that disappears on stop/start.
+      allocation_id=$(aws ec2 describe-addresses --region "$REGION" \
+        --public-ips "$attached_ip" \
+        --query 'Addresses[0].AllocationId' --output text 2>/dev/null)
+      if [ -n "$allocation_id" ] && [ "$allocation_id" != "None" ]; then
+        EIP="$attached_ip"
+        skip "EIP $EIP already attached to $INSTANCE_ID (adopting; no allocation)"
+        env_set EIP "$EIP"
+        # Best-effort retroactive tag so future runs find via path B.
+        if [ "$DRY_RUN" = "0" ]; then
+          aws ec2 create-tags --region "$REGION" --resources "$allocation_id" \
+            --tags "Key=${tag_key},Value=${tag_val}" 2>/dev/null \
+            && ok "tagged existing EIP as $tag_val (idempotency for re-runs)" \
+            || warn "could not tag EIP $EIP (AllocationId=$allocation_id) — operator can `aws ec2 create-tags` by hand"
+        fi
+        return
+      else
+        warn "$INSTANCE_ID has public IP $attached_ip but it's not a static EIP — will allocate one in path B/D"
+      fi
+    fi
+  fi
+
+  # ── B. Tagged EIP in account → reuse ──
   local existing_eip
   existing_eip=$(aws ec2 describe-addresses --region "$REGION" \
     --filters "Name=tag:${tag_key},Values=${tag_val}" \
     --query 'Addresses[0].PublicIp' --output text 2>/dev/null)
   if [ -n "$existing_eip" ] && [ "$existing_eip" != "None" ]; then
-    skip "EIP $existing_eip already allocated"
+    skip "EIP $existing_eip already tagged $tag_val (reusing)"
     EIP="$existing_eip"
+  # ── C. EIP from env file → use ──
   elif [ -n "${EIP:-}" ]; then
-    skip "EIP $EIP provided via env; not allocating new one"
+    skip "EIP $EIP provided via env file; not allocating new one"
+  # ── D. Allocate fresh ──
   else
     [ "$DRY_RUN" = "1" ] && { warn "DRY: would allocate-address + create-tags"; return; }
     local alloc_json
@@ -220,7 +262,7 @@ do_step_4() {
   fi
   env_set EIP "$EIP"
 
-  # Optional: attach to a known EC2 instance.
+  # Associate to INSTANCE_ID if not already attached.
   if [ -n "${INSTANCE_ID:-}" ]; then
     local current_assoc
     current_assoc=$(aws ec2 describe-addresses --region "$REGION" \
