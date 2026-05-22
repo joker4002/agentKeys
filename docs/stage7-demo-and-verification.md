@@ -7,7 +7,7 @@ guide is the end-to-end production demo** for the full Stage 7 pluggable
 broker (Phase 0 + A.1 + A.2 + B + C-structural + D-rest + E) **and the
 new dev_key_service signer flow from issue #74 step 1** (the
 operator-holds-no-keys path), running on a real EC2 broker host with the
-AWS account from [`cloud-setup.md`](cloud-setup.md).
+AWS account from [`cloud-bootstrap.md`](cloud-bootstrap.md).
 
 When you finish this guide you will have:
 
@@ -94,7 +94,7 @@ inline `# === ON … ===` banner.
 
 | Machine | What it has | Used for |
 |---|---|---|
-| **Operator workstation (master role)** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-setup.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS. The operator running these commands IS the master per [`architecture.md` §4a](spec/architecture.md). |
+| **Operator workstation (master role)** | `awsp agentkeys-admin` profile, `$ACCOUNT_ID` / `$BROKER_HOST` / `$BUCKET` shell vars from `cloud-bootstrap.md §0`, `agentkeys` CLI, `aws` CLI, `jq` | AWS-side checks, `aws sts assume-role-with-web-identity`, S3 isolation proof, calling the broker + signer over HTTPS. The operator running these commands IS the master per [`architecture.md` §4a](spec/architecture.md). |
 | **Broker host (EC2)** | `agentkeys-broker-server` and `agentkeys-mock-server` binaries at `/usr/local/bin/`, both ES256 keypairs at `/var/lib/agentkeys/.agentkeys/broker/`, systemd services `agentkeys-broker.service` + `agentkeys-backend.service` + `agentkeys-signer.service`, nginx fronting broker on `:8091` at `https://$BROKER_HOST` and signer on `:8092` at `https://signer.<zone>` | Broker process, audit DB, JWT minting, **dev_key_service signer** |
 
 Hop between them with `ssh agentkey@$BROKER_HOST`.
@@ -134,7 +134,7 @@ test -n "$ACCOUNT_ID" && test -n "$BROKER_HOST" && test -n "$BUCKET" \
   && echo "env ok" || echo "env MISSING — check scripts/operator-workstation.env"
 ```
 
-Cloud-side state from [`cloud-setup.md`](cloud-setup.md):
+Cloud-side state from [`cloud-bootstrap.md`](cloud-bootstrap.md):
 
 - `§0` — env vars, awsp profile.
 - `§1` — DNS A record for `$BROKER_HOST`.
@@ -305,7 +305,7 @@ ls /etc/nginx/sites-enabled/agentkeys-broker /etc/nginx/sites-enabled/agentkeys-
 #
 # If either is missing → re-pull + re-run setup-broker-host.sh. If
 # `agentkeys-signer` is a "TLS not yet issued" stub, jump to §6.2 of
-# cloud-setup.md (issue cert + re-run script to flip onto :443 ssl).
+# cloud-bootstrap.md (issue cert + re-run script to flip onto :443 ssl).
 grep -E 'proxy_pass|return 503' /etc/nginx/sites-available/agentkeys-signer
 # Expect: 2x proxy_pass http://127.0.0.1:8092 (for /dev/ and /healthz)
 # Reject: any `return 503` (means cert issued but script never re-ran)
@@ -326,7 +326,7 @@ exists with mode 0600.
 `$BACKEND_URL` / `$AGENTKEYS_SIGNER_URL` are the public HTTPS URL of the
 dedicated signer listener (`signer.<zone>`). No SSH tunnel required — the
 signer is fronted by nginx over TLS, co-located with the broker on the same
-EC2 host (see [`cloud-setup.md` §1.3](cloud-setup.md#13-signer-subdomain--a-record--tls-cert-issue-74-step-1b)
+EC2 host (see [`cloud-bootstrap.md` §1.3](cloud-bootstrap.md#13-signer-subdomain--a-record--tls-cert-issue-74-step-1b)
 for the topology + future-split note).
 
 Both vars are pre-set in [`scripts/operator-workstation.env`](../scripts/operator-workstation.env)
@@ -356,8 +356,8 @@ fi
 |---|---|---|
 | `ok` | Healthy. | Continue. |
 | `TLS cert not yet issued for signer — see setup-broker-host.sh` | Cert is issued but nginx still serving the HTTP-only stub vhost — `setup-broker-host.sh` step 3 of §6.2 wasn't run. | On broker host: `sudo bash scripts/setup-broker-host.sh --yes` (script detects cert, overwrites vhost with `proxy_pass`). |
-| (curl error: TLS) | Cert not issued at all. | Run [`cloud-setup.md` §6](cloud-setup.md#6-signer-host) end-to-end. |
-| (curl error: connection / NXDOMAIN) | DNS A record missing OR points at a proxied/private IP (e.g. `198.18.x.x` from WARP / Zscaler / Tailscale). | Re-derive `$EIP` from `aws ec2 describe-addresses` (NOT from `dig`) and re-UPSERT — see [`cloud-setup.md` §6.1](cloud-setup.md#61-dns-a-record). |
+| (curl error: TLS) | Cert not issued at all. | Run [`cloud-bootstrap.md` §6](cloud-bootstrap.md#6-signer-host) end-to-end. |
+| (curl error: connection / NXDOMAIN) | DNS A record missing OR points at a proxied/private IP (e.g. `198.18.x.x` from WARP / Zscaler / Tailscale). | Re-derive `$EIP` from `aws ec2 describe-addresses` (NOT from `dig`) and re-UPSERT — see [`cloud-bootstrap.md` §6.1](cloud-bootstrap.md#61-dns-a-record). |
 | `signer_disabled` (503) | `/etc/agentkeys/dev-key-service.env` didn't load. | `sudo systemctl show agentkeys-signer \| grep EnvironmentFile` — confirm file exists, mode 0600. |
 
 ### 0.3 Identity → `omni_account` math (reference)
@@ -452,7 +452,7 @@ working is one `--email` round-trip.
 >    CSPRNG token → SHA256 in EmailTokenStore → single-use within TTL.)
 >
 >    **Broker IAM role: `agentkeys-broker-host`** (canonical, per
->    `cloud-setup.md` §3.4 — the legacy `S3-full-access` name was
+>    `cloud-bootstrap.md` §3.4 — the legacy `S3-full-access` name was
 >    fully retired 2026-05-12). The role's `BrokerSendEmail` inline
 >    policy must grant **both** `ses:SendEmail` (per-request) **and**
 >    `ses:GetEmailIdentity` (Tier-2 verify probe — without it /readyz
@@ -512,7 +512,7 @@ working is one `--email` round-trip.
 >    per-call. **A restart IS needed** for `ses:GetEmailIdentity` to
 >    take effect on /readyz, because the Tier-2 verify probe runs once
 >    at boot (then every 12h) — see commit `722a990` for the probe wiring.
->    See [`cloud-setup.md` §3.4a](cloud-setup.md#34a-sessendemail-grant-on-the-brokers-runtime-role-pass-2-prereq)
+>    See [`cloud-bootstrap.md` §3.4a](cloud-bootstrap.md#34a-sessendemail-grant-on-the-brokers-runtime-role-pass-2-prereq)
 >    for the full discovery + grant flow.
 >
 >    **If the setup script dies with `cargo did NOT enable
@@ -1297,7 +1297,7 @@ SES's `inbound/`, future `audit/`, etc. Keeping user data under a
 single parent prefix lets lifecycle rules, encryption defaults, and
 replication scope cleanly to "user data" without touching the
 bucket's system prefixes. The bucket policy from
-[`cloud-setup.md` §4.4](cloud-setup.md#44-upgrade-bucket-policy-to-principaltag-scoped)
+[`cloud-bootstrap.md` §4.4](cloud-bootstrap.md#44-upgrade-bucket-policy-to-principaltag-scoped)
 grants access conditioned on
 `bots/${aws:PrincipalTag/agentkeys_user_wallet}/*`.
 
@@ -1316,8 +1316,8 @@ then asserts:
 ```bash
 # === ON OPERATOR WORKSTATION ===
 # Prereqs: operator-workstation.env sourced; awsp agentkeys-admin (for the
-# seed step); bucket policy applied per cloud-setup.md §4.4; role inline
-# policy stripped per cloud-setup.md §4.4.1.
+# seed step); bucket policy applied per cloud-bootstrap.md §4.4; role inline
+# policy stripped per cloud-bootstrap.md §4.4.1.
 bash scripts/agentkeys-isolation-demo.sh
 # ==> WALLET_A=0x…
 # ==> WALLET_B=0x…
@@ -1337,7 +1337,7 @@ Exit codes:
 - `0` proof passed
 - `1` precondition missing (env vars, tools, sessions)
 - `2` alice's own-prefix read failed (false-negative — check
-  cloud-setup.md §4.4 bucket policy + §4.4.1 role inline strip)
+  cloud-bootstrap.md §4.4 bucket policy + §4.4.1 role inline strip)
 - `3` bob's peer-prefix read succeeded (false-positive — **isolation
   broken**, §4.4.1 wasn't applied so the role's broad `s3:GetObject`
   overrides the bucket-policy PrincipalTag check)
@@ -1426,7 +1426,7 @@ echo "$JWT_A" | cut -d. -f2 | tr '_-' '/+' \
 # without the tag claim — see runbook §oidc-issuer.
 ```
 
-If step 4b succeeds (silent pass — the worst-case bug), `cloud-setup.md
+If step 4b succeeds (silent pass — the worst-case bug), `cloud-bootstrap.md
 §4.4.1` wasn't applied and the role's inline `s3:*` grant overrides the
 bucket policy. Re-apply §4.4.1 and confirm the role's inline policy
 contains only `ses:SendRawEmail`.
@@ -1502,7 +1502,7 @@ export AWS_ACCESS_KEY_ID=$(printf '%s' "$CREDS" | jq -r .Credentials.AccessKeyId
 export AWS_SECRET_ACCESS_KEY=$(printf '%s' "$CREDS" | jq -r .Credentials.SecretAccessKey)
 export AWS_SESSION_TOKEN=$(printf '%s' "$CREDS" | jq -r .Credentials.SessionToken)
 
-# 3. Use the temp creds. PrincipalTag-scoped per cloud-setup.md §4.4.
+# 3. Use the temp creds. PrincipalTag-scoped per cloud-bootstrap.md §4.4.
 #    `$WALLET_A` is the canonical prefix — never `$ADDR_A` (which is
 #    only correct on §2's manual SIWE path; the auto-init path puts
 #    `master_wallet` in the JWT, and AWS gates on the JWT, not the
@@ -1569,7 +1569,7 @@ subprocess as env vars — all in one shot.
 
 # 2. SES inbound-routing Lambda (issue #83). Required for the CDP
 #    scraper to read its own verification email via the OIDC workflow
-#    (cloud-setup.md §2.4 + §4.5 federation-isolation rule). Without
+#    (cloud-bootstrap.md §2.4 + §4.5 federation-isolation rule). Without
 #    it, the assumed `agentkeys-data-role` lacks read on `inbound/`
 #    and the scraper times out at fetch-verification-email.
 awsp agentkeys-admin
@@ -1613,7 +1613,7 @@ via env if needed (`AGENTKEYS_BROKER_URL`, `AGENTKEYS_DATA_ROLE_ARN`,
 >
 > ```bash
 > export AGENTKEYS_CREDENTIAL_BACKEND=s3
-> export AGENTKEYS_BUCKET="$BUCKET"            # same value as cloud-setup.md
+> export AGENTKEYS_BUCKET="$BUCKET"            # same value as cloud-bootstrap.md
 > export AGENTKEYS_SIGNER_URL=https://signer.litentry.org
 > export AGENTKEYS_OMNI_ACCOUNT=<64hex>        # from /v1/auth/.../status
 > ```
@@ -2132,14 +2132,14 @@ time a fresh init lands** — it's idempotent and cheap.
   the JWT and confirm.
 - **Stale OIDC provider.** If the broker's `kid` rotated and AWS
   cached the old JWKS, re-register the provider per
-  `cloud-setup.md §4.2`.
+  `cloud-bootstrap.md §4.2`.
 
 ### 14.6 S3 GetObject returns AccessDenied for own prefix
 
 The JWT isn't carrying the `https://aws.amazon.com/tags` claim. Decode
 and check (per §4.4 above). If the claim is present, confirm the role's
 trust policy has `sts:TagSession` and the `aws:RequestTag/...`
-condition (per `cloud-setup.md §4.3`).
+condition (per `cloud-bootstrap.md §4.3`).
 
 ### 14.7 Broker exits 0 cleanly after ~24h
 
@@ -2499,7 +2499,7 @@ aws sts get-caller-identity        # confirm: back to admin
 its public hostname, not via SSH.)
 
 The broker keeps running. To tear down the cloud-side state
-(provider, role, bucket policy), follow `cloud-setup.md §7`.
+(provider, role, bucket policy), follow `cloud-bootstrap.md §7`.
 
 > **Do NOT casually rotate `DEV_KEY_SERVICE_MASTER_SECRET`** —
 > rotating invalidates every previously-derived wallet for every
@@ -2519,7 +2519,7 @@ The broker keeps running. To tear down the cloud-side state
 - [`docs/operator-runbook-stage7.md`](operator-runbook-stage7.md) —
   authoritative env-var inventory, BOOT_FAIL anchors, recovery
   procedures, OAuth2/email setup details.
-- [`docs/cloud-setup.md`](cloud-setup.md) — AWS-side IAM, OIDC
+- [`docs/cloud-bootstrap.md`](cloud-bootstrap.md) — AWS-side IAM, OIDC
   provider, bucket policy, EC2 broker host wiring.
 - [`docs/spec/plans/issue-64/PLAN.md`](spec/plans/issue-64/PLAN.md) —
   the canonical Stage 7 plan (§6 Refuse-to-boot tiers; §3.5 plugin

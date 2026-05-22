@@ -1998,7 +1998,7 @@ The full bring-up runbook lives in [`scripts/setup-broker-host.sh`](../../script
 - **Payment-service design** — [`plans/v2-issues/issue-payment-service-deferred.md`](plans/v2-issues/issue-payment-service-deferred.md)
 - **Migration from pre-v2** — [`v2-stage1-migration-and-demo.md`](../v2-stage1-migration-and-demo.md) (historical; the migration window closed when stage 1 shipped)
 - **Operator runbook** — [`../operator-runbook.md`](../operator-runbook.md)
-- **Cloud-side IAM + DNS + cert** — [`../cloud-setup.md`](../cloud-setup.md)
+- **Cloud-side IAM + DNS + cert** — [`../cloud-bootstrap.md`](../cloud-bootstrap.md)
 - **Per-actor reference (agent role)** — [`../../wiki/agent-role-and-usage-hdkd-per-agent-omni.md`](../../wiki/agent-role-and-usage-hdkd-per-agent-omni.md)
 - **Upstream backend classes (per-upstream design)** — [`../../wiki/upstream-backend-classes-exercise-vs-distribution.md`](../../wiki/upstream-backend-classes-exercise-vs-distribution.md)
 

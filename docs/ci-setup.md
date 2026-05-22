@@ -1,7 +1,7 @@
 # CI setup — AgentKeys
 
 **Audience:** the operator activating the no-LLM CI workflow against a test instance of the production environment.
-**Scope:** one workflow file ([`.github/workflows/harness-ci.yml`](../.github/workflows/harness-ci.yml)), a list of GitHub secrets, and the test-side counterparts of the production resources from [`docs/cloud-setup.md`](cloud-setup.md) + [`docs/heima-setup.md`](heima-setup.md).
+**Scope:** one workflow file ([`.github/workflows/harness-ci.yml`](../.github/workflows/harness-ci.yml)), a list of GitHub secrets, and the test-side counterparts of the production resources from [`docs/cloud-bootstrap.md`](cloud-bootstrap.md) + [`docs/chain-setup.md`](chain-setup.md).
 **FAQ + troubleshooting:** [`wiki/ci-setup-faq.md`](../wiki/ci-setup-faq.md).
 
 ## Where things run
@@ -192,7 +192,7 @@ Never paste a real account ID, role ARN, bucket name, deployer key, or contract 
 ## Related
 
 - Workflow file: [`.github/workflows/harness-ci.yml`](../.github/workflows/harness-ci.yml)
-- Cloud / broker bring-up: [`docs/cloud-setup.md`](cloud-setup.md)
-- Chain bring-up: [`docs/heima-setup.md`](heima-setup.md)
+- Cloud / broker bring-up: [`docs/cloud-bootstrap.md`](cloud-bootstrap.md)
+- Chain bring-up: [`docs/chain-setup.md`](chain-setup.md)
 - Harness scripts: [`harness/v2-stage{1,2,3}-demo.sh`](../harness/)
 - FAQ + troubleshooting: [`wiki/ci-setup-faq.md`](../wiki/ci-setup-faq.md)

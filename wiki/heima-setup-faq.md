@@ -1,6 +1,6 @@
 # Heima setup — FAQ
 
-Troubleshooting + edge cases for [`docs/heima-setup.md`](https://github.com/litentry/agentKeys/blob/main/docs/heima-setup.md) + [`scripts/setup-heima.sh`](https://github.com/litentry/agentKeys/blob/main/scripts/setup-heima.sh).
+Troubleshooting + edge cases for [`docs/chain-setup.md`](https://github.com/litentry/agentKeys/blob/main/docs/chain-setup.md) + [`scripts/setup-heima.sh`](https://github.com/litentry/agentKeys/blob/main/scripts/setup-heima.sh).
 
 ## Q. `chain mismatch: profile says chain_id=X but RPC reports Y`
 
@@ -103,7 +103,7 @@ The atomic deploy is by design — each downstream contract takes the prior addr
 
 ## Related
 
-- Operator runbook: [docs/heima-setup.md](https://github.com/litentry/agentKeys/blob/main/docs/heima-setup.md)
+- Operator runbook: [docs/chain-setup.md](https://github.com/litentry/agentKeys/blob/main/docs/chain-setup.md)
 - Orchestrator: [scripts/setup-heima.sh](https://github.com/litentry/agentKeys/blob/main/scripts/setup-heima.sh)
 - Per-step helpers: [scripts/heima-*.sh](https://github.com/litentry/agentKeys/tree/main/scripts)
 - Live contract addresses: [docs/spec/deployed-contracts.md](https://github.com/litentry/agentKeys/blob/main/docs/spec/deployed-contracts.md)

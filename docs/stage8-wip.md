@@ -228,7 +228,7 @@ There are no users today, so no live data to migrate. The migration is doc-and-d
 
 - [`docs/spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) — the architectural position this doc implements.
 - [`docs/stage7-wip.md`](./stage7-wip.md) — OIDC + PrincipalTag, the isolation primitive Stage 8 reuses.
-- [`docs/cloud-setup.md`](./cloud-setup.md) — AWS infra for SES + S3 (singleton); the same AWS account hosts the vault bucket.
+- [`docs/cloud-bootstrap.md`](./cloud-bootstrap.md) — AWS infra for SES + S3 (singleton); the same AWS account hosts the vault bucket.
 - [`docs/spec/heima-gaps-vs-desired-architecture.md`](./spec/heima-gaps-vs-desired-architecture.md) — needs new gap entry for `pallet-vault-pointers`.
 - [`docs/spec/credential-backend-interface.md`](./spec/credential-backend-interface.md) — `store_credential` / `read_credential` semantics translate cleanly; mapping table updated.
 - [`docs/spec/plans/development-stages.md`](./spec/plans/development-stages.md) — Stage 8 entry, post-renumber.

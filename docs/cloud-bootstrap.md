@@ -1,7 +1,7 @@
 # Cloud bootstrap — AgentKeys
 
 **Audience:** the operator standing up a brand-new cloud account to host AgentKeys for the first time, or porting the deployment to a new cloud provider (AliCloud, GCP, Tencent Cloud).
-**Scope:** the per-account, run-once provisioning that has to happen **before** anything in [`docs/cloud-setup.md`](cloud-setup.md), [`docs/heima-setup.md`](heima-setup.md), or [`docs/ci-setup.md`](ci-setup.md) can run. Identifiers (DNS names, IAM principals, mail backend, object store, initial bucket policy) — never runtime processes.
+**Scope:** the per-account, run-once provisioning that has to happen **before** the broker host can come up (§§3–8 of this doc), followed by the per-broker OIDC federation activation (§9), broker host bring-up (§10), and tear-down (§11). Identifiers (DNS names, IAM principals, mail backend, object store, initial bucket policy) + runtime activation in one place.
 **FAQ + troubleshooting:** [`wiki/cloud-setup-faq.md`](../wiki/cloud-setup-faq.md).
 
 After this doc is run, the operator returns here ONLY when:
@@ -10,7 +10,7 @@ After this doc is run, the operator returns here ONLY when:
 - Re-bootstrapping after a teardown
 - Auditing the identity surface (the security-audit checklist in §7)
 
-The day-to-day broker re-deploys live in [`docs/cloud-setup.md`](cloud-setup.md) §5 (`setup-broker-host.sh`); they never re-enter this doc.
+The day-to-day broker re-deploys live in §10 below (`setup-broker-host.sh`); they re-run that section without touching §§1–9.
 
 ## TL;DR — operator flow
 
@@ -39,7 +39,7 @@ For surgical re-runs after a fix: `bash scripts/setup-cloud.sh --only-step N` (s
 §2  Domain + DNS       — subdomain ownership; parent-zone confirmation
 §3  Email backend      — SES domain identity + receipt rule + S3 inbound bucket
 §4  IAM users + roles  — agentkeys-{admin,broker,daemon} + agentkeys-data-role
-§5  Bucket policy      — static-IAM variant (pre-OIDC; replaced in cloud-setup.md §1)
+§5  Bucket policy      — static-IAM variant (pre-OIDC; replaced in §9 below)
 §6  Instance profile   — agentkeys-broker-host (optional, EC2-only)
 §7  Security audit     — strip legacy over-broad attached policies
 §8  Cloud portability  — AWS → AliCloud / GCP / Tencent Cloud mapping
@@ -83,9 +83,9 @@ Six subdomains under the operator's parent zone (substitute `${ZONE}` everywhere
 | Host | Purpose | Provisioned in |
 |---|---|---|
 | `${MAIL_DOMAIN}` (e.g. `bots.${ZONE}`) | SES / email backend inbound | §3 |
-| `${BROKER_HOST}` (e.g. `broker.${ZONE}`) | Broker public reverse proxy | §5.1 of cloud-setup.md |
-| `signer.${ZONE}` | Signer service (issue #74 step 1b) | §5.1 of cloud-setup.md |
-| `audit.${ZONE}` / `email.${ZONE}` / `cred.${ZONE}` / `memory.${ZONE}` | Service workers (issue #90) | §5.1 of cloud-setup.md (dev co-location on broker EIP today) |
+| `${BROKER_HOST}` (e.g. `broker.${ZONE}`) | Broker public reverse proxy | §10.1 below |
+| `signer.${ZONE}` | Signer service (issue #74 step 1b) | §10.1 below |
+| `audit.${ZONE}` / `email.${ZONE}` / `cred.${ZONE}` / `memory.${ZONE}` | Service workers (issue #90) | §10.1 below (dev co-location on broker EIP today) |
 
 Confirm the parent zone is reachable before any record changes (AWS Route 53 example; the same `get-hosted-zone` shape exists on AliCloud DNS + Cloud DNS):
 
@@ -197,7 +197,7 @@ The daemon user can do exactly one thing: assume `agentkeys-data-role`. Any stor
 
 ### §4.2 `agentkeys-data-role` (static-IAM-user trust variant)
 
-The role's trust policy starts with the static-IAM-user variant. After the broker is publicly reachable, [`docs/cloud-setup.md`](cloud-setup.md) §4 swaps it for the OIDC-federated variant.
+The role's trust policy starts with the static-IAM-user variant. After the broker is publicly reachable, [`docs/cloud-bootstrap.md`](cloud-bootstrap.md) §4 swaps it for the OIDC-federated variant.
 
 ```bash
 aws iam create-role --role-name agentkeys-data-role \
@@ -275,7 +275,7 @@ aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
   }')"
 ```
 
-The PrincipalTag-scoped federated variant (which replaces this once OIDC federation is up) lives in [`docs/cloud-setup.md`](cloud-setup.md) §4.4.
+The PrincipalTag-scoped federated variant (which replaces this once OIDC federation is up) lives in [`docs/cloud-bootstrap.md`](cloud-bootstrap.md) §4.4.
 
 ## §6 `agentkeys-broker-host` instance profile (EC2-only, optional)
 
@@ -316,7 +316,7 @@ broker rejected /v1/auth/email/request: status=502 body=
  unhandled error (AccessDeniedException)"}
 ```
 
-The IAM action is `ses:SendEmail` (sesv2), NOT `ses:SendRawEmail` (v1; different code path the broker doesn't use). The grant lives on the broker's runtime role (`agentkeys-broker-host` on EC2; the user `agentkeys-daemon` otherwise) — see [`docs/cloud-setup.md`](cloud-setup.md) §3.3 for the exact statement.
+The IAM action is `ses:SendEmail` (sesv2), NOT `ses:SendRawEmail` (v1; different code path the broker doesn't use). The grant lives on the broker's runtime role (`agentkeys-broker-host` on EC2; the user `agentkeys-daemon` otherwise) — see [`docs/cloud-bootstrap.md`](cloud-bootstrap.md) §3.3 for the exact statement.
 
 ## §7 Security audit — strip legacy over-broad attached policies
 
@@ -369,18 +369,168 @@ Every layer in §3–§5 has a 1:1 analog on the major providers. The provisioni
 
 1. Re-bind operator-workstation.env to the new provider's identifiers (account ID, region, role ARNs, bucket name).
 2. Re-run this doc top-to-bottom against the new provider.
-3. Re-run [`docs/cloud-setup.md`](cloud-setup.md) §4 (OIDC federation) — substitute the provider's OIDC API.
+3. Re-run §9 (OIDC federation activation) — substitute the provider's OIDC API.
 4. Re-run `scripts/setup-broker-host.sh` on the new host (the script doesn't care which cloud — it consumes already-provisioned identifiers).
 5. Re-run `scripts/setup-heima.sh` — the chain side is cloud-agnostic.
 6. Re-run the harness scripts to validate end-to-end.
 
 The boundary is sharp: the broker process itself contains zero cloud-specific code — it talks STS-compatible OIDC + S3-compatible PutObject/GetObject + SMTP-compatible SendEmail. Every cloud above offers all three primitives. The [`provisioner-scripts/email-backends/`](../provisioner-scripts/) directory documents the email-backend trait; a new backend slots in as `tencent-simpledm-cos` (or similar) with the same upstream API as `ses-s3`.
 
+## §9 OIDC federation activation (after broker is publicly reachable)
+
+The broker mints OIDC JWTs that AWS STS validates via the broker's public JWKS endpoint. Three one-shot steps per account, run AFTER `setup-broker-host.sh` finishes and the broker is reachable at `https://${BROKER_HOST}` over public TLS.
+
+### §9.1 Prereqs
+
+- `https://${BROKER_HOST}/.well-known/openid-configuration` returns 200 with the expected `issuer` + `jwks_uri`.
+- `https://${BROKER_HOST}/.well-known/jwks.json` returns at least one ES256 key.
+- `curl -sf "https://${BROKER_HOST}/healthz"` returns 200.
+
+### §9.2 Register the OIDC provider
+
+```bash
+thumb=$(echo | openssl s_client -servername "$BROKER_HOST" \
+                                 -connect "${BROKER_HOST}:443" 2>/dev/null \
+          | openssl x509 -fingerprint -noout \
+          | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
+
+aws iam create-open-id-connect-provider \
+  --url "https://${BROKER_HOST}" \
+  --client-id-list "sts.amazonaws.com" \
+  --thumbprint-list "$thumb"
+```
+
+**AWS validates the issuer URL byte-for-byte** against the JWT `iss` claim. Once registered, the URL is effectively immutable — switching means a new provider ARN + new trust policy + new federated grants.
+
+### §9.3 Trust policy (federated variant)
+
+Apply to each of the three data roles. Use `$ROLE` ∈ `{agentkeys-data-role, agentkeys-vault-role, agentkeys-memory-role}` (or the `-test` variants when bootstrapping the CI test instance).
+
+```bash
+aws iam update-assume-role-policy --role-name "$ROLE" --policy-document "$(jq -n \
+  --arg acct "$ACCOUNT_ID" --arg host "$BROKER_HOST" '{
+    Version:"2012-10-17",
+    Statement:[{
+      Effect:"Allow",
+      Principal:{Federated:"arn:aws:iam::\($acct):oidc-provider/\($host)"},
+      Action:"sts:AssumeRoleWithWebIdentity",
+      Condition:{StringEquals:{"\($host):aud":"sts.amazonaws.com"}}
+    }]
+  }')"
+```
+
+### §9.4 PrincipalTag-scoped bucket policy
+
+Per CLAUDE.md "Per-actor + per-data-class isolation invariants": every S3 read/write is scoped to `bots/${aws:PrincipalTag/agentkeys_actor_omni}/{credentials,memory}/*`. The split-statement v3 bucket policy is applied by [`scripts/apply-{vault,memory}-bucket-policy.sh`](../scripts/) — those scripts are the source of truth for the policy shape.
+
+After §9.3 + §9.4, strip the broad-bucket inline grant from the role's policy (the bucket-side policy enforces; defense in depth means no app-side grant):
+
+```bash
+aws iam delete-role-policy --role-name "$ROLE" --policy-name "${ROLE}-inline"
+```
+
+### §9.5 End-to-end proof
+
+Run [`harness/v2-stage3-demo.sh`](../harness/v2-stage3-demo.sh) (or `bash harness/run.sh --stage 3`) — it mints session JWT → OIDC JWT → STS creds, then proves both POSITIVE (own prefix) and NEGATIVE (cross-actor prefix → AccessDenied) writes for both data classes plus the cross-role isolation matrix. Walks the full §17.2 isolation table from CLAUDE.md.
+
+## §10 Broker host bring-up: `setup-broker-host.sh`
+
+§§3–8 set up identifiers. This step stands up the actual processes — broker + mock-server + signer + 4 service workers — on the EC2 host (or any Linux box with public-internet egress + the broker's hostname).
+
+### §10.1 Prereqs
+
+- Fresh Linux host with sudo, systemd, public-internet egress, ports 80 + 443 open inbound (for certbot + nginx).
+- DNS A records for `${BROKER_HOST}` + `signer.${ZONE}` + `audit.${ZONE}` + `email.${ZONE}` + `cred.${ZONE}` + `memory.${ZONE}` all pointing at the host's public IP (provisioned by `setup-cloud.sh` step 6).
+- AWS credentials in `/etc/agentkeys/broker.env` (the script writes the template; operator pastes the `agentkeys-daemon` access key from §4.1).
+
+### §10.2 Run
+
+```bash
+# Bootstrap a fresh host:
+sudo bash scripts/setup-broker-host.sh \
+  --issuer-url "https://${BROKER_HOST}" \
+  --account-id "${ACCOUNT_ID}" \
+  --signer-host "signer.${ZONE}" \
+  --audit-host  "audit.${ZONE}" \
+  --email-host  "email.${ZONE}" \
+  --cred-host   "cred.${ZONE}" \
+  --memory-host "memory.${ZONE}" \
+  --yes
+
+# After a `git pull`, the same command re-deploys:
+sudo bash scripts/setup-broker-host.sh --yes
+```
+
+The script:
+- Builds `agentkeys-broker-server` (+ `auth-email-link` feature), `agentkeys-mock-server`, the 4 service workers, and the signer.
+- Creates the `agentkeys` system user + state dir `/var/lib/agentkeys/`.
+- Writes the dev_key_service master secret (one-shot at first boot, never rotated — rotation invalidates every previously-derived wallet).
+- Writes per-worker env files at `/etc/agentkeys/worker-{audit,email,creds,memory}.env`.
+- Writes systemd units for broker + signer + each worker, enables + starts.
+- Configures nginx vhosts for `${BROKER_HOST}` + `signer.${ZONE}` + 4 worker hosts (skip via `--without-nginx`).
+- Runs certbot for first-time TLS cert issuance (skip via `--without-certbot`).
+- Mints broker keypairs (oidc + session) under `/var/lib/agentkeys/keys/`.
+
+Auto-detects bootstrap vs upgrade by reading the existing systemd unit's `Environment=` lines. Pass `--ref <branch>` to opt into an in-script `git fetch + pull`.
+
+### §10.3 Verify
+
+```bash
+curl -sf "https://${BROKER_HOST}/healthz"                  # → 200
+curl -sf "https://${BROKER_HOST}/.well-known/openid-configuration" | jq .
+curl -sf "https://${BROKER_HOST}/.well-known/jwks.json"    | jq '.keys | length'
+curl -sf "https://audit.${ZONE}/healthz"                   # → 200 (and friends)
+```
+
+For full E2E (broker + workers + chain + AWS), run `bash harness/run.sh` — see [`docs/chain-setup.md`](chain-setup.md) for the chain side and [`docs/ci-setup.md`](ci-setup.md) for the automated path.
+
+## §11 Cleanup (full account teardown)
+
+Tear down the whole AgentKeys footprint in one account. Use only when retiring the deployment.
+
+```bash
+# Drain the buckets
+for b in "$BUCKET" "agentkeys-vault-${ACCOUNT_ID}" "agentkeys-memory-${ACCOUNT_ID}"; do
+  aws s3 rm "s3://$b" --recursive 2>/dev/null || true
+  aws s3api delete-bucket --bucket "$b" --region "$REGION" 2>/dev/null || true
+done
+
+# Roles
+for r in agentkeys-data-role agentkeys-vault-role agentkeys-memory-role agentkeys-broker-host; do
+  for p in $(aws iam list-role-policies --role-name "$r" --query 'PolicyNames[]' --output text 2>/dev/null); do
+    aws iam delete-role-policy --role-name "$r" --policy-name "$p"
+  done
+  aws iam delete-role --role-name "$r" 2>/dev/null || true
+done
+
+# OIDC provider
+aws iam delete-open-id-connect-provider \
+  --open-id-connect-provider-arn "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${BROKER_HOST}"
+
+# Daemon user
+for k in $(aws iam list-access-keys --user-name agentkeys-daemon --query 'AccessKeyMetadata[].AccessKeyId' --output text); do
+  aws iam delete-access-key --user-name agentkeys-daemon --access-key-id "$k"
+done
+aws iam delete-user-policy --user-name agentkeys-daemon --policy-name agentkeys-daemon-assume-role 2>/dev/null || true
+aws iam delete-user --user-name agentkeys-daemon
+
+# SES + DNS
+aws ses set-active-receipt-rule-set --rule-set-name "" --region "$REGION" 2>/dev/null || true
+aws sesv2 delete-email-identity --email-identity "$MAIL_DOMAIN" --region "$REGION" 2>/dev/null || true
+# DNS records: operator-managed (Route 53 / your DNS provider) — delete by hand.
+
+# EC2 + EIP: manual via console or aws ec2 CLI
+```
+
+For the test instance, substitute `-test` on every identifier above.
+
 ## Related
 
-- Day-to-day broker re-deploys: [`docs/cloud-setup.md`](cloud-setup.md)
-- Chain bring-up: [`docs/heima-setup.md`](heima-setup.md)
+- Operator workstation setup: [`docs/dev-setup.md`](dev-setup.md)
+- Chain bring-up: [`docs/chain-setup.md`](chain-setup.md)
 - CI activation: [`docs/ci-setup.md`](ci-setup.md)
+- Broker host script (single entry point): [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh)
+- Cloud bootstrap script (single entry point): [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh)
 - Architecture (per-data-class buckets + isolation invariants): [`docs/spec/architecture.md`](spec/architecture.md) §17, §17.2
 - Future Tencent / TEE DKIM: [`docs/spec/heima-gaps-vs-desired-architecture.md`](spec/heima-gaps-vs-desired-architecture.md) §4
 - FAQ + troubleshooting: [`wiki/cloud-setup-faq.md`](../wiki/cloud-setup-faq.md)

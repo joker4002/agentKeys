@@ -3,7 +3,7 @@
 Troubleshooting + edge cases for the two cloud-side operator docs:
 
 - [`docs/cloud-bootstrap.md`](https://github.com/litentry/agentKeys/blob/main/docs/cloud-bootstrap.md) — first-time provisioning (per account or per cloud provider).
-- [`docs/cloud-setup.md`](https://github.com/litentry/agentKeys/blob/main/docs/cloud-setup.md) — ongoing OIDC federation + broker-host re-deploys.
+- [`docs/cloud-bootstrap.md`](https://github.com/litentry/agentKeys/blob/main/docs/cloud-bootstrap.md) — ongoing OIDC federation + broker-host re-deploys.
 
 Use ⌘F to find your error.
 
@@ -13,7 +13,7 @@ The script auto-detects an existing systemd unit and reads `Environment=` lines 
 
 **Fix:** decide which URL is canonical. AWS validates the OIDC issuer URL byte-for-byte against the JWT `iss` claim, so the issuer URL is effectively immutable once the IAM trust policy is built. Either:
 - Re-run with the OLD `--issuer-url` (the trust policy already matches).
-- Or delete the OIDC provider, redo §4 from cloud-setup.md, and re-run with the NEW URL.
+- Or delete the OIDC provider, redo §4 from cloud-bootstrap.md, and re-run with the NEW URL.
 
 ## Q. nginx 502 after a fresh `setup-broker-host.sh` run
 
@@ -68,11 +68,11 @@ certbot renewals run on a 90-day cadence. If they fail (often: rate limit, DNS-0
 
 ## Q. Switching AWS accounts for the test instance
 
-Same-account is fine — isolation comes from the `-test` suffix, not from the AWS account boundary. If you want hard account isolation, every reference to `${ACCOUNT_ID}` in cloud-setup.md becomes `${TEST_ACCOUNT_ID}`, including the role ARN that the broker assumes via OIDC. The setup-broker-host.sh script accepts `--account-id` to point at a different account.
+Same-account is fine — isolation comes from the `-test` suffix, not from the AWS account boundary. If you want hard account isolation, every reference to `${ACCOUNT_ID}` in cloud-bootstrap.md becomes `${TEST_ACCOUNT_ID}`, including the role ARN that the broker assumes via OIDC. The setup-broker-host.sh script accepts `--account-id` to point at a different account.
 
 ## Q. Tencent Cloud port?
 
-§2.2 of cloud-setup.md sketches SimpleDM + COS as the swap-in at the §3+ boundary. The boundary is real — DNS + inbound mail are the only AWS-specific layers; everything from `agentkeys-data-role` onward is provider-agnostic in shape, with COS providing S3-compatible PutObject/GetObject and Tencent's IAM providing OIDC federation. Real port work is tracked separately.
+§2.2 of cloud-bootstrap.md sketches SimpleDM + COS as the swap-in at the §3+ boundary. The boundary is real — DNS + inbound mail are the only AWS-specific layers; everything from `agentkeys-data-role` onward is provider-agnostic in shape, with COS providing S3-compatible PutObject/GetObject and Tencent's IAM providing OIDC federation. Real port work is tracked separately.
 
 ## Q. Can I run the broker without nginx?
 
@@ -93,7 +93,7 @@ The script rewrites the unit clean. If you had a legitimately custom field, add 
 
 ## Related
 
-- Operator runbook: [docs/cloud-setup.md](https://github.com/litentry/agentKeys/blob/main/docs/cloud-setup.md)
+- Operator runbook: [docs/cloud-bootstrap.md](https://github.com/litentry/agentKeys/blob/main/docs/cloud-bootstrap.md)
 - Single entry point: [scripts/setup-broker-host.sh](https://github.com/litentry/agentKeys/blob/main/scripts/setup-broker-host.sh)
 - Heima chain FAQ: [heima-setup-faq](./heima-setup-faq.md)
 - CI FAQ: [ci-setup-faq](./ci-setup-faq.md)

@@ -189,18 +189,18 @@ The split exists so the long-lived secret (user access key) only does ONE thing 
 
 | | Stage 6 interim (shipped) | Stage 7 target |
 |---|---|---|
-| Bucket policy | `AllowDaemonRead`: role reads whole bucket | `AllowDaemonReadOwnPrefix`: role reads only `bots/${aws:PrincipalTag/agentkeys_user_wallet}/*` (per arch.md §6 `bots/` parent namespace — see cloud-setup.md §4.4) |
+| Bucket policy | `AllowDaemonRead`: role reads whole bucket | `AllowDaemonReadOwnPrefix`: role reads only `bots/${aws:PrincipalTag/agentkeys_user_wallet}/*` (per arch.md §6 `bots/` parent namespace — see cloud-bootstrap.md §4.4) |
 | Per-user enforcement | App-side: daemon filters by `To:` header | Cloud-side: S3 returns AccessDenied on cross-prefix reads |
 | Auth flow | `sts:AssumeRole` from IAM user (static keys) | `sts:AssumeRoleWithWebIdentity` from OIDC JWT |
 | AWS resource count | Same singletons | Same singletons (no new IAM per user) |
 | Failure mode if app has a bug | User A could read user B's mail | AccessDenied from cloud — bug caught at the boundary |
-| Where to read more | This spec + [`docs/cloud-setup.md`](../cloud-setup.md) | [`docs/cloud-setup.md` §4](../cloud-setup.md#4-oidc-federation-stage-7) + §10.4 PrincipalTag pattern below |
+| Where to read more | This spec + [`docs/cloud-bootstrap.md`](../cloud-bootstrap.md) | [`docs/cloud-bootstrap.md` §4](../cloud-bootstrap.md#4-oidc-federation-stage-7) + §10.4 PrincipalTag pattern below |
 
 The migration from Stage 6 to Stage 7 is mostly a trust-policy rewrite + a `Resource`/`Condition` swap on the bucket policy (see §10.4). No new IAM resources, no per-user provisioning. Singleton stays singleton.
 
 ### What this spec does NOT cover (intentionally)
 
-- **Operator setup specifics** (account ID, hosted zone ID, exact ARNs) live in [`docs/cloud-setup.md`](../cloud-setup.md), the operator-facing runbook. Reference that for the actual AWS CLI calls.
+- **Operator setup specifics** (account ID, hosted zone ID, exact ARNs) live in [`docs/cloud-bootstrap.md`](../cloud-bootstrap.md), the operator-facing runbook. Reference that for the actual AWS CLI calls.
 - **PrincipalTag enforcement details** are in §10.4 below + [`wiki/tag-based-access.md`](../../wiki/tag-based-access.md).
 - **OIDC issuer key derivation + JWKS** are in §10.5 + [`wiki/oidc-federation.md`](../../wiki/oidc-federation.md).
 
@@ -263,7 +263,7 @@ Higher-level concerns like drafts-with-human-approval, per-message reply/forward
 | **SES SendRawEmail** | Outbound. IAM access is via OIDC federation from the TEE — no static access keys held anywhere. See §10.5. |
 | **SES event destinations** (SNS) | Delivery / bounce / complaint notifications. Subscribed to by the daemon directly, not proxied by us. |
 | **Mail-from subdomain** (optional) | `bounce.agentkeys-email.io` for bounce handling — adds 2 records. |
-| **S3 for raw MIME** | `s3://agentkeys-mail/bots/<user_wallet>/<inbox>/<message_id>.eml`. Bucket policy with `aws:PrincipalTag/agentkeys_user_wallet` enforces per-user isolation (§10.4); `bots/` is the per-actor data namespace, sibling to SES's `inbound/` landing zone — see arch.md §6 + cloud-setup.md §4.4. Lifecycle rule prunes > 90 days. |
+| **S3 for raw MIME** | `s3://agentkeys-mail/bots/<user_wallet>/<inbox>/<message_id>.eml`. Bucket policy with `aws:PrincipalTag/agentkeys_user_wallet` enforces per-user isolation (§10.4); `bots/` is the per-actor data namespace, sibling to SES's `inbound/` landing zone — see arch.md §6 + cloud-bootstrap.md §4.4. Lifecycle rule prunes > 90 days. |
 
 ## 10. Domain setup (one-time per custom domain)
 

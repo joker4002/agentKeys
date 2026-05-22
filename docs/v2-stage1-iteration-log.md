@@ -347,7 +347,7 @@ shared JSON encoding is the source of truth for the canonical bytes.
 - ai-slop-cleaner skill flagged the heima-*.sh script duplication
   (color helpers, log functions, master-key resolution boilerplate
   repeated across 6 scripts) but I left it alone: per the
-  operator-readability principle in `docs/cloud-setup.md` style, each
+  operator-readability principle in `docs/cloud-bootstrap.md` style, each
   operator-facing script should be readable in isolation. Bash `source`
   indirection would hurt that. ~360 LOC of cross-script duplication
   is intentional, not slop.

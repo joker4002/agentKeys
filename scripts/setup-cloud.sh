@@ -76,6 +76,7 @@ fi
 # ─── CLI parse ────────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
   case "$1" in
+    --env-file)    ENV_FILE="$2"; shift 2 ;;
     --yes)         YES=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
     --from-step)   FROM_STEP="$2"; shift 2 ;;
@@ -88,6 +89,16 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
+
+# Test-mode suffix is auto-detected from the env file path if it
+# contains "test", and overridable via AGENTKEYS_TEST=1.
+case "$ENV_FILE" in
+  *test*) : "${AGENTKEYS_TEST:=1}" ;;
+esac
+SUFFIX=""
+[ "${AGENTKEYS_TEST:-0}" = "1" ] && SUFFIX="-test"
+DAEMON_USER="agentkeys-daemon${SUFFIX}"
+DATA_ROLE="agentkeys-data-role${SUFFIX}"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 step() { printf "${COLOR_HEAD}==> [step %d/%d] %s${COLOR_RESET}\n" "$CUR_STEP" "$STEP_TOTAL" "$1" >&2; }
@@ -352,37 +363,37 @@ do_step_9() {
 }
 
 do_step_10() {
-  CUR_STEP=10; step "IAM user agentkeys-daemon (broker runtime)"
-  if aws iam get-user --user-name agentkeys-daemon >/dev/null 2>&1; then
-    skip "IAM user agentkeys-daemon already exists"
+  CUR_STEP=10; step "IAM user $DAEMON_USER (broker runtime)"
+  if aws iam get-user --user-name "$DAEMON_USER" >/dev/null 2>&1; then
+    skip "IAM user $DAEMON_USER already exists"
   else
-    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-user agentkeys-daemon"; return; }
-    aws iam create-user --user-name agentkeys-daemon >/dev/null \
-      || die "create-user agentkeys-daemon failed"
-    ok "IAM user agentkeys-daemon created"
+    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-user $DAEMON_USER"; return; }
+    aws iam create-user --user-name "$DAEMON_USER" >/dev/null \
+      || die "create-user $DAEMON_USER failed"
+    ok "IAM user $DAEMON_USER created"
   fi
 
   # Inline assume-role policy is idempotent (overwrite).
-  [ "$DRY_RUN" = "1" ] || aws iam put-user-policy --user-name agentkeys-daemon \
-    --policy-name agentkeys-daemon-assume-role \
-    --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+  [ "$DRY_RUN" = "1" ] || aws iam put-user-policy --user-name "$DAEMON_USER" \
+    --policy-name "${DAEMON_USER}-assume-role" \
+    --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" --arg role "$DATA_ROLE" '{
       Version:"2012-10-17",
       Statement:[{Effect:"Allow", Action:"sts:AssumeRole",
-                  Resource:"arn:aws:iam::\($acct):role/agentkeys-data-role"}]
+                  Resource:"arn:aws:iam::\($acct):role/\($role)"}]
     }')" >/dev/null || die "put-user-policy failed"
-  ok "agentkeys-daemon inline policy applied"
+  ok "$DAEMON_USER inline policy applied"
 
   # Access key: only mint if none currently active.
   local active_keys
-  active_keys=$(aws iam list-access-keys --user-name agentkeys-daemon \
+  active_keys=$(aws iam list-access-keys --user-name "$DAEMON_USER" \
     --query 'AccessKeyMetadata[?Status==`Active`] | length(@)' --output text)
   if [ "$active_keys" -ge 1 ]; then
-    skip "agentkeys-daemon already has $active_keys active access key(s) — operator must already hold them"
+    skip "$DAEMON_USER already has $active_keys active access key(s) — operator must already hold them"
   else
-    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-access-key agentkeys-daemon"; return; }
+    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-access-key $DAEMON_USER"; return; }
     warn "creating a new access key — SAVE THE SECRET, it is shown ONCE"
     local key_json key_id key_secret
-    key_json=$(aws iam create-access-key --user-name agentkeys-daemon --output json) \
+    key_json=$(aws iam create-access-key --user-name "$DAEMON_USER" --output json) \
       || die "create-access-key failed"
     key_id=$(echo "$key_json"     | jq -r .AccessKey.AccessKeyId)
     key_secret=$(echo "$key_json" | jq -r .AccessKey.SecretAccessKey)
@@ -394,26 +405,26 @@ do_step_10() {
 }
 
 do_step_11() {
-  CUR_STEP=11; step "IAM role agentkeys-data-role (static-IAM trust variant)"
-  if aws iam get-role --role-name agentkeys-data-role >/dev/null 2>&1; then
-    skip "role agentkeys-data-role already exists"
+  CUR_STEP=11; step "IAM role $DATA_ROLE (static-IAM trust variant)"
+  if aws iam get-role --role-name "$DATA_ROLE" >/dev/null 2>&1; then
+    skip "role $DATA_ROLE already exists"
   else
-    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-role agentkeys-data-role"; return; }
-    aws iam create-role --role-name agentkeys-data-role \
-      --assume-role-policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-role $DATA_ROLE"; return; }
+    aws iam create-role --role-name "$DATA_ROLE" \
+      --assume-role-policy-document "$(jq -n --arg acct "$ACCOUNT_ID" --arg user "$DAEMON_USER" '{
         Version:"2012-10-17",
         Statement:[{
           Effect:"Allow",
-          Principal:{AWS:"arn:aws:iam::\($acct):user/agentkeys-daemon"},
+          Principal:{AWS:"arn:aws:iam::\($acct):user/\($user)"},
           Action:"sts:AssumeRole"
         }]
       }')" >/dev/null || die "create-role failed"
-    ok "role agentkeys-data-role created"
+    ok "role $DATA_ROLE created"
   fi
 
   # Inline data-plane policy (idempotent overwrite).
-  [ "$DRY_RUN" = "1" ] || aws iam put-role-policy --role-name agentkeys-data-role \
-    --policy-name agentkeys-data-role-inline \
+  [ "$DRY_RUN" = "1" ] || aws iam put-role-policy --role-name "$DATA_ROLE" \
+    --policy-name "${DATA_ROLE}-inline" \
     --policy-document "$(jq -n \
       --arg bucket "$BUCKET" --arg region "$REGION" \
       --arg acct "$ACCOUNT_ID" --arg domain "$MAIL_DOMAIN" '{
@@ -426,10 +437,10 @@ do_step_11() {
                      "arn:aws:ses:\($region):\($acct):identity/*@\($domain)"]}
         ]
       }')" >/dev/null || die "put-role-policy failed"
-  ok "agentkeys-data-role inline policy applied"
+  ok "$DATA_ROLE inline policy applied"
 
   local role_arn
-  role_arn=$(aws iam get-role --role-name agentkeys-data-role --query 'Role.Arn' --output text)
+  role_arn=$(aws iam get-role --role-name "$DATA_ROLE" --query 'Role.Arn' --output text)
   env_set DATA_ROLE_ARN "$role_arn"
 }
 
@@ -461,7 +472,7 @@ do_step_13() {
 
   [ "$DRY_RUN" = "1" ] && { warn "DRY: would put-bucket-policy on $BUCKET"; return; }
   aws s3api put-bucket-policy --region "$REGION" --bucket "$BUCKET" \
-    --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" '{
+    --policy "$(jq -n --arg bucket "$BUCKET" --arg acct "$ACCOUNT_ID" --arg role "$DATA_ROLE" '{
       Version:"2012-10-17",
       Statement:[
         {Sid:"AllowSESWriteInbound", Effect:"Allow",
@@ -470,7 +481,7 @@ do_step_13() {
          Resource:"arn:aws:s3:::\($bucket)/*",
          Condition:{StringEquals:{"aws:Referer":$acct}}},
         {Sid:"AllowDaemonRead", Effect:"Allow",
-         Principal:{AWS:"arn:aws:iam::\($acct):role/agentkeys-data-role"},
+         Principal:{AWS:"arn:aws:iam::\($acct):role/\($role)"},
          Action:["s3:GetObject","s3:ListBucket"],
          Resource:["arn:aws:s3:::\($bucket)","arn:aws:s3:::\($bucket)/*"]}
       ]
