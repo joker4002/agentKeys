@@ -108,6 +108,12 @@ SUFFIX=""
 DAEMON_USER="agentkeys-daemon${SUFFIX}"
 DATA_ROLE="agentkeys-data-role${SUFFIX}"
 
+# Source env file unconditionally so any --only-step N or --from-step N
+# (where N > 2) has access to ACCOUNT_ID/REGION/ZONE/etc. Step 2's
+# do_step_2 re-sources + validates explicitly when in scope. Reading
+# the env file is idempotent; this just makes scope flags ergonomic.
+[ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; }
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 step() { printf "${COLOR_HEAD}==> [step %d/%d] %s${COLOR_RESET}\n" "$CUR_STEP" "$STEP_TOTAL" "$1" >&2; }
 ok()   { printf "    ${COLOR_OK}ok    %s${COLOR_RESET}\n" "$1" >&2; }
@@ -500,22 +506,31 @@ do_step_13() {
 do_step_14() {
   CUR_STEP=14; step "Summary + next steps"
   printf "\n${COLOR_OK}═══ Cloud bootstrap complete ═══${COLOR_RESET}\n\n" >&2
+  printf "  Env file          : %s\n" "$ENV_FILE" >&2
+  printf "  Test mode         : %s\n" "$([ "$TEST_MODE" = "1" ] && echo "yes (-test suffix on IAM identifiers)" || echo "no (prod)")" >&2
   printf "  Region            : %s\n" "$REGION" >&2
   printf "  Zone              : %s (id: %s)\n" "$ZONE" "$PARENT_ZONE_ID" >&2
   printf "  Mail domain       : %s\n" "$MAIL_DOMAIN" >&2
   printf "  Broker host       : %s\n" "$BROKER_HOST" >&2
   printf "  Mail bucket       : s3://%s/\n" "$BUCKET" >&2
-  printf "  Data role         : arn:aws:iam::%s:role/agentkeys-data-role\n" "$ACCOUNT_ID" >&2
+  printf "  Daemon user       : %s\n" "$DAEMON_USER" >&2
+  printf "  Data role         : arn:aws:iam::%s:role/%s\n" "$ACCOUNT_ID" "$DATA_ROLE" >&2
   printf "  EIP               : %s\n" "${EIP:-(unallocated)}" >&2
+  printf "  EIP attached to   : %s\n" "${INSTANCE_ID:-(unattached — paste INSTANCE_ID into env file + re-run --only-step 4)}" >&2
   printf "\n  Next steps (in order):\n" >&2
-  printf "    1. Launch EC2 (or other Linux host); attach the EIP if you skipped INSTANCE_ID:\n" >&2
-  printf "         aws ec2 associate-address --region %s --instance-id <id> --public-ip %s\n" \
-    "$REGION" "${EIP:-<eip>}" >&2
-  printf "    2. SSH into the host, clone the repo, then:\n" >&2
+  if [ -z "${INSTANCE_ID:-}" ]; then
+    printf "    1. Launch EC2, paste 'INSTANCE_ID=i-…' into %s, re-run:\n" "$ENV_FILE" >&2
+    printf "         bash %s --env-file %s%s --only-step 4\n" "$0" "$ENV_FILE" "$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "")" >&2
+    printf "    2. SSH into the host, clone the repo, then:\n" >&2
+  else
+    printf "    1. SSH into %s, clone the repo, then:\n" "${EIP:-<eip>}" >&2
+  fi
   printf "         sudo bash scripts/setup-broker-host.sh --issuer-url https://%s --account-id %s --yes\n" \
     "$BROKER_HOST" "$ACCOUNT_ID" >&2
-  printf "    3. Once broker is publicly reachable, run docs/cloud-setup.md §1 (OIDC federation upgrade).\n" >&2
-  printf "    4. Chain bring-up: bash scripts/setup-heima.sh\n\n" >&2
+  printf "    %d. Once broker is publicly reachable, run docs/cloud-bootstrap.md §9 (OIDC federation upgrade).\n" \
+    "$([ -z "${INSTANCE_ID:-}" ] && echo 3 || echo 2)" >&2
+  printf "    %d. Chain bring-up: bash scripts/setup-heima.sh\n\n" \
+    "$([ -z "${INSTANCE_ID:-}" ] && echo 4 || echo 3)" >&2
 
   printf "  Re-run any step surgically (idempotent):\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 6   # re-UPSERT DNS\n" >&2

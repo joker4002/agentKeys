@@ -17,19 +17,38 @@ The day-to-day broker re-deploys live in §10 below (`setup-broker-host.sh`); th
 The idempotent one-shot orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) walks every step in this doc end-to-end. Same posture as `setup-broker-host.sh` + `setup-heima.sh`: every step pre-checks state and short-circuits when the work is already a no-op.
 
 ```bash
-# 1. Configure env on the operator's workstation:
-cp scripts/operator-workstation.env.example scripts/operator-workstation.env   # if not already done
-$EDITOR scripts/operator-workstation.env                                       # fill in ACCOUNT_ID, REGION, ZONE, PARENT_ZONE_ID, BROKER_HOST, MAIL_DOMAIN, BUCKET
+# 1. Configure env on the operator's workstation. For prod, edit:
+#      scripts/operator-workstation.env
+#    For test, the parallel file is pre-populated with -test names:
+#      scripts/operator-workstation.test.env
+#    Required keys: ACCOUNT_ID REGION ZONE PARENT_ZONE_ID BROKER_HOST
+#    MAIL_DOMAIN BUCKET (+ VAULT_BUCKET / MEMORY_BUCKET / DATA_ROLE_ARN
+#    / VAULT_ROLE_ARN / MEMORY_ROLE_ARN — already present in the template).
 
-# 2. Run the orchestrator (~12 steps, idempotent, ~3 min on a fresh account):
 awsp agentkeys-admin
+
+# 2. Launch EC2 (operator decides instance type + image + key pair):
+aws ec2 run-instances --instance-type t3.small --image-id <ami> --key-name <key> ...
+# → note the INSTANCE_ID
+
+# 3. Paste INSTANCE_ID into the env file (one line):
+echo 'INSTANCE_ID=<id-from-step-2>' >> scripts/operator-workstation.env
+
+# 4. Run the orchestrator (~14 steps, idempotent, ~3 min on a fresh account).
+#    Step 4 allocates the EIP, attaches to INSTANCE_ID, and writes EIP=…
+#    back to the env file. Subsequent runs reuse it.
 AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh --yes
 
-# 3. Launch an EC2 (operator decides instance type + image + key pair) and:
-aws ec2 associate-address --region "$REGION" --instance-id <id> --public-ip <EIP-from-step-2>
+# 5. SSH to the host, clone the repo, then:
+sudo bash scripts/setup-broker-host.sh \
+  --issuer-url "https://${BROKER_HOST}" --account-id "${ACCOUNT_ID}" --yes
+```
 
-# 4. SSH to the host, clone the repo, then:
-sudo bash scripts/setup-broker-host.sh --issuer-url "https://${BROKER_HOST}" --account-id "${ACCOUNT_ID}" --yes
+For the **test stack**, swap in `--env-file scripts/operator-workstation.test.env --test` on step 4 and use a SEPARATE test EC2 (single-tenant — don't co-locate with prod):
+
+```bash
+AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh \
+  --env-file scripts/operator-workstation.test.env --test --yes
 ```
 
 For surgical re-runs after a fix: `bash scripts/setup-cloud.sh --only-step N` (see step list below).
