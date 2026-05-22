@@ -353,11 +353,23 @@ do_step_6() {
   read -r t1 t2 t3 <<<"$tokens"
   [ -z "$t1" ] && die "no DKIM tokens returned — wait 30s after step 5 and re-run"
 
-  local broker_host="${BROKER_HOST}"
+  # Worker hostnames come from the operator-workstation env file (they
+  # carry the prod/test split: `signer.${ZONE}` vs `signer-test.${ZONE}`
+  # etc.). Hardcoding `signer.${ZONE}` here would silently overwrite
+  # prod DNS records to the test EIP when running --test — disaster.
+  : "${SIGNER_HOST:?SIGNER_HOST missing — must be set in $ENV_FILE}"
+  : "${WORKER_AUDIT_HOST:?WORKER_AUDIT_HOST missing — must be set in $ENV_FILE}"
+  : "${WORKER_EMAIL_HOST:?WORKER_EMAIL_HOST missing — must be set in $ENV_FILE}"
+  : "${WORKER_CRED_HOST:?WORKER_CRED_HOST missing — must be set in $ENV_FILE}"
+  : "${WORKER_MEMORY_HOST:?WORKER_MEMORY_HOST missing — must be set in $ENV_FILE}"
+
   local change_batch
   change_batch=$(jq -n \
-    --arg domain "$MAIL_DOMAIN" --arg region "$REGION" --arg zone "$ZONE" \
-    --arg eip "$EIP" --arg broker "$broker_host" \
+    --arg domain "$MAIL_DOMAIN" --arg region "$REGION" \
+    --arg eip "$EIP" --arg broker "$BROKER_HOST" \
+    --arg signer "$SIGNER_HOST" --arg audit "$WORKER_AUDIT_HOST" \
+    --arg email "$WORKER_EMAIL_HOST" --arg cred "$WORKER_CRED_HOST" \
+    --arg memory "$WORKER_MEMORY_HOST" \
     --arg t1 "$t1" --arg t2 "$t2" --arg t3 "$t3" '{
       Comment: "AgentKeys cloud bootstrap (DKIM/SPF/DMARC/MX + broker subdomains)",
       Changes: [
@@ -367,12 +379,12 @@ do_step_6() {
         {Action:"UPSERT", ResourceRecordSet:{Name:$domain, Type:"MX",  TTL:300, ResourceRecords:[{Value:"10 inbound-smtp.\($region).amazonaws.com"}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$domain, Type:"TXT", TTL:300, ResourceRecords:[{Value:"\"v=spf1 include:amazonses.com -all\""}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:"_dmarc.\($domain)", Type:"TXT", TTL:300, ResourceRecords:[{Value:"\"v=DMARC1; p=quarantine; rua=mailto:dmarc@\($domain)\""}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:$broker,            Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:"signer.\($zone)",  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:"audit.\($zone)",   Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:"email.\($zone)",   Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:"cred.\($zone)",    Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:"memory.\($zone)",  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}}
+        {Action:"UPSERT", ResourceRecordSet:{Name:$broker, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$signer, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$audit,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$email,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$cred,   Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$memory, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}}
       ]
     }')
 
@@ -414,7 +426,13 @@ do_step_7() {
 }
 
 do_step_8() {
-  CUR_STEP=8; step "SES receipt rule (agentkeys/agentkeys-inbound)"
+  # Receipt rule name carries the suffix so prod (`agentkeys-inbound`)
+  # and test (`agentkeys-inbound-test`) can coexist on the same active
+  # rule set without colliding. Without this, running --test sees the
+  # prod rule already exists, silently skips, and SES has no route for
+  # *@$MAIL_DOMAIN → verification mail never arrives at the test bucket.
+  local rule_name="agentkeys-inbound${SUFFIX}"
+  CUR_STEP=8; step "SES receipt rule (agentkeys/$rule_name)"
   # Ensure rule set exists.
   aws ses create-receipt-rule-set --rule-set-name agentkeys --region "$REGION" \
     >/dev/null 2>&1 || true
@@ -422,19 +440,19 @@ do_step_8() {
   # Pre-check: rule already on the set?
   local existing_rule
   existing_rule=$(aws ses describe-receipt-rule --rule-set-name agentkeys \
-    --rule-name agentkeys-inbound --region "$REGION" \
+    --rule-name "$rule_name" --region "$REGION" \
     --query 'Rule.Name' --output text 2>/dev/null || echo "absent")
-  if [ "$existing_rule" = "agentkeys-inbound" ]; then
-    skip "receipt rule already configured"
+  if [ "$existing_rule" = "$rule_name" ]; then
+    skip "receipt rule $rule_name already configured"
   else
-    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-receipt-rule"; return; }
+    [ "$DRY_RUN" = "1" ] && { warn "DRY: would create-receipt-rule $rule_name"; return; }
     aws ses create-receipt-rule --region "$REGION" --rule-set-name agentkeys \
-      --rule "$(jq -n --arg domain "$MAIL_DOMAIN" --arg bucket "$BUCKET" '{
-        Name: "agentkeys-inbound", Enabled: true, ScanEnabled: true, TlsPolicy: "Optional",
+      --rule "$(jq -n --arg name "$rule_name" --arg domain "$MAIL_DOMAIN" --arg bucket "$BUCKET" '{
+        Name: $name, Enabled: true, ScanEnabled: true, TlsPolicy: "Optional",
         Recipients: [$domain],
         Actions: [{S3Action: {BucketName: $bucket, ObjectKeyPrefix: "inbound/"}}]
       }')" >/dev/null || die "create-receipt-rule failed"
-    ok "receipt rule created"
+    ok "receipt rule $rule_name created"
   fi
 
   # Activate the rule set (idempotent).
