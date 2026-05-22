@@ -96,7 +96,13 @@ MUX_OPTS=(-o "ControlMaster=auto"
 if [ "$FALLBACK" = "1" ]; then
   [ -n "$EIP" ] || { echo "EIP unset in $BROKER_ENV_FILE — required for --fallback" >&2; exit 1; }
   [ -f "$PEM_PATH" ] || { echo "PEM key not found at $PEM_PATH — pass --pem <path>" >&2; exit 1; }
-  : "${OS_USER:=ubuntu}"
+  # Default to `agentkey` — same user the non-fallback path uses — so both
+  # ssh-broker.sh invocation styles land in /home/agentkey/ and the
+  # operator sees the same files regardless of which alias they used.
+  # setup-broker-host.sh mirrors ubuntu's authorized_keys → agentkey's
+  # so the .pem authenticates as agentkey too. Override with --os-user
+  # ubuntu if you actually want the AMI's default user.
+  : "${OS_USER:=agentkey}"
   echo "ssh -i $PEM_PATH $OS_USER@$EIP   (stack=$STACK, instance=$INSTANCE_ID, mux=on)" >&2
   # ssh takes a remote command directly after host (no separator needed).
   # ${arr[@]+"${arr[@]}"} avoids the bash 3.2 (macOS default) "unbound

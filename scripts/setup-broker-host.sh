@@ -720,6 +720,22 @@ if ! id -u agentkey >/dev/null 2>&1; then
   sudo chmod 0440 /etc/sudoers.d/agentkey
 fi
 
+# Mirror ubuntu's authorized_keys into agentkey's .ssh so the .pem
+# fallback path of ssh-broker.sh also lands as `agentkey` (not as
+# `ubuntu`). Without this, ssh-broker.sh's non-fallback path drops into
+# /home/agentkey/ while the fallback path drops into /home/ubuntu/ —
+# operator sees different files depending on which alias they used.
+# Mirroring the keys means both SSH methods end up in the same home
+# dir → same files visible everywhere.
+if [[ -f /home/ubuntu/.ssh/authorized_keys ]] \
+   && ! sudo test -s /home/agentkey/.ssh/authorized_keys; then
+  log "Mirroring ubuntu's authorized_keys → agentkey's .ssh (so .pem fallback lands as agentkey too)"
+  sudo install -d -m 0700 -o agentkey -g agentkey /home/agentkey/.ssh
+  sudo install -m 0600 -o agentkey -g agentkey \
+    /home/ubuntu/.ssh/authorized_keys \
+    /home/agentkey/.ssh/authorized_keys
+fi
+
 # Ensure ec2-instance-connect is installed so sshd's AuthorizedKeysCommand
 # can resolve the ephemeral keys pushed via aws ec2-instance-connect
 # send-ssh-public-key. Recent Ubuntu AMIs include the package but NOT
