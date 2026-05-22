@@ -22,20 +22,28 @@
 # Usage:
 #   AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh [flags]
 #
-# Env file (sourced — `--env-file` selects which):
-#   Required keys:
-#     ACCOUNT_ID, REGION, ZONE, PARENT_ZONE_ID,
-#     BROKER_HOST, MAIL_DOMAIN, BUCKET (= MAIL_BUCKET)
-#   Optional keys (operator pastes these into the env file BEFORE re-run):
-#     EIP            Reuse this existing EIP instead of allocating a fresh one
-#     INSTANCE_ID    EC2 to attach the EIP to (step 4 skips attach if absent)
+# Env files (TWO sourced — operator-workstation first, broker second):
+#
+#   1. Operator-workstation env (`--env-file`, default
+#      scripts/operator-workstation.env). Account-wide identifiers:
+#      ACCOUNT_ID, REGION, ZONE, PARENT_ZONE_ID, BROKER_HOST, MAIL_DOMAIN,
+#      BUCKET (= MAIL_BUCKET), VAULT_BUCKET, MEMORY_BUCKET, *_ROLE_ARN, ...
+#
+#   2. Broker env (`--broker-env-file`, default scripts/broker.env or
+#      scripts/broker.test.env when --test is set). MACHINE identifiers:
+#      INSTANCE_ID  EC2 hosting the broker — operator pastes manually
+#      EIP          Static IP for $BROKER_HOST — usually filled in by step 4
+#                   and written back; operator hand-edits only when importing
+#                   an EIP allocated outside the script.
 #
 # Flags:
-#   --env-file <path>  env file to source (default: scripts/operator-workstation.env)
-#                      use scripts/operator-workstation.test.env for the test stack
-#   --test             explicit test mode: suffix IAM identifiers with -test
-#                      (auto-set when --env-file path contains "test", but pass
-#                       explicitly if your test env file uses a different name)
+#   --env-file <path>           operator-workstation env file (default per above)
+#   --broker-env-file <path>    broker-machine env file (default per --test mode)
+#   --test                      explicit test mode: suffix IAM identifiers with
+#                               -test AND switch broker-env-file default to
+#                               scripts/broker.test.env. Auto-set when --env-file
+#                               path contains "test", but pass explicitly if your
+#                               test env file uses a different name.
 #   --yes              non-interactive (don't pause before destructive)
 #   --from-step N      start at step N (skip 1..N-1)
 #   --to-step N        stop after step N
@@ -60,6 +68,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$SCRIPT_DIR/operator-workstation.env"
+BROKER_ENV_FILE=""   # resolved post-CLI-parse based on TEST_MODE
 
 YES=0
 DRY_RUN=0
@@ -80,13 +89,14 @@ TEST_MODE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --env-file)    ENV_FILE="$2"; shift 2 ;;
-    --test)        TEST_MODE=1; shift ;;
-    --yes)         YES=1; shift ;;
-    --dry-run)     DRY_RUN=1; shift ;;
-    --from-step)   FROM_STEP="$2"; shift 2 ;;
-    --to-step)     TO_STEP="$2"; shift 2 ;;
-    --only-step)   FROM_STEP="$2"; TO_STEP="$2"; shift 2 ;;
+    --env-file)         ENV_FILE="$2"; shift 2 ;;
+    --broker-env-file)  BROKER_ENV_FILE="$2"; shift 2 ;;
+    --test)             TEST_MODE=1; shift ;;
+    --yes)              YES=1; shift ;;
+    --dry-run)          DRY_RUN=1; shift ;;
+    --from-step)        FROM_STEP="$2"; shift 2 ;;
+    --to-step)          TO_STEP="$2"; shift 2 ;;
+    --only-step)        FROM_STEP="$2"; TO_STEP="$2"; shift 2 ;;
     --help|-h)
       sed -n '2,55p' "$0" | sed 's/^# //; s/^#//'
       exit 0
@@ -108,11 +118,22 @@ SUFFIX=""
 DAEMON_USER="agentkeys-daemon${SUFFIX}"
 DATA_ROLE="agentkeys-data-role${SUFFIX}"
 
-# Source env file unconditionally so any --only-step N or --from-step N
-# (where N > 2) has access to ACCOUNT_ID/REGION/ZONE/etc. Step 2's
-# do_step_2 re-sources + validates explicitly when in scope. Reading
-# the env file is idempotent; this just makes scope flags ergonomic.
-[ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; }
+# Resolve BROKER_ENV_FILE default if not set via flag: matches TEST_MODE.
+if [ -z "$BROKER_ENV_FILE" ]; then
+  if [ "$TEST_MODE" = "1" ]; then
+    BROKER_ENV_FILE="$SCRIPT_DIR/broker.test.env"
+  else
+    BROKER_ENV_FILE="$SCRIPT_DIR/broker.env"
+  fi
+fi
+
+# Source BOTH env files unconditionally so any --only-step N or
+# --from-step N (where N > 2) has access to ACCOUNT_ID/REGION/ZONE/etc.
+# (operator-workstation) AND INSTANCE_ID/EIP (broker). Step 2's do_step_2
+# re-sources + validates the operator-workstation keys explicitly when in
+# scope. Reading the env files is idempotent.
+[ -f "$ENV_FILE"        ] && { set -a; . "$ENV_FILE";        set +a; }
+[ -f "$BROKER_ENV_FILE" ] && { set -a; . "$BROKER_ENV_FILE"; set +a; }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 step() { printf "${COLOR_HEAD}==> [step %d/%d] %s${COLOR_RESET}\n" "$CUR_STEP" "$STEP_TOTAL" "$1" >&2; }
@@ -126,23 +147,24 @@ in_scope() {
   [ "$1" -ge "$FROM_STEP" ] && [ "$1" -le "$TO_STEP" ]
 }
 
-# Idempotent overwrite of a KEY=VAL line in $ENV_FILE.
+# Idempotent overwrite of a KEY=VAL line in an env file. Defaults to $ENV_FILE;
+# pass a third arg to write to a different env file (e.g. $BROKER_ENV_FILE for
+# EIP / INSTANCE_ID, which live with the broker-machine config).
 env_set() {
-  local key="$1" val="$2"
-  if [ ! -f "$ENV_FILE" ]; then
-    printf '%s=%s\n' "$key" "$val" > "$ENV_FILE"
+  local key="$1" val="$2" file="${3:-$ENV_FILE}"
+  if [ ! -f "$file" ]; then
+    printf '%s=%s\n' "$key" "$val" > "$file"
     return
   fi
-  if grep -q "^${key}=" "$ENV_FILE"; then
-    # macOS + GNU sed compatibility: write tmp, swap.
+  if grep -q "^${key}=" "$file"; then
     awk -v k="$key" -v v="$val" '
       BEGIN { ow = 0 }
       $0 ~ "^"k"=" { print k"="v; ow = 1; next }
       { print }
       END { if (!ow) print k"="v }
-    ' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
   else
-    printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+    printf '%s=%s\n' "$key" "$val" >> "$file"
   fi
 }
 
@@ -223,7 +245,7 @@ do_step_4() {
       if [ -n "$allocation_id" ] && [ "$allocation_id" != "None" ]; then
         EIP="$attached_ip"
         skip "EIP $EIP already attached to $INSTANCE_ID (adopting; no allocation)"
-        env_set EIP "$EIP"
+        env_set EIP "$EIP" "$BROKER_ENV_FILE"
         # Best-effort retroactive tag so future runs find via path B.
         if [ "$DRY_RUN" = "0" ]; then
           aws ec2 create-tags --region "$REGION" --resources "$allocation_id" \
@@ -260,7 +282,7 @@ do_step_4() {
     EIP=$(echo "$alloc_json" | jq -r .PublicIp)
     ok "allocated EIP $EIP"
   fi
-  env_set EIP "$EIP"
+  env_set EIP "$EIP" "$BROKER_ENV_FILE"
 
   # Associate to INSTANCE_ID if not already attached.
   if [ -n "${INSTANCE_ID:-}" ]; then
@@ -278,7 +300,7 @@ do_step_4() {
       ok "attached EIP $EIP → $INSTANCE_ID"
     fi
   else
-    warn "INSTANCE_ID unset in $ENV_FILE — EIP unattached. Paste 'INSTANCE_ID=i-…' into the env file once EC2 exists, then re-run: bash $0 --env-file $ENV_FILE --only-step 4"
+    warn "INSTANCE_ID unset in $BROKER_ENV_FILE — EIP unattached. Paste 'INSTANCE_ID=i-…' into that file once EC2 exists, then re-run: bash $0 --env-file $ENV_FILE --broker-env-file $BROKER_ENV_FILE$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "") --only-step 4"
   fi
 }
 
@@ -548,7 +570,8 @@ do_step_13() {
 do_step_14() {
   CUR_STEP=14; step "Summary + next steps"
   printf "\n${COLOR_OK}═══ Cloud bootstrap complete ═══${COLOR_RESET}\n\n" >&2
-  printf "  Env file          : %s\n" "$ENV_FILE" >&2
+  printf "  Operator env file : %s\n" "$ENV_FILE" >&2
+  printf "  Broker env file   : %s\n" "$BROKER_ENV_FILE" >&2
   printf "  Test mode         : %s\n" "$([ "$TEST_MODE" = "1" ] && echo "yes (-test suffix on IAM identifiers)" || echo "no (prod)")" >&2
   printf "  Region            : %s\n" "$REGION" >&2
   printf "  Zone              : %s (id: %s)\n" "$ZONE" "$PARENT_ZONE_ID" >&2
@@ -558,11 +581,12 @@ do_step_14() {
   printf "  Daemon user       : %s\n" "$DAEMON_USER" >&2
   printf "  Data role         : arn:aws:iam::%s:role/%s\n" "$ACCOUNT_ID" "$DATA_ROLE" >&2
   printf "  EIP               : %s\n" "${EIP:-(unallocated)}" >&2
-  printf "  EIP attached to   : %s\n" "${INSTANCE_ID:-(unattached — paste INSTANCE_ID into env file + re-run --only-step 4)}" >&2
+  printf "  EIP attached to   : %s\n" "${INSTANCE_ID:-(unattached — paste INSTANCE_ID into $BROKER_ENV_FILE + re-run --only-step 4)}" >&2
   printf "\n  Next steps (in order):\n" >&2
   if [ -z "${INSTANCE_ID:-}" ]; then
-    printf "    1. Launch EC2, paste 'INSTANCE_ID=i-…' into %s, re-run:\n" "$ENV_FILE" >&2
-    printf "         bash %s --env-file %s%s --only-step 4\n" "$0" "$ENV_FILE" "$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "")" >&2
+    printf "    1. Launch EC2, paste 'INSTANCE_ID=i-…' into %s, re-run:\n" "$BROKER_ENV_FILE" >&2
+    printf "         bash %s --env-file %s --broker-env-file %s%s --only-step 4\n" \
+      "$0" "$ENV_FILE" "$BROKER_ENV_FILE" "$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "")" >&2
     printf "    2. SSH into the host, clone the repo, then:\n" >&2
   else
     printf "    1. SSH into %s, clone the repo, then:\n" "${EIP:-<eip>}" >&2

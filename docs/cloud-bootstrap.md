@@ -246,6 +246,64 @@ aws ec2 associate-address --region "$REGION" \
 
 A is one fewer command; B is sometimes necessary when an existing EC2 needs to be repointed at the EIP later. For test, swap in `--env-file scripts/operator-workstation.test.env --test` everywhere — the EIP will be tagged `agentkeys-broker-eip-test` (the test env file has the test placeholders pre-populated).
 
+#### 2a. SSH into the broker host
+
+Once the EC2 is launched + the EIP attached, SSH access goes through [`scripts/ssh-broker.sh`](../scripts/ssh-broker.sh) — single entry point that reads `INSTANCE_ID` + `EIP` from `scripts/broker.env` or `scripts/broker.test.env` so it stays in lockstep with whatever `setup-cloud.sh` persisted.
+
+```bash
+# Prod broker via EC2 Instance Connect (no .pem needed):
+bash scripts/ssh-broker.sh
+
+# Test broker:
+bash scripts/ssh-broker.sh test
+
+# Fallback via .pem key (when EC2 Instance Connect is down):
+bash scripts/ssh-broker.sh prod --fallback
+bash scripts/ssh-broker.sh test --fallback
+```
+
+Default AWS profiles per stack (least-privilege, one-shot to provision):
+
+| Stack | Default profile | Trust |
+|---|---|---|
+| `prod` | `agentkeys-broker` | `ec2-instance-connect:SendSSHPublicKey` on the prod instance ARN only |
+| `test` | `agentkeys-broker-test` | same, scoped to the test instance ARN |
+
+If `agentkeys-broker-test` doesn't exist yet, create it once (parallel to `agentkeys-broker`):
+
+```bash
+awsp agentkeys-admin
+TEST_INSTANCE_ID=$(grep ^INSTANCE_ID= scripts/broker.test.env | cut -d= -f2)
+
+aws iam create-user --user-name agentkeys-broker-test
+aws iam put-user-policy --user-name agentkeys-broker-test \
+  --policy-name agentkeys-broker-test-ec2ic \
+  --policy-document "$(jq -n \
+    --arg acct "$ACCOUNT_ID" --arg id "$TEST_INSTANCE_ID" '{
+      Version: "2012-10-17",
+      Statement: [
+        {Effect:"Allow", Action:"ec2-instance-connect:SendSSHPublicKey",
+         Resource:"arn:aws:ec2:*:\($acct):instance/\($id)",
+         Condition:{StringEquals:{"ec2:osuser":"agentkey"}}},
+        {Effect:"Allow",
+         Action:["ec2:DescribeInstances","ec2:DescribeInstanceConnectEndpoints"],
+         Resource:"*"}
+      ]
+    }')"
+aws iam create-access-key --user-name agentkeys-broker-test
+# → paste output into ~/.aws/credentials as [agentkeys-broker-test]
+```
+
+This user is **not** auto-created by `setup-cloud.sh` because it's an operator-facing IAM principal (your SSH key, not the broker's data-plane key) — same rationale as why `agentkeys-broker` and `agentkeys-admin` are pre-existing per CLAUDE.md "AWS local-profile ↔ remote-IAM mapping" rather than provisioned by automation.
+
+Shell wrappers (drop in `~/.zshrc`) make the common case one keystroke:
+
+```bash
+AGENTKEYS_REPO="$HOME/Projects/agentKeys"
+alias ssh-prod='bash $AGENTKEYS_REPO/scripts/ssh-broker.sh prod'
+alias ssh-test='bash $AGENTKEYS_REPO/scripts/ssh-broker.sh test'
+```
+
 #### 3. `agentkeys-admin` AWS profile
 
 A long-lived IAM user with `IAMFullAccess` + `AmazonS3FullAccess` + `AmazonSESFullAccess` + `AmazonRoute53FullAccess` permissions. Already provisioned per [CLAUDE.md "AWS local-profile ↔ remote-IAM mapping"](../CLAUDE.md). Switch to it before any bootstrap call:
