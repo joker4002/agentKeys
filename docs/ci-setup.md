@@ -189,6 +189,8 @@ If `stack: PROD` appears here while you intended a test deploy — STOP. You're 
 
 That walks step 4 (reuse the test key) → 5 (fund check; mainnet path just balance-checks, prints manual recipe if the test deployer is low) → 6 (deploy 6 contracts using the test deployer) → 7 (write the NEW `*_HEIMA` addresses back to `operator-workstation.test.env`) → 8 (read-only RPC verify against the just-written addresses). After this completes, the six `*_HEIMA` addresses in `operator-workstation.test.env` are the NEW test contract addresses — different from prod's, isolated by trust scope.
 
+> **Each redeploy yields fresh addresses.** EVM `CREATE` derives the contract address from `keccak256(rlp(deployer, nonce))`, so re-running step 6 advances the deployer's nonce and produces a brand-new set. Always copy the `*_HEIMA` values that land in `operator-workstation.test.env` after the run — never cache addresses from an earlier session.
+
 **Equivalent forms (all three work; pick whichever fits your shell habits):**
 
 ```bash
@@ -246,7 +248,7 @@ If the GitHub OIDC provider doesn't exist in the account yet, `aws iam create-op
 
 ### 5. Set the GitHub repo secrets
 
-In **Settings → Secrets and variables → Actions**:
+In **Settings → Secrets and variables → Actions → Repository secrets** (NOT "Environments" — `harness-ci.yml` doesn't declare an `environment:` and looks up secrets at the repo level; if you're on the "Add environment" page asking for a name, you're on the wrong page, click "Secrets and variables → Actions" in the left sidebar instead):
 
 | Secret | Value |
 |---|---|
