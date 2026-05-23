@@ -1,8 +1,26 @@
 # Issue #103 — aiosandbox + Hermes agent + AgentKeys demo on ESP32-S3
 
-**Status:** DRAFT
+**Status:** DRAFT — sections C4, C5, C6 SUPERSEDED 2026-05-24, see banner below.
 **Tracking issue:** [#103](https://github.com/litentry/agentKeys/issues/103)
 **Branch:** `claude/hopeful-mccarthy-15e5ba`
+
+> ## ⚠ PIVOT 2026-05-24 — read [`docs/research/xiaozhi-esp32-magiclink.md`](../../research/xiaozhi-esp32-magiclink.md) before implementing
+>
+> The demo hardware on hand is a **MagicLick 2.5** (ESP32-S3 + ES8311 audio codec + 128×128 LCD + dual-network WiFi/4G) running **xiaozhi-esp32 v1.9.4** firmware. The xiaozhi-esp32 framework already ships the entire voice pipeline (offline wake-word → streaming ASR → LLM → streaming TTS → OPUS audio transport over WebSocket or MQTT+UDP) and supports 70+ boards.
+>
+> "Hermes agent" in this plan refers to **[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** — a real MIT-licensed Python agent framework, NOT an internal AgentKeys runtime as the original §C4 mistakenly stated. Hermes ships its own memory loop, multi-interface gateway (Telegram/Discord/Slack/Signal/CLI), LLM-agnostic model selection, and runs inside Docker / SSH / Modal / Daytona / Vercel Sandbox out of the box.
+>
+> **Direction (decided)**: keep the existing xiaozhi-esp32 firmware on the device unchanged. Build the integration cloud-side via a new **`xiaozhi-hermes-bridge`** that speaks xiaozhi's WebSocket protocol while routing the agent loop to Hermes-agent (which in turn pulls memory from `agentkeys-daemon` per §C3). Reduces v0 effort from ~3 months (custom firmware) to ~2-3 weeks (server-side adapter only).
+>
+> **What this means for the original plan sections:**
+> - §C3 (mock memory + daemon endpoint) — **STILL VALID**, no changes
+> - §C4 (custom Hermes runtime as a Rust crate) — **SUPERSEDED**. Use NousResearch Hermes-agent installed via official installer; no Rust crate to build
+> - §C5 (sandbox Dockerfile with hermes-runtime program) — **SUPERSEDED**. Install Hermes-agent inside aiosandbox via the official script; add `xiaozhi-hermes-bridge` as a separate component  
+> - §C6 (ESP32-S3 firmware from scratch) — **SUPERSEDED for the MagicLick demo**. Keep `firmware/esp32s3-agentkeys/` as a reference scaffolding for future custom hardware projects, but the MagicLick demo uses the unmodified xiaozhi firmware. Configure the device's server URL via its built-in WiFi captive portal (Path C in the research doc) to point at our `xiaozhi-hermes-bridge`.
+> - §C7 (deploy script) — **PARTIALLY VALID**. Update to provision the bridge instead of a custom hermes-runtime.
+> - §Implementation order — **SUPERSEDED** by the 6-step "Specific next steps" list in the research doc.
+>
+> Full rationale, hardware specs, communication protocols, four candidate reference server implementations, and hardware verification procedures live in [`docs/research/xiaozhi-esp32-magiclink.md`](../../research/xiaozhi-esp32-magiclink.md). A follow-up commit will rewrite the C-sections below to match the pivoted direction. Until then, read the research doc as the source of truth.
 **Related research:**
 - [`docs/research/aiosandbox/agent-infra-sandbox-analysis.md`](../../research/aiosandbox/agent-infra-sandbox-analysis.md)
 - [`docs/research/aiosandbox/agent-infra-sandbox-runtime-probe.md`](../../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)
