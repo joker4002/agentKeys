@@ -179,10 +179,14 @@ else
     log "DRY RUN — would create-role $ROLE_NAME with trust: $trust_policy"
   else
     log "Creating role $ROLE_NAME"
+    # IAM CreateRole --description allows only printable ASCII + Latin-1
+    # (regex [\t\n\r\x20-\x7e\xa1-\xff]*). Em-dash / en-dash / arrows trip
+    # "Value at 'description' failed to satisfy constraint" at AWS-call time.
+    # Keep this string ASCII-only.
     aws iam create-role \
       --role-name "$ROLE_NAME" \
       --assume-role-policy-document "$trust_policy" \
-      --description "CI deploy role — drives setup-broker-host.sh on the test EC2 via SSM (issue #101)" \
+      --description "CI deploy role - drives setup-broker-host.sh on the test EC2 via SSM (issue #101)" \
       >/dev/null \
       || die "create-role failed"
     ok "role created"
