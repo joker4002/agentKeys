@@ -242,6 +242,33 @@ AWS_PROFILE=agentkeys-admin aws iam put-role-policy \
       ]
     }]
   }')"
+
+# Second inline policy: read-only S3 perms on the test buckets so the
+# harness verify steps (head-object after store, ls during cleanup) work
+# from the runner's direct creds without re-assuming a worker role.
+# s3:DeleteObject is required for the per-run cleanup step
+# (`aws s3 rm s3://$bucket/ci/run-$GITHUB_RUN_ID/ --recursive`) at end of
+# the workflow. Without this policy the harness fails Stage 1 step 8
+# with AccessDenied on s3:ListBucket.
+AWS_PROFILE=agentkeys-admin aws iam put-role-policy \
+  --role-name github-actions-agentkeys-e2e \
+  --policy-name agentkeys-e2e-verify-s3 \
+  --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
+    Version:"2012-10-17",
+    Statement:[{
+      Sid:"VerifyAndCleanupTestBuckets",
+      Effect:"Allow",
+      Action:["s3:ListBucket","s3:GetObject","s3:HeadObject","s3:DeleteObject"],
+      Resource:[
+        "arn:aws:s3:::agentkeys-vault-test-\($acct)",
+        "arn:aws:s3:::agentkeys-vault-test-\($acct)/*",
+        "arn:aws:s3:::agentkeys-memory-test-\($acct)",
+        "arn:aws:s3:::agentkeys-memory-test-\($acct)/*",
+        "arn:aws:s3:::agentkeys-mail-test-\($acct)",
+        "arn:aws:s3:::agentkeys-mail-test-\($acct)/*"
+      ]
+    }]
+  }')"
 ```
 
 If the GitHub OIDC provider doesn't exist in the account yet, `aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1` creates it (one-time).

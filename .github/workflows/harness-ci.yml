@@ -18,9 +18,17 @@ name: harness CI (no LLM)
 #   TEST_OIDC_AWS_ROLE_ARN  IAM role assumed by this workflow via GitHub
 #                           Actions OIDC. Trust policy:
 #                             "token.actions.githubusercontent.com",
-#                             conditioned on this repo + ref. Grants:
-#                             sts:AssumeRole on the test data roles +
-#                             read-only S3 on the test buckets.
+#                             conditioned on this repo + ref. Inline policies:
+#                             1) agentkeys-e2e-assume-test-roles: sts:AssumeRole
+#                                on the three test data roles (data, vault,
+#                                memory).
+#                             2) agentkeys-e2e-verify-s3: s3:{ListBucket,
+#                                GetObject, HeadObject, DeleteObject} on the
+#                                three test buckets — required for the
+#                                harness verify step (head-object after
+#                                store) + the per-run S3 prefix cleanup
+#                                (`aws s3 rm ci/run-${RUN_ID}/`).
+#                           See docs/ci-setup.md §4 for the full setup recipe.
 #   TEST_ACCOUNT_ID         AWS account ID hosting the test infra.
 #                           Same account as prod is fine — isolation is
 #                           by resource name, not by account.
