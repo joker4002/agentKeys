@@ -55,7 +55,7 @@ case "$TO_ADDR" in 0x*) ;; *) die "--to must start with 0x (got: $TO_ADDR)" ;; e
 [ "${#TO_ADDR}" = "42" ] || die "--to must be 42 chars (0x + 40 hex), got ${#TO_ADDR}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 

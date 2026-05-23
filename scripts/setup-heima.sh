@@ -59,8 +59,20 @@ set -euo pipefail
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE="$SCRIPT_DIR/operator-workstation.env"
 
+# ENV_FILE drives BOTH the idempotency read (existing *_HEIMA addresses)
+# AND the persist write (step 7's env_set inside heima-bring-up.sh).
+# Precedence (resolved after CLI parse below):
+#   1. --env-file <path>      (CLI flag, highest priority)
+#   2. $ENV_FILE env var      (inherited from caller — e.g. ci-setup.md recipe)
+#   3. --test → operator-workstation.test.env  (ergonomic shorthand)
+#   4. operator-workstation.env  (prod default)
+# Snapshot the caller-supplied env-var value so the CLI parser can detect it.
+ENV_FILE_FROM_ENV="${ENV_FILE:-}"
+unset ENV_FILE
+
+EXPLICIT_ENV_FILE=""
+TEST_MODE=0
 AGENTKEYS_CHAIN_ARG=""
 SESSION_ID="${SESSION_ID:-alice}"
 AGENT_LABEL="demo-agent"
@@ -91,6 +103,9 @@ while [ $# -gt 0 ]; do
     --from-step)    FROM_STEP="$2"; shift 2 ;;
     --to-step)      TO_STEP="$2"; shift 2 ;;
     --only-step)    FROM_STEP="$2"; TO_STEP="$2"; shift 2 ;;
+    --env-file)     EXPLICIT_ENV_FILE="$2"; shift 2 ;;
+    --env-file=*)   EXPLICIT_ENV_FILE="${1#*=}"; shift ;;
+    --test)         TEST_MODE=1; shift ;;
     --help|-h)
       sed -n '2,55p' "$0" | sed 's/^# //; s/^#//'
       exit 0
@@ -98,6 +113,23 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
+
+# Resolve ENV_FILE per documented precedence.
+if [ -n "$EXPLICIT_ENV_FILE" ]; then
+  ENV_FILE="$EXPLICIT_ENV_FILE"
+elif [ -n "$ENV_FILE_FROM_ENV" ]; then
+  ENV_FILE="$ENV_FILE_FROM_ENV"
+elif [ "$TEST_MODE" = "1" ]; then
+  ENV_FILE="$SCRIPT_DIR/operator-workstation.test.env"
+else
+  ENV_FILE="$SCRIPT_DIR/operator-workstation.env"
+fi
+# Critical: export so heima-bring-up.sh + verify-heima-contracts.sh inherit
+# the SAME env file. Otherwise step 6 reads prod addresses for idempotency
+# check (skip-already-deployed fires against prod state) AND step 7 writes
+# the freshly-deployed test addresses back to the prod env file (clobbers
+# the live broker's contract pointers).
+export ENV_FILE
 
 if [ -n "$AGENTKEYS_CHAIN_ARG" ]; then
   export AGENTKEYS_CHAIN="$AGENTKEYS_CHAIN_ARG"
@@ -123,8 +155,19 @@ AGENTKEYS_BIN="$REPO_ROOT/target/release/agentkeys"
 [ ! -x "$AGENTKEYS_BIN" ] && AGENTKEYS_BIN="$(command -v agentkeys || true)"
 
 # ─── Run steps ────────────────────────────────────────────────────────────────
+# Env-file banner — surfaces test-vs-prod isolation upfront so the operator
+# can't miss a prod-env-file run that would clobber prod's *_HEIMA addresses
+# (or silently short-circuit a test deploy via prod's idempotency cache).
+ENV_BASENAME="$(basename "$ENV_FILE")"
+if [ "$TEST_MODE" = "1" ] || [[ "$ENV_BASENAME" == *test* ]]; then
+  STACK_LABEL="${COLOR_WARN}TEST${COLOR_RESET}"
+else
+  STACK_LABEL="${COLOR_OK}PROD${COLOR_RESET}"
+fi
 printf "${COLOR_HEAD}=== AgentKeys Heima setup: chain=%s session=%s ===${COLOR_RESET}\n" \
   "$AGENTKEYS_CHAIN" "$SESSION_ID" >&2
+printf "  stack:    %b\n" "$STACK_LABEL" >&2
+printf "  env_file: %s\n" "$ENV_FILE" >&2
 printf "  steps %d..%d (of %d)\n\n" "$FROM_STEP" "$TO_STEP" "$STEP_TOTAL" >&2
 
 do_step_1() {

@@ -163,24 +163,46 @@ The script defaults to derivation path `m/44'/60'/0'/0/0` (standard Ethereum BIP
 
 ### 3. Deploy test contracts via `setup-heima.sh`
 
-With the key in place + funded, the orchestrator handles the deploy + persists addresses back to the operator env file. **`HEIMA_DEPLOYER_KEY_FILE` is the override** — without it, the script falls back to `~/.agentkeys/heima-deployer.key` (your prod key) and step 6's `cast code` idempotency check sees prod contracts already exist, so nothing new deploys.
+The orchestrator owns idempotency via TWO inputs that must both point at the TEST stack — otherwise step 6's `cast code` idempotency check fires against prod's addresses and silently skips the test deploy:
+
+| Input | Where to set | What it controls |
+|---|---|---|
+| **`--test` flag** (or `--env-file scripts/operator-workstation.test.env`) | CLI on `setup-heima.sh` | Which env file the orchestrator + every helper (`heima-bring-up.sh`, `verify-heima-contracts.sh`) reads `*_HEIMA` from for the skip-deploy check AND writes the freshly-deployed addresses back to (via `env_set` in step 6). |
+| **`HEIMA_DEPLOYER_KEY_FILE`** | env var | Which deployer wallet signs the deploy tx. Different deployer → different `(deployer, nonce)` → different on-chain addresses than prod. |
 
 ```bash
 HEIMA_DEPLOYER_KEY_FILE=~/.agentkeys/heima-deployer-test.key \
 MAINNET_CONFIRM=1 \
-  bash scripts/setup-heima.sh --from-step 4 --to-step 8
+  bash scripts/setup-heima.sh --test --from-step 4 --to-step 8
 ```
 
-That walks 4 (reuse the test key) → 5 (fund check) → 6 (deploy 6 contracts) → 7 (write `*_HEIMA` addresses back to `operator-workstation.env`) → 8 (read-only RPC verify). For the test instance, source `operator-workstation.test.env` first so the addresses land in the test env file:
+The orchestrator prints a banner at the top so you can confirm the stack before any tx fires:
+
+```
+=== AgentKeys Heima setup: chain=heima session=alice ===
+  stack:    TEST
+  env_file: …/scripts/operator-workstation.test.env
+  steps 4..8 (of 15)
+```
+
+If `stack: PROD` appears here while you intended a test deploy — STOP. You're about to clobber prod's contract pointers. Re-run with `--test`.
+
+That walks step 4 (reuse the test key) → 5 (fund check; mainnet path just balance-checks, prints manual recipe if the test deployer is low) → 6 (deploy 6 contracts using the test deployer) → 7 (write the NEW `*_HEIMA` addresses back to `operator-workstation.test.env`) → 8 (read-only RPC verify against the just-written addresses). After this completes, the six `*_HEIMA` addresses in `operator-workstation.test.env` are the NEW test contract addresses — different from prod's, isolated by trust scope.
+
+**Equivalent forms (all three work; pick whichever fits your shell habits):**
 
 ```bash
-ENV_FILE=scripts/operator-workstation.test.env \
-HEIMA_DEPLOYER_KEY_FILE=~/.agentkeys/heima-deployer-test.key \
-MAINNET_CONFIRM=1 \
-  bash scripts/setup-heima.sh --from-step 4 --to-step 8
+# Form 1: --test ergonomic flag (RECOMMENDED — shortest)
+bash scripts/setup-heima.sh --test ...
+
+# Form 2: explicit --env-file
+bash scripts/setup-heima.sh --env-file scripts/operator-workstation.test.env ...
+
+# Form 3: ENV_FILE env var (useful when scripting across multiple commands)
+ENV_FILE=scripts/operator-workstation.test.env bash scripts/setup-heima.sh ...
 ```
 
-After this completes, the six `*_HEIMA` addresses in `operator-workstation.test.env` are the NEW test contract addresses (different from prod).
+Precedence when more than one is set: `--env-file` > `$ENV_FILE` > `--test` (auto-derives to `.test.env`) > default (`operator-workstation.env`).
 
 ### 4. Register the GitHub Actions OIDC role
 

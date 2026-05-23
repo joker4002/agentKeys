@@ -23,7 +23,7 @@ log()  { printf "${C_HEAD}==>${C_RESET} %s\n" "$*" >&2; }
 die()  { printf "    ${C_ERR}fail${C_RESET} %s\n" "$*" >&2; exit 1; }
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 
