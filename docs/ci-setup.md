@@ -37,7 +37,7 @@ Every resource in the test instance is parallel to prod:
 | Broker host | `broker.litentry.org` | `test-broker.litentry.org` (long-lived; AWS validates OIDC issuer URLs byte-for-byte) |
 | OIDC issuer | `https://broker.litentry.org` | `https://test-broker.litentry.org` |
 | IAM roles | `agentkeys-{data,vault,memory}-role` | `agentkeys-{data,vault,memory}-role-test` |
-| S3 buckets | `agentkeys-{mail,vault,memory}-${ACCT}` | `agentkeys-{mail,vault,memory}-test-${ACCT}` |
+| S3 buckets | `agentkeys-{mail,vault,memory}-${ACCOUNT_ID}` | `agentkeys-{mail,vault,memory}-test-${ACCOUNT_ID}` |
 | Chain | Heima mainnet | **Heima mainnet** (same chain, different deployer → different addresses) |
 | Deployer wallet | operator's prod deployer | dedicated test wallet (small HEI float) |
 | Contracts | one production deploy | one test deploy with **identical `.sol` source** → new addresses |
@@ -48,18 +48,31 @@ Every resource in the test instance is parallel to prod:
 
 ## CI activation — what comes AFTER `setup-broker-host.sh` succeeds
 
-**Prereq:** the test stack from [`docs/cloud-bootstrap.md` quick start](cloud-bootstrap.md#quick-start--five-steps-to-a-running-stack) steps 1–5 is complete — `setup-cloud.sh --test` ran clean, the test EC2 is up at `test-broker.${ZONE}`, and `setup-broker-host.sh` finished on the box (broker + signer + 4 workers + nginx + certbot all running).
+**Prereq:** the test stack from [`docs/cloud-bootstrap.md` quick start](cloud-bootstrap.md#quick-start--five-steps-to-a-running-stack) steps 1–5 is complete — `setup-cloud.sh --test` ran clean, the test EC2 is up at `test-broker.<your-zone>`, and `setup-broker-host.sh` finished on the box (broker + signer + 4 workers + nginx + certbot all running).
 
-Running `bash scripts/setup-heima.sh` alone is **not enough** for CI. Five more steps:
+Running `bash scripts/setup-heima.sh` alone is **not enough** for CI. Five more steps below.
+
+### Shell setup before you start (every command block below runs on your LAPTOP)
+
+Source the test env file so `${ZONE}` / `${ACCOUNT_ID}` / `${BROKER_HOST}` etc. resolve in your shell. Every command block in this doc runs from the operator's **laptop** unless explicitly noted; the broker host doesn't need any of these env vars set in the operator's shell (the broker process gets its config via systemd `Environment=` lines).
+
+```bash
+awsp agentkeys-admin
+set -a; source scripts/operator-workstation.test.env; set +a
+# Confirm the test values are in your shell:
+echo "ACCOUNT_ID=$ACCOUNT_ID  ZONE=$ZONE  BROKER_HOST=$BROKER_HOST"
+# → ACCOUNT_ID=429071895007  ZONE=litentry.org  BROKER_HOST=test-broker.litentry.org
+```
+
+If `${ZONE}` echoes empty, the env file isn't sourced — re-run the `set -a; source …; set +a` line.
 
 ### 1. Activate OIDC federation for the test broker
 
 The broker is reachable, but AWS STS doesn't trust its JWTs yet. Follow [`docs/cloud-bootstrap.md` §9](cloud-bootstrap.md#9-oidc-federation-activation-after-broker-is-publicly-reachable) — register the test OIDC provider in IAM (separate ARN from prod's), swap the three `*-role-test` trust policies to the federated variant, apply PrincipalTag-scoped bucket policies.
 
 ```bash
-# Quick form (full explanation in cloud-bootstrap.md §9):
-export BROKER_HOST=test-broker.${ZONE}
-export ACCOUNT_ID=429071895007
+# Quick form (full explanation in cloud-bootstrap.md §9). $BROKER_HOST +
+# $ACCOUNT_ID come from the env file sourced in the "Shell setup" step above.
 
 thumb=$(echo | openssl s_client -servername "$BROKER_HOST" -connect "$BROKER_HOST:443" 2>/dev/null \
         | openssl x509 -fingerprint -noout | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
@@ -160,15 +173,15 @@ In **Settings → Secrets and variables → Actions**:
 
 | Secret | Value |
 |---|---|
-| `TEST_OIDC_AWS_ROLE_ARN` | `arn:aws:iam::${ACCT}:role/github-actions-agentkeys-e2e` (the gate) |
+| `TEST_OIDC_AWS_ROLE_ARN` | `arn:aws:iam::${ACCOUNT_ID}:role/github-actions-agentkeys-e2e` (the gate) |
 | `TEST_ACCOUNT_ID` | numeric AWS account ID (same account as prod is fine) |
 | `TEST_AWS_REGION` | e.g. `us-east-1` |
 | `TEST_BROKER_HOST` | `test-broker.${ZONE}` |
-| `TEST_VAULT_BUCKET` | `agentkeys-vault-test-${ACCT}` |
-| `TEST_MEMORY_BUCKET` | `agentkeys-memory-test-${ACCT}` |
-| `TEST_VAULT_ROLE_ARN` | `arn:aws:iam::${ACCT}:role/agentkeys-vault-role-test` |
-| `TEST_MEMORY_ROLE_ARN` | `arn:aws:iam::${ACCT}:role/agentkeys-memory-role-test` |
-| `TEST_DATA_ROLE_ARN` | `arn:aws:iam::${ACCT}:role/agentkeys-data-role-test` |
+| `TEST_VAULT_BUCKET` | `agentkeys-vault-test-${ACCOUNT_ID}` |
+| `TEST_MEMORY_BUCKET` | `agentkeys-memory-test-${ACCOUNT_ID}` |
+| `TEST_VAULT_ROLE_ARN` | `arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-vault-role-test` |
+| `TEST_MEMORY_ROLE_ARN` | `arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-memory-role-test` |
+| `TEST_DATA_ROLE_ARN` | `arn:aws:iam::${ACCOUNT_ID}:role/agentkeys-data-role-test` |
 | `TEST_HEIMA_DEPLOYER_KEY` | the 0x-prefixed test deployer private key from step 4 |
 | `TEST_SCOPE_CONTRACT_ADDRESS_HEIMA` | from step 5 |
 | `TEST_SIDECAR_REGISTRY_ADDRESS_HEIMA` | from step 5 |
@@ -204,7 +217,7 @@ gh workflow run harness-ci.yml --field stage=3
 
 ## Secret hygiene
 
-No project credentials live in this doc. Every value above is either a placeholder (`${ACCT}`, `${ZONE}`) or an instruction to read from the operator's already-provisioned state ("from step 5"). The actual values live in two places only:
+No project credentials live in this doc. Every value above is either a placeholder (`${ACCOUNT_ID}`, `${ZONE}`) or an instruction to read from the operator's already-provisioned state ("from step 5"). The actual values live in two places only:
 
 - The operator's local `scripts/operator-workstation.env` (gitignored copies / test variants only).
 - The GitHub repo's encrypted secrets store.
