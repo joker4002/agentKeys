@@ -24,6 +24,13 @@
 # activates the workflow).
 #
 # Disarm later with: gh secret delete TEST_OIDC_AWS_ROLE_ARN --repo <repo>
+#
+# History:
+#   2026-05-23 — refreshed all 17 secrets via this script after preflight in
+#                .github/workflows/harness-ci.yml caught all three core values
+#                (TEST_ACCOUNT_ID / TEST_AWS_REGION / TEST_OIDC_AWS_ROLE_ARN)
+#                stored as 1-char strings — likely a botched UI paste. The
+#                preflight is the canonical guard against this recurring.
 
 set -euo pipefail
 
