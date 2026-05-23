@@ -100,7 +100,15 @@ DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
 K11_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json"
 [ -f "$K11_FILE" ] || die "K11 enrollment not found at $K11_FILE — run \`agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI\` first"
 MODE=$(jq -r .mode "$K11_FILE")
-[ "$MODE" = "webauthn" ] || die "K11 file at $K11_FILE has mode=$MODE (expected 'webauthn') — re-enroll with --webauthn"
+# Accept either real WebAuthn or the stage-1 CI stub. The on-chain contract
+# only enforces length != 0 on the pubkey (arch.md §22b.1 stage-1
+# simplification); CI uses deterministic stub bytes so it can register
+# without a Touch ID prompt. Local operators with --webauthn get real
+# attested credentials. Both modes pass the same length+slice check below.
+case "$MODE" in
+  webauthn|stage1-stub) ;;
+  *) die "K11 file at $K11_FILE has mode=$MODE (expected 'webauthn' or 'stage1-stub') — re-enroll with --webauthn for real ceremony or via harness step 11 stub-mode" ;;
+esac
 COSE_HEX=$(jq -r .cose_pubkey_hex "$K11_FILE")
 COSE_NOPREFIX="${COSE_HEX#0x}"
 [ "${#COSE_NOPREFIX}" = "130" ] || die "K11 cose_pubkey_hex unexpected length ${#COSE_NOPREFIX} (expected 130)"

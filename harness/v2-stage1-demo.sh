@@ -813,9 +813,18 @@ do_step_11() {
     fi
     info "writing stage-1 K11 stub enrollment for operator_omni=0x$operator_omni"
     mkdir -p "$(dirname "$enrollment_file")"
-    local cred_id cose ts
+    local cred_id cose_x cose_y cose ts
     cred_id=$(printf 'agentkeys-k11-stub-cred:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
-    cose=$(printf 'agentkeys-k11-stub-cose:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    # cose_pubkey_hex must be 130 hex chars: '04' uncompressed-P256 prefix +
+    # 64-char X + 64-char Y. Real WebAuthn writes a real P256 pubkey here;
+    # the stub fills X/Y with deterministic sha256 outputs so the SHAPE
+    # passes harness/scripts/heima-register-first-master.sh's length=130
+    # check + the slice extraction (X=positions 2..66, Y=positions 66..130).
+    # The bytes don't lie on the P256 curve, but the on-chain contract
+    # only checks `length != 0` per arch.md §22b.1 stage-1 simplification.
+    cose_x=$(printf 'agentkeys-k11-stub-cose-x:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    cose_y=$(printf 'agentkeys-k11-stub-cose-y:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    cose="04${cose_x}${cose_y}"
     ts=$(date +%s)
     (umask 077 && jq -n \
       --arg op "0x$operator_omni" \
