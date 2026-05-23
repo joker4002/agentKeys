@@ -25,6 +25,7 @@
 //!   - **Per-caller scope policies stubbed** — allow-all when no
 //!     policy file is loaded. Stage 2 (#90) adds policy file loading +
 //!     deny-by-default + per-caller spend quotas.
+//!
 //! Both gaps are tracked in #90's "Daemon hardening" task list.
 
 use std::collections::HashMap;

@@ -230,7 +230,6 @@ pub async fn list_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{create_router, db, state::AppState};
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};

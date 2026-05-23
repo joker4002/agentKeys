@@ -103,7 +103,7 @@ fn render_field(field: &Erc7730Field, raw: Option<&serde_json::Value>) -> String
         "integer" => render_integer(raw),
         "date" => render_date(raw),
         "bool" => render_bool(raw),
-        "raw" | _ => render_raw(raw),
+        _ => render_raw(raw),
     }
 }
 

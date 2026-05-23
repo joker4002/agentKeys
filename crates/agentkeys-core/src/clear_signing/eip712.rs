@@ -364,7 +364,7 @@ fn parse_int_bits(suffix: &str) -> Option<u32> {
         return Some(256);
     }
     let n: u32 = suffix.parse().ok()?;
-    if n == 0 || n > 256 || n % 8 != 0 {
+    if n == 0 || n > 256 || !n.is_multiple_of(8) {
         return None;
     }
     Some(n)
@@ -644,7 +644,7 @@ impl U256 {
             // limbs are most-sig-first, so shifting LEFT moves a limb
             // to a SMALLER index.
             let primary_out = k as i32 - limb_shift as i32;
-            if primary_out >= 0 && primary_out < 4 {
+            if (0..4).contains(&primary_out) {
                 out[primary_out as usize] |= val << bit_shift;
             }
             // When the shift crosses a 64-bit boundary, the top
@@ -652,7 +652,7 @@ impl U256 {
             // output limb.
             if bit_shift > 0 {
                 let secondary_out = primary_out - 1;
-                if secondary_out >= 0 && secondary_out < 4 {
+                if (0..4).contains(&secondary_out) {
                     out[secondary_out as usize] |= val >> (64 - bit_shift);
                 }
             }
@@ -662,10 +662,7 @@ impl U256 {
 
     /// Two's-complement negation as a full-256-bit value: `(~self).wrapping_add(1)`.
     fn neg_twos_complement(self) -> Self {
-        let mut out = [0u64; 4];
-        for i in 0..4 {
-            out[i] = !self.limbs[i];
-        }
+        let mut out = self.limbs.map(|x| !x);
         // wrapping_add 1
         let mut carry = 1u128;
         for i in (0..4).rev() {
