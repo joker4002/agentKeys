@@ -436,13 +436,20 @@ gh secret set TEST_BROKER_INSTANCE_ID  --repo litentry/agentKeys --body "$TEST_B
 
 #### 7.3 Dry-run validate
 
-Trigger the workflow manually with `force_deploy_broker=true` so the deploy fires regardless of whether the latest commit touched broker paths:
+Trigger the workflow manually with `force_deploy_broker=true` so the deploy fires regardless of whether the latest commit touched broker paths.
+
+**Pre-merge — `--ref` is required.** `gh workflow run` reads the workflow definition from the *default branch* (`main`) unless you tell it otherwise. Since the `force_deploy_broker` input lives on the PR branch, dispatching without `--ref` fails with `HTTP 422: Unexpected inputs provided: ["force_deploy_broker"]`. Pass `--ref` so GHA reads the workflow YAML (and its inputs) from the PR branch instead:
 
 ```bash
 gh workflow run harness-ci.yml --repo litentry/agentKeys \
+  --ref claude/adoring-bell-1b9ca8 \
   --field stage=1 \
   --field force_deploy_broker=true
 ```
+
+Replace `claude/adoring-bell-1b9ca8` with your actual PR branch name (`git rev-parse --abbrev-ref HEAD` if you're on it locally).
+
+**Post-merge — `--ref` is optional.** Once this PR is on `main`, dispatching without `--ref` will work because the input is part of the default-branch workflow definition. (The `--ref` form still works and lets you target any branch.)
 
 Then in the run logs:
 
