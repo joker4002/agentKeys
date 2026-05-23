@@ -155,7 +155,16 @@ CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null |
 CALLER_LC=$(printf '%s' "$CALLER_ARN" | tr '[:upper:]' '[:lower:]')
 case "$CALLER_LC" in
   *user/agentkeys-admin*) ;;
-  *) die "current AWS profile is $CALLER_ARN — run \`awsp agentkeys-admin\` first (needed for step 8 cleanup + sanity bucket lookups)" ;;
+  # Soft-fail to warn: the admin check exists for step 8 (cleanup) +
+  # sanity bucket lookups. CI runs as the OIDC-assumed
+  # github-actions-agentkeys-e2e role which has list/get/delete on
+  # test buckets (per docs/ci-setup.md §4 inline policy
+  # agentkeys-e2e-verify-s3) — sufficient for steps 1-7 + the cleanup
+  # in step 8. Steps that genuinely need agentkeys-admin perms (none
+  # on the stage-3 critical path today) will fail loudly when they
+  # actually exercise IAM-admin actions. Same softening pattern as
+  # the equivalent check in v2-stage1-demo.sh + heima-scope-set.sh.
+  *) warn "caller is $CALLER_ARN — may or may not have required perms; proceeding (admin needed for step 8 cleanup + bucket lookups)" ;;
 esac
 
 printf "\n=== v2 stage-3 demo: OIDC isolation proof ===\n  chain=%s issuer=%s vault=%s memory=%s\n\n" \
