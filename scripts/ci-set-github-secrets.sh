@@ -115,7 +115,15 @@ set_secret() {
     printf '  DRY  %-46s = %s\n' "$name" "$preview"
     return
   fi
-  printf '%s' "$value" | gh secret set "$name" --repo "$REPO" --body - >/dev/null
+  # CRITICAL: do NOT pass `--body -` here.
+  # gh secret set's --body flag takes a LITERAL value; `--body -` sets the
+  # secret to the single character "-", NOT "read from stdin". To read from
+  # stdin you OMIT --body entirely (per `gh secret set --help`: "reads from
+  # standard input if not specified"). Past versions of this script had
+  # `--body -` and produced 17 secrets all set to "-" — caught only by the
+  # preflight in .github/workflows/harness-ci.yml ("got length 1"). Don't
+  # re-add --body.
+  printf '%s' "$value" | gh secret set "$name" --repo "$REPO" >/dev/null
   printf '  ok   %-46s   %s\n' "$name" "$preview"
 }
 
