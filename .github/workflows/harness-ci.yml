@@ -126,9 +126,15 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  id-token: write   # GitHub Actions OIDC → assume TEST_OIDC_AWS_ROLE_ARN
-                    # (and OIDC_AWS_ROLE_ARN_DEPLOY for deploy-test-broker)
+  id-token: write       # GitHub Actions OIDC → assume TEST_OIDC_AWS_ROLE_ARN
+                        # (and OIDC_AWS_ROLE_ARN_DEPLOY for deploy-test-broker)
   contents: read
+  pull-requests: read   # dorny/paths-filter@v3 on pull_request events queries
+                        # the GitHub REST API (/repos/.../pulls/N/files) to list
+                        # changed paths. Without this, the API returns
+                        # 'Bad credentials' and the detect-changes job fails.
+                        # Required only on PR triggers; workflow_dispatch +
+                        # push triggers don't need it (no PR to query).
 
 jobs:
   rust-checks:
