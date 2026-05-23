@@ -388,10 +388,13 @@ TEST_BROKER_INSTANCE_ID=$(aws ec2 describe-instances \
   --query 'Reservations[0].Instances[0].InstanceId' --output text)
 echo "$TEST_BROKER_INSTANCE_ID"   # → i-xxxxxxxxxxxxxxxxx
 
-# Idempotent provisioning — safe to re-run:
+# Idempotent provisioning — safe to re-run. Use --fix-ssm on the FIRST run
+# so the script auto-attaches AmazonSSMManagedInstanceCore to the broker EC2's
+# instance profile if it's missing (a fresh EC2 commonly lacks this policy).
 bash scripts/provision-ci-deploy-role.sh \
   --test-broker-instance-id "$TEST_BROKER_INSTANCE_ID" \
-  --env-file scripts/operator-workstation.test.env
+  --env-file scripts/operator-workstation.test.env \
+  --fix-ssm
 ```
 
 The script:
@@ -401,7 +404,19 @@ The script:
   - `ssm:SendCommand` on `document/AWS-RunShellScript` + the one instance ARN (so even if the role's session creds leaked, the worst a third party can do is re-run setup-broker-host.sh on the test EC2 — a destructive op there is `terraform apply`-style: idempotent, recoverable, and contained to the test environment).
   - `ssm:GetCommandInvocation` / `ssm:ListCommandInvocations` for status polling.
   - `ec2:DescribeInstances` scoped to the one instance ID, for the workflow's pre-deploy sanity check.
-- Verifies the test EC2 is registered with SSM (`PingStatus = Online`). If not, prints concrete remediation: attach `AmazonSSMManagedInstanceCore` to the instance profile and / or `systemctl restart amazon-ssm-agent`.
+- Verifies the test EC2 is registered with SSM (`PingStatus = Online`). With `--fix-ssm`, auto-remediates the common "instance profile is missing AmazonSSMManagedInstanceCore" case by attaching the policy and polling for up to 3 min for the SSM agent to refresh its creds. Without `--fix-ssm`, just reports the failure with manual fix instructions.
+
+**SSM remediation modes (what `--fix-ssm` covers, what it doesn't):**
+
+| Failure | What `--fix-ssm` does | What it CAN'T fix automatically |
+|---|---|---|
+| Instance profile missing `AmazonSSMManagedInstanceCore` | Attaches the policy, polls for Online | (handled) |
+| Policy already attached, agent process running with stale creds | Polls until agent refreshes (~1-3 min typical) | If poll times out: SSH + `sudo systemctl restart amazon-ssm-agent`, OR `aws ec2 reboot-instances …` |
+| Instance has NO instance profile at all | Exits with `associate-iam-instance-profile` command to run first | Operator runs the printed command, then re-invokes with `--fix-ssm` |
+| SSM Agent not installed | Reports state; can't reach the box to install | SSH + `sudo systemctl enable --now amazon-ssm-agent` (Ubuntu 22.04+ ships it) |
+| Private VPC subnet without an SSM VPC endpoint | Reports state | Operator wires the VPC endpoint (unlikely for a public-IP broker, but possible) |
+
+Re-running the script after any of the operator-side fixes is safe (idempotent — every step is `get-*` pre-checked before any mutation).
 
 #### 7.2 Set the two new repo secrets
 

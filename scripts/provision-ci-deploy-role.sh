@@ -37,6 +37,12 @@
 #   - --repo litentry/agentKeys (default; pinned in OIDC sub condition)
 #   - --role-name github-actions-agentkeys-deploy (default)
 #   - --env-file scripts/operator-workstation.test.env (default)
+#   - --fix-ssm  Auto-attach AmazonSSMManagedInstanceCore to the broker EC2's
+#                instance profile role if the SSM agent is offline, then poll
+#                for up to 3 min waiting for the agent to refresh creds.
+#                Safe to pass on every run (idempotent: aws iam attach-role-policy
+#                no-ops on re-attach, and the auto-attach is gated on PingStatus
+#                != Online so a healthy EC2 is untouched).
 #   - --dry-run (print planned changes; no AWS calls that mutate state)
 #
 # Required AWS profile: agentkeys-admin (the script checks caller ARN).
@@ -50,6 +56,7 @@ set -euo pipefail
 
 # ─── CLI parse ────────────────────────────────────────────────────────────────
 DRY_RUN=0
+FIX_SSM=0
 TEST_BROKER_INSTANCE_ID=""
 REPO_SLUG="litentry/agentKeys"
 ROLE_NAME="github-actions-agentkeys-deploy"
@@ -63,6 +70,7 @@ while [ $# -gt 0 ]; do
     --repo)                    REPO_SLUG="$2"; shift 2 ;;
     --role-name)               ROLE_NAME="$2"; shift 2 ;;
     --env-file)                ENV_FILE="$2"; shift 2 ;;
+    --fix-ssm)                 FIX_SSM=1; shift ;;
     --dry-run)                 DRY_RUN=1; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
@@ -252,6 +260,90 @@ fi
 # If the instance lacks AmazonSSMManagedInstanceCore (via its instance profile)
 # OR the SSM Agent isn't running, SendCommand will queue the command and time
 # out without delivering it. Fail fast here with a clear remediation path.
+#
+# With --fix-ssm, the script attempts auto-remediation:
+#   - Looks up the EC2's instance profile via DescribeInstances
+#   - Extracts the role name behind the profile
+#   - Attaches AmazonSSMManagedInstanceCore (idempotent: AWS no-ops on re-attach)
+#   - Re-polls PingStatus for up to 3 min waiting for the agent to refresh creds
+#   - If still offline after 3 min: tells operator to reboot or restart the agent
+#
+# The auto-attach is safe because the operator is already running as
+# agentkeys-admin (verified above) — they HAVE iam:AttachRolePolicy. Without
+# --fix-ssm the script just reports + exits (no IAM mutation, no surprises).
+attach_ssm_managed_policy_if_missing() {
+  # Returns 0 if policy was attached or already present; non-zero on hard error.
+  local instance_id="$1"
+  local profile_arn role_name policy_arn already_attached
+
+  policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  profile_arn=$(aws ec2 describe-instances \
+    --region "$REGION" \
+    --instance-ids "$instance_id" \
+    --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' \
+    --output text 2>/dev/null || echo "None")
+
+  if [ -z "$profile_arn" ] || [ "$profile_arn" = "None" ] || [ "$profile_arn" = "null" ]; then
+    warn "instance $instance_id has NO IAM instance profile attached — auto-remediation is blocked."
+    warn "Fix: associate an instance profile via:"
+    warn "  aws ec2 associate-iam-instance-profile --instance-id $instance_id \\"
+    warn "    --iam-instance-profile Name=<existing-profile-name> --region $REGION"
+    warn "Then re-run this script with --fix-ssm."
+    return 1
+  fi
+
+  # Profile ARN shape: arn:aws:iam::ACCT:instance-profile/<NAME>
+  local profile_name="${profile_arn##*/}"
+  log "instance profile: $profile_name"
+
+  role_name=$(aws iam get-instance-profile \
+    --instance-profile-name "$profile_name" \
+    --query 'InstanceProfile.Roles[0].RoleName' \
+    --output text 2>/dev/null || echo "None")
+
+  if [ -z "$role_name" ] || [ "$role_name" = "None" ]; then
+    warn "instance profile $profile_name has no role attached — auto-remediation is blocked."
+    return 1
+  fi
+  log "role behind profile: $role_name"
+
+  already_attached=$(aws iam list-attached-role-policies \
+    --role-name "$role_name" \
+    --query "AttachedPolicies[?PolicyArn=='$policy_arn'].PolicyArn" \
+    --output text 2>/dev/null || echo "")
+
+  if [ -n "$already_attached" ]; then
+    ok "AmazonSSMManagedInstanceCore already attached to $role_name"
+    return 0
+  fi
+
+  log "Attaching AmazonSSMManagedInstanceCore to $role_name"
+  aws iam attach-role-policy \
+    --role-name "$role_name" \
+    --policy-arn "$policy_arn" \
+    || { warn "attach-role-policy failed"; return 1; }
+  ok "AmazonSSMManagedInstanceCore attached to $role_name"
+  return 0
+}
+
+poll_ssm_online() {
+  local instance_id="$1" max_iters="$2" state
+  for _ in $(seq 1 "$max_iters"); do
+    state=$(aws ssm describe-instance-information \
+      --region "$REGION" \
+      --filters "Key=InstanceIds,Values=$instance_id" \
+      --query 'InstanceInformationList[0].PingStatus' \
+      --output text 2>/dev/null || echo "None")
+    case "$state" in
+      Online) printf '%s' "$state"; return 0 ;;
+    esac
+    sleep 10
+  done
+  printf '%s' "${state:-None}"
+  return 1
+}
+
 log "Verify SSM agent reachable: $TEST_BROKER_INSTANCE_ID"
 if [ "$DRY_RUN" = "1" ]; then
   log "DRY RUN — would query ssm describe-instance-information for $TEST_BROKER_INSTANCE_ID"
@@ -266,23 +358,44 @@ else
     Online)
       ok "SSM agent online — workflow can SendCommand"
       ;;
-    ConnectionLost|Inactive)
-      warn "SSM agent state = $ssm_state — workflow SendCommand may stall"
-      warn "Remediation: ssh into EC2, run 'sudo systemctl restart amazon-ssm-agent' and re-check"
-      ;;
-    None|"")
-      die "$TEST_BROKER_INSTANCE_ID is not registered with SSM. Likely causes:
-    1. EC2 instance profile is missing AmazonSSMManagedInstanceCore. Fix:
-         aws ec2 describe-instances --region $REGION --instance-ids $TEST_BROKER_INSTANCE_ID \\
-           --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn'
-       Then attach the policy to the role behind that instance profile:
-         aws iam attach-role-policy --role-name <role-from-above> \\
-           --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-       Reboot the EC2 (or restart amazon-ssm-agent) to pick up new perms.
-    2. SSM Agent not installed/running. Fix (Ubuntu 22.04+ ships it):
-         ssh test-broker 'sudo systemctl enable --now amazon-ssm-agent'
-    3. Instance is in a private VPC subnet without an SSM VPC endpoint.
-       (Unlikely for a public-IP broker, but worth a glance at the routing.)"
+    ConnectionLost|Inactive|None|"")
+      if [ "$FIX_SSM" = "1" ]; then
+        log "Auto-remediating (--fix-ssm): attach AmazonSSMManagedInstanceCore + poll"
+        if attach_ssm_managed_policy_if_missing "$TEST_BROKER_INSTANCE_ID"; then
+          log "Polling SSM PingStatus for up to 3 min (agent refresh window)"
+          final_state=$(poll_ssm_online "$TEST_BROKER_INSTANCE_ID" 18) || true
+          if [ "$final_state" = "Online" ]; then
+            ok "SSM agent now online"
+          else
+            warn "SSM agent still $final_state after 3 min — policy attached, but the"
+            warn "agent process hasn't picked up the refreshed creds. Pick ONE:"
+            warn "  a) SSH and bounce the agent:"
+            warn "     ssh test-broker 'sudo systemctl restart amazon-ssm-agent'"
+            warn "  b) Reboot the EC2 (heavier):"
+            warn "     aws ec2 reboot-instances --instance-ids $TEST_BROKER_INSTANCE_ID --region $REGION"
+            warn "Then re-run this script (no flags) to confirm Online."
+            exit 1
+          fi
+        else
+          exit 1
+        fi
+      else
+        die "$TEST_BROKER_INSTANCE_ID is not registered with SSM (state=$ssm_state). Re-run with --fix-ssm
+to attempt auto-remediation (attaches AmazonSSMManagedInstanceCore to the
+EC2's instance profile role, then polls until the SSM agent refreshes).
+Or remediate manually:
+  1. EC2 instance profile is missing AmazonSSMManagedInstanceCore. Fix:
+       aws ec2 describe-instances --region $REGION --instance-ids $TEST_BROKER_INSTANCE_ID \\
+         --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn'
+     Then attach the policy to the role behind that instance profile:
+       aws iam attach-role-policy --role-name <role-from-above> \\
+         --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+     Reboot the EC2 (or restart amazon-ssm-agent) to pick up new perms.
+  2. SSM Agent not installed/running. Fix (Ubuntu 22.04+ ships it):
+       ssh test-broker 'sudo systemctl enable --now amazon-ssm-agent'
+  3. Instance is in a private VPC subnet without an SSM VPC endpoint.
+     (Unlikely for a public-IP broker, but worth a glance at the routing.)"
+      fi
       ;;
     *)
       warn "SSM agent state = $ssm_state (unexpected) — proceed with caution"
