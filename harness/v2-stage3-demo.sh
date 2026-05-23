@@ -116,7 +116,10 @@ record_ok() { STEP_OUTCOMES+=("$STEP_NUM:ok:$1"); }
 should_run_step() { [ "$1" -ge "$FROM_STEP" ] && [ "$1" -le "$TO_STEP" ]; }
 
 # ─── Env ────────────────────────────────────────────────────────────────────
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+# ENV_FILE: caller-supplied env var takes precedence; default = prod.
+# Lets `ENV_FILE=scripts/operator-workstation.test.env bash harness/v2-stage3-demo.sh`
+# (or CI's in-place rewrite of the default path) re-point at test resources.
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE — run from a clone of agentKeys"
 set -a; . "$ENV_FILE"; set +a
 : "${OIDC_ISSUER:?OIDC_ISSUER unset (operator-workstation.env)}"
@@ -125,8 +128,20 @@ set -a; . "$ENV_FILE"; set +a
 : "${REGION:?REGION unset}"
 : "${VAULT_ROLE_ARN:?VAULT_ROLE_ARN unset}"
 : "${MEMORY_ROLE_ARN:?MEMORY_ROLE_ARN unset (operator-workstation.env — added in #90 Q3 followup)}"
+
+# Deployer-wallet resolution: prefer a raw private-key file (the CI path,
+# and the operator's test-deployer path) over a mnemonic. Set
+# HEIMA_DEPLOYER_KEY_FILE=/path/to/0x-key.txt to skip the mnemonic derive.
+# Mnemonic fallback preserves the existing operator dogfood flow that uses
+# ./test-hei in the repo root.
+DEPLOYER_KEY_FILE="${HEIMA_DEPLOYER_KEY_FILE:-}"
 MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-[ -f "$MNEMONIC_FILE" ] || die "missing mnemonic at $MNEMONIC_FILE"
+if [ -n "$DEPLOYER_KEY_FILE" ] && [ -f "$DEPLOYER_KEY_FILE" ]; then
+  USE_KEY_FILE=1
+else
+  USE_KEY_FILE=0
+  [ -f "$MNEMONIC_FILE" ] || die "no HEIMA_DEPLOYER_KEY_FILE set and no mnemonic at $MNEMONIC_FILE — set one or the other"
+fi
 
 # Hold state across steps in a temp dir so steps are individually re-runnable.
 STATE_DIR="${STAGE3_STATE_DIR:-/tmp/agentkeys-stage3}"
@@ -146,13 +161,28 @@ esac
 printf "\n=== v2 stage-3 demo: OIDC isolation proof ===\n  chain=%s issuer=%s vault=%s memory=%s\n\n" \
   "${AGENTKEYS_CHAIN:-heima}" "$OIDC_ISSUER" "$VAULT_BUCKET" "$MEMORY_BUCKET" >&2
 
-# Pre-derive wallet identity (used in many steps).
-if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
-  npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund || die "npm install ethers failed"
+# Pre-derive wallet identity (used in many steps). Two paths land on the
+# same (WALLET_KEY, WALLET_ADDR) pair:
+#   1. HEIMA_DEPLOYER_KEY_FILE — raw 0x-prefixed private key; preferred path
+#                                (CI + test-deployer dogfood). No npm + ethers
+#                                round-trip; relies only on `cast` (already on
+#                                PATH from foundry-toolchain action).
+#   2. HEIMA_DEPLOYER_MNEMONIC_FILE (defaults to ./test-hei) — legacy operator
+#                                dogfood path. Requires ethers via npm.
+if [ "$USE_KEY_FILE" = "1" ]; then
+  WALLET_KEY=$(tr -d '\r\n[:space:]' < "$DEPLOYER_KEY_FILE")
+  [[ "$WALLET_KEY" =~ ^0x[0-9a-fA-F]{64}$ ]] \
+    || die "HEIMA_DEPLOYER_KEY_FILE=$DEPLOYER_KEY_FILE: content not in 0x<64hex> form"
+  WALLET_ADDR=$(cast wallet address --private-key "$WALLET_KEY") \
+    || die "cast wallet address failed (cast on PATH? key valid?)"
+else
+  if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
+    npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund || die "npm install ethers failed"
+  fi
+  DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
+  WALLET_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
+  WALLET_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
 fi
-DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-WALLET_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
-WALLET_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
 WALLET_LC=$(printf '%s' "$WALLET_ADDR" | tr '[:upper:]' '[:lower:]')
 OWN_ACTOR_OMNI=$(printf 'agentkeysevm%s' "$WALLET_LC" | shasum -a 256 | awk '{print $1}')
 # A different actor_omni for the negative test. Any 64-hex non-matching string.

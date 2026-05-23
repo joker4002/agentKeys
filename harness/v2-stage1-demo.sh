@@ -135,7 +135,11 @@ DEBUG=0
 WEBAUTHN_MODE=0
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+# ENV_FILE: caller-supplied env var takes precedence; default = prod.
+# Lets `ENV_FILE=scripts/operator-workstation.test.env bash harness/v2-stage1-demo.sh`
+# (or CI's in-place rewrite of the default path) both point at test resources
+# without modifying the script. Matches the same plumbing in setup-heima.sh.
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 
 # Resolve agentkeys binary — prefer workspace-local builds (operator just
 # built / is iterating). Falls back to PATH (installed via
