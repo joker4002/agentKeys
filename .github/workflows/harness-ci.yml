@@ -155,6 +155,53 @@ jobs:
         with:
           version: stable
 
+      - name: Preflight — validate TEST_* secret shape before AWS action
+        # Self-diagnoses the most common operator-setup errors so the failure
+        # tells you EXACTLY what to fix instead of a generic AWS-action error.
+        # GHA masks secret values, but unmasked LENGTH + computed shape checks
+        # are safe to log (they reveal "is it an ARN" without revealing the ARN).
+        env:
+          ROLE_ARN: ${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}
+          REGION_RAW: ${{ secrets.TEST_AWS_REGION }}
+          ACCT_RAW: ${{ secrets.TEST_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          fail=0
+          # Length-based shape check on TEST_OIDC_AWS_ROLE_ARN — full ARNs are
+          # always >= 35 chars (`arn:aws:iam::123456789012:role/x` = 33 minimum).
+          # Bare role names are typically <50 chars but don't have the "arn:" prefix.
+          arn_len="${#ROLE_ARN}"
+          if [ "$arn_len" -lt 35 ]; then
+            echo "::error::TEST_OIDC_AWS_ROLE_ARN is too short ($arn_len chars) — likely a bare role name, not a full ARN."
+            echo "::error::Expected: arn:aws:iam::<12-digit-account>:role/<name> (length ~50-80 chars)"
+            echo "::error::Fix: gh secret set TEST_OIDC_AWS_ROLE_ARN --body \"\$(aws iam get-role --role-name github-actions-agentkeys-e2e --query 'Role.Arn' --output text)\""
+            fail=1
+          fi
+          # Use bash substring (sliced positions) to verify the prefix without
+          # echoing the masked secret value itself.
+          arn_prefix="${ROLE_ARN:0:13}"
+          if [ "$arn_prefix" != "arn:aws:iam::" ]; then
+            echo "::error::TEST_OIDC_AWS_ROLE_ARN does not start with 'arn:aws:iam::' (first 13 chars hash differs)"
+            fail=1
+          fi
+          # Region sanity — must match xx-yyyy-N (e.g. us-east-1). Fallback to
+          # us-east-1 when empty handled at the action layer; reject malformed.
+          region_eff="${REGION_RAW:-us-east-1}"
+          if ! [[ "$region_eff" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]]; then
+            echo "::error::TEST_AWS_REGION shape invalid: '$region_eff' (expected xx-yyyy-N like 'us-east-1')"
+            fail=1
+          fi
+          # Account ID must be exactly 12 digits.
+          if ! [[ "$ACCT_RAW" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::TEST_ACCOUNT_ID shape invalid (expected 12 digits; got length ${#ACCT_RAW})"
+            fail=1
+          fi
+          if [ "$fail" = "1" ]; then
+            echo "::error::Preflight failed — re-run scripts/ci-set-github-secrets.sh to refresh secrets from canonical sources, then re-trigger the workflow."
+            exit 1
+          fi
+          echo "::notice::preflight ok: role_arn_len=$arn_len region=$region_eff account_id_len=${#ACCT_RAW}"
+
       - name: Configure AWS credentials via OIDC (test role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
