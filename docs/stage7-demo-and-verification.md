@@ -22,7 +22,7 @@ When you finish this guide you will have:
 5. **Proven cloud-enforced per-user isolation** — `omni_A`'s derived
    wallet reads its own prefix; `omni_B`'s derived wallet returns
    `AccessDenied` from S3 itself, not from app code.
-6. Inspected the audit log + metrics + idempotency cache.
+6. Inspected the audit log + metrics.
 7. Exercised capability grants and wallet recovery.
 
 The guide assumes the build deployed includes:
@@ -1917,7 +1917,7 @@ exercise this end-to-end against the stub.
 
 ---
 
-## 12. Metrics + idempotency (Phase D-rest)
+## 12. Metrics (Phase D-rest)
 
 ### 12.1 Prometheus metrics
 
@@ -1934,7 +1934,6 @@ curl -sS --fail-with-body https://broker.litentry.org/metrics | head -30
 # agentkeys_broker_mints_failed_total 0
 # agentkeys_broker_audit_writes_total 14
 # agentkeys_broker_auth_attempts_total 23
-# agentkeys_broker_idempotency_hits_total 3
 # …
 ```
 
