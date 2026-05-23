@@ -790,6 +790,67 @@ EOF
   sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || warn "sshd reload failed — restart manually"
 fi
 
+# ─── AWS SSM Agent (idempotent install) ───────────────────────────────────────
+# Required by harness-ci.yml deploy-test-broker job (issue #101): the GitHub
+# Actions workflow drives `setup-broker-host.sh --test --yes` on the EC2 via
+# `aws ssm send-command`. That path needs amazon-ssm-agent installed AND
+# active here.
+#
+# Some Ubuntu AMIs (including some Canonical / Multipass-derived images
+# downstream of the AWS Marketplace base) ship without amazon-ssm-agent.
+# When that's the case, `systemctl restart amazon-ssm-agent` errors with
+# "Unit amazon-ssm-agent.service not found" — the failure mode the operator
+# hit on 2026-05-23. Fold the install into broker-host bootstrap so every
+# new test broker is SSM-ready out of the box.
+#
+# Two install paths, in priority order:
+#   1) snap (AWS-blessed on Ubuntu 22.04+; service: snap.amazon-ssm-agent.amazon-ssm-agent.service)
+#   2) deb fallback (older / non-snap images; service: amazon-ssm-agent.service)
+#
+# Both produce a unit named `amazon-ssm-agent` in our systemctl alias check
+# below, so subsequent `setup-broker-host.sh --upgrade` re-runs skip.
+ssm_unit_active() {
+  systemctl is-active snap.amazon-ssm-agent.amazon-ssm-agent.service >/dev/null 2>&1 \
+    || systemctl is-active amazon-ssm-agent.service >/dev/null 2>&1
+}
+
+if ssm_unit_active; then
+  log "amazon-ssm-agent already active — skipping install"
+else
+  log "Installing amazon-ssm-agent (required for CI auto-deploy per issue #101)"
+  if command -v snap >/dev/null 2>&1; then
+    # snap install is idempotent — re-running on an already-installed agent
+    # exits 0 with a "snap already installed" message.
+    sudo snap install amazon-ssm-agent --classic >/dev/null \
+      || warn "snap install amazon-ssm-agent failed — falling back to deb"
+    sudo systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service \
+      >/dev/null 2>&1 || true
+  fi
+
+  if ! ssm_unit_active; then
+    # Snap path didn't take — fall back to the .deb from AWS.
+    REGION_FOR_SSM="${REGION:-us-east-1}"
+    SSM_DEB_URL="https://s3.${REGION_FOR_SSM}.amazonaws.com/amazon-ssm-${REGION_FOR_SSM}/latest/debian_amd64/amazon-ssm-agent.deb"
+    SSM_TMP_DEB=$(mktemp /tmp/amazon-ssm-agent.XXXXXX.deb)
+    if curl -sSfL "$SSM_DEB_URL" -o "$SSM_TMP_DEB"; then
+      sudo dpkg -i "$SSM_TMP_DEB" >/dev/null \
+        || warn "dpkg install amazon-ssm-agent.deb failed"
+      sudo systemctl enable --now amazon-ssm-agent.service \
+        >/dev/null 2>&1 || warn "amazon-ssm-agent enable/start failed"
+    else
+      warn "could not download amazon-ssm-agent.deb from $SSM_DEB_URL"
+    fi
+    rm -f "$SSM_TMP_DEB"
+  fi
+
+  if ssm_unit_active; then
+    log "amazon-ssm-agent installed and active"
+  else
+    warn "amazon-ssm-agent install did not produce an active unit — CI auto-deploy will fail until this is resolved"
+    warn "Manual recovery: sudo snap install amazon-ssm-agent --classic && sudo systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service"
+  fi
+fi
+
 if [[ "$CRED_MODE" == "profile" ]]; then
   sudo install -d -m 0700 -o agentkeys -g agentkeys /var/lib/agentkeys/.aws
   if [[ ! -f /var/lib/agentkeys/.aws/credentials ]]; then
