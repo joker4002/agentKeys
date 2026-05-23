@@ -47,6 +47,14 @@
 #   --skip-email          assume ~/.agentkeys/$SESSION_ID/session.json exists
 #   --skip-smoke          skip the S3 envelope round-trip
 #   --skip-deploy         skip the chain bring-up (contract deploy)
+#   --skip-provision      skip step 7 (vault bucket + role + policy provisioning).
+#                         Use in CI / non-admin paths where the test infra is
+#                         already provisioned by the operator one-shot and the
+#                         current AWS caller lacks IAM-admin perms to create
+#                         buckets/roles. Mirrors --skip-deploy: the sub-scripts
+#                         require agentkeys-admin caller identity, which CI
+#                         (assumed via OIDC into github-actions-agentkeys-e2e)
+#                         doesn't have.
 #   --confirm             pause for Enter before chain deploy
 #   --debug               enable `set -x` (very chatty)
 #   --webauthn            use REAL WebAuthn ceremony for K11 enroll (step 11)
@@ -126,6 +134,7 @@ SKIP_BUILD=0
 SKIP_EMAIL=0
 SKIP_SMOKE=0
 SKIP_DEPLOY=0
+SKIP_PROVISION=0
 CONFIRM=0
 DEBUG=0
 # WEBAUTHN_MODE: 0 = stage-1 stub (CI-friendly, no Touch ID prompt — default).
@@ -176,6 +185,7 @@ while [ $# -gt 0 ]; do
     --skip-email)      SKIP_EMAIL=1; shift ;;
     --skip-smoke)      SKIP_SMOKE=1; shift ;;
     --skip-deploy)     SKIP_DEPLOY=1; shift ;;
+    --skip-provision)  SKIP_PROVISION=1; shift ;;
     --confirm)         CONFIRM=1; shift ;;
     --debug)           DEBUG=1; shift ;;
     --webauthn)        WEBAUTHN_MODE=1; shift ;;
@@ -436,6 +446,19 @@ wallet_sig_init_session() {
 # ─── Step 7: provision vault infrastructure (arch.md §17 per-data-class) ────
 do_step_7() {
   step "Provision vault infra (bucket + role + policy)"
+  # Skip-provision: CI + any non-admin path where infra is pre-provisioned
+  # by an operator one-shot. The four sub-scripts below all require the
+  # caller to be `agentkeys-admin` (they create buckets, roles, and apply
+  # policies — IAM-admin perms). CI's caller is the OIDC-assumed
+  # github-actions-agentkeys-e2e role, which deliberately can NOT create
+  # buckets / roles / policies (least-privilege). So in CI, infra is
+  # pre-provisioned by `setup-cloud.sh --test` + `provision-vault-*.sh`
+  # invoked once by the operator with agentkeys-admin perms; the harness
+  # just exercises the already-provisioned bucket via assumed STS creds.
+  if [ "$SKIP_PROVISION" = "1" ]; then
+    skip "--skip-provision set; assuming vault/memory bucket+role+policy already provisioned (operator one-shot)"
+    return 0
+  fi
   # Per arch.md §17 (per-data-class buckets) + §17.2 (per-bucket IAM
   # role): credentials and email MUST live in separate S3 buckets with
   # separate IAM roles, so a bug widening one role doesn't widen all

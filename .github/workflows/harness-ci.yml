@@ -266,15 +266,23 @@ jobs:
 
       - name: Stage 1 — chain reachability + identity bootstrap
         if: ${{ inputs.stage == 'all' || inputs.stage == '1' || inputs.stage == '' }}
-        # --skip-deploy: contracts are pre-deployed once per test-env
-        # refresh (operator one-shot) and pinned in TEST_*_HEIMA secrets,
-        # so CI doesn't burn HEI on every push.
-        # --skip-email: SES email-link round-trip is exercised separately;
-        # identity bootstrap here uses wallet_sig.
-        # No --webauthn: stub-mode K11 (WEBAUTHN_MODE=0 default).
+        # --skip-deploy:    contracts are pre-deployed once per test-env
+        #                   refresh (operator one-shot) and pinned in
+        #                   TEST_*_HEIMA secrets, so CI doesn't burn HEI
+        #                   on every push.
+        # --skip-email:     SES email-link round-trip is exercised separately;
+        #                   identity bootstrap here uses wallet_sig.
+        # --skip-provision: vault/memory bucket+role+policy were provisioned
+        #                   by the operator's `setup-cloud.sh --test` one-shot;
+        #                   the CI assumed-role (github-actions-agentkeys-e2e)
+        #                   deliberately lacks IAM-admin perms to (re)create
+        #                   them. Same model as --skip-deploy: one-shot infra
+        #                   provisioning lives on the operator's laptop, not
+        #                   on the ephemeral runner.
+        # No --webauthn:    stub-mode K11 (WEBAUTHN_MODE=0 default).
         run: |
           AGENTKEYS_CHAIN=heima \
-            bash harness/v2-stage1-demo.sh --skip-deploy --skip-email
+            bash harness/v2-stage1-demo.sh --skip-deploy --skip-email --skip-provision
 
       - name: Stage 2 — multi-master + recovery (stub mode)
         if: ${{ inputs.stage == 'all' || inputs.stage == '2' || inputs.stage == '' }}
