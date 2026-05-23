@@ -137,7 +137,7 @@ A concrete request flow makes the split obvious:
                                                        │  (PUBLIC — AWS reaches this)
 ┌──────────────────┐  legacy bearer        ┌───────────▼───────────┐
 │  agentkeys-cli   ├──────────────────────▶│ agentkeys-broker-     │
-│  / agentkeys-    │  /v1/mint-aws-creds   │ server                │
+│  / agentkeys-    │  /v1/mint-oidc-jwt    │ server                │
 │  daemon          │                       │                       │
 └──────────────────┘                       │ ┌───────────────────┐ │
                                            │ │ POST /session/    │ │
@@ -367,20 +367,22 @@ by `aud=sts.amazonaws.com` and a `sub` prefix.
 
 The broker's `BROKER_DATA_ROLE_ARN` must point at this role.
 
-### Mint-time STS paths (issue #71)
+### Mint-time STS path (issue #71 / issue #72)
 
-There are two endpoints that result in AWS credentials, with **different
-trust models** and **identical end-state security** (both go through
-`AssumeRoleWithWebIdentity`, both emit creds tagged with the user's
-`agentkeys_user_wallet` PrincipalTag):
+One endpoint produces AWS credentials, via `AssumeRoleWithWebIdentity`,
+with creds carrying the per-actor `agentkeys_actor_omni` PrincipalTag
+that drives bucket-policy isolation per [`arch.md §17.2`](../docs/arch.md#172-pri-actor-isolation).
+The legacy `agentkeys_user_wallet` tag is still emitted alongside it for
+backward compatibility with v0.1 bucket policies; new policies should
+key off `agentkeys_actor_omni`.
 
-#### `POST /v1/mint-oidc-jwt` — daemon-side STS (recommended)
+#### `POST /v1/mint-oidc-jwt` — daemon-side STS
 
 The broker signs a short-lived OIDC JWT with the user's wallet claim
 and returns it. The daemon exchanges that JWT for AWS creds **on its
 own machine** by calling `sts:AssumeRoleWithWebIdentity` directly. This
 is the path the provisioner / MCP / `agentkeys-daemon` use after the
-issue #71 Option A migration.
+issue #71 Option A + issue #72 retirement of the server-side mint.
 
 - **Broker work**: validate bearer → sign JWT → return.
 - **Daemon work**: receive JWT → `AssumeRoleWithWebIdentity` → inject
@@ -388,28 +390,18 @@ issue #71 Option A migration.
 - **AWS principal on broker**: none required.
 - **AWS principal on daemon**: none required (the JWT authenticates).
 
-#### `POST /v1/mint-aws-creds` — server-side gated (kept for callers needing audit/grants/idempotency)
-
-Broker handles the full mint pipeline:
-
-1. Verifies the session JWT against the broker's session keypair.
-2. Verifies a per-call EIP-191 signature on the request body.
-3. Resolves any Phase B grant (consume → 403 if revoked/expired/exhausted).
-4. Mints an internal user-scoped OIDC JWT (same claim shape as
-   `/v1/mint-oidc-jwt`).
-5. Calls `sts:AssumeRoleWithWebIdentity` with that JWT (broker-side).
-6. Writes the audit anchor row(s) per `BROKER_AUDIT_POLICY` (single
-   `sqlite` or `dual_strict` for multi-anchor durability).
-7. Returns the temporary credentials.
-
-Use this endpoint when:
-- You want the broker to be the policy point (mandatory audit log,
-  Phase B grants, Idempotency-Key dedup, multi-anchor coordination).
-- You can't trust callers to self-audit.
+> **Retired in PR #96 (issue #72).** The previous server-side
+> aggregator `POST /v1/mint-aws-creds` no longer exists — the route
+> returns 404. Its in-process gates (Phase B grant `try_consume`,
+> Idempotency-Key dedup, multi-anchor audit coordination) were dropped
+> with the route; isolation now relies on `/v1/mint-oidc-jwt`'s audit
+> row + AWS CloudTrail's `AssumeRoleWithWebIdentity` events + AWS
+> PrincipalTag/bucket policy per `arch.md §17.2`. Daemons must not
+> retry against the old route.
 
 ### Broker creds-free posture (post-migration)
 
-Both paths above use `AssumeRoleWithWebIdentity`, which is JWT-authenticated. The broker **does not need** an IAM principal at
+The path above uses `AssumeRoleWithWebIdentity`, which is JWT-authenticated. The broker **does not need** an IAM principal at
 runtime for credential minting. After cutover you can:
 
 - Drop `AWS_PROFILE` from `agentkeys-broker.service`.
@@ -549,24 +541,20 @@ curl -X POST https://broker.litentry.org/v1/grant/revoke \
   -d '{"grant_id":"grn-..."}'
 ```
 
-### Migration window — implicit-grant fallback
+### Grant enforcement — retired with `/v1/mint-aws-creds` in PR #96 (issue #72)
 
-The mint endpoint currently allows mints WITHOUT an explicit grant for
-backward-compatibility with Phase 0 daemons (legacy `NoGrant` path
-documented inline in `src/handlers/mint.rs::mint_v2`). The audit log
-records these mints with an empty `grant_id` column.
+The grant `try_consume` enforcement point lived inside the deleted
+`src/handlers/mint.rs::mint_v2`. With that route gone (issue #72), the
+broker no longer consults `grant_store` at mint time at all — the
+`NoGrant` fallback, the planned Phase E fail-closed flip
+(`BROKER_REQUIRE_EXPLICIT_GRANT=true`), and the empty-`grant_id` audit
+rows are all moot. The grant CRUD endpoints (`/v1/grant/create`,
+`/v1/grant/list`, `/v1/grant/revoke`) still exist so master devices can
+manage grants for audit / future re-introduction, but no broker path
+consumes them today.
 
-**This is an intentional Phase 0→Phase B migration window.** Phase E
-US-039 will flip the default to fail-closed (`NoGrant` → 403). Operators
-should:
-
-1. Roll out the broker with grants enabled (this build).
-2. Call `/v1/grant/create` for every existing daemon address.
-3. Verify mints continue to succeed (now with non-empty `grant_id` in
-   audit rows).
-4. Set `BROKER_REQUIRE_EXPLICIT_GRANT=true` (Phase E env var) to flip
-   the default to fail-closed.
-5. Audit any 403s for daemons that didn't get a grant.
+Per-actor isolation now rides on `/v1/mint-oidc-jwt`'s audit row + AWS
+CloudTrail + AWS PrincipalTag/bucket policy (see `arch.md §17.2`).
 
 ### Recovery flow
 
@@ -707,16 +695,18 @@ disabled to avoid leaking counter shapes to unauthenticated probers.
 Histograms (mint_latency, audit_write_latency) + per-handler counter
 bumps land in V0.1-FOLLOWUPS Phase E hardening.
 
-### Idempotency-Key
+### Idempotency-Key — retired with `/v1/mint-aws-creds` in PR #96 (issue #72)
 
-The mint endpoint accepts an `Idempotency-Key: <ulid>` header. Bodies
-that hash to the same fingerprint within the 5-minute window return
-the cached response (no re-mint, no STS quota burn). Same key + a
-different body returns 422.
+The `Idempotency-Key` header was consumed by the deleted
+`mint_v2` handler. No surviving broker route honors the header today —
+`/v1/mint-oidc-jwt` always re-signs (the OIDC JWT TTL of 5 min, default
+`BROKER_OIDC_JWT_TTL_SECONDS=300`, is the only knob bounding re-mint
+cost). Callers that need rate-limiting / dedup must implement it
+client-side.
 
-`BROKER_REQUEST_BODY_LIMIT_BYTES` enforces the request body size limit
-(default 1 MiB) at router level (DefaultBodyLimit middleware) — closes
-Codex R2-F18 (declared-but-unenforced).
+`BROKER_REQUEST_BODY_LIMIT_BYTES` (default 1 MiB) still enforces the
+request body size limit at router level via the `DefaultBodyLimit`
+middleware for every endpoint.
 
 ---
 
