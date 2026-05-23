@@ -2,7 +2,14 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    # Run only on PR submission events — NOT on every push (`synchronize`).
+    # `opened`        — first PR submission
+    # `ready_for_review` — draft promoted to ready (effectively a submission)
+    # `reopened`      — closed PR reopened
+    # Subsequent pushes to the PR branch are intentionally NOT reviewed, to
+    # cap Claude usage cost. Re-trigger manually by closing + reopening the
+    # PR, or by `@claude review` mention (handled in claude.yml).
+    types: [opened, ready_for_review, reopened]
     # Run only on paths that contain real code or CI config.
     # Pure docs pushes (`docs/**`, including `docs/wiki/**`) don't need a full code review
     # — they go through normal PR approval. This also skips Cargo.lock-only

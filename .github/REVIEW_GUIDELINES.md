@@ -1,8 +1,11 @@
 # Review Guidelines — agentkeys
 
 This is the single source of truth for code review patterns in this repo. The
-`claude-code-review.yml` workflow points Claude at this file; human reviewers
-should also use it as a checklist.
+[`claude-code-review.yml`](workflows/claude-code-review.yml) workflow points
+Claude at this file on PR *submission* events (`opened`, `ready_for_review`,
+`reopened`) — NOT on every push, to cap token cost. Human reviewers should
+use it as a checklist, and `@claude`-invoked reviews
+(see [`claude.yml`](workflows/claude.yml)) pick it up when relevant.
 
 Background: these patterns were distilled from 15+ PR review cycles in
 March-April 2026 where codex repeatedly surfaced the same classes of bug. Each
