@@ -21,6 +21,13 @@
 
 set -euo pipefail
 
+# AWS SSM-driven invocations (harness-ci.yml deploy-test-broker, issue #101)
+# don't export HOME on the remote shell. Under set -u that hits 'HOME: unbound
+# variable' at the rustup `source "$HOME/.cargo/env"` line. Resolve HOME from
+# /etc/passwd if missing so the script is callable from both interactive ssh
+# sessions and SSM SendCommand.
+export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
+
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
