@@ -438,10 +438,25 @@ fi
 # Contract addresses pulled from operator-workstation.env on Heima Mainnet.
 # Source the repo-committed env file so a fresh broker host inherits the
 # same canonical addresses as the operator laptop (no manual sync needed).
-if [[ -f "$REPO_ROOT/scripts/operator-workstation.env" ]]; then
-  # shellcheck disable=SC1091
-  set -a; . "$REPO_ROOT/scripts/operator-workstation.env"; set +a
+# Source operator-workstation.env for canonical contract addresses + hostnames.
+# CRITICAL: pick the right variant per --test. In test mode we MUST source
+# operator-workstation.test.env (which has SIGNER_HOST=signer-test.${ZONE})
+# rather than the prod env (which has SIGNER_HOST=signer.${ZONE}) — sourcing
+# prod would clobber the test-suffix SIGNER_HOST that derive_companion just
+# set, leaving nginx with `server_name signer.litentry.org` on the test box
+# while certbot issued certs for `signer-test.litentry.org`. Incident
+# 2026-05-23: caught by no-TLS-cert response from signer-test, traced to
+# this hardcoded prod-env source after --test ran.
+_env_file_to_source="$REPO_ROOT/scripts/operator-workstation.env"
+if [[ "$TEST_MODE" == "true" ]] && [[ -f "$REPO_ROOT/scripts/operator-workstation.test.env" ]]; then
+  _env_file_to_source="$REPO_ROOT/scripts/operator-workstation.test.env"
 fi
+if [[ -f "$_env_file_to_source" ]]; then
+  # shellcheck disable=SC1091
+  set -a; . "$_env_file_to_source"; set +a
+  log "Sourced env file: $_env_file_to_source"
+fi
+unset _env_file_to_source
 [[ -z "$SCOPE_ADDR" ]]      && SCOPE_ADDR="${SCOPE_CONTRACT_ADDRESS_HEIMA:-}"
 [[ -z "$REGISTRY_ADDR" ]]   && REGISTRY_ADDR="${SIDECAR_REGISTRY_ADDRESS_HEIMA:-}"
 [[ -z "$K3_COUNTER_ADDR" ]] && K3_COUNTER_ADDR="${K3_EPOCH_COUNTER_ADDRESS_HEIMA:-}"
