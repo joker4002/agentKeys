@@ -267,6 +267,14 @@ jobs:
           VAULT_ROLE_ARN=${{ secrets.TEST_VAULT_ROLE_ARN }}
           MEMORY_ROLE_ARN=${{ secrets.TEST_MEMORY_ROLE_ARN }}
           AGENTKEYS_SIGNER_URL=https://signer-test.litentry.org
+          # Worker URLs — stage 1 step 15 (Tier-A audit relay + email-inbox
+          # smoke) calls AGENTKEYS_WORKER_AUDIT_URL + AGENTKEYS_WORKER_EMAIL_URL.
+          # Hosts match setup-broker-host.sh --test derived names; all 5
+          # worker subdomains co-locate on the test-broker EC2.
+          AGENTKEYS_WORKER_AUDIT_URL=https://audit-test.litentry.org
+          AGENTKEYS_WORKER_EMAIL_URL=https://email-test.litentry.org
+          AGENTKEYS_WORKER_CRED_URL=https://cred-test.litentry.org
+          AGENTKEYS_WORKER_MEMORY_URL=https://memory-test.litentry.org
           BACKEND_URL=https://signer-test.litentry.org
           AGENTKEYS_CHAIN=heima
           SCOPE_CONTRACT_ADDRESS_HEIMA=${{ secrets.TEST_SCOPE_CONTRACT_ADDRESS_HEIMA }}
