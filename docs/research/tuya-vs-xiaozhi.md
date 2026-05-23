@@ -92,11 +92,20 @@ An AI-toy maker picks **one or the other**, not both on the same device. The cho
 
 ### Recommended posture: complement, don't compete
 
-| Phase | Action | Effort |
-|---|---|---|
-| Phase 1 (now) | Ship the xiaozhi cloud-side bridge as planned. xiaozhi has 17× the mindshare and a clean OPUS+MCP protocol surface — fastest path to a working integration with the broadest device pool. | issue #103, ~1-2 weeks |
-| Phase 2 (3-6 months) | Add a **Tuya Cloud Development connector** that lets Tuya-platform devices flow into AgentKeys' agent / memory / credential layer via Tuya's developer-platform webhooks + their MCP-server hooks (announced as part of "Hey Tuya" upgrade). This sits above Tuya, not beside it. | net-new issue, ~1-2 weeks |
-| Phase 3 (when needed) | Add adapters for any other dominant brand-owner clouds (Xiaomi MIoT, Alibaba Smart Home, Volcano AI Hub) using the same above-the-rail pattern. | per-platform 1 week |
+| Phase | Action | Effort | Feasibility |
+|---|---|---|---|
+| Phase 1 (now) | Ship the xiaozhi cloud-side bridge as planned. xiaozhi has 17× the mindshare and a clean OPUS+MCP protocol surface — fastest path to a working integration with the broadest device pool. | issue #103, ~1-2 weeks | Open source, no gating |
+| Phase 2 (3-6 months) | Add a **Tuya Cloud Development connector** that lets Tuya-platform devices flow into AgentKeys' agent / memory / credential layer via Tuya's developer-platform webhooks + their MCP-server hooks (announced as part of "Hey Tuya" upgrade). This sits above Tuya, not beside it. | net-new issue, ~1-2 weeks | Open developer signup; verify Tuya MCP-server hooks expose what we need |
+| Phase 3a (when needed) | **Volcano Ark MCP-server adapter** — ByteDance's enterprise AI platform launched an MCP-server marketplace in 2026. Open international developer signup, no PRC entity / ICP required. AgentKeys publishes an MCP tool that any Doubao-powered AI hardware (including FoloToy's "Eye-Catching Bag" stack) can call. Genuinely Tuya-equivalent for AI-side rather than IoT-side. | ~1 week | **VERIFIED FEASIBLE** — no partnership gate |
+| Phase 3b (with PRC partner) | **AliGenie custom-skill adapter** — Alibaba's Tmall Genie ecosystem accepts custom skills via webhook on any Alibaba Cloud account (international tier works for sandbox). Production distribution onto Tmall Genie hardware requires Alibaba's skill review + de-facto PRC-domiciled brand. Build the adapter; pair with a Chinese ISV when ready for production. | ~1 week dev + partnership lead time | **FEASIBLE WITH PARTNERSHIP** for production |
+| Phase 3c (deferred / partnership-only) | **Xiaomi MIoT / XiaoAI adapter** — Mi Ecosystem brand admission required for device-tier integration; PRC real-name verification required to publish discoverable XiaoAI skills. Consumer-OAuth path (Home-Assistant-style) works today for per-user device reach but is a narrower wedge than the brand-tier path. | partnership-gated | **WEAKEST** of the three — defer until Xiaomi partnership materializes or pivot to consumer-OAuth-only scope |
+
+**Honest note on Phase 3 verification**: an earlier version of this doc said *"add adapters for any other dominant brand-owner clouds (Xiaomi MIoT, Alibaba Smart Home, Volcano AI Hub) using the same above-the-rail pattern"* without verifying that each platform's third-party developer surface actually supports the pattern. After research:
+- **Volcano Ark** = genuinely open. MCP-server marketplace shipped 2026, no PRC entity / ICP needed.
+- **AliGenie** = international Alibaba Cloud account works for sandbox + custom-skill webhook; production distribution needs PRC partner.
+- **Xiaomi MIoT** = brand-tier path needs Mi Ecosystem partnership; only consumer-OAuth works today for foreigners.
+
+Tuya remains the realistic *production* ceiling for the device-side IoT path; Volcano Ark is a credible *AI-side* peer to Tuya. Keep Phase 3 — narrow it per the table above.
 
 **Don't compete with Tuya on white-label PaaS.** Their 1.97M developers, 306 premium customers, and 100+ country distribution are a moat AgentKeys won't beat. Be the agent / identity / memory layer that Tuya devices AND xiaozhi devices both terminate into.
 
@@ -121,3 +130,22 @@ The agentic-identity-and-memory layer we're building isn't a firmware feature or
 - [Tuya AI Capabilities Developer Docs](https://developer.tuya.com/en/docs/iot/AI-feature?id=Keapy1et1fc63)
 - [Best AI Robots 2026 (esp32s.com)](https://www.esp32s.com/blog/best-ai-robots-2026-14-top-smart-assistants-robot-dogs-esp32-dev-boards/)
 - [XiaoZhi AI docs](https://xiaozhi.dev/en/docs/esp32/)
+
+**Phase 3 platform feasibility sources** (added 2026-05-24):
+
+- [iot.mi.com Vela platform (EN)](https://iot.mi.com/vela?language=en) — Xiaomi MIoT Vela RTOS
+- [Xiaomi Home Assistant integration (official)](https://github.com/XiaoMi/ha_xiaomi_home) — proves consumer-OAuth cloud-to-cloud works for foreign servers
+- [XiaoAI Open Platform docs](https://developers.xiaoai.mi.com/documents/Home) — voice-skill SDK, requires Xiaomi Account + PRC real-name to publish
+- [Mi Developer global portal](https://global.developer.mi.com/) — global tier (limited)
+- [Alibaba Cloud Living Link (飞燕)](https://www.aliyun.com/product/livinglink) — multi-tenant smart-home cloud for appliance OEMs
+- [Alibaba Cloud OpenAPI Portal](https://api.alibabacloud.com/) — REST surface, international tier accepts non-PRC entities
+- [Global ISVs China Onboarding](https://www.alibabacloud.com/solutions/gisv) — Alibaba's explicit foreign-ISV path
+- [Building Skills for Tmall Genie (Medium, Alex Xu)](https://medium.com/@xalex/building-the-skills-for-tmall-genie-alibabas-smart-speaker-b3ca22d7a3a2) — confirms webhook architecture for custom skills
+- [AliGenie 200M IoT devices announcement](https://www.alibabacloud.com/blog/aligenie-is-now-on-200-million-iot-devices_595463) — scale reference
+- [Doubao International Access Guide 2026 (TokenMix)](https://tokenmix.ai/blog/doubao-api-international-access-guide-2026) — confirms international developer signup
+- [Volcano Engine MCP Servers launch (AIBase)](https://www.aibase.com/news/18171) — 2026 MCP-server marketplace open to third-party tool uploads
+- [Volcano Engine MCP server registry (mcp.so)](https://mcp.so/server/mcp-server/volcengine) — third-party MCP tool catalog
+- [EMQX + Volcano Engine RTC voice-agent integration](https://docs.emqx.com/en/emqx/latest/emqx-ai/rtc-services/volcengine-rtc/quick-start.html) — working third-party RTC voice-agent recipe
+- [Doubao on UI-TARS issue #826](https://github.com/bytedance/UI-TARS-desktop/issues/826) — international-account Doubao path confirmation
+- [China ICP licensing overview (TMO Group)](https://www.tmogroup.asia/insights/china-icp-license/) — when ICP is required
+- [China real-name verification guide (AppInChina)](https://appinchina.co/blog/the-complete-guide-to-chinas-real-name-verification/) — what real-name actually requires
