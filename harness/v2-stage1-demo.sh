@@ -693,6 +693,12 @@ do_step_10() {
     info "skipping — no SidecarRegistry address yet (run step 9 chain bring-up first)"
     return 0
   fi
+  # AGENTKEYS_STAGE1_STUB_OK=1 opts THIS specific stage-1 invocation into
+  # accepting a stage1-stub K11 file (CI / WEBAUTHN_MODE=0 path). Without
+  # the env, heima-register-first-master.sh refuses stage1-stub → prevents
+  # a stale stub K11 file in $HOME/.agentkeys/k11/ from being accepted by
+  # a later prod setup-heima.sh run. Codex H2 mitigation.
+  AGENTKEYS_STAGE1_STUB_OK=1 \
   bash "$REPO_ROOT/scripts/heima-device-register.sh" \
     --registry-address "$registry_addr" \
     --roles cap-mint,recovery,scope-mgmt \

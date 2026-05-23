@@ -243,31 +243,49 @@ AWS_PROFILE=agentkeys-admin aws iam put-role-policy \
     }]
   }')"
 
-# Second inline policy: read-only S3 perms on the test buckets so the
-# harness verify steps (head-object after store, ls during cleanup) work
-# from the runner's direct creds without re-assuming a worker role.
-# s3:DeleteObject is required for the per-run cleanup step
-# (`aws s3 rm s3://$bucket/ci/run-$GITHUB_RUN_ID/ --recursive`) at end of
-# the workflow. Without this policy the harness fails Stage 1 step 8
-# with AccessDenied on s3:ListBucket.
+# Second inline policy: S3 perms on the test buckets so the harness verify
+# steps (head-object after store, ls during cleanup) work from the runner's
+# direct creds without re-assuming a worker role.
+#
+# Codex M3 mitigation (2026-05-23): the policy is split into two statements
+# so s3:DeleteObject is scoped to `bots/*` only — the worker write path the
+# harness exercises. Previously DeleteObject was granted on the entire
+# bucket, which meant a typo or compromised step in the workflow cleanup
+# (`aws s3 rm s3://$bucket/...`) could nuke any object in the bucket.
+# Now: read-only verify (List/Get/Head) stays bucket-wide because those
+# operations need to inspect anywhere the workers might have written; but
+# Delete is constrained to the harness's own write path, so the worst a
+# bad cleanup invocation can do is wipe its own test data.
 AWS_PROFILE=agentkeys-admin aws iam put-role-policy \
   --role-name github-actions-agentkeys-e2e \
   --policy-name agentkeys-e2e-verify-s3 \
   --policy-document "$(jq -n --arg acct "$ACCOUNT_ID" '{
     Version:"2012-10-17",
-    Statement:[{
-      Sid:"VerifyAndCleanupTestBuckets",
-      Effect:"Allow",
-      Action:["s3:ListBucket","s3:GetObject","s3:HeadObject","s3:DeleteObject"],
-      Resource:[
-        "arn:aws:s3:::agentkeys-vault-test-\($acct)",
-        "arn:aws:s3:::agentkeys-vault-test-\($acct)/*",
-        "arn:aws:s3:::agentkeys-memory-test-\($acct)",
-        "arn:aws:s3:::agentkeys-memory-test-\($acct)/*",
-        "arn:aws:s3:::agentkeys-mail-test-\($acct)",
-        "arn:aws:s3:::agentkeys-mail-test-\($acct)/*"
-      ]
-    }]
+    Statement:[
+      {
+        Sid:"VerifyReadOnlyTestBuckets",
+        Effect:"Allow",
+        Action:["s3:ListBucket","s3:GetObject","s3:HeadObject"],
+        Resource:[
+          "arn:aws:s3:::agentkeys-vault-test-\($acct)",
+          "arn:aws:s3:::agentkeys-vault-test-\($acct)/*",
+          "arn:aws:s3:::agentkeys-memory-test-\($acct)",
+          "arn:aws:s3:::agentkeys-memory-test-\($acct)/*",
+          "arn:aws:s3:::agentkeys-mail-test-\($acct)",
+          "arn:aws:s3:::agentkeys-mail-test-\($acct)/*"
+        ]
+      },
+      {
+        Sid:"CleanupTestBucketsBotsPrefixOnly",
+        Effect:"Allow",
+        Action:["s3:DeleteObject"],
+        Resource:[
+          "arn:aws:s3:::agentkeys-vault-test-\($acct)/bots/*",
+          "arn:aws:s3:::agentkeys-memory-test-\($acct)/bots/*",
+          "arn:aws:s3:::agentkeys-mail-test-\($acct)/bots/*"
+        ]
+      }
+    ]
   }')"
 ```
 
