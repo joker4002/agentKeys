@@ -363,8 +363,9 @@ jobs:
           # a non-default path.
           read -r -d '' deploy_script <<EOF || true
           set -euo pipefail
+          REPO_DIR_OVERRIDE="\${REPO_DIR_OVERRIDE:-$REPO_DIR_OVERRIDE}"
           REPO_DIR=""
-          for candidate in "$REPO_DIR_OVERRIDE" /home/ubuntu/agentKeys /home/ubuntu/agentkeys /home/ubuntu/agentkey /opt/agentkeys /srv/agentkeys /root/agentKeys /root/agentkeys; do
+          for candidate in "\$REPO_DIR_OVERRIDE" /home/ubuntu/agentKeys /home/ubuntu/agentkeys /home/ubuntu/agentkey /home/agentkey/agentKeys /home/agentkey/agentkeys /home/agentkeys/agentKeys /opt/agentkeys /srv/agentkeys /root/agentKeys /root/agentkeys; do
             [ -n "\$candidate" ] || continue
             if [ -f "\$candidate/scripts/setup-broker-host.sh" ]; then
               REPO_DIR=\$candidate
@@ -373,7 +374,7 @@ jobs:
           done
           if [ -z "\$REPO_DIR" ]; then
             echo "could not locate the agentKeys checkout on this EC2" >&2
-            echo "candidates tried: \$REPO_DIR_OVERRIDE /home/ubuntu/agentKeys ..." >&2
+            echo "candidates tried: \$REPO_DIR_OVERRIDE /home/ubuntu/agentKeys /home/agentkey/agentKeys /opt/agentkeys /srv/agentkeys /root/agentKeys etc." >&2
             echo "Fix: pin the path via the TEST_BROKER_REPO_DIR repo secret." >&2
             exit 2
           fi
