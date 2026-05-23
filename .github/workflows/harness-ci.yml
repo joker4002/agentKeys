@@ -459,6 +459,21 @@ jobs:
   harness-e2e:
     name: harness/v2-stage*-demo.sh on Heima mainnet (test deployer)
     needs: [preflight, deploy-test-broker]
+    # Codex adversarial review (PR #102) confirmed: the harness's chain-mutating
+    # scripts (heima-fund-account.sh + heima-agent-create.sh) share ONE Heima
+    # test deployer wallet. The outer `concurrency: harness-ci-${{ github.ref }}`
+    # only cancels in-flight runs on the SAME ref — concurrent runs on DIFFERENT
+    # refs (PR branch + manual dispatch, two PRs, etc.) share the deployer and
+    # collide on nonce in the Heima mempool, surfacing as
+    # `replacement transaction underpriced`.
+    #
+    # This second concurrency group, scoped to the deployer (not the ref),
+    # serializes harness-e2e runs globally. `cancel-in-progress: false` queues
+    # subsequent runs instead of cancelling them — so a long-running harness
+    # doesn't lose work to a newer push.
+    concurrency:
+      group: heima-test-deployer-nonce
+      cancel-in-progress: false
     # Run when:
     #   - preflight gates green (test infra is set up)
     #   - AND either:

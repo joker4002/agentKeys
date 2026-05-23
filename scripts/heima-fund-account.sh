@@ -125,15 +125,38 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
+# Resolve PENDING nonce (defends against the race where a prior run's funding
+# tx is still in the mempool — cast's default `latest` nonce derivation would
+# collide with the stuck pending tx, surfacing as
+# `replacement transaction underpriced`. PR #102 / codex adversarial review.)
+log "Resolving pending nonce for $DEPLOYER_ADDR"
+PENDING_NONCE=$(cast nonce "$DEPLOYER_ADDR" --rpc-url "$RPC_HTTP" --block pending 2>/dev/null || echo "")
+if [ -z "$PENDING_NONCE" ]; then
+  warn "could not resolve pending nonce — proceeding without explicit --nonce (cast will use latest)"
+  NONCE_ARGS=()
+else
+  ok "pending nonce = $PENDING_NONCE"
+  NONCE_ARGS=(--nonce "$PENDING_NONCE")
+fi
+
 log "Submitting transfer via cast send …"
 set +e
 SEND_OUT=$(cast send "$TO_ADDR" --value "$AMOUNT_WEI" \
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" \
+  "${NONCE_ARGS[@]}" \
   --private-key "$DEPLOYER_KEY" 2>&1)
 SEND_RC=$?
 set -e
 if [ "$SEND_RC" != "0" ]; then
-  echo "    cast send FAILED (exit $SEND_RC). Output:" >&2
+  # Surface the underpriced-replacement case with a specific remediation —
+  # the broader workflow-level concurrency lock SHOULD prevent this from
+  # firing for parallel runs, but a stuck mempool tx still trips it.
+  if printf '%s\n' "$SEND_OUT" | grep -qi "replacement transaction underpriced"; then
+    echo "    cast send FAILED: prior tx with same nonce is pending in Heima mempool." >&2
+    echo "    Wait ~1 minute for it to confirm or drop, then re-run. Output:" >&2
+  else
+    echo "    cast send FAILED (exit $SEND_RC). Output:" >&2
+  fi
   echo "$SEND_OUT" >&2
   exit 1
 fi
