@@ -226,7 +226,8 @@ inline_policy=$(jq -n \
         Effect: "Allow",
         Action: [
           "ssm:GetCommandInvocation",
-          "ssm:ListCommandInvocations"
+          "ssm:ListCommandInvocations",
+          "ssm:DescribeInstanceInformation"
         ],
         Resource: "*"
       },

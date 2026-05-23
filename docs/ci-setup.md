@@ -402,8 +402,10 @@ The script:
 - Creates / refreshes the `github-actions-agentkeys-deploy` IAM role with a federated trust policy on the GitHub Actions OIDC provider, scoped to `repo:litentry/agentKeys:*` (any branch in this repo can trigger; the workflow's path filter + preflight gate further restrict when the role is actually used).
 - Attaches an inline policy `agentkeys-ci-deploy-ssm` with:
   - `ssm:SendCommand` on `document/AWS-RunShellScript` + the one instance ARN (so even if the role's session creds leaked, the worst a third party can do is re-run setup-broker-host.sh on the test EC2 — a destructive op there is `terraform apply`-style: idempotent, recoverable, and contained to the test environment).
-  - `ssm:GetCommandInvocation` / `ssm:ListCommandInvocations` for status polling.
+  - `ssm:GetCommandInvocation` / `ssm:ListCommandInvocations` / `ssm:DescribeInstanceInformation` for status polling + the workflow's pre-deploy sanity check.
   - `ec2:DescribeInstances` scoped to the one instance ID, for the workflow's pre-deploy sanity check.
+
+> Already provisioned the role before `ssm:DescribeInstanceInformation` was added to the policy template? Re-run the provisioning script. `put-role-policy` is idempotent — it overwrites the inline policy with the current source-of-truth shape, picking up any added permissions.
 - Verifies the test EC2 is registered with SSM (`PingStatus = Online`). With `--fix-ssm`, auto-remediates the common "instance profile is missing AmazonSSMManagedInstanceCore" case by attaching the policy and polling for up to 3 min for the SSM agent to refresh its creds. Without `--fix-ssm`, just reports the failure with manual fix instructions.
 
 **SSM remediation modes (what `--fix-ssm` covers, what it doesn't):**

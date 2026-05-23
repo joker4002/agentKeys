@@ -272,25 +272,43 @@ jobs:
           role-session-name: gh-deploy-${{ github.run_id }}
 
       - name: Sanity-check the test broker EC2 is SSM-managed
-        # Fail fast with a clear remediation path if the instance isn't
-        # registered with SSM (instance profile missing AmazonSSMManagedInstanceCore,
-        # agent down, or wrong region).
+        # Fail fast with a clear remediation path. Three failure modes are
+        # distinguished:
+        #   - AccessDenied → deploy role lacks ssm:DescribeInstanceInformation.
+        #     Operator re-runs provision-ci-deploy-role.sh on their laptop;
+        #     the inline policy is idempotently refreshed to include it.
+        #   - Empty/None  → instance genuinely not registered (no agent, no
+        #     profile, wrong region). Operator SSH-debugs or re-runs
+        #     setup-broker-host.sh which auto-installs amazon-ssm-agent.
+        #   - Other state → unexpected; fail loud with the value for triage.
         env:
           REGION: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
           INSTANCE_ID: ${{ secrets.TEST_BROKER_INSTANCE_ID }}
         run: |
           set -euo pipefail
+          stderr_file=$(mktemp)
           state=$(aws ssm describe-instance-information \
             --region "$REGION" \
             --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
             --query 'InstanceInformationList[0].PingStatus' \
-            --output text 2>/dev/null || echo "None")
+            --output text 2>"$stderr_file" || echo "")
+          if grep -q "AccessDenied" "$stderr_file"; then
+            echo "::error::Deploy role lacks ssm:DescribeInstanceInformation."
+            echo "::error::Fix: re-run scripts/provision-ci-deploy-role.sh on the operator laptop —"
+            echo "::error::the inline policy is now refreshed with the missing perm (idempotent)."
+            rm -f "$stderr_file"
+            exit 1
+          fi
+          rm -f "$stderr_file"
+          [ -z "$state" ] && state="None"
           case "$state" in
             Online)
               echo "::notice::SSM agent online on $INSTANCE_ID"
               ;;
-            None|"")
-              echo "::error::$INSTANCE_ID is not SSM-managed. Run scripts/provision-ci-deploy-role.sh to diagnose."
+            None)
+              echo "::error::$INSTANCE_ID is not SSM-managed (state=$state)."
+              echo "::error::SSH into the broker EC2 and run scripts/setup-broker-host.sh --test --yes —"
+              echo "::error::it auto-installs amazon-ssm-agent. See docs/ci-setup.md §7.1."
               exit 1
               ;;
             *)
