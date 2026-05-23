@@ -1637,6 +1637,23 @@ else
   REPO_MOVED=0
 fi
 
+# Free ~1.5GB by removing root's Rust toolchain (used only by this script to
+# build the broker binaries; the running services don't need it). Operators
+# who want interactive `cargo` as the agentkey user should install rustup
+# under their own $HOME — see the post-run NOTE below + docs/cloud-bootstrap.md
+# §5 "Optional: install rustup for dev-loop cargo runs as agentkey".
+#
+# Idempotent: rm -rf on a missing path is a no-op. Future re-runs of this
+# script will reinstall rustup as root automatically (the toolchain step
+# earlier in the script handles bootstrap from scratch).
+if [[ -d /root/.cargo ]] || [[ -d /root/.rustup ]]; then
+  log "Removing root's Rust toolchain (~1.5GB) — binaries are built + installed"
+  sudo rm -rf /root/.cargo /root/.rustup
+  ROOT_RUST_CLEANED=1
+else
+  ROOT_RUST_CLEANED=0
+fi
+
 cat <<EOF
   Smoke test (from a client machine — NOT this host):
     curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $ISSUER_URL/healthz        # expect: HTTP 200
@@ -1655,9 +1672,22 @@ if [[ "$REPO_MOVED" == "1" ]]; then
 
   NOTE: repo was moved /home/ubuntu/agentKeys → /home/agentkey/agentKeys.
   Your current shell's \$PWD is now stale. After this script exits:
-    1. exit              # the ubuntu SSH session
-    2. ssh-agentkeys-test  # from your laptop — lands as agentkey
-    3. cd ~/agentKeys      # → /home/agentkey/agentKeys (with the repo)
+    1. exit                 # the ubuntu SSH session
+    2. ssh-agentkeys-test   # from your laptop — lands as agentkey
+    3. cd ~/agentKeys       # → /home/agentkey/agentKeys (with the repo)
+
+  Root's Rust toolchain has been removed (\`/root/.cargo\`, \`/root/.rustup\`)
+  to save ~1.5GB. If you want interactive \`cargo\` as the agentkey user
+  (e.g. for dev-loop clippy / test runs that mirror the CI Linux env),
+  install rustup under your own \$HOME once after reconnecting:
+
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \\
+      | sh -s -- -y --default-toolchain stable --profile minimal
+    source "\$HOME/.cargo/env"
+    echo 'source "\$HOME/.cargo/env"' >> ~/.bashrc
+
+  Then \`cargo clippy --workspace --all-targets -- -D warnings\` runs the
+  same lint set CI uses (matching x86_64-linux + stable channel).
 ================================================================================
 EOF
 fi

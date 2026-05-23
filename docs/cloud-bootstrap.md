@@ -130,9 +130,25 @@ ssh-agentkeys-test         # Instance Connect, no .pem needed
 cd ~/agentKeys             # → /home/agentkey/agentKeys, files visible
 ```
 
-Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --test --yes`) happen from `/home/agentkey/agentKeys` — step 10's relocation is idempotent (existence check skips when already in place). The cargo build cache survives the move (it's inside `target/`); the Rust toolchain + registry cache live in `/root/.rustup` + `/root/.cargo` (sudo's home, unaffected by the relocation).
+Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --test --yes`) happen from `/home/agentkey/agentKeys` — step 10's relocation is idempotent (existence check skips when already in place). The cargo build cache survives the move (it's inside `target/`). The Rust toolchain itself is **deleted from `/root/` at the end of the first run** to save ~1.5 GB — future re-runs reinstall it as part of the toolchain step automatically. This keeps the box clean and ensures only one canonical Rust install on disk at a time.
 
 For **prod**, the same flow applies — drop `--test` everywhere and the relocation moves the repo from whichever home dir you bootstrapped in to `/home/agentkey/`.
+
+**Optional: install rustup for the `agentkey` user (dev-loop cargo).** If you want to run `cargo clippy` / `cargo test` interactively as `agentkey` (e.g., to mirror the CI Linux env locally and catch `cfg(target_os = "linux")` clippy lints that don't fire on macOS), install rustup under your own `$HOME` once after reconnecting as `agentkey`:
+
+```bash
+ssh-agentkeys-test
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+  | sh -s -- -y --default-toolchain stable --profile minimal
+source "$HOME/.cargo/env"
+echo 'source "$HOME/.cargo/env"' >> ~/.bashrc   # persist for future sessions
+
+cargo --version    # matches CI's stable channel
+cd ~/agentKeys
+cargo clippy --workspace --all-targets -- -D warnings   # same lint set as CI
+```
+
+This is **optional**; the broker itself runs from compiled binaries, not from a live toolchain. Operators who only manage the deployed broker (no compile-in-place dev work) can skip this.
 
 ### 5b. Issue TLS certs + flip nginx onto :443
 
