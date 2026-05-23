@@ -265,10 +265,12 @@ jobs:
           printf '%s\n' "$DEPLOYER_KEY" > "$HOME/.agentkeys/heima-deployer.key"
           chmod 600 "$HOME/.agentkeys/heima-deployer.key"
           unset DEPLOYER_KEY  # shrink the window where it lives in env
-          # eth-keys is a self-contained pure-Python secp256k1 lib (~50KB);
+          # eth-keys is a self-contained pure-Python secp256k1 lib;
           # installs in <2 s on ubuntu-latest runners. Avoids cast's argv
-          # exposure of the private key.
-          pip3 install --quiet --user eth-keys eth-utils
+          # exposure of the private key. pycryptodome provides the keccak256
+          # backend (eth-keys errors with "None of these hashing backends are
+          # installed: ['pycryptodome', 'pysha3']" otherwise).
+          pip3 install --quiet --user eth-keys eth-utils pycryptodome
           DEPLOYER_ADDR=$(python3 - <<'PY'
           import os, pathlib
           from eth_keys import keys
