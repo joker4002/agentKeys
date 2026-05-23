@@ -59,7 +59,9 @@ pub enum Eip712Error {
     #[error("invalid_typed_data: invalid hex in field '{field}': {reason}")]
     InvalidHex { field: String, reason: String },
 
-    #[error("invalid_typed_data: array '{field}' length {got} does not match fixed size {expected}")]
+    #[error(
+        "invalid_typed_data: array '{field}' length {got} does not match fixed size {expected}"
+    )]
     ArrayLengthMismatch {
         field: String,
         expected: usize,
@@ -219,11 +221,13 @@ pub fn hash_struct(
     value: &serde_json::Value,
 ) -> Result<[u8; 32], Eip712Error> {
     let th = type_hash(types, type_name)?;
-    let obj = value.as_object().ok_or_else(|| Eip712Error::FieldTypeMismatch {
-        field: type_name.to_string(),
-        expected: "object".to_string(),
-        got: value_kind(value),
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| Eip712Error::FieldTypeMismatch {
+            field: type_name.to_string(),
+            expected: "object".to_string(),
+            got: value_kind(value),
+        })?;
     let fields = types
         .get(type_name)
         .ok_or_else(|| Eip712Error::UnknownType(type_name.to_string()))?;
@@ -249,11 +253,13 @@ fn encode_data_for_field(
 ) -> Result<[u8; 32], Eip712Error> {
     // Arrays: keccak256(concat(encode_data_for_field(inner, x) for x in arr)).
     if let Some(inner_ty) = parse_array_outer(ty) {
-        let arr = value.as_array().ok_or_else(|| Eip712Error::FieldTypeMismatch {
-            field: field_name.to_string(),
-            expected: ty.to_string(),
-            got: value_kind(value),
-        })?;
+        let arr = value
+            .as_array()
+            .ok_or_else(|| Eip712Error::FieldTypeMismatch {
+                field: field_name.to_string(),
+                expected: ty.to_string(),
+                got: value_kind(value),
+            })?;
         if let ArrayKind::Fixed(n) = inner_ty.kind {
             if arr.len() != n {
                 return Err(Eip712Error::ArrayLengthMismatch {
@@ -284,19 +290,23 @@ fn encode_data_for_field(
             Ok(keccak(&bytes))
         }
         "string" => {
-            let s = value.as_str().ok_or_else(|| Eip712Error::FieldTypeMismatch {
-                field: field_name.to_string(),
-                expected: "string".to_string(),
-                got: value_kind(value),
-            })?;
+            let s = value
+                .as_str()
+                .ok_or_else(|| Eip712Error::FieldTypeMismatch {
+                    field: field_name.to_string(),
+                    expected: "string".to_string(),
+                    got: value_kind(value),
+                })?;
             Ok(keccak(s.as_bytes()))
         }
         "bool" => {
-            let b = value.as_bool().ok_or_else(|| Eip712Error::FieldTypeMismatch {
-                field: field_name.to_string(),
-                expected: "bool".to_string(),
-                got: value_kind(value),
-            })?;
+            let b = value
+                .as_bool()
+                .ok_or_else(|| Eip712Error::FieldTypeMismatch {
+                    field: field_name.to_string(),
+                    expected: "bool".to_string(),
+                    got: value_kind(value),
+                })?;
             let mut buf = [0u8; 32];
             if b {
                 buf[31] = 1;
@@ -395,9 +405,8 @@ fn encode_uint(
     bits: u32,
 ) -> Result<[u8; 32], Eip712Error> {
     let s = number_or_string(value, field_name, ty)?;
-    let big = parse_uint_string(&s).ok_or_else(|| {
-        Eip712Error::IntegerOutOfRange(s.clone(), ty.to_string())
-    })?;
+    let big = parse_uint_string(&s)
+        .ok_or_else(|| Eip712Error::IntegerOutOfRange(s.clone(), ty.to_string()))?;
     if bits < 256 {
         let max = U256::ONE.shl(bits as usize);
         if big >= max {
@@ -418,9 +427,8 @@ fn encode_int(
         Some(rest) => (true, rest.to_string()),
         None => (false, s.clone()),
     };
-    let mag = parse_uint_string(&magnitude).ok_or_else(|| {
-        Eip712Error::IntegerOutOfRange(s.clone(), ty.to_string())
-    })?;
+    let mag = parse_uint_string(&magnitude)
+        .ok_or_else(|| Eip712Error::IntegerOutOfRange(s.clone(), ty.to_string()))?;
     // Range check: for intN, magnitude must fit in (N-1) bits when positive
     // (i.e. mag < 2^(N-1)) and ≤ 2^(N-1) when negative (covers int's
     // asymmetric range: [-2^(N-1), 2^(N-1) - 1]).
@@ -473,12 +481,17 @@ fn parse_uint_string(s: &str) -> Option<U256> {
 }
 
 fn parse_hex_field(value: &serde_json::Value, field_name: &str) -> Result<Vec<u8>, Eip712Error> {
-    let s = value.as_str().ok_or_else(|| Eip712Error::FieldTypeMismatch {
-        field: field_name.to_string(),
-        expected: "0x-prefixed hex string".to_string(),
-        got: value_kind(value),
-    })?;
-    let stripped = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = value
+        .as_str()
+        .ok_or_else(|| Eip712Error::FieldTypeMismatch {
+            field: field_name.to_string(),
+            expected: "0x-prefixed hex string".to_string(),
+            got: value_kind(value),
+        })?;
+    let stripped = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     hex::decode(stripped).map_err(|e| Eip712Error::InvalidHex {
         field: field_name.to_string(),
         reason: e.to_string(),
@@ -520,7 +533,9 @@ struct U256 {
 
 impl U256 {
     const ZERO: Self = Self { limbs: [0; 4] };
-    const ONE: Self = Self { limbs: [0, 0, 0, 1] };
+    const ONE: Self = Self {
+        limbs: [0, 0, 0, 1],
+    };
 
     fn from_dec(s: &str) -> Option<Self> {
         if s.is_empty() {
@@ -687,9 +702,18 @@ mod tests {
         t.insert(
             "EIP712Domain".to_string(),
             vec![
-                TypeField { name: "name".into(), ty: "string".into() },
-                TypeField { name: "version".into(), ty: "string".into() },
-                TypeField { name: "chainId".into(), ty: "uint256".into() },
+                TypeField {
+                    name: "name".into(),
+                    ty: "string".into(),
+                },
+                TypeField {
+                    name: "version".into(),
+                    ty: "string".into(),
+                },
+                TypeField {
+                    name: "chainId".into(),
+                    ty: "uint256".into(),
+                },
                 TypeField {
                     name: "verifyingContract".into(),
                     ty: "address".into(),
@@ -699,16 +723,31 @@ mod tests {
         t.insert(
             "Person".to_string(),
             vec![
-                TypeField { name: "name".into(), ty: "string".into() },
-                TypeField { name: "wallet".into(), ty: "address".into() },
+                TypeField {
+                    name: "name".into(),
+                    ty: "string".into(),
+                },
+                TypeField {
+                    name: "wallet".into(),
+                    ty: "address".into(),
+                },
             ],
         );
         t.insert(
             "Mail".to_string(),
             vec![
-                TypeField { name: "from".into(), ty: "Person".into() },
-                TypeField { name: "to".into(), ty: "Person".into() },
-                TypeField { name: "contents".into(), ty: "string".into() },
+                TypeField {
+                    name: "from".into(),
+                    ty: "Person".into(),
+                },
+                TypeField {
+                    name: "to".into(),
+                    ty: "Person".into(),
+                },
+                TypeField {
+                    name: "contents".into(),
+                    ty: "string".into(),
+                },
             ],
         );
         t
@@ -771,24 +810,39 @@ mod tests {
         let mut t = BTreeMap::new();
         t.insert(
             "EIP712Domain".to_string(),
-            vec![TypeField { name: "x".into(), ty: "uint256".into() }],
+            vec![TypeField {
+                name: "x".into(),
+                ty: "uint256".into(),
+            }],
         );
         t.insert(
             "A".to_string(),
-            vec![TypeField { name: "b".into(), ty: "B".into() }],
+            vec![TypeField {
+                name: "b".into(),
+                ty: "B".into(),
+            }],
         );
         t.insert(
             "B".to_string(),
-            vec![TypeField { name: "a".into(), ty: "A".into() }],
+            vec![TypeField {
+                name: "a".into(),
+                ty: "A".into(),
+            }],
         );
-        assert!(matches!(encode_type(&t, "A"), Err(Eip712Error::CyclicType(_))));
+        assert!(matches!(
+            encode_type(&t, "A"),
+            Err(Eip712Error::CyclicType(_))
+        ));
     }
 
     #[test]
     fn uint256_accepts_decimal_and_hex_strings() {
         let v = json!("1000000000000000000");
         let r = encode_data_for_field(&BTreeMap::new(), "uint256", &v, "amount").unwrap();
-        assert_eq!(hex::encode(r), "0000000000000000000000000000000000000000000000000de0b6b3a7640000");
+        assert_eq!(
+            hex::encode(r),
+            "0000000000000000000000000000000000000000000000000de0b6b3a7640000"
+        );
 
         let v = json!("0xde0b6b3a7640000");
         let r2 = encode_data_for_field(&BTreeMap::new(), "uint256", &v, "amount").unwrap();
@@ -879,7 +933,8 @@ mod tests {
         let expected128 = U256::from_dec("340282366920938463463374607431768211456").unwrap(); // 2^128
         assert_eq!(v128, expected128);
         let v192 = U256::ONE.shl(192);
-        let expected192 = U256::from_hex("1000000000000000000000000000000000000000000000000").unwrap(); // 2^192
+        let expected192 =
+            U256::from_hex("1000000000000000000000000000000000000000000000000").unwrap(); // 2^192
         assert_eq!(v192, expected192);
     }
 
