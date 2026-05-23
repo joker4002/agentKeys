@@ -113,7 +113,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: harness-ci
+          # debug-profile cache: rust-checks runs cargo fmt + clippy + test,
+          # all of which build in debug mode under target/debug. Separate
+          # from the release cache used by harness-e2e (target/release) so
+          # neither job overwrites the other's artifacts.
+          shared-key: harness-ci-debug
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -157,7 +161,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: harness-ci
+          # release-profile cache for the harness build below. Distinct from
+          # harness-ci-debug used by rust-checks — release + debug live in
+          # different target/ subdirs, so sharing one cache key just means
+          # whichever job saves last wins, blowing away the other's reusable
+          # artifacts. Per-profile keys → both jobs cache effectively.
+          shared-key: harness-ci-release
 
       - uses: foundry-rs/foundry-toolchain@v1
         with:
@@ -219,7 +228,18 @@ jobs:
           role-session-name: gh-ci-${{ github.run_id }}
 
       - name: Build agentkeys CLI + workers (release)
-        run: cargo build --release --workspace
+        # Build ONLY the three binaries the harness actually invokes at
+        # runtime — agentkeys (CLI), agentkeys-daemon, agentkeys-mock-server
+        # (same set as scripts/install-agentkeys-cli.sh L138). `--workspace`
+        # would also build agentkeys-broker-server + all 4 worker bins +
+        # agentkeys-chain — those run REMOTELY on the test-broker EC2, not
+        # on this runner, so building them here is pure cargo-time waste
+        # (~3-4min per run with cold cache). Drop to the minimum set.
+        run: |
+          cargo build --release \
+            -p agentkeys-cli \
+            -p agentkeys-daemon \
+            -p agentkeys-mock-server
 
       - name: Materialize the production env file with TEST values
         # The harness scripts source scripts/operator-workstation.env

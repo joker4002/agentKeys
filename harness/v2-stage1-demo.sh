@@ -897,8 +897,13 @@ main() {
   in_scope 7  && do_step_7
   in_scope 8  && do_step_8
   in_scope 9  && do_step_9
-  in_scope 10 && do_step_10
+  # Step 11 (K11 enrollment) must run BEFORE step 10 (register master device):
+  # harness/scripts/heima-register-first-master.sh refuses to run without the
+  # K11 enrollment file at ~/.agentkeys/k11/<operator_omni>.json. The step
+  # numbers reflect the conceptual flow (register-then-enroll for explanation
+  # purposes); the actual execution dependency is enroll-then-register.
   in_scope 11 && do_step_11
+  in_scope 10 && do_step_10
   in_scope 12 && do_step_12
   in_scope 13 && do_step_13
   in_scope 14 && do_step_14
