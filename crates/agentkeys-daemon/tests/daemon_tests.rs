@@ -96,12 +96,8 @@ fn daemon_mlock_residency() {
             let status = std::fs::read_to_string("/proc/self/status").unwrap();
             let vmlck_line = status.lines().find(|l| l.starts_with("VmLck:"));
             if let Some(line) = vmlck_line {
-                let kb: u64 = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                assert!(kb >= 0, "VmLck field should be present and numeric");
+                let kb: Option<u64> = line.split_whitespace().nth(1).and_then(|v| v.parse().ok());
+                assert!(kb.is_some(), "VmLck field should be present and numeric");
             }
         } else {
             eprintln!(

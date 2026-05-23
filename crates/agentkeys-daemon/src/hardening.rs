@@ -291,6 +291,7 @@ pub fn apply_hardening() -> anyhow::Result<HardeningReport> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unused_imports)]
 pub use linux::read_proc_self_status_field;
 
 #[cfg(not(target_os = "linux"))]
