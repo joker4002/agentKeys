@@ -86,10 +86,38 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 ok "challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID)…"
+# Typed K11 intent (per wiki/k11-intent-conventions.md). Headline +
+# field rendering live in `crates/agentkeys-cli/src/k11_intent.rs` —
+# scripts pass the typed payload, the CLI renders it uniformly. Role
+# bitfields become readable, hashes are truncated, unlimited amounts
+# render as the word "unlimited", chain IDs get human labels.
+INTENT_JSON=$(jq -n \
+  --arg op_omni "0x${OPERATOR_OMNI}" \
+  --arg device_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+  --argjson threshold "${THRESHOLD}" \
+  --argjson chain_id "${LIVE_CHAIN_ID}" \
+  --argjson nonce "${NONCE}" \
+  '{
+    kind: "set_recovery_threshold",
+    operator_omni: $op_omni,
+    new_threshold: $threshold,
+    chain_id: $chain_id,
+    operator_nonce: $nonce,
+    asserting: { kind: "primary", device_key_hash: $device_hash }
+  }')
+K11_ERR=$(mktemp -t heima-set-threshold-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
-  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>/dev/null) \
-  || die "k11 assert failed"
+  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
+  --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "k11 assert failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)

@@ -66,7 +66,7 @@ TEE returns the token string to the client
 
 The issuer signing key:
 
-- Lives inside the TEE (sealed storage), derived from the sealed TEE master seed at path `issuer/jwt/v1` via SLIP-0010 HDKD — the same seed that roots the shielding key, per-user wallet keys, OIDC-issuer key, and per-domain DKIM keys (see [Blockchain TEE Architecture §1](blockchain-tee-architecture#tee-trusted-execution-environment-worker) and [`docs/spec/heima-gaps-vs-desired-architecture.md`](../docs/spec/heima-gaps-vs-desired-architecture.md) for the current-vs-desired gap)
+- Lives inside the TEE (sealed storage), derived from the sealed TEE master seed at path `issuer/jwt/v1` via SLIP-0010 HDKD — the same seed that roots the shielding key, per-user wallet keys, OIDC-issuer key, and per-domain DKIM keys (see [Blockchain TEE Architecture §1](blockchain-tee-architecture#tee-trusted-execution-environment-worker) and [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md) for the current-vs-desired gap)
 - Alg is **ES256** (ECDSA P-256, SHA-256 digest). This is the TEE's internal trust anchor for the 30-day session bearer and is verified only by TEE workers — not exposed on any public JWKS endpoint.
 - The session-JWT key is **separate** from the public OIDC-issuer key (`oidc/issuer/v1`, also ES256). Separation keeps the public-facing, rotatable OIDC trust anchor isolated from the internal session-JWT anchor, so an OIDC-issuer rotation (driven by AWS cache windows) does not invalidate every live session token.
 - Public key published on chain via `register_enclave()` for on-chain verification by other Heima components.
@@ -267,7 +267,7 @@ The v0 → v0.1 migration for session tokens is straightforward: replace the ran
 
 - `[wiki/blockchain-tee-architecture.md](./blockchain-tee-architecture.md)` Section 4 — auth token lifecycle in the blockchain+TEE architecture
 - `[wiki/key-security.md](./key-security.md)` Section 2 — storage recommendations
-- `[docs/spec/1-step-analysis.md](../docs/spec/1-step-analysis.md)` Section 3.2 — session tier table (corrected for JWT model)
+- `[docs/spec/1-step-analysis.md](../spec/1-step-analysis.md)` Section 3.2 — session tier table (corrected for JWT model)
 
 ### Issues
 

@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
     # Run only on paths that contain real code or CI config.
-    # Pure docs pushes (`docs/**`, `wiki/**`) don't need a full code review
+    # Pure docs pushes (`docs/**`, including `docs/wiki/**`) don't need a full code review
     # — they go through normal PR approval. This also skips Cargo.lock-only
     # churn and README-only edits.
     paths:
@@ -68,9 +68,9 @@ jobs:
             - READ `.github/REVIEW_GUIDELINES.md` for agentkeys-specific review
               patterns (audit-log contract, session-token redaction, URL encoding
               via reqwest `.query()`, `--test-threads=1` requirement, etc).
-            - Related specs: `docs/spec/architecture.md`,
+            - Related specs: `docs/arch.md`,
               `docs/spec/credential-backend-interface.md`,
-              `wiki/session-token.md` (30-day TTL policy).
+              `docs/wiki/session-token.md` (30-day TTL policy).
 
             TEST CONSTRAINTS:
             - Tests mutate shared process state (HOME, keyring accounts) so
@@ -85,7 +85,7 @@ jobs:
                interpolation into query strings.
             4. Token / session-token redaction in prompts and log lines.
             5. Case-insensitive wallet comparison (EIP-55 vs backend lowercase).
-            6. Session TTL uniformly 30 days per `wiki/session-token.md`.
+            6. Session TTL uniformly 30 days per `docs/wiki/session-token.md`.
             7. Synchronous keychain ops — no fire-and-forget delete.
             8. Path traversal guards on any user-supplied session_id / filename.
 

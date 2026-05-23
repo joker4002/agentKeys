@@ -95,6 +95,34 @@ ok "companion operator_omni = $COMP_OPERATOR_OMNI"
 ok "companion device_key_hash = $COMP_DEVICE_KEY_HASH"
 ok "companion rp_id          = $COMP_RP_ID"
 
+# Idempotency check per CLAUDE.md "Idempotent remote-setup rule":
+# `SidecarRegistry.getDevice(deviceKeyHash).registeredAt > 0` means the
+# companion is already registered on chain — skip the K11 ceremony +
+# tx submit. Re-runs MUST exit 0 without re-applying the mutation,
+# otherwise the contract reverts `DeviceAlreadyRegistered(bytes32)`
+# (selector 0xa98bbce0) on the second attempt.
+log "Idempotency check: is the companion device already on-chain?"
+DEVICE_ENTRY=$(cast call "$REGISTRY" \
+  "getDevice(bytes32)(bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint8,uint8,uint64,uint32,bool)" \
+  "$COMP_DEVICE_KEY_HASH" --rpc-url "$RPC_HTTP" 2>/dev/null) || die "getDevice RPC call failed"
+# DeviceEntry layout: (operatorOmni, actorOmni, k11CredId, k11RpIdHash,
+# k11PubX, k11PubY, tier, roles, registeredAt, lastSignCount, revoked).
+# `cast call` with multi-return signature prints one value per line.
+REGISTERED_AT=$(printf '%s\n' "$DEVICE_ENTRY" | awk 'NR==9 {print; exit}')
+REVOKED=$(printf '%s\n' "$DEVICE_ENTRY" | awk 'NR==11 {print; exit}')
+if [ -n "$REGISTERED_AT" ] && [ "$REGISTERED_AT" != "0" ]; then
+  if [ "$REVOKED" = "true" ]; then
+    die "device $COMP_DEVICE_KEY_HASH is registered AND revoked on-chain — \
+re-registering a revoked device is not supported (would require \
+contract-side override). Generate a NEW companion device + re-enroll."
+  fi
+  ok "skip device $COMP_DEVICE_KEY_HASH already registered at block-ts $REGISTERED_AT — no-op"
+  printf '{"ok":true,"skipped":"already-registered","device_key_hash":"%s","registered_at":%s}\n' \
+    "$COMP_DEVICE_KEY_HASH" "$REGISTERED_AT"
+  exit 0
+fi
+ok "device not yet on-chain — proceeding"
+
 # Load the companion's K11 pubkey from disk — file path is derived from
 # the rp_id the daemon was started with, so this works for any version
 # (companion.localhost, companion-v2.localhost, etc.).
@@ -150,13 +178,42 @@ if [ "$DRY_RUN" = "1" ] && [ ! -f "$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json" ]
   S_HEX="0x0000000000000000000000000000000000000000000000000000000000000001"
 else
   log "Step 4/4: requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
+  # Typed K11 intent — wiki/k11-intent-conventions.md. Role bitfield
+  # ROLES=3 renders as "CAP_MINT | RECOVERY" (decoded by k11_intent.rs).
+  INTENT_JSON=$(jq -n \
+    --arg op_omni "0x${OPERATOR_OMNI}" \
+    --arg asserting_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+    --arg comp_hash "${COMP_DEVICE_KEY_HASH}" \
+    --arg comp_rp_id "${COMP_RP_ID}" \
+    --argjson roles "${ROLES}" \
+    --argjson chain_id "${LIVE_CHAIN_ID}" \
+    --argjson nonce "${NONCE}" \
+    '{
+      kind: "register_companion_as2nd_master",
+      operator_omni: $op_omni,
+      new_device_key_hash: $comp_hash,
+      companion_rp_id: $comp_rp_id,
+      roles: $roles,
+      chain_id: $chain_id,
+      operator_nonce: $nonce,
+      asserting: { kind: "primary", device_key_hash: $asserting_hash }
+    }')
+  K11_ERR=$(mktemp -t heima-device-add-k11.XXXXXX) || die "mktemp failed"
   ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
     --webauthn \
     --rp-id localhost \
     --emit-chain-payload \
     --operator-omni "0x$OPERATOR_OMNI" \
-    --message-hex "$CHALLENGE" 2>/dev/null) \
-    || die "k11 assert ceremony failed"
+    --message-hex "$CHALLENGE" \
+    --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
+    || {
+      echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+      cat "$K11_ERR" >&2
+      echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+      rm -f "$K11_ERR"
+      die "k11 assert ceremony failed (see stderr above for root cause)"
+    }
+  rm -f "$K11_ERR"
 
   AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
   # cast send needs raw bytes; b64url-decode the JSON.

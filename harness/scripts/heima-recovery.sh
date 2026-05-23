@@ -115,25 +115,82 @@ build_tuple() {
   printf '(%s,%s,%s,%s,%s,%s)' "$device_hash" "$auth" "$cdj_hex" "$chall_loc" "$r_hex" "$s_hex"
 }
 
+# ─── Typed K11 intent for both masters in the quorum ─────────────────
+# Both PRIMARY and COMPANION render the SAME headline + SAME rows
+# from the SAME typed payload — only `asserting` differs per master.
+# Headline + field formatting live in the shared k11_intent.rs
+# renderer, so cross-prompt uniformity is enforced by construction.
+# See wiki/k11-intent-conventions.md.
+
 # Collect PRIMARY assertion.
 log "Step 1/$THRESHOLD: K11 from PRIMARY master (Touch ID prompt)…"
+PRIMARY_INTENT_JSON=$(jq -n \
+  --arg op_omni "0x${OPERATOR_OMNI}" \
+  --arg asserting_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+  --arg target "${TARGET}" \
+  --argjson thr "${THRESHOLD}" \
+  --argjson chain_id "${LIVE_CHAIN_ID}" \
+  --argjson nonce "${NONCE}" \
+  '{
+    kind: "recovery_device_revoke",
+    operator_omni: $op_omni,
+    target_device_key_hash: $target,
+    recovery_threshold: $thr,
+    chain_id: $chain_id,
+    operator_nonce: $nonce,
+    asserting: { kind: "primary", device_key_hash: $asserting_hash }
+  }')
+K11_ERR=$(mktemp -t heima-recovery-primary-k11.XXXXXX) || die "mktemp failed"
 PRIMARY_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
-  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" 2>/dev/null) \
-  || die "PRIMARY K11 ceremony failed"
+  --operator-omni "0x$OPERATOR_OMNI" --message-hex "$CHALLENGE" \
+  --intent-op-json "$PRIMARY_INTENT_JSON" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "PRIMARY K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 PRIMARY_TUPLE=$(build_tuple "$PRIMARY_DEVICE_KEY_HASH" "$PRIMARY_JSON")
 
 ASSERTIONS_ARRAY="[$PRIMARY_TUPLE"
 
-# If threshold >= 2: collect COMPANION assertion via HTTP.
+# If threshold >= 2: collect COMPANION assertion via HTTP. The companion
+# daemon's /v1/companion/approve handler accepts a typed `intent_op`
+# payload in its POST body — same K11OpIntent shape, same renderer,
+# so PRIMARY + COMPANION prompts are byte-for-byte uniform on the
+# operation rows; only `asserting` differs.
 if [ "$THRESHOLD" -ge 2 ]; then
   log "Step 2/$THRESHOLD: requesting K11 from COMPANION daemon …"
   COMP_WHOAMI=$(curl -sS "$COMPANION_URL/v1/companion/whoami") \
     || die "GET $COMPANION_URL/v1/companion/whoami failed"
   COMP_DEVICE_KEY_HASH=$(echo "$COMP_WHOAMI" | jq -r .device_key_hash)
 
+  COMP_REQ_JSON=$(jq -n \
+    --arg challenge "$CHALLENGE" \
+    --arg op_omni "0x${OPERATOR_OMNI}" \
+    --arg companion_hash "${COMP_DEVICE_KEY_HASH}" \
+    --arg target "${TARGET}" \
+    --argjson thr "${THRESHOLD}" \
+    --argjson chain_id "${LIVE_CHAIN_ID}" \
+    --argjson nonce "${NONCE}" \
+    '{
+      expected_challenge_hex: $challenge,
+      intent_op: {
+        kind: "recovery_device_revoke",
+        operator_omni: $op_omni,
+        target_device_key_hash: $target,
+        recovery_threshold: $thr,
+        chain_id: $chain_id,
+        operator_nonce: $nonce,
+        asserting: { kind: "companion", device_key_hash: $companion_hash }
+      }
+    }')
+
   COMP_RESPONSE=$(curl -sS -X POST -H 'Content-Type: application/json' \
-    -d "{\"expected_challenge_hex\":\"$CHALLENGE\"}" \
+    -d "$COMP_REQ_JSON" \
     "$COMPANION_URL/v1/companion/approve") \
     || die "companion approve failed"
 

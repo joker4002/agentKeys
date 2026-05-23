@@ -13,11 +13,11 @@ gh issue create --repo litentry/agentKeys \
 
 ## Context
 
-[arch.md §9 #10](../../docs/spec/architecture.md#L608) flags the mock-server backend (`agentkeys-backend.service` on `127.0.0.1:8090` on the deployed broker host) as **legacy and pending deprecation**:
+[arch.md §9 #10](../../docs/arch.md#L608) flags the mock-server backend (`agentkeys-backend.service` on `127.0.0.1:8090` on the deployed broker host) as **legacy and pending deprecation**:
 
 > Backend (mock-server) — Legacy `/session/*` + `/credential/*` + `/audit/*` (broker's Tier-2 reachability target; **will be deprecated as callers migrate to the new flow**)
 
-[arch.md §11](../../docs/spec/architecture.md#L670) explicitly forbids exposing this backend publicly:
+[arch.md §11](../../docs/arch.md#L670) explicitly forbids exposing this backend publicly:
 
 > The legacy backend at `:8090` is **never** publicly exposed; only the broker on the same host reaches it.
 
@@ -32,9 +32,9 @@ Reuse the auth + isolation infrastructure that already enforces per-operator bou
 | **Where credentials sit** | SQLite on the operator workstation OR :8090 on broker host (loopback) | `s3://$BUCKET/bots/<wallet>/credentials/<service>.enc` |
 | **Access control** | Process-local | OIDC-assumed `agentkeys-data-role` + bucket-policy PrincipalTag scoping (already in place — same path the SES Lambda routes into) |
 | **Encryption at rest** | None (cleartext SQLite) | Client-side AES-256-GCM with a wallet-derived KEK (signed via dev_key_service `/dev/sign-message` or HKDF over a stable wallet-bound secret) — broker never sees the plaintext |
-| **Cross-operator isolation** | None (single SQLite DB) | Bucket-policy + PrincipalTag (cloud-enforced — same federation-isolation rule as cloud-bootstrap.md §4.5) |
+| **Cross-operator isolation** | None (single SQLite DB) | Bucket-policy + PrincipalTag (cloud-enforced — same federation-isolation rule as cloud-setup.md §4.5) |
 | **Deployment** | Per-operator-laptop mock-server OR shared broker SQLite | Zero new deployable artifacts — uses the existing mail bucket + role |
-| **Cloud-portability** | AWS-only | S3/COS-abstracted (Tencent CAM + COS slot in unchanged — per cloud-bootstrap.md §2.2) |
+| **Cloud-portability** | AWS-only | S3/COS-abstracted (Tencent CAM + COS slot in unchanged — per cloud-setup.md §2.2) |
 | **Audit trail** | None | S3 CloudTrail + bucket-policy access log |
 | **Lifecycle / rotation** | None | Bucket lifecycle: expire credentials after N days; operator re-provisions to rotate |
 
@@ -84,7 +84,7 @@ Extend the existing bucket policy (already grants PrincipalTag-scoped read on `b
 
 1. ✅ Land `S3CredentialBackend` alongside the existing `MockHttpClient` impl (both compile, both pass tests). — `crates/agentkeys-core/src/s3_backend.rs`, 9 unit tests covering KEK determinism, AAD-binding, envelope versioning.
 2. ✅ Add a CLI flag `--credential-backend {http,s3}` (default still `http` for the transition window). — top-level flag on `agentkeys` + `AGENTKEYS_CREDENTIAL_BACKEND` env. `cmd_store` / `cmd_read` / `cmd_run` / `cmd_teardown` / `cmd_provision` now route through `ctx.credential_backend()`; every other backend method (sessions, audit, identity, scope, rendezvous, inbox) still hits `MockHttpClient`.
-3. ✅ Update §5.3 of the demo doc + cloud-bootstrap.md to document the new backend. — cloud-bootstrap.md §4.4 grows an `AllowDaemonPutOwnCredentials` statement (`s3:PutObject` + `s3:DeleteObject` on `bots/<wallet>/credentials/*` under the same PrincipalTag). stage7-demo-and-verification.md §5.3 documents the env-var opt-in.
+3. ✅ Update §5.3 of the demo doc + cloud-setup.md to document the new backend. — cloud-setup.md §4.4 grows an `AllowDaemonPutOwnCredentials` statement (`s3:PutObject` + `s3:DeleteObject` on `bots/<wallet>/credentials/*` under the same PrincipalTag). stage7-demo-and-verification.md §5.3 documents the env-var opt-in.
 4. ⏳ Once the operator-runbook docs are migrated, flip the default to `s3`. — next PR; gated on operators running the bucket-policy update.
 5. ⏳ After one release with `s3` default, remove the mock-server's `/credential/*` handlers + the `agentkeys-backend.service` systemd unit (component #10 in arch.md §9 ceases to exist for credentials, stays for sessions+audit).
 6. ⏳ Update arch.md §11: remove the "never publicly exposed" rule for :8090 entirely (the legacy backend goes away — nothing left to expose). Blocked by sessions+audit also migrating off the mock-server (separate issues).
@@ -99,4 +99,4 @@ Extend the existing bucket policy (already grants PrincipalTag-scoped read on `b
 
 - Forced by [issue #83](https://github.com/litentry/agentKeys/issues/83) follow-up: the auto-provision pipeline now succeeds through key mint but fails at storage because the legacy backend isn't reachable.
 - Reuses infra from [SES routing Lambda](../../infra/ses-routing-lambda/) (issue #83 follow-up).
-- See [arch.md §9 #10](../../docs/spec/architecture.md#L608), [§11](../../docs/spec/architecture.md#L636), [cloud-bootstrap.md §4.5](../../docs/cloud-bootstrap.md).
+- See [arch.md §9 #10](../../docs/arch.md#L608), [§11](../../docs/arch.md#L636), [cloud-setup.md §4.5](../../docs/cloud-setup.md).

@@ -1,6 +1,6 @@
 # Upstream backend classes — exercise vs distribution
 
-**Status:** decided 2026-05-15. Source of truth for *how a new upstream is integrated* and *which patterns apply*. Cross-link from [`docs/spec/architecture.md`](../docs/spec/architecture.md) §4b and §7a.
+**Status:** decided 2026-05-15. Source of truth for *how a new upstream is integrated* and *which patterns apply*. Cross-link from [`docs/arch.md`](../arch.md) §4b and §7a.
 
 ## The two security concerns
 
@@ -127,12 +127,12 @@ Today: delete vault object + revoke at provider = two steps, not atomic. Until t
 
 ### Vault backend swap (per arch.md §7)
 
-The `vault_bucket = S3` choice is one row of [§7 pluggable surfaces](../docs/spec/architecture.md#7-pluggable-surfaces). Future swaps (IPFS / Filecoin / Arweave content-addressed; on-chain pointer + hash) are tracked in [`threat-model-key-custody.md`](../docs/spec/threat-model-key-custody.md) §4 + §9. The Class A vs Class B split documented here is independent of the vault backend — both classes ride whichever backend is configured for `vault_bucket`.
+The `vault_bucket = S3` choice is one row of [§7 pluggable surfaces](../arch.md#7-pluggable-surfaces). Future swaps (IPFS / Filecoin / Arweave content-addressed; on-chain pointer + hash) are tracked in [`threat-model-key-custody.md`](../spec/threat-model-key-custody.md) §4 + §9. The Class A vs Class B split documented here is independent of the vault backend — both classes ride whichever backend is configured for `vault_bucket`.
 
 ## Related
 
-- [`docs/spec/architecture.md`](../docs/spec/architecture.md) §4b (this split's home), §6 (per-mint sequence), §7 (pluggable surfaces), §7a (bucket layout)
-- [`docs/stage7-demo-and-verification.md`](../docs/stage7-demo-and-verification.md) §5.1, §5.2, §5.3 (Class A pipeline), §6 (grant lifecycle)
-- [`crates/agentkeys-provisioner/`](../crates/agentkeys-provisioner/) (Class B implementation)
+- [`docs/arch.md`](../arch.md) §4b (this split's home), §6 (per-mint sequence), §7 (pluggable surfaces), §7a (bucket layout)
+- [`docs/stage7-demo-and-verification.md`](../stage7-demo-and-verification.md) §5.1, §5.2, §5.3 (Class A pipeline), §6 (grant lifecycle)
+- [`crates/agentkeys-provisioner/`](../../crates/agentkeys-provisioner/) (Class B implementation)
 - [`provisioner-scripts/src/scrapers/openrouter.ts`](../provisioner-scripts/src/scrapers/openrouter.ts) (Class B reference: OpenRouter)
 - [`wiki/key-security.md`](./key-security.md), [`wiki/credential-usage.md`](./credential-usage.md), [`wiki/tag-based-access.md`](./tag-based-access.md) — adjacent wiki pages

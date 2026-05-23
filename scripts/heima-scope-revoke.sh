@@ -119,11 +119,37 @@ CHALLENGE=$(cast keccak "$(cast abi-encode \
 log "expected_challenge = $CHALLENGE"
 
 log "Requesting K11 assertion from PRIMARY master (Touch ID prompt)…"
+# Typed K11 intent — wiki/k11-intent-conventions.md.
+INTENT_JSON=$(jq -n \
+  --arg op_omni "0x${OPERATOR_OMNI}" \
+  --arg asserting_hash "${PRIMARY_DEVICE_KEY_HASH}" \
+  --arg agent_label "${LABEL}" \
+  --arg agent_omni "${ACTOR_OMNI}" \
+  --argjson chain_id "${LIVE_CHAIN_ID}" \
+  --argjson nonce "${SCOPE_NONCE}" \
+  '{
+    kind: "set_scope_revoke",
+    operator_omni: $op_omni,
+    agent_label: $agent_label,
+    agent_omni: $agent_omni,
+    chain_id: $chain_id,
+    scope_nonce: $nonce,
+    asserting: { kind: "primary", device_key_hash: $asserting_hash }
+  }')
+K11_ERR=$(mktemp -t heima-scope-revoke-k11.XXXXXX) || die "mktemp failed"
 ASSERTION_JSON=$("$AGENTKEYS_BIN" k11 assert \
   --webauthn --rp-id localhost --emit-chain-payload \
   --operator-omni "0x$OPERATOR_OMNI" \
-  --message-hex "$CHALLENGE" 2>/dev/null) \
-  || die "primary K11 ceremony failed"
+  --message-hex "$CHALLENGE" \
+  --intent-op-json "$INTENT_JSON" 2>"$K11_ERR") \
+  || {
+    echo "==> K11 assert stderr ↓ ↓ ↓" >&2
+    cat "$K11_ERR" >&2
+    echo "==> K11 assert stderr ↑ ↑ ↑" >&2
+    rm -f "$K11_ERR"
+    die "primary K11 ceremony failed (see stderr above for root cause)"
+  }
+rm -f "$K11_ERR"
 
 K11_AUTH_DATA=$(echo "$ASSERTION_JSON" | jq -r .authenticator_data_hex)
 K11_CDJ_UTF8=$(echo "$ASSERTION_JSON" | jq -r .client_data_json_utf8)
