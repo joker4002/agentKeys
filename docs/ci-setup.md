@@ -248,7 +248,19 @@ If the GitHub OIDC provider doesn't exist in the account yet, `aws iam create-op
 
 ### 5. Set the GitHub repo secrets
 
-In **Settings → Secrets and variables → Actions → Repository secrets** (NOT "Environments" — `harness-ci.yml` doesn't declare an `environment:` and looks up secrets at the repo level; if you're on the "Add environment" page asking for a name, you're on the wrong page, click "Secrets and variables → Actions" in the left sidebar instead):
+**One-shot recipe (recommended)** — runs `gh secret set` for all 17 values, reading from `operator-workstation.test.env` + the deployer key file:
+
+```bash
+# Preview first:
+bash scripts/ci-set-github-secrets.sh --dry-run
+
+# Apply (idempotent — replaces existing values silently):
+bash scripts/ci-set-github-secrets.sh
+```
+
+The script's sanity check refuses to run if any `*_HEIMA` slot is still zeroed (forces you to complete step 3's deploy first), masks the deployer private key in its output, and sets `TEST_OIDC_AWS_ROLE_ARN` last (the gate). Pass `--skip-gate` to populate everything except the activator if you want to wire the role ARN manually later.
+
+**Manual path** — if you'd rather click through, the destination is **Settings → Secrets and variables → Actions → Repository secrets** (NOT "Environments" — `harness-ci.yml` doesn't declare an `environment:` and looks up secrets at the repo level; if you're on the "Add environment" page asking for a name, you're on the wrong page, click "Secrets and variables → Actions" in the left sidebar instead):
 
 | Secret | Value |
 |---|---|
