@@ -325,15 +325,18 @@ do_step_5() {
   fi
 }
 
-# ─── Step 6: email-init Alice session ───────────────────────────────────────
+# ─── Step 6: init Alice session (email magic-link OR wallet_sig fallback) ───
+# Two paths land at the same on-disk shape (~/.agentkeys/$SESSION_ID/session.json):
+#   1. Email magic-link — interactive, used by operators dogfooding locally.
+#   2. wallet_sig SIWE — non-interactive, used by CI (no human to click links).
+#                        Triggered when --skip-email is passed AND
+#                        $HEIMA_DEPLOYER_KEY_FILE points at a usable key.
+#                        Mirrors v2-stage3-demo.sh step 1's flow.
 do_step_6() {
-  step "Initialize session ($SESSION_ID) via email magic-link"
+  step "Initialize session ($SESSION_ID) via email magic-link or wallet_sig"
   local session_file="$HOME/.agentkeys/$SESSION_ID/session.json"
-  if [ "$SKIP_EMAIL" = "1" ]; then
-    skip "--skip-email set"
-    [ -f "$session_file" ] || die "but $session_file missing — drop --skip-email or run init manually"
-    return 0
-  fi
+
+  # Reuse a fresh session.json regardless of init mode.
   if [ -f "$session_file" ]; then
     local age_sec
     age_sec=$(( $(date +%s) - $(stat -f %m "$session_file" 2>/dev/null \
@@ -344,13 +347,86 @@ do_step_6() {
     fi
     info "$session_file exists but is ${age_sec}s old; re-initing to refresh JWT"
   fi
+
+  if [ "$SKIP_EMAIL" = "1" ]; then
+    local key_file="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/heima-deployer.key}"
+    if [ -f "$key_file" ]; then
+      info "--skip-email + deployer key available → wallet_sig SIWE init"
+      info "using key file: $key_file"
+      wallet_sig_init_session "$key_file" "$session_file" \
+        || die "wallet_sig session init failed (broker $OIDC_ISSUER reachable? key valid?)"
+      ok "session JWT persisted at $session_file (via wallet_sig)"
+      return 0
+    fi
+    skip "--skip-email set"
+    die "$session_file missing AND no deployer key at $key_file — drop --skip-email, run init manually, or set HEIMA_DEPLOYER_KEY_FILE"
+  fi
+
   info "NOTE: when the macOS keychain dialog appears, click 'Always Allow' (or Touch ID)"
   info "running: bash scripts/agentkeys-init-email-demo.sh --session-id $SESSION_ID"
   AGENTKEYS_SESSION_ID="$SESSION_ID" \
     bash "$REPO_ROOT/scripts/agentkeys-init-email-demo.sh" --session-id "$SESSION_ID" \
     || die "agentkeys-init-email-demo.sh failed — see output above"
   [ -f "$session_file" ] || die "expected $session_file to exist after init"
-  ok "session JWT persisted at $session_file"
+  ok "session JWT persisted at $session_file (via email magic-link)"
+}
+
+# wallet_sig SIWE init — mints a session JWT from a deployer wallet's private
+# key without any human interaction. The broker's /v1/auth/wallet plug-in must
+# be enabled (BROKER_AUTH_METHODS contains "wallet_sig"). Used by CI; mirrors
+# the working flow in v2-stage3-demo.sh step 1.
+#
+# Writes session.json with the schema agentkeys-core/session_store.rs expects:
+#   { token, wallet, scope: null, ttl_seconds, created_at }
+wallet_sig_init_session() {
+  local key_file="$1" session_file="$2"
+  local key wallet_addr start_resp request_id siwe_msg sig verify_resp jwt
+
+  key=$(tr -d '\r\n[:space:]' < "$key_file")
+  case "$key" in
+    0x*) ;;
+    *) fail "wallet_sig: $key_file content does not start with 0x"; return 1 ;;
+  esac
+
+  wallet_addr=$(cast wallet address --private-key "$key" 2>/dev/null) \
+    || { fail "wallet_sig: cast wallet address failed (cast on PATH? key valid?)"; return 1; }
+  info "wallet_sig: signing as $wallet_addr"
+
+  # SIWE chain_id = 1: the broker treats this as a replay-binding nonce only,
+  # NOT a chain hop — matches v2-stage3-demo.sh's CHAIN_ID_FOR_SIWE.
+  start_resp=$(curl -sSf -X POST "${OIDC_ISSUER}/v1/auth/wallet/start" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg addr "$wallet_addr" --argjson cid 1 \
+          '{address: $addr, chain_id: $cid}')" 2>&1) \
+    || { fail "wallet_sig: /v1/auth/wallet/start failed: $start_resp"; return 1; }
+
+  request_id=$(echo "$start_resp" | jq -r '.request_id // empty')
+  siwe_msg=$(echo "$start_resp" | jq -r '.siwe_message // empty')
+  [ -z "$request_id" ] && { fail "wallet_sig: /v1/auth/wallet/start missing request_id: $start_resp"; return 1; }
+  [ -z "$siwe_msg" ] && { fail "wallet_sig: /v1/auth/wallet/start missing siwe_message: $start_resp"; return 1; }
+
+  sig=$(cast wallet sign --private-key "$key" "$siwe_msg" 2>/dev/null) \
+    || { fail "wallet_sig: cast wallet sign failed"; return 1; }
+
+  verify_resp=$(curl -sSf -X POST "${OIDC_ISSUER}/v1/auth/wallet/verify" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg rid "$request_id" --arg sig "$sig" \
+          '{request_id: $rid, signature: $sig}')" 2>&1) \
+    || { fail "wallet_sig: /v1/auth/wallet/verify failed: $verify_resp"; return 1; }
+
+  jwt=$(echo "$verify_resp" | jq -r '.session_jwt // .jwt // empty')
+  [ -z "$jwt" ] && { fail "wallet_sig: /v1/auth/wallet/verify missing session JWT: $verify_resp"; return 1; }
+
+  mkdir -p "$(dirname "$session_file")"
+  umask 077
+  jq -n \
+    --arg token "$jwt" \
+    --arg wallet "$wallet_addr" \
+    --argjson ttl 18000 \
+    --argjson now "$(date +%s)" \
+    '{token: $token, wallet: $wallet, scope: null, ttl_seconds: $ttl, created_at: $now}' \
+    > "$session_file"
+  chmod 600 "$session_file"
 }
 
 # ─── Step 7: provision vault infrastructure (arch.md §17 per-data-class) ────
