@@ -102,9 +102,17 @@ The broker is reachable, but AWS STS doesn't trust its JWTs yet. Follow [`docs/c
 #   broker_ip=$(curl -sS "https://dns.google/resolve?name=${BROKER_HOST}&type=A" | jq -r '.Answer[0].data')
 
 thumb=$(echo | openssl s_client -servername "$BROKER_HOST" -connect "${broker_ip}:443" 2>/dev/null \
-        | openssl x509 -fingerprint -noout | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
+        | openssl x509 -fingerprint -sha1 -noout \
+        | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
 [ -n "$thumb" ] || { echo "thumbprint empty — broker has no TLS cert; see cloud-bootstrap.md §5b" >&2; return 1; }
+[ ${#thumb} -eq 40 ] || { echo "thumb length ${#thumb} != 40 — openssl emitted non-SHA1 fingerprint; check -sha1 flag is present" >&2; return 1; }
 echo "thumb=$thumb"
+
+# IMPORTANT: -sha1 is required. macOS LibreSSL 3.3 (and OpenSSL 3.x on some
+# Linux distros) default `openssl x509 -fingerprint` to SHA256 → 64 hex chars,
+# but AWS IAM CreateOpenIDConnectProvider rejects anything that isn't exactly
+# 40 hex chars (SHA1). Pinning -sha1 makes the recipe portable across the
+# operator's openssl version.
 
 AWS_PROFILE=agentkeys-admin aws iam create-open-id-connect-provider \
   --url "https://$BROKER_HOST" \

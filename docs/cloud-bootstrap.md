@@ -792,10 +792,17 @@ The broker mints OIDC JWTs that AWS STS validates via the broker's public JWKS e
 ### §9.2 Register the OIDC provider
 
 ```bash
+# DoH-resolved EIP (immune to local DNS interception; see §5b verify steps):
+broker_ip=$(curl -sS "https://dns.google/resolve?name=${BROKER_HOST}&type=A" | jq -r '.Answer[0].data')
+
+# -sha1 is REQUIRED. macOS LibreSSL 3.3 + OpenSSL 3.x default to SHA256
+# (64 hex chars) but AWS IAM CreateOpenIDConnectProvider rejects anything
+# that isn't exactly 40 hex chars (SHA1).
 thumb=$(echo | openssl s_client -servername "$BROKER_HOST" \
-                                 -connect "${BROKER_HOST}:443" 2>/dev/null \
-          | openssl x509 -fingerprint -noout \
+                                 -connect "${broker_ip}:443" 2>/dev/null \
+          | openssl x509 -fingerprint -sha1 -noout \
           | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
+[ ${#thumb} -eq 40 ] || { echo "thumb length ${#thumb} != 40 — check -sha1 flag" >&2; return 1; }
 
 aws iam create-open-id-connect-provider \
   --url "https://${BROKER_HOST}" \
