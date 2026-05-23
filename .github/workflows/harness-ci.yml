@@ -344,19 +344,46 @@ jobs:
         env:
           REGION: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
           INSTANCE_ID: ${{ secrets.TEST_BROKER_INSTANCE_ID }}
+          # Operator-pinnable override; the auto-discover loop below covers the
+          # common candidates when this isn't set.
+          REPO_DIR_OVERRIDE: ${{ secrets.TEST_BROKER_REPO_DIR }}
         run: |
           set -euo pipefail
           # Compose the remote shell script. `$DEPLOY_REF` is interpolated by
           # the runner's shell (GHA env block makes it visible here); the
           # remote SSM-driven shell sees the literal branch name. The remote
           # shell runs as root (SSM-default on Ubuntu AMIs); git ops use
-          # `sudo -u ubuntu` so the working tree stays ubuntu-owned.
+          # `sudo -u <owner>` so the working tree stays owned by whoever
+          # originally cloned it (typically ubuntu, sometimes agentkeys / root).
+          #
+          # Repo location auto-discovery: try TEST_BROKER_REPO_DIR override
+          # first, then common candidates. Fail fast with a clear remediation
+          # path if no candidate has the repo. Avoids the 'cd: can\'t cd to
+          # /home/ubuntu/agentKeys' failure mode when the operator cloned to
+          # a non-default path.
           read -r -d '' deploy_script <<EOF || true
           set -euo pipefail
-          cd /home/ubuntu/agentKeys
-          sudo -u ubuntu git fetch --prune origin
-          sudo -u ubuntu git checkout "$DEPLOY_REF" || sudo -u ubuntu git checkout "origin/$DEPLOY_REF"
-          sudo -u ubuntu git pull --ff-only origin "$DEPLOY_REF" 2>/dev/null || true
+          REPO_DIR=""
+          for candidate in "$REPO_DIR_OVERRIDE" /home/ubuntu/agentKeys /home/ubuntu/agentkeys /home/ubuntu/agentkey /opt/agentkeys /srv/agentkeys /root/agentKeys /root/agentkeys; do
+            [ -n "\$candidate" ] || continue
+            if [ -f "\$candidate/scripts/setup-broker-host.sh" ]; then
+              REPO_DIR=\$candidate
+              break
+            fi
+          done
+          if [ -z "\$REPO_DIR" ]; then
+            echo "could not locate the agentKeys checkout on this EC2" >&2
+            echo "candidates tried: \$REPO_DIR_OVERRIDE /home/ubuntu/agentKeys ..." >&2
+            echo "Fix: pin the path via the TEST_BROKER_REPO_DIR repo secret." >&2
+            exit 2
+          fi
+          echo "using repo at \$REPO_DIR"
+          REPO_OWNER=\$(stat -c '%U' "\$REPO_DIR")
+          echo "tree is owned by \$REPO_OWNER"
+          cd "\$REPO_DIR"
+          sudo -u "\$REPO_OWNER" git fetch --prune origin
+          sudo -u "\$REPO_OWNER" git checkout "$DEPLOY_REF" || sudo -u "\$REPO_OWNER" git checkout "origin/$DEPLOY_REF"
+          sudo -u "\$REPO_OWNER" git pull --ff-only origin "$DEPLOY_REF" 2>/dev/null || true
           bash scripts/setup-broker-host.sh --test --yes --non-interactive
           EOF
 

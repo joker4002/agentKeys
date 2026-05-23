@@ -435,6 +435,7 @@ gh secret set TEST_BROKER_INSTANCE_ID  --repo litentry/agentKeys --body "$TEST_B
 |---|---|
 | `OIDC_AWS_ROLE_ARN_DEPLOY` | ARN of `github-actions-agentkeys-deploy` — assumed by the `deploy-test-broker` job via GitHub Actions OIDC. |
 | `TEST_BROKER_INSTANCE_ID` | EC2 instance ID (`i-…`) hosting `test-broker.${ZONE}`. The deploy role's inline policy is scoped to *this single instance*. |
+| `TEST_BROKER_REPO_DIR` | **Optional.** Absolute path of the agentKeys git checkout on the EC2 (e.g. `/home/ubuntu/agentKeys`). The deploy workflow auto-discovers across common candidates (`/home/ubuntu/agentKeys`, `/home/ubuntu/agentkeys`, `/opt/agentkeys`, `/srv/agentkeys`, `/root/agentKeys`), so this only needs to be set when the operator cloned to a non-standard path and the workflow's auto-discover step prints `could not locate the agentKeys checkout`. |
 
 #### 7.3 Dry-run validate
 
