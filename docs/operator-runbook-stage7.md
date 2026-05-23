@@ -370,7 +370,11 @@ The broker's `BROKER_DATA_ROLE_ARN` must point at this role.
 ### Mint-time STS path (issue #71 / issue #72)
 
 One endpoint produces AWS credentials, via `AssumeRoleWithWebIdentity`,
-with creds tagged with the user's `agentkeys_user_wallet` PrincipalTag.
+with creds carrying the per-actor `agentkeys_actor_omni` PrincipalTag
+that drives bucket-policy isolation per [`arch.md §17.2`](../docs/arch.md#172-pri-actor-isolation).
+The legacy `agentkeys_user_wallet` tag is still emitted alongside it for
+backward compatibility with v0.1 bucket policies; new policies should
+key off `agentkeys_actor_omni`.
 
 #### `POST /v1/mint-oidc-jwt` — daemon-side STS
 
@@ -537,24 +541,20 @@ curl -X POST https://broker.litentry.org/v1/grant/revoke \
   -d '{"grant_id":"grn-..."}'
 ```
 
-### Migration window — implicit-grant fallback
+### Grant enforcement — retired with `/v1/mint-aws-creds` in PR #96 (issue #72)
 
-The mint endpoint currently allows mints WITHOUT an explicit grant for
-backward-compatibility with Phase 0 daemons (legacy `NoGrant` path
-documented inline in `src/handlers/mint.rs::mint_v2`). The audit log
-records these mints with an empty `grant_id` column.
+The grant `try_consume` enforcement point lived inside the deleted
+`src/handlers/mint.rs::mint_v2`. With that route gone (issue #72), the
+broker no longer consults `grant_store` at mint time at all — the
+`NoGrant` fallback, the planned Phase E fail-closed flip
+(`BROKER_REQUIRE_EXPLICIT_GRANT=true`), and the empty-`grant_id` audit
+rows are all moot. The grant CRUD endpoints (`/v1/grant/create`,
+`/v1/grant/list`, `/v1/grant/revoke`) still exist so master devices can
+manage grants for audit / future re-introduction, but no broker path
+consumes them today.
 
-**This is an intentional Phase 0→Phase B migration window.** Phase E
-US-039 will flip the default to fail-closed (`NoGrant` → 403). Operators
-should:
-
-1. Roll out the broker with grants enabled (this build).
-2. Call `/v1/grant/create` for every existing daemon address.
-3. Verify mints continue to succeed (now with non-empty `grant_id` in
-   audit rows).
-4. Set `BROKER_REQUIRE_EXPLICIT_GRANT=true` (Phase E env var) to flip
-   the default to fail-closed.
-5. Audit any 403s for daemons that didn't get a grant.
+Per-actor isolation now rides on `/v1/mint-oidc-jwt`'s audit row + AWS
+CloudTrail + AWS PrincipalTag/bucket policy (see `arch.md §17.2`).
 
 ### Recovery flow
 
@@ -695,16 +695,18 @@ disabled to avoid leaking counter shapes to unauthenticated probers.
 Histograms (mint_latency, audit_write_latency) + per-handler counter
 bumps land in V0.1-FOLLOWUPS Phase E hardening.
 
-### Idempotency-Key
+### Idempotency-Key — retired with `/v1/mint-aws-creds` in PR #96 (issue #72)
 
-The mint endpoint accepts an `Idempotency-Key: <ulid>` header. Bodies
-that hash to the same fingerprint within the 5-minute window return
-the cached response (no re-mint, no STS quota burn). Same key + a
-different body returns 422.
+The `Idempotency-Key` header was consumed by the deleted
+`mint_v2` handler. No surviving broker route honors the header today —
+`/v1/mint-oidc-jwt` always re-signs (the OIDC JWT TTL of 5 min, default
+`BROKER_OIDC_JWT_TTL_SECONDS=300`, is the only knob bounding re-mint
+cost). Callers that need rate-limiting / dedup must implement it
+client-side.
 
-`BROKER_REQUEST_BODY_LIMIT_BYTES` enforces the request body size limit
-(default 1 MiB) at router level (DefaultBodyLimit middleware) — closes
-Codex R2-F18 (declared-but-unenforced).
+`BROKER_REQUEST_BODY_LIMIT_BYTES` (default 1 MiB) still enforces the
+request body size limit at router level via the `DefaultBodyLimit`
+middleware for every endpoint.
 
 ---
 

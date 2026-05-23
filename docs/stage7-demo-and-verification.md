@@ -1945,10 +1945,16 @@ disabled to avoid leaking counter shapes to unauthenticated probers.
 ### 12.2 Idempotency-Key (retired with `/v1/mint-aws-creds` in PR #96)
 
 Server-side idempotency dedup lived in the now-deleted
-`/v1/mint-aws-creds` handler. With the route gone (issue #72), there is
-no server-side dedup layer — `/v1/mint-oidc-jwt` is short-lived (5 min
-default TTL) and the daemon caches the JWT in-process, so a re-mint
-within the TTL window is a no-op without any server help.
+`/v1/mint-aws-creds` handler. With the route gone (issue #72), no
+broker route honors the `Idempotency-Key` header. The only cost-bounding
+knob is `BROKER_OIDC_JWT_TTL_SECONDS` (default 300s) — every call to
+`/v1/mint-oidc-jwt` re-signs and writes a fresh `mint_log` row, and
+every call to `sts:AssumeRoleWithWebIdentity` is a fresh AWS API call
+(no caching in the provisioner — see
+[`crates/agentkeys-provisioner/src/aws_creds.rs::fetch_via_broker`](../crates/agentkeys-provisioner/src/aws_creds.rs#L128)
+which fetches a fresh JWT and assumes a fresh role every invocation).
+Callers that need batching, dedup, or rate-limiting must implement it
+client-side.
 
 `BROKER_REQUEST_BODY_LIMIT_BYTES` (default 1 MiB) still caps body size
 at the router level for every endpoint.
