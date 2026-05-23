@@ -185,8 +185,20 @@ do_step_4() {
 }
 
 do_step_5() {
-  CUR_STEP=5; step "Fund deployer"
-  bash "$SCRIPT_DIR/heima-fund-account.sh" --target deployer
+  CUR_STEP=5; step "Fund deployer (sudo on paseo; balance-check on mainnet)"
+  # Delegate to heima-bring-up.sh's canonical fund step:
+  #   - paseo: Alice sudo auto-tops-up the deployer
+  #   - mainnet: balance-check; if low, prints fund-from-personal-wallet
+  #     instructions and exits non-zero (NEVER auto-spends real HEI).
+  # SKIP_DEPLOY=1 stops bring-up after the fund step so this orchestrator's
+  # do_step_6 owns the deploy invocation (avoids double-deploy).
+  # Do NOT call heima-fund-account.sh here — that script sends FROM the
+  # deployer (used to bootstrap agent wallets), not TO the deployer.
+  if [ "$YES" = "1" ]; then
+    SKIP_DEPLOY=1 bash "$SCRIPT_DIR/heima-bring-up.sh" --yes
+  else
+    SKIP_DEPLOY=1 bash "$SCRIPT_DIR/heima-bring-up.sh"
+  fi
 }
 
 do_step_6() {

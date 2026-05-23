@@ -135,12 +135,13 @@ Single fresh EVM wallet — its `(deployer, nonce)` is what makes test contracts
 ```bash
 mkdir -p ~/.agentkeys
 umask 077
-cast wallet new --json | tee /tmp/test-deployer.json \
+cast wallet new --json \
   | jq -r '.[0].private_key' > ~/.agentkeys/heima-deployer-test.key
 chmod 600 ~/.agentkeys/heima-deployer-test.key
 
-# Print the address so you can fund it:
-jq -r '.[0].address' /tmp/test-deployer.json
+# Print the address so you can fund it (works for both Option A and B —
+# derives the address from the saved priv key, no /tmp/*.json dependency):
+cast wallet address $(cat ~/.agentkeys/heima-deployer-test.key)
 # → 0x…  ← send a small float of HEI from your personal wallet
 #         (deploy gas only — ~0.5 HEI is plenty for the 6 contracts).
 ```
