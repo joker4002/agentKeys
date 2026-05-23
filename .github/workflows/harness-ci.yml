@@ -407,11 +407,11 @@ jobs:
 
           # Codex M4 POST-validate: belt-and-braces final check. Even with
           # safe $VAR expansion, catch any future maintainer who reintroduces
-          # ${{ secrets.X }} directly into the heredoc body. This guard
-          # converts a latent code-exec bug into a CI hard-fail.
+          # direct GHA expression substitution (double-brace) into the heredoc
+          # body. This guard converts a latent code-exec bug into a CI hard-fail.
           if grep -nE '\$\(|`' scripts/operator-workstation.env; then
             echo "::error::materialized env file contains \$( ) or backticks — refusing to ship."
-            echo "::error::Inspect secrets for embedded shell metacharacters or the heredoc body for direct \${{ ... }} substitution."
+            echo "::error::Inspect secrets for embedded shell metacharacters, or the heredoc body for direct GHA double-brace substitution."
             exit 1
           fi
           echo "::notice::env file materialized + safety-validated (no \$( ), no backticks; all secrets routed via env: block)"
