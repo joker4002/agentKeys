@@ -1,0 +1,379 @@
+# Issue #102 — aiosandbox + Hermes agent + AgentKeys demo on ESP32
+
+**Status:** DRAFT
+**Tracking issue:** [#102](https://github.com/litentry/agentKeys/issues/102) (to be created)
+**Branch:** `claude/hopeful-mccarthy-15e5ba`
+**Related research:**
+- [`docs/research/aiosandbox/agent-infra-sandbox-analysis.md`](../../research/aiosandbox/agent-infra-sandbox-analysis.md)
+- [`docs/research/aiosandbox/agent-infra-sandbox-runtime-probe.md`](../../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)
+- [`docs/research/ai-hardware-companion-office-hours.md`](../../research/ai-hardware-companion-office-hours.md) (Approach D)
+- [`docs/arch.md`](../../arch.md) (agent-infra/sandbox is the canonical agent runtime; memory-service at `bots/<actor_omni_hex>/memory/*`)
+
+## Goal
+
+Ship a working end-to-end demo for the AgentKeys hardware-vendor wedge:
+
+> An ESP32 hardware device, configured with one URL and one actor token, talks to a cloud-hosted `agent-infra/sandbox` running a Hermes agent runtime + `agentkeys-daemon`. The agent auto-injects a mock user-memory MD file from S3 at boot, so the device sounds personalized from the very first conversation.
+
+This is the v0 buyer-pitch demo that the [office-hours design doc §9.6 Storyboard](../../research/ai-hardware-companion-office-hours.md) calls for, scoped down to **single device, single sandbox, single mock memory blob**. Cross-vendor portability, cap-token enforcement, multi-tenant orchestration, payment rails, and the parent-control app are out of scope for v0 demo.
+
+## Why now
+
+The office-hours diagnostic surfaced that the next critical step is a working demo a vendor can SEE — not more architecture docs. Approach D (AgentKeys-native sandbox) was chosen specifically because vendor integration friction collapses from "embed SDK in firmware" (2 months) to "point your device at a URL" (1 day). This issue ships that 1-day vendor onboarding story end-to-end.
+
+## Scope
+
+**IN scope:**
+
+- One ESP32 device speaking to one cloud-hosted sandbox
+- Mock memory injected from one S3 MD file at agent boot
+- Single hardcoded actor (`O_demo_001`) for the demo
+- Text-mode interaction (button press → text payload → agent → text response → serial-print or BLE-companion-app display); voice mode deferred to a follow-up issue
+- Subsidized LLM (Qwen-class via DashScope or OpenRouter) for the agent
+- Public-facing demo URL (`https://demo.aiosandbox.litentry.org` or similar)
+- One-command setup script (idempotent per [CLAUDE.md "Idempotent remote-setup rule"](../../../CLAUDE.md))
+- Demo runbook for live walk-throughs
+
+**NOT in scope (deferred to follow-ups):**
+
+- Voice STT/TTS pipeline (text-only v0 demo)
+- Real `agentkeys-worker-memory` integration (demo uses mock S3 blob with direct `s3:GetObject`, bypasses cap-token verification)
+- Cross-vendor memory portability (single-vendor v0)
+- Multi-tenant sandbox orchestration (one sandbox per active demo; multi-tenancy follows in production phase)
+- Pricing / billing / activation flow (no Stripe ACP / Alipay+ AMP)
+- Cap-token enforcement on the memory read path (mock memory is read with a static signed URL for v0)
+- Parent-control / consumer mobile app
+- Audit anchoring to Heima (off-chain audit only for v0)
+- Real-time revocation UI
+
+## Architecture
+
+```
+┌─────────────────────┐
+│ ESP32 (~$5 board)   │
+│ - WiFi config       │
+│ - Hardcoded:        │
+│   • sandbox URL     │
+│   • actor_token     │
+│ - Button → POST     │
+│ - Response → serial │
+└──────────┬──────────┘
+           │ HTTPS POST /v1/chat
+           │ Authorization: Bearer <actor_token>
+           v
+┌──────────────────────────────────────────────────────────┐
+│ agent-infra/sandbox @ ghcr.io/agent-infra/sandbox        │
+│ (cloud-hosted, supervisord PID 1)                        │
+│                                                          │
+│  [supervisord programs]                                  │
+│   ├── gem-server (default, port 8088)  ← stock           │
+│   ├── nginx (port 8080 frontend)       ← stock           │
+│   ├── agentkeys-daemon (port 8089)     ← NEW            │
+│   ├── hermes-runtime (port 8090)       ← NEW            │
+│   └── (browser/code-server/jupyter — stock, unused for demo) │
+│                                                          │
+│  [boot sequence]                                         │
+│   1. agentkeys-daemon starts; reads $ACTOR_OMNI from env │
+│   2. agentkeys-daemon caches mock memory from S3         │
+│      → GET s3://agentkeys-demo-memory/bots/<actor>/memory/profile.md │
+│   3. hermes-runtime starts; queries daemon's            │
+│      /v1/memory/<actor>/profile.md endpoint              │
+│   4. hermes-runtime injects profile.md into system prompt│
+│   5. /v1/chat is ready                                   │
+│                                                          │
+│  [request flow]                                          │
+│   ESP32 → nginx → agentkeys-broker-server (forward)      │
+│                → hermes-runtime /v1/chat                 │
+│                → LLM (DashScope Qwen-Plus or OpenRouter) │
+│                → response → ESP32                        │
+└──────────────────────────────────────────────────────────┘
+           │
+           v
+┌────────────────────────────────────────────┐
+│ S3: agentkeys-demo-memory (us-east-1)      │
+│   bots/O_demo_001/memory/profile.md        │ ← mock blob (versioned)
+└────────────────────────────────────────────┘
+```
+
+Reuse of canonical AgentKeys primitives ([`docs/arch.md`](../../arch.md)):
+
+- **Sandbox**: `agent-infra/sandbox` is already arch.md's chosen agent runtime substrate (§3.3a, §10.4)
+- **Actor model**: `O_demo_001` is a fixed HDKD-derived actor omni for v0 demo (single actor; production binds per device)
+- **Memory bucket layout**: `bots/<actor_omni_hex>/memory/<path>` matches arch.md §15.2 — we use the same layout with a demo prefix so the path stays canonical
+- **Daemon**: `agentkeys-daemon` extends with one new GET endpoint `/v1/memory/<actor>/profile.md`; no new K-key infra needed
+- **supervisord**: stock sandbox ships supervisord at PID 1 (per [runtime probe finding 3 in §1](../../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)) — we register `agentkeys-daemon` + `hermes-runtime` as new programs in `/opt/gem/supervisord.conf`
+
+## Components
+
+### C1 — Mock memory MD blob (S3)
+
+Path: `s3://agentkeys-demo-memory/bots/O_demo_001/memory/profile.md`
+
+Content (sample fixture; team can iterate before demo day):
+
+```markdown
+---
+actor_omni: O_demo_001
+user_display_name: Kevin Cheng
+timezone: Asia/Shanghai
+last_updated: 2026-05-23T10:00:00Z
+---
+
+# User profile (demo fixture)
+
+## Personal
+- Lives in Shanghai
+- Travels frequently between SH ↔ Chengdu for work
+- Currently planning Chengdu trip 2026-05-25 → 2026-05-29
+- Outstanding question: customs clearance for personal electronics (raised yesterday)
+
+## Diet
+- Loves spicy Sichuan food (especially mapo tofu, hotpot)
+- 2 days of Fujian food in Singapore last week — would prefer Sichuan today
+- Allergic to peanuts
+
+## Family
+- Wife Lin works remotely in Hangzhou
+- 2 kids (Mia 8, Leo 5); Mia is into dinosaurs; Leo is into space
+
+## Recent context
+- Yesterday's chat: customs clearance question (no resolution)
+- 3 days ago: discussed booking dinner via Meituan
+- Default budget cap for autonomous purchases: ¥500/day
+```
+
+### C2 — `agentkeys-demo-memory` S3 bucket
+
+- Region: `us-east-1` (matches `agentkeys-admin` operational region; PIPL note in office-hours doc §Constraints — for production we'll need a CN-cloud replica, but demo can run on AWS)
+- Lifecycle: versioned, 30-day expiration for non-current versions
+- Access: read-only signed URL for v0 demo (skip cap-token verification per Scope NOT-in-scope item)
+- Provision via `scripts/setup-demo-aiosandbox.sh` step 1 (idempotent — skip if bucket exists, upload only if content drift)
+
+### C3 — `agentkeys-daemon` new endpoint
+
+Add handler to [`crates/agentkeys-daemon/src/handlers/`](../../../crates/agentkeys-daemon):
+
+```rust
+// GET /v1/memory/{actor_omni}/profile.md
+// Demo-only endpoint — returns mock memory content from S3 bucket
+// without cap-token verification. Production path goes through
+// agentkeys-worker-memory + cap-token check.
+async fn get_demo_memory_profile(
+    Path(actor_omni): Path<String>,
+    State(state): State<AppState>,
+) -> Result<String, AppError> {
+    if !state.config.demo_mode {
+        return Err(AppError::DemoEndpointDisabled);
+    }
+    let s3_key = format!("bots/{}/memory/profile.md", actor_omni);
+    let content = state
+        .s3_client
+        .get_object()
+        .bucket(&state.config.demo_memory_bucket)
+        .key(&s3_key)
+        .send()
+        .await?
+        .body
+        .collect()
+        .await?;
+    Ok(String::from_utf8(content.to_vec())?)
+}
+```
+
+- Demo endpoint is gated behind `AGENTKEYS_DEMO_MODE=1` env var; off by default
+- Reuses existing S3 client + IAM role wiring in the daemon
+- No cap-token verification in v0 — the memory blob is "public" for the demo
+- Logs every read for audit-trail (off-chain, append to local journal)
+
+### C4 — Hermes agent runtime (`agentkeys-hermes-runtime`)
+
+NEW crate at `crates/agentkeys-hermes-runtime/`:
+
+- Single binary that serves `POST /v1/chat`
+- At startup: HTTP GET `http://localhost:8089/v1/memory/{actor_omni}/profile.md` (calls the daemon on the loopback)
+- Inject profile.md content as the system prompt prefix:
+  ```
+  You are a helpful AI companion. Below is the user's profile and recent context.
+  Respond conversationally, referencing relevant context when natural.
+
+  ---
+  {profile_md}
+  ---
+  ```
+- LLM backend: configurable via env var
+  - `AGENTKEYS_LLM_PROVIDER=dashscope|openrouter|claude|openai`
+  - `AGENTKEYS_LLM_MODEL=qwen-plus|claude-haiku|gpt-4o-mini|...`
+  - `AGENTKEYS_LLM_API_KEY=...`
+- Default: DashScope Qwen-Plus (cheap, low-latency for China, ~$0.001/1K tokens)
+- Chat endpoint:
+  ```
+  POST /v1/chat
+  Authorization: Bearer <actor_token>
+  Body: {"query": "string"}
+  Response: {"response": "string", "memory_loaded": true, "tokens_used": N}
+  ```
+
+**Naming note**: "Hermes" in this issue refers to the lightweight AgentKeys-native runtime we're shipping for this demo, NOT NousResearch's Hermes LLM and NOT an existing third-party project. We picked the name in [office-hours §Approach D](../../research/ai-hardware-companion-office-hours.md). A 1-week research spike (open question §1 below) should confirm whether a public OSS project named "Hermes" already occupies this namespace and we need to rename — best candidates if rename needed: `agentkeys-companion`, `agentkeys-runtime`, `agentkeys-shell`.
+
+### C5 — Extended sandbox image
+
+NEW Dockerfile at `docker/aiosandbox-demo/Dockerfile`:
+
+```dockerfile
+FROM ghcr.io/agent-infra/sandbox:latest
+
+# Install agentkeys binaries
+COPY --from=builder /target/release/agentkeys-daemon /usr/local/bin/
+COPY --from=builder /target/release/agentkeys-hermes-runtime /usr/local/bin/
+
+# Register as supervisord programs
+COPY supervisord.d/agentkeys-daemon.conf /opt/gem/supervisord.d/
+COPY supervisord.d/hermes-runtime.conf /opt/gem/supervisord.d/
+
+# Pre-create memory cache dir (writable by gem)
+RUN mkdir -p /home/gem/.agentkeys && chown gem:gem /home/gem/.agentkeys
+
+# Expose ports
+EXPOSE 8080 8089 8090
+```
+
+Supervisord programs (per [runtime probe §4 B10](../../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)):
+
+```ini
+# /opt/gem/supervisord.d/agentkeys-daemon.conf
+[program:agentkeys-daemon]
+command=/usr/local/bin/agentkeys-daemon serve --port 8089
+user=gem
+environment=AGENTKEYS_DEMO_MODE=1,ACTOR_OMNI=O_demo_001,DEMO_MEMORY_BUCKET=agentkeys-demo-memory
+autostart=true
+autorestart=true
+stdout_logfile=/var/log/agentkeys-daemon.log
+
+# /opt/gem/supervisord.d/hermes-runtime.conf
+[program:hermes-runtime]
+command=/usr/local/bin/agentkeys-hermes-runtime serve --port 8090 --daemon-url http://localhost:8089
+user=gem
+environment=AGENTKEYS_LLM_PROVIDER=dashscope,AGENTKEYS_LLM_MODEL=qwen-plus
+autostart=true
+autorestart=true
+stdout_logfile=/var/log/hermes-runtime.log
+```
+
+### C6 — ESP32 firmware (text mode v0)
+
+Path: `firmware/esp32-demo/`
+
+Stack:
+- ESP-IDF or Arduino IDE (whichever the team prefers; default Arduino for fastest iteration)
+- `ESP32-WROOM-32` or `ESP32-S3-WROOM` board (off-the-shelf, $5-15)
+- WiFi config via boot-time WPS or hardcoded SSID/password in `secrets.h` (gitignored)
+
+Behavior:
+1. On boot: connect to WiFi, print "ready" to serial
+2. On button press: read user input from serial (representing the user saying something to the toy)
+3. POST `https://demo.aiosandbox.litentry.org/v1/chat` with `Authorization: Bearer <ACTOR_TOKEN>` and body `{"query": "<serial input>"}`
+4. Parse JSON response, print agent response to serial
+5. (Stretch) play simple beep/LED feedback during processing
+
+Hardcoded for v0:
+- `SANDBOX_URL = "https://demo.aiosandbox.litentry.org/v1/chat"`
+- `ACTOR_TOKEN = "demo_token_O_demo_001_changeme"` (static demo token, validated by hermes-runtime against env)
+
+Voice mode is a follow-up issue (would add I2S mic + DAC + STT/TTS pipeline).
+
+### C7 — Demo deploy script
+
+NEW: `scripts/setup-demo-aiosandbox.sh`
+
+Idempotent per [CLAUDE.md "Idempotent remote-setup rule"](../../../CLAUDE.md) — every step pre-checks state and short-circuits if already done.
+
+Step inventory:
+
+| Step | Action | Idempotency check |
+|---|---|---|
+| 1 | Build agentkeys-daemon + agentkeys-hermes-runtime binaries (cargo) | `[ -x target/release/agentkeys-hermes-runtime ]` |
+| 2 | Build demo sandbox image (`docker build docker/aiosandbox-demo/`) | `docker image inspect agentkeys/aiosandbox-demo:latest` |
+| 3 | Provision `agentkeys-demo-memory` S3 bucket | `aws s3api head-bucket --bucket agentkeys-demo-memory --region us-east-1` |
+| 4 | Upload mock memory MD to S3 | content hash diff vs S3 ETag |
+| 5 | Deploy sandbox container to demo host (single VM behind nginx + TLS) | `systemctl is-active aiosandbox-demo.service` |
+| 6 | Health-check `https://demo.aiosandbox.litentry.org/v1/chat` returns 200 | curl + jq check |
+| 7 | Print ESP32 config: sandbox URL + actor token | always print (informational) |
+
+Output convention per CLAUDE.md: `ok proceeding` / `skip <reason>` / `fail <reason>` per step.
+
+### C8 — Demo runbook
+
+NEW: `docs/demo-aiosandbox-runbook.md`
+
+Operator-facing 1-pager:
+- One-command setup
+- ESP32 flashing instructions
+- Live demo script (what to say into the serial, what the audience sees)
+- Troubleshooting (firmware → WiFi → sandbox → LLM, each layer's failure signature)
+- How to swap the mock memory blob mid-demo (change S3 file + restart agent)
+
+## Implementation order
+
+Sequenced for incremental verifiability — each step lands a testable artifact:
+
+| # | Deliverable | Verify by |
+|---|---|---|
+| 1 | Mock memory MD fixture in `tests/fixtures/demo-profile.md` | File exists; passes markdown lint |
+| 2 | New crate `agentkeys-hermes-runtime` with `/v1/chat` stub (no LLM yet) | `cargo test -p agentkeys-hermes-runtime` |
+| 3 | Hook hermes-runtime to DashScope Qwen-Plus; chat returns LLM response (no memory yet) | `curl localhost:8090/v1/chat -d '{"query":"hi"}'` returns response |
+| 4 | Add `/v1/memory/{actor}/profile.md` endpoint to agentkeys-daemon (returns hardcoded test fixture, no S3 yet) | `curl localhost:8089/v1/memory/O_demo_001/profile.md` returns fixture |
+| 5 | Hermes-runtime fetches memory from daemon at startup; system prompt includes profile | Chat response references profile facts (e.g., "Kevin", "Chengdu", "spicy") |
+| 6 | Provision S3 bucket + upload fixture via `setup-demo-aiosandbox.sh` step 3-4 | `aws s3 ls s3://agentkeys-demo-memory/bots/O_demo_001/memory/` |
+| 7 | agentkeys-daemon reads from S3 (not hardcoded fixture) | Change S3 file, restart daemon, chat reflects new profile |
+| 8 | Build extended sandbox Dockerfile with supervisord configs | `docker run agentkeys/aiosandbox-demo:latest` boots clean |
+| 9 | Deploy sandbox to demo host with TLS + public URL | `curl https://demo.aiosandbox.litentry.org/v1/chat` succeeds |
+| 10 | Write ESP32 firmware, flash to board | Button press → text query → response on serial |
+| 11 | End-to-end: ESP32 → sandbox → LLM → response on serial, reflecting memory | Live demo |
+| 12 | Write `docs/demo-aiosandbox-runbook.md` + commit + push | Operator can re-run from doc alone |
+
+## Acceptance criteria
+
+A reviewer takes the demo runbook, runs `bash scripts/setup-demo-aiosandbox.sh` on a fresh demo host, flashes the ESP32 firmware to a fresh board, and within **15 minutes** is able to:
+
+- Send a text query from the ESP32 via serial-input
+- Receive a response that demonstrably reflects the mock memory content (e.g., calls user by name "Kevin", references the Chengdu trip, knows the spicy food preference)
+- Swap the S3 memory blob and see the next response reflect the new content (after agent restart)
+- Read the demo runbook to understand every command they ran
+
+## Open questions for kickoff (resolve before step 3)
+
+1. **"Hermes" naming**: confirm internal name vs. potential OSS conflict. If OSS Hermes exists in this space, rename to `agentkeys-companion-runtime` or `agentkeys-shell`.
+2. **LLM provider for demo**: DashScope (China-friendly, cheap, low-latency) vs. OpenRouter (global, more model choice) vs. direct Claude/OpenAI (premium, expensive). Default DashScope unless team has DashScope-access friction.
+3. **Demo host**: reuse Heima broker host (per `scripts/setup-broker-host.sh`) or spin up a separate dedicated VM? Recommend separate to avoid blast radius on the broker.
+4. **Voice mode timeline**: defer to a follow-up issue, or stretch goal for this issue? Recommend defer — text-mode demo is enough to validate the pitch with vendors.
+5. **ESP32 board choice**: ESP32-WROOM-32 (cheaper, basic) vs. ESP32-S3 (more flash, better for voice in v1). Recommend WROOM-32 for v0; S3 for the voice follow-up.
+6. **Auth**: skip JWT for v0 demo or use simple bearer token? Recommend simple static bearer token tied to actor_omni — easy to demo, easy to revoke (just restart the sandbox with a new token).
+
+## Dependencies
+
+- **agent-infra/sandbox**: stock image, no fork needed for v0
+- **AgentKeys Stage 7+ stack**: agentkeys-daemon exists, extend with one new GET handler
+- **agentkeys-worker-memory**: NOT used in v0 demo (mock bypasses it); production path uses it
+- **AWS S3**: existing `agentkeys-admin` profile, `us-east-1`
+- **LLM provider account**: DashScope or OpenRouter, ~$10/month credit is more than enough for demos
+- **ESP32 hardware**: $5-15 board, off-the-shelf
+- **Demo host**: small VM (1 vCPU / 2GB RAM is plenty for stock sandbox per `docker-compose.yaml mem_limit: 8g` — overprovision to 2 vCPU / 4GB to be safe)
+- **TLS cert**: Let's Encrypt via certbot, same pattern as `setup-broker-host.sh`
+
+## Effort estimate
+
+- Steps 1-7 (Rust + S3 + memory injection): **~1.5 weeks**
+- Steps 8-9 (Dockerfile + deploy): **~3 days**
+- Steps 10-11 (ESP32 + end-to-end): **~1 week**
+- Step 12 (runbook): **~2 days**
+- **Total: ~3 weeks for a working v0 demo**
+
+This fits the office-hours §9.7 next-moves timeline: demo ready in 3 weeks, vendor outreach happens in parallel during weeks 1-2 (the assignment from §The Assignment).
+
+## What landed (to fill at PR time)
+
+*To be completed by the implementing engineer at PR time per [CLAUDE.md plan-completion policy](../../../CLAUDE.md).*
+
+## What did NOT land (to fill at PR time)
+
+*To be completed by the implementing engineer at PR time per [CLAUDE.md plan-completion policy](../../../CLAUDE.md). If empty, state "All plan steps shipped."*
