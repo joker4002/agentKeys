@@ -470,11 +470,31 @@ log "Verify SSM agent reachable: $TEST_BROKER_INSTANCE_ID"
 if [ "$DRY_RUN" = "1" ]; then
   log "DRY RUN — would query ssm describe-instance-information for $TEST_BROKER_INSTANCE_ID"
 else
+  # Capture stderr separately so AccessDenied doesn't get silently mapped to
+  # "None" (instance-not-registered). They're distinct failure modes:
+  #   - AccessDenied → caller (agentkeys-admin) lacks ssm:DescribeInstanceInformation.
+  #     Fix the caller's IAM, not the EC2.
+  #   - Empty/None → instance genuinely not registered with SSM. Remediate the EC2.
+  ssm_stderr=$(mktemp /tmp/ssm-describe.XXXXXX.err)
   ssm_state=$(aws ssm describe-instance-information \
     --region "$REGION" \
     --filters "Key=InstanceIds,Values=$TEST_BROKER_INSTANCE_ID" \
     --query 'InstanceInformationList[0].PingStatus' \
-    --output text 2>/dev/null || echo "None")
+    --output text 2>"$ssm_stderr" || echo "")
+  if grep -q "AccessDenied" "$ssm_stderr"; then
+    rm -f "$ssm_stderr"
+    die "caller lacks ssm:DescribeInstanceInformation. This is the upstream
+of every 'PingStatus=None' loop — without read perms, the script cannot tell
+'instance not registered with SSM' from 'I have no permission to look'. Fix
+by attaching AmazonSSMReadOnlyAccess to the admin group ONCE:
+    aws iam attach-group-policy \\
+      --group-name AgentKeyAdmin \\
+      --policy-arn arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+Then re-run this script."
+  fi
+  # Empty state = no record found (genuinely not registered).
+  [ -z "$ssm_state" ] && ssm_state="None"
+  rm -f "$ssm_stderr"
 
   case "$ssm_state" in
     Online)
