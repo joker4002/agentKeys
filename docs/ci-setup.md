@@ -283,6 +283,43 @@ The script's sanity check refuses to run if any `*_HEIMA` slot is still zeroed (
 
 `TEST_OIDC_AWS_ROLE_ARN` is the gate. Setting it last activates the workflow; unsetting it disarms.
 
+### 6. Trigger the first run + verify
+
+Setup is done. Confirm the pipeline actually works end-to-end.
+
+**Pre-merge (PR branch — what's true today):** the workflow auto-fires on every push to a branch with an open PR against `main`. The `pull_request:` trigger watches the path filter `crates/**`, `harness/**`, `scripts/**`, `.github/workflows/harness-ci.yml`, `Cargo.toml`, and `Cargo.lock` — push any qualifying change and the run kicks off automatically:
+
+```bash
+# List recent runs on your branch:
+gh run list --workflow harness-ci.yml --repo litentry/agentKeys \
+  --branch <your-branch> --limit 5
+
+# Drill into a specific run's failing step:
+gh run view <run-id> --repo litentry/agentKeys --log-failed
+```
+
+**Post-merge (after this PR lands on `main`):** `workflow_dispatch` becomes available — GitHub registers workflows from the default branch, so manual dispatch only works once `harness-ci.yml` is on `main`. From then on you can re-run any stage on demand:
+
+```bash
+gh workflow run harness-ci.yml --repo litentry/agentKeys --field stage=3
+```
+
+`stage` accepts `1`, `2`, `3`, or `all`. Stage 3 is the capstone — it mints session JWT → OIDC JWT → STS creds via the test broker, then exercises the per-actor + per-data-class isolation matrix against real AWS IAM. Stage 3 passing means every layer is wired: TLS + OIDC + IAM federation + S3 PrincipalTag scoping + cap-mint + worker chain-verify.
+
+> **`gh workflow run` returns `Workflow does not have 'workflow_dispatch' trigger`** before the PR merges. That's not a bug in the workflow YAML on your branch — it's GitHub's "workflows are registered from the default branch" rule. Use the `pull_request:` auto-trigger above until merge; after merge, `workflow_dispatch` works.
+
+**Common first-run failure modes:**
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `cargo fmt --all -- --check` fails with a long diff | accumulated rustfmt drift on `main` from pre-existing code | Run `cargo fmt --all` locally, commit the result as a separate "style: cargo fmt" commit; once it lands, the workspace stays clean. |
+| `harness-e2e` job skipped with `::warning::` | `TEST_OIDC_AWS_ROLE_ARN` secret not set | Re-run [§5](#5-set-the-github-repo-secrets) (or `bash scripts/ci-set-github-secrets.sh` without `--skip-gate`). |
+| `AssumeRoleWithWebIdentity: AccessDenied` | `github-actions-agentkeys-e2e` role's trust policy `sub` condition doesn't match `repo:litentry/agentKeys:*` | Re-check [§4](#4-register-the-github-actions-oidc-role)'s trust policy JSON; the `StringLike` on `sub` must match the repo path. |
+| stage 1 fails on `cast` deploy | runner's contract addresses are zeros | The `TEST_*_ADDRESS_HEIMA` secrets are unset or stale — re-check [§5](#5-set-the-github-repo-secrets). |
+| stage 3 fails on `s3:ListBucket → AccessDenied` cross-actor | `apply-vault-bucket-policy.sh` / `apply-memory-bucket-policy.sh` were applied to PROD buckets, not the `-test` variants | Re-run those scripts with `ENV_FILE=scripts/operator-workstation.test.env`. |
+
+When the workflow passes against the test stack, CI is live. Every subsequent push to a PR triggers it; you're done.
+
 ## What the workflow does on every run
 
 1. Restores submodules + Rust toolchain + Foundry + cargo cache.
