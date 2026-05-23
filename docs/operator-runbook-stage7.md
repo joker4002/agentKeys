@@ -137,7 +137,7 @@ A concrete request flow makes the split obvious:
                                                        │  (PUBLIC — AWS reaches this)
 ┌──────────────────┐  legacy bearer        ┌───────────▼───────────┐
 │  agentkeys-cli   ├──────────────────────▶│ agentkeys-broker-     │
-│  / agentkeys-    │  /v1/mint-aws-creds   │ server                │
+│  / agentkeys-    │  /v1/mint-oidc-jwt    │ server                │
 │  daemon          │                       │                       │
 └──────────────────┘                       │ ┌───────────────────┐ │
                                            │ │ POST /session/    │ │
@@ -367,20 +367,18 @@ by `aud=sts.amazonaws.com` and a `sub` prefix.
 
 The broker's `BROKER_DATA_ROLE_ARN` must point at this role.
 
-### Mint-time STS paths (issue #71)
+### Mint-time STS path (issue #71 / issue #72)
 
-There are two endpoints that result in AWS credentials, with **different
-trust models** and **identical end-state security** (both go through
-`AssumeRoleWithWebIdentity`, both emit creds tagged with the user's
-`agentkeys_user_wallet` PrincipalTag):
+One endpoint produces AWS credentials, via `AssumeRoleWithWebIdentity`,
+with creds tagged with the user's `agentkeys_user_wallet` PrincipalTag.
 
-#### `POST /v1/mint-oidc-jwt` — daemon-side STS (recommended)
+#### `POST /v1/mint-oidc-jwt` — daemon-side STS
 
 The broker signs a short-lived OIDC JWT with the user's wallet claim
 and returns it. The daemon exchanges that JWT for AWS creds **on its
 own machine** by calling `sts:AssumeRoleWithWebIdentity` directly. This
 is the path the provisioner / MCP / `agentkeys-daemon` use after the
-issue #71 Option A migration.
+issue #71 Option A + issue #72 retirement of the server-side mint.
 
 - **Broker work**: validate bearer → sign JWT → return.
 - **Daemon work**: receive JWT → `AssumeRoleWithWebIdentity` → inject
@@ -388,28 +386,18 @@ issue #71 Option A migration.
 - **AWS principal on broker**: none required.
 - **AWS principal on daemon**: none required (the JWT authenticates).
 
-#### `POST /v1/mint-aws-creds` — server-side gated (kept for callers needing audit/grants/idempotency)
-
-Broker handles the full mint pipeline:
-
-1. Verifies the session JWT against the broker's session keypair.
-2. Verifies a per-call EIP-191 signature on the request body.
-3. Resolves any Phase B grant (consume → 403 if revoked/expired/exhausted).
-4. Mints an internal user-scoped OIDC JWT (same claim shape as
-   `/v1/mint-oidc-jwt`).
-5. Calls `sts:AssumeRoleWithWebIdentity` with that JWT (broker-side).
-6. Writes the audit anchor row(s) per `BROKER_AUDIT_POLICY` (single
-   `sqlite` or `dual_strict` for multi-anchor durability).
-7. Returns the temporary credentials.
-
-Use this endpoint when:
-- You want the broker to be the policy point (mandatory audit log,
-  Phase B grants, Idempotency-Key dedup, multi-anchor coordination).
-- You can't trust callers to self-audit.
+> **Retired in PR #96 (issue #72).** The previous server-side
+> aggregator `POST /v1/mint-aws-creds` no longer exists — the route
+> returns 404. Its in-process gates (Phase B grant `try_consume`,
+> Idempotency-Key dedup, multi-anchor audit coordination) were dropped
+> with the route; isolation now relies on `/v1/mint-oidc-jwt`'s audit
+> row + AWS CloudTrail's `AssumeRoleWithWebIdentity` events + AWS
+> PrincipalTag/bucket policy per `arch.md §17.2`. Daemons must not
+> retry against the old route.
 
 ### Broker creds-free posture (post-migration)
 
-Both paths above use `AssumeRoleWithWebIdentity`, which is JWT-authenticated. The broker **does not need** an IAM principal at
+The path above uses `AssumeRoleWithWebIdentity`, which is JWT-authenticated. The broker **does not need** an IAM principal at
 runtime for credential minting. After cutover you can:
 
 - Drop `AWS_PROFILE` from `agentkeys-broker.service`.
