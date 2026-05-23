@@ -412,7 +412,7 @@ The script:
 |---|---|---|
 | Instance profile missing `AmazonSSMManagedInstanceCore` | Attaches the policy, polls for Online | (handled) |
 | Policy already attached, agent process running with stale creds | Polls until agent refreshes (~1-3 min typical) | If poll times out: SSH + `sudo systemctl restart amazon-ssm-agent`, OR `aws ec2 reboot-instances …` |
-| Instance has NO instance profile at all | Exits with `associate-iam-instance-profile` command to run first | Operator runs the printed command, then re-invokes with `--fix-ssm` |
+| Instance has NO instance profile at all | Creates a dedicated `agentkeys-test-broker-ssm` role + instance profile (EC2 trust + `AmazonSSMManagedInstanceCore`) and associates it with the EC2. IMDS surfaces the new creds within ~30s. Safe because the broker's app-layer AWS access uses static creds from `broker.env`, not IMDS — adding IMDS-served creds can only ADD capability for the SSM agent, not displace anything. | (handled) |
 | SSM Agent not installed | Reports state; can't reach the box to install | SSH + `sudo systemctl enable --now amazon-ssm-agent` (Ubuntu 22.04+ ships it) |
 | Private VPC subnet without an SSM VPC endpoint | Reports state | Operator wires the VPC endpoint (unlikely for a public-IP broker, but possible) |
 

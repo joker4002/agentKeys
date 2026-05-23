@@ -271,6 +271,131 @@ fi
 # The auto-attach is safe because the operator is already running as
 # agentkeys-admin (verified above) — they HAVE iam:AttachRolePolicy. Without
 # --fix-ssm the script just reports + exits (no IAM mutation, no surprises).
+# Creates the dedicated SSM-only instance profile + role and associates
+# it with the EC2 instance. Used when the EC2 has NO profile attached at
+# all — common on test brokers spun up by setup-cloud.sh --test (the
+# broker process authenticates via static creds in /etc/agentkeys/broker.env,
+# so the EC2 was never given an instance profile).
+#
+# Why this is safe to add to an already-running broker:
+#   - The broker's app-layer AWS calls use AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+#     from broker.env explicitly; the static creds take precedence over IMDS.
+#   - Adding an IMDS-served instance profile cannot reduce capability — it only
+#     ADDS a credential source for processes that don't already have static creds
+#     (which on the broker EC2 = the SSM agent and not much else).
+#
+# Names:
+#   - Role:    agentkeys-test-broker-ssm
+#   - Profile: agentkeys-test-broker-ssm (same — conventional)
+#
+# Idempotent: every step is get-* pre-checked. Safe to call repeatedly.
+SSM_INSTANCE_ROLE_NAME="agentkeys-test-broker-ssm"
+SSM_INSTANCE_PROFILE_NAME="agentkeys-test-broker-ssm"
+
+create_and_associate_ssm_profile() {
+  local instance_id="$1"
+  local policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  # ── Role ──
+  if aws iam get-role --role-name "$SSM_INSTANCE_ROLE_NAME" >/dev/null 2>&1; then
+    skip "role $SSM_INSTANCE_ROLE_NAME already exists"
+  else
+    log "Creating role $SSM_INSTANCE_ROLE_NAME (EC2 trust)"
+    local ec2_trust
+    ec2_trust=$(jq -n '{
+      Version: "2012-10-17",
+      Statement: [{
+        Effect: "Allow",
+        Principal: { Service: "ec2.amazonaws.com" },
+        Action: "sts:AssumeRole"
+      }]
+    }')
+    aws iam create-role \
+      --role-name "$SSM_INSTANCE_ROLE_NAME" \
+      --assume-role-policy-document "$ec2_trust" \
+      --description "Lets the test broker EC2 register with AWS SSM (issue #101)" \
+      >/dev/null \
+      || { warn "create-role failed"; return 1; }
+    ok "role $SSM_INSTANCE_ROLE_NAME created"
+  fi
+
+  # ── Managed policy attach (idempotent — AWS no-ops on re-attach) ──
+  local already_attached
+  already_attached=$(aws iam list-attached-role-policies \
+    --role-name "$SSM_INSTANCE_ROLE_NAME" \
+    --query "AttachedPolicies[?PolicyArn=='$policy_arn'].PolicyArn" \
+    --output text 2>/dev/null || echo "")
+  if [ -n "$already_attached" ]; then
+    skip "AmazonSSMManagedInstanceCore already attached to $SSM_INSTANCE_ROLE_NAME"
+  else
+    aws iam attach-role-policy \
+      --role-name "$SSM_INSTANCE_ROLE_NAME" \
+      --policy-arn "$policy_arn" \
+      || { warn "attach-role-policy failed"; return 1; }
+    ok "AmazonSSMManagedInstanceCore attached to $SSM_INSTANCE_ROLE_NAME"
+  fi
+
+  # ── Instance profile ──
+  if aws iam get-instance-profile --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
+    skip "instance profile $SSM_INSTANCE_PROFILE_NAME already exists"
+  else
+    log "Creating instance profile $SSM_INSTANCE_PROFILE_NAME"
+    aws iam create-instance-profile \
+      --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" \
+      >/dev/null \
+      || { warn "create-instance-profile failed"; return 1; }
+    ok "instance profile $SSM_INSTANCE_PROFILE_NAME created"
+  fi
+
+  # ── Add role to profile ──
+  local profile_role
+  profile_role=$(aws iam get-instance-profile \
+    --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" \
+    --query 'InstanceProfile.Roles[0].RoleName' \
+    --output text 2>/dev/null || echo "None")
+  if [ "$profile_role" = "$SSM_INSTANCE_ROLE_NAME" ]; then
+    skip "role already added to instance profile"
+  else
+    if [ "$profile_role" != "None" ] && [ -n "$profile_role" ]; then
+      warn "instance profile $SSM_INSTANCE_PROFILE_NAME currently holds role $profile_role (expected $SSM_INSTANCE_ROLE_NAME)"
+      warn "Refusing to swap — operator should reconcile manually."
+      return 1
+    fi
+    aws iam add-role-to-instance-profile \
+      --instance-profile-name "$SSM_INSTANCE_PROFILE_NAME" \
+      --role-name "$SSM_INSTANCE_ROLE_NAME" \
+      || { warn "add-role-to-instance-profile failed"; return 1; }
+    ok "added $SSM_INSTANCE_ROLE_NAME to instance profile"
+    # IAM is eventually consistent — newly-attached role may not show up in
+    # the EC2 associate API for a few seconds. Brief sleep here is the
+    # documented pattern (AWS docs: "may take up to 30s to propagate").
+    log "Waiting 15s for IAM eventual consistency"
+    sleep 15
+  fi
+
+  # ── Associate profile with EC2 ──
+  local current_profile_arn
+  current_profile_arn=$(aws ec2 describe-iam-instance-profile-associations \
+    --region "$REGION" \
+    --filters "Name=instance-id,Values=$instance_id" \
+    --query 'IamInstanceProfileAssociations[?State==`associated` || State==`associating`].IamInstanceProfile.Arn' \
+    --output text 2>/dev/null || echo "")
+  if [ -n "$current_profile_arn" ] && [ "$current_profile_arn" != "None" ]; then
+    skip "instance already has profile associated: $current_profile_arn"
+  else
+    log "Associating $SSM_INSTANCE_PROFILE_NAME with $instance_id"
+    aws ec2 associate-iam-instance-profile \
+      --region "$REGION" \
+      --instance-id "$instance_id" \
+      --iam-instance-profile "Name=$SSM_INSTANCE_PROFILE_NAME" \
+      >/dev/null \
+      || { warn "associate-iam-instance-profile failed"; return 1; }
+    ok "profile associated; EC2 IMDS will surface new creds within ~30s"
+  fi
+
+  return 0
+}
+
 attach_ssm_managed_policy_if_missing() {
   # Returns 0 if policy was attached or already present; non-zero on hard error.
   local instance_id="$1"
@@ -285,12 +410,9 @@ attach_ssm_managed_policy_if_missing() {
     --output text 2>/dev/null || echo "None")
 
   if [ -z "$profile_arn" ] || [ "$profile_arn" = "None" ] || [ "$profile_arn" = "null" ]; then
-    warn "instance $instance_id has NO IAM instance profile attached — auto-remediation is blocked."
-    warn "Fix: associate an instance profile via:"
-    warn "  aws ec2 associate-iam-instance-profile --instance-id $instance_id \\"
-    warn "    --iam-instance-profile Name=<existing-profile-name> --region $REGION"
-    warn "Then re-run this script with --fix-ssm."
-    return 1
+    log "instance $instance_id has NO IAM instance profile — creating + associating one"
+    create_and_associate_ssm_profile "$instance_id" || return 1
+    return 0
   fi
 
   # Profile ARN shape: arn:aws:iam::ACCT:instance-profile/<NAME>
