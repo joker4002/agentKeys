@@ -1,7 +1,7 @@
-# Issue #102 — aiosandbox + Hermes agent + AgentKeys demo on ESP32
+# Issue #103 — aiosandbox + Hermes agent + AgentKeys demo on ESP32-S3
 
 **Status:** DRAFT
-**Tracking issue:** [#102](https://github.com/litentry/agentKeys/issues/102) (to be created)
+**Tracking issue:** [#103](https://github.com/litentry/agentKeys/issues/103)
 **Branch:** `claude/hopeful-mccarthy-15e5ba`
 **Related research:**
 - [`docs/research/aiosandbox/agent-infra-sandbox-analysis.md`](../../research/aiosandbox/agent-infra-sandbox-analysis.md)
@@ -259,27 +259,81 @@ autorestart=true
 stdout_logfile=/var/log/hermes-runtime.log
 ```
 
-### C6 — ESP32 firmware (text mode v0)
+### C6 — ESP32-S3 firmware (text mode v0)
 
-Path: `firmware/esp32-demo/`
+Path: `firmware/esp32s3-agentkeys/`
 
-Stack:
-- ESP-IDF or Arduino IDE (whichever the team prefers; default Arduino for fastest iteration)
-- `ESP32-WROOM-32` or `ESP32-S3-WROOM` board (off-the-shelf, $5-15)
-- WiFi config via boot-time WPS or hardcoded SSID/password in `secrets.h` (gitignored)
+**Hardware target:** ESP32-S3-DevKitC-1 (or compatible ESP32-S3-WROOM-1 board). Rationale:
 
-Behavior:
-1. On boot: connect to WiFi, print "ready" to serial
-2. On button press: read user input from serial (representing the user saying something to the toy)
-3. POST `https://demo.aiosandbox.litentry.org/v1/chat` with `Authorization: Bearer <ACTOR_TOKEN>` and body `{"query": "<serial input>"}`
-4. Parse JSON response, print agent response to serial
-5. (Stretch) play simple beep/LED feedback during processing
+- Native USB-OTG → flash + console via single USB-C cable, no separate UART chip
+- PSRAM-capable (8MB external) → audio buffers fit for the voice-mode follow-up
+- Xtensa LX7 with AI vector instructions → on-device wake-word feasible in v1
+- BLE 5 + WiFi 802.11 b/g/n
+- ~$10-15 dev board; underlying ESP32-S3 chip is <$5 in BOM volume
+- Matches MCU-class authenticity (FoloToy / Ropet / BubblePal ship MCU-class chips)
 
-Hardcoded for v0:
-- `SANDBOX_URL = "https://demo.aiosandbox.litentry.org/v1/chat"`
-- `ACTOR_TOKEN = "demo_token_O_demo_001_changeme"` (static demo token, validated by hermes-runtime against env)
+**Stack:** PlatformIO + ESP-IDF (not Arduino). Rationale:
 
-Voice mode is a follow-up issue (would add I2S mic + DAC + STT/TTS pipeline).
+- ESP-IDF exposes S3-specific features (native USB CDC, PSRAM, ESP-DSP, secure boot, OTA) that Arduino abstracts away
+- PlatformIO wraps it with VSCode integration + reproducible builds + dependency lock
+- Production AI-toy vendors use ESP-IDF — the demo code can become a reference integration rather than throwaway
+
+**Module structure:**
+
+```
+firmware/esp32s3-agentkeys/
+├── platformio.ini          # board=esp32-s3-devkitc-1, framework=espidf
+├── README.md               # flash + WiFi config quickstart
+├── sdkconfig.defaults      # USB CDC console, PSRAM, mbedTLS, partition table
+├── partitions.csv          # NVS + factory + OTA partition layout
+├── CMakeLists.txt          # ESP-IDF project root
+├── .gitignore              # build/, .pio/, secrets.h
+└── main/
+    ├── CMakeLists.txt      # component registration
+    ├── main.c              # app_main entrypoint + FreeRTOS task spawn
+    ├── config.h            # SANDBOX_URL, ACTOR_TOKEN, GPIO pin assignments
+    ├── secrets.h.example   # WiFi SSID/PASSWORD template (copy → secrets.h, gitignored)
+    ├── wifi_sta.h/.c       # WiFi STA mode + reconnect loop
+    ├── https_chat.h/.c     # POST /v1/chat with Bearer auth + JSON parse
+    ├── button.h/.c         # GPIO interrupt → FreeRTOS queue event
+    └── led_status.h/.c     # RGB status LED state machine (idle/processing/error)
+```
+
+**FreeRTOS task layout:**
+
+| Task | Priority | Purpose |
+|---|---|---|
+| `wifi_task` | 5 | Connect WiFi STA, reconnect on disconnect, signal `WIFI_READY` event |
+| `button_task` | 4 | Debounce GPIO interrupt, emit `BUTTON_PRESSED` event |
+| `chat_task` | 3 | Wait for button event → read user input from USB CDC → POST → parse JSON → print response to USB CDC + LED status update |
+| `led_task` | 2 | Drive on-board RGB LED based on state machine (boot=red, idle=blue dim, processing=blue pulsing, error=red flashing) |
+
+Tasks communicate via FreeRTOS queues + event groups; no shared globals.
+
+**Behavior (v0):**
+
+1. On boot: connect to WiFi (config from NVS or `secrets.h` fallback), print `[agentkeys] ready` to USB CDC
+2. On button press (GPIO 0, the boot button on DevKitC-1): prompt for user input over USB CDC (`> `)
+3. User types message + ENTER over USB CDC; firmware POSTs `https://demo.aiosandbox.litentry.org/v1/chat` with `Authorization: Bearer <ACTOR_TOKEN>` and body `{"query": "<text>"}`
+4. Parse JSON response, print `agent: <text>` to USB CDC; flash LED on success
+5. On error (WiFi loss, TLS fail, HTTP non-2xx, JSON parse fail): LED flashes red, print `[error] <reason>` to USB CDC
+
+**Config sources (priority order):**
+
+1. NVS-stored config (set via serial command `agentkeys config set sandbox_url ...`) — production path
+2. `secrets.h` compile-time defines (gitignored, copy from `secrets.h.example`) — dev path
+3. Hardcoded fallback in `config.h` — last-resort default
+
+**Hardcoded fallback for v0 demo:**
+
+```c
+#define DEFAULT_SANDBOX_URL "https://demo.aiosandbox.litentry.org/v1/chat"
+#define DEFAULT_ACTOR_TOKEN "demo_token_O_demo_001_changeme"
+```
+
+Token is validated by hermes-runtime against `AGENTKEYS_DEMO_ACTOR_TOKEN` env var on the sandbox side.
+
+**Voice mode follow-up (NOT in v0 scope, but architecture-friendly):** I2S mic (INMP441) + I2S DAC (MAX98357A) + PSRAM-backed ring buffers + WebSocket streaming to sandbox `/v1/audio` endpoint. ESP-IDF's `esp_codec_dev` component + ESP-DSP wake-word are the building blocks. Tracked as separate follow-up issue (TBD).
 
 ### C7 — Demo deploy script
 
@@ -346,7 +400,7 @@ A reviewer takes the demo runbook, runs `bash scripts/setup-demo-aiosandbox.sh` 
 2. **LLM provider for demo**: DashScope (China-friendly, cheap, low-latency) vs. OpenRouter (global, more model choice) vs. direct Claude/OpenAI (premium, expensive). Default DashScope unless team has DashScope-access friction.
 3. **Demo host**: reuse Heima broker host (per `scripts/setup-broker-host.sh`) or spin up a separate dedicated VM? Recommend separate to avoid blast radius on the broker.
 4. **Voice mode timeline**: defer to a follow-up issue, or stretch goal for this issue? Recommend defer — text-mode demo is enough to validate the pitch with vendors.
-5. **ESP32 board choice**: ESP32-WROOM-32 (cheaper, basic) vs. ESP32-S3 (more flash, better for voice in v1). Recommend WROOM-32 for v0; S3 for the voice follow-up.
+5. **ESP32 board choice**: ~~ESP32-WROOM-32 vs ESP32-S3~~ **CONFIRMED: ESP32-S3** (ESP32-S3-DevKitC-1 dev board). Native USB-OTG + PSRAM + AI vector instructions all matter — PSRAM for the voice follow-up, native USB for faster iteration, AI instructions for on-device wake-word in v1. Same MCU-class authenticity as WROOM-32, ~$10-15 dev board.
 6. **Auth**: skip JWT for v0 demo or use simple bearer token? Recommend simple static bearer token tied to actor_omni — easy to demo, easy to revoke (just restart the sandbox with a new token).
 
 ## Dependencies
