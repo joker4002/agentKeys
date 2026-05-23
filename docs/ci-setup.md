@@ -130,6 +130,8 @@ Verify with `harness/v2-stage3-demo.sh` — it mints session JWT → OIDC JWT �
 
 Single fresh EVM wallet — its `(deployer, nonce)` is what makes test contracts land at different addresses on the same Heima mainnet.
 
+**Option A (fresh wallet, recommended for clean test isolation):**
+
 ```bash
 mkdir -p ~/.agentkeys
 umask 077
@@ -142,6 +144,21 @@ jq -r '.[0].address' /tmp/test-deployer.json
 # → 0x…  ← send a small float of HEI from your personal wallet
 #         (deploy gas only — ~0.5 HEI is plenty for the 6 contracts).
 ```
+
+**Option B (re-use an existing mnemonic):** if you already have a BIP39 mnemonic (hardware wallet, MetaMask seed, previous deploy you want to redeploy from), derive the deployer key from it:
+
+```bash
+# Interactive (mnemonic input is hidden — not in shell history):
+bash scripts/heima-deployer-from-mnemonic.sh --test
+
+# Or read from a file (more secure than CLI when scripting):
+bash scripts/heima-deployer-from-mnemonic.sh --test --mnemonic-file /path/to/mnemonic.txt
+
+# Print the address for funding:
+cast wallet address $(cat ~/.agentkeys/heima-deployer-test.key)
+```
+
+The script defaults to derivation path `m/44'/60'/0'/0/0` (standard Ethereum BIP-44); pass `--index N` for a different address index. Idempotent — re-running with the same mnemonic prints `skip already-matches`; re-running with a different mnemonic refuses to overwrite (the existing key may own live deployed contracts).
 
 ### 3. Deploy test contracts via `setup-heima.sh`
 
