@@ -8,6 +8,14 @@ Mode: Startup
 
 **Working title naming note**: This doc uses "aiosandbox" as the in-session working title. There is a separate open-source `aiosandbox` npm library from Ant International — name conflict resolution is required before any public launch (see §Dependencies trademark check). Treat the title as a placeholder, not a committed brand.
 
+> **Implementation update (2026-05-24)**: implementation work moved into [issue #103](https://github.com/litentry/agentKeys/issues/103) and pivoted away from a from-scratch ESP32 firmware build to a cloud-side bridge that integrates the existing xiaozhi-esp32 firmware (already running on the MagicLick 2.5 device on hand) with NousResearch Hermes-agent. The v0 demo timeline is **~1-2 weeks**, not the multi-week estimate originally projected. See:
+> - [`docs/research/xiaozhi-esp32-magiclink.md`](./xiaozhi-esp32-magiclink.md) — hardware research + Option 1 (use xiaozhi firmware) vs Option 2 (rewrite firmware) decision
+> - [`docs/research/xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) — architecture diagrams + per-turn latency budget
+> - [`docs/research/xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) — three risks verified against actual code, plus a fourth discovered (cold agent construction needs pooling)
+> - [`docs/research/tuya-vs-xiaozhi.md`](./tuya-vs-xiaozhi.md) — Tuya is a different role than xiaozhi (closed PaaS for brand-owners vs open firmware for makers); AgentKeys sits above both
+>
+> The §Recommended Approach / §Pricing structure / §Cross-Vendor Memory Model below are unchanged. The shift is in the firmware-and-runtime layer (now leverages xiaozhi + Hermes upstream instead of building both ourselves), not in the AgentKeys-side architecture.
+
 ## Problem Statement
 
 AI hardware companion devices (AI toys, AI glasses, AI pencils, AI pendants) ship today as stateless model-callers. They have no persistent user identity, no cross-device memory, no permission scoping, no spend caps, no audit log. The Chinese AI-toy market alone is $3.5B+ with 1.8M units shipped H1 2025 and 1,500+ vendors competing — and not one of them ships a memory or identity layer that survives a device replacement or follows a user across vendors.

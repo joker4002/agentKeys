@@ -10,7 +10,7 @@
 >
 > "Hermes agent" in this plan refers to **[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** — a real MIT-licensed Python agent framework, NOT an internal AgentKeys runtime as the original §C4 mistakenly stated. Hermes ships its own memory loop, multi-interface gateway (Telegram/Discord/Slack/Signal/CLI), LLM-agnostic model selection, and runs inside Docker / SSH / Modal / Daytona / Vercel Sandbox out of the box.
 >
-> **Direction (decided)**: keep the existing xiaozhi-esp32 firmware on the device unchanged. Build the integration cloud-side via a new **`xiaozhi-hermes-bridge`** that speaks xiaozhi's WebSocket protocol while routing the agent loop to Hermes-agent (which in turn pulls memory from `agentkeys-daemon` per §C3). Reduces v0 effort from ~3 months (custom firmware) to ~2-3 weeks (server-side adapter only).
+> **Direction (decided)**: keep the existing xiaozhi-esp32 firmware on the device unchanged. Build the integration cloud-side via a new **`xiaozhi-hermes-bridge`** that speaks xiaozhi's WebSocket protocol while routing the agent loop to Hermes-agent (which in turn pulls memory from `agentkeys-daemon` per §C3). Reduces v0 effort from ~3 months (custom firmware) to **~1-2 weeks** (server-side adapter only — revised down from earlier ~2-3 week estimate based on the risk-verification research; see [`docs/research/xiaozhi-hermes-risks.md`](../../research/xiaozhi-hermes-risks.md) for grounded effort breakdown).
 >
 > **What this means for the original plan sections:**
 > - §C3 (mock memory + daemon endpoint) — **STILL VALID**, no changes
@@ -438,9 +438,11 @@ A reviewer takes the demo runbook, runs `bash scripts/setup-demo-aiosandbox.sh` 
 - Steps 8-9 (Dockerfile + deploy): **~3 days**
 - Steps 10-11 (ESP32 + end-to-end): **~1 week**
 - Step 12 (runbook): **~2 days**
-- **Total: ~3 weeks for a working v0 demo**
+- **Total: ~1-2 weeks for a working v0 demo** (revised 2026-05-24 from original ~3 week estimate)
 
-This fits the office-hours §9.7 next-moves timeline: demo ready in 3 weeks, vendor outreach happens in parallel during weeks 1-2 (the assignment from §The Assignment).
+**The revision happened because** the [risk-verification research](../../research/xiaozhi-hermes-risks.md) showed all three identified risks were either built-in-mitigated (R1: Hermes session headers, 2-4 hrs), mostly-not-real (R2: learning loop is background-off-turn-path), or fine-for-v0 (R3: gateway is multi-tenant by design). A newly discovered fourth risk (R4: cold agent construction per request adds 50-300ms) needs 1 day of fork-local pooling work. Net effect: bridge work ~3-4 days, parallel tracks (AgentKeys daemon endpoint, S3 mock, device config, runbook) ~3-4 days. Calendar time ~1-2 weeks depending on engineer concurrency.
+
+This fits the office-hours §9.7 next-moves timeline: demo ready in 1-2 weeks, vendor outreach happens in parallel (the assignment from §The Assignment).
 
 ## What landed (to fill at PR time)
 

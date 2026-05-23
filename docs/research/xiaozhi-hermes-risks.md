@@ -132,7 +132,7 @@ Adding 50-200ms Hermes overhead lands at **1.5-2.4s**, within the office-hours d
 - `main/README.md` lines 112 + 134 — design: "asyncio-based concurrent WebSocket handling ... per-connection handler instance ensures multi-device state isolation."
 - `core/connection.py` line 121 — caps blocking work at `ThreadPoolExecutor(max_workers=5)` PER CONNECTION (for sync ASR/TTS calls).
 - **No documented hard ceiling on concurrent devices per process.** README mentions a 6-concurrent-user public demo but recommends streaming config for ">2 concurrent users."
-- The "100+ devices per process in production by Chinese AI toy vendors" claim in the [office-hours doc](./ai-hardware-companion-office-hours.md) is **unverified** by the repo — Tenclass provides "high-concurrency scenario reference" without published numbers.
+- The "100+ devices per process in production by Chinese AI toy vendors" figure that circulated in earlier informal discussion is **unverified** by the repo. The xiaozhi-esp32-server README only documents the 6-concurrent demo; Tenclass is mentioned as providing "high-concurrency scenario reference" but without published numbers. Treat the actual concurrent-device ceiling as unknown until measured under realistic load.
 
 **Hermes side**:
 - Per-request `_create_agent()` (line 851) builds a fresh `AIAgent`. The gateway IS multi-tenant — README claims "Telegram, Discord, Slack, WhatsApp, Signal, and CLI — all from a single gateway process."
