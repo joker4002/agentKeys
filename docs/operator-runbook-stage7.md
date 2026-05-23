@@ -686,7 +686,6 @@ standard exposition format. Counters available:
 - `agentkeys_broker_audit_writes_total` / `_failed_total`
 - `agentkeys_broker_auth_attempts_total`
 - `agentkeys_broker_auth_failed_unauthorized_total` / `_rate_limited_total` / `_other_total`
-- `agentkeys_broker_idempotency_hits_total` / `_conflicts_total`
 
 When `BROKER_METRICS_ENABLED` is unset or `false`, `/metrics` returns
 404 — operators who don't run a Prometheus scraper should leave it
