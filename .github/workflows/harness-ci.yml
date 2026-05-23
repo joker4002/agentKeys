@@ -276,6 +276,13 @@ jobs:
           P256_VERIFIER_ADDRESS_HEIMA=${{ secrets.TEST_P256_VERIFIER_ADDRESS_HEIMA }}
           K11_VERIFIER_ADDRESS_HEIMA=${{ secrets.TEST_K11_VERIFIER_ADDRESS_HEIMA }}
           HEIMA_DEPLOYER_KEY_FILE=$HOME/.agentkeys/heima-deployer.key
+          # Derived from TEST_HEIMA_DEPLOYER_KEY at materialize time so
+          # the harness step 11 (K11 enrollment) reads master_addr from
+          # the canonical env-var slot instead of skipping with "no
+          # master address yet". cast is on PATH via foundry-toolchain.
+          # GHA masks the secret in logs; the cast invocation captures
+          # only the public address into the env file.
+          HEIMA_DEPLOYER_ADDR_HEIMA=$(cast wallet address --private-key "${{ secrets.TEST_HEIMA_DEPLOYER_KEY }}")
           # Per-run S3 prefix so concurrent runs don't step on each
           # other's writes. Nightly cleanup script (operator-side) rm's
           # ci/run-* prefixes older than 7d.
