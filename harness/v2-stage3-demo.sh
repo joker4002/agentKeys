@@ -164,7 +164,7 @@ case "$CALLER_LC" in
   # on the stage-3 critical path today) will fail loudly when they
   # actually exercise IAM-admin actions. Same softening pattern as
   # the equivalent check in v2-stage1-demo.sh + heima-scope-set.sh.
-  *) warn "caller is $CALLER_ARN — may or may not have required perms; proceeding (admin needed for step 8 cleanup + bucket lookups)" ;;
+  *) info "caller is $CALLER_ARN — may or may not have required perms; proceeding (admin needed for step 8 cleanup + bucket lookups)" ;;
 esac
 
 printf "\n=== v2 stage-3 demo: OIDC isolation proof ===\n  chain=%s issuer=%s vault=%s memory=%s\n\n" \
