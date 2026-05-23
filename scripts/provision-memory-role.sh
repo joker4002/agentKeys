@@ -58,8 +58,14 @@ BROKER_HOST="${BROKER_HOST:?BROKER_HOST required}"
 OIDC_PROVIDER_ARN="${OIDC_PROVIDER_ARN:?OIDC_PROVIDER_ARN required}"
 MEMORY_BUCKET="${MEMORY_BUCKET:?MEMORY_BUCKET required}"
 
-ROLE_NAME="agentkeys-memory-role"
-INLINE_POLICY_NAME="agentkeys-memory-role-inline"
+# ROLE_NAME derives from $MEMORY_ROLE_ARN — see provision-vault-role.sh
+# for the why (prod-clobber prevention; same 2026-05-23 incident).
+if [ -n "${MEMORY_ROLE_ARN:-}" ]; then
+  ROLE_NAME="${MEMORY_ROLE_ARN##*/}"
+else
+  ROLE_NAME="agentkeys-memory-role"
+fi
+INLINE_POLICY_NAME="${ROLE_NAME}-inline"
 
 # Caller identity (admin needed)
 caller_arn=$(aws sts get-caller-identity --query Arn --output text 2>&1) \
