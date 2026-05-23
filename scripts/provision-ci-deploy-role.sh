@@ -175,7 +175,7 @@ if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
   if [ "$DRY_RUN" = "1" ]; then
     log "DRY RUN — would update-assume-role-policy with: $trust_policy"
   else
-    log "Refreshing trust policy (idempotent — overwrites with $sub_pattern shape)"
+    log "Refreshing trust policy (idempotent; sub pattern: repo:${REPO_SLUG}:*)"
     aws iam update-assume-role-policy \
       --role-name "$ROLE_NAME" \
       --policy-document "$trust_policy" \
