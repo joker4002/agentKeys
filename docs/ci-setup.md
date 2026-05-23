@@ -48,7 +48,7 @@ Every resource in the test instance is parallel to prod:
 
 ## CI activation — what comes AFTER `setup-broker-host.sh` succeeds
 
-**Prereq:** the test stack from [`docs/cloud-bootstrap.md` quick start](cloud-bootstrap.md#quick-start--five-steps-to-a-running-stack) steps 1–5 is complete — `setup-cloud.sh --test` ran clean, the test EC2 is up at `test-broker.<your-zone>`, and `setup-broker-host.sh` finished on the box (broker + signer + 4 workers + nginx + certbot all running).
+**Prereq:** the test stack from [`docs/cloud-bootstrap.md` quick start](cloud-bootstrap.md#quick-start--five-steps-to-a-running-stack) **steps 1–5b** is complete — `setup-cloud.sh --test` ran clean, the test EC2 is up at `test-broker.<your-zone>` with SG ports 22 + 80 + 443 all open, `setup-broker-host.sh` finished on the box (broker + signer + 4 workers + nginx running), AND **`certbot` has issued certs for all 6 test hostnames + nginx has been flipped onto `:443`** ([`docs/cloud-bootstrap.md` §5b](cloud-bootstrap.md#5b-issue-tls-certs--flip-nginx-onto-443)).
 
 Running `bash scripts/setup-heima.sh` alone is **not enough** for CI. Five more steps below.
 
@@ -66,6 +66,30 @@ echo "ACCOUNT_ID=$ACCOUNT_ID  ZONE=$ZONE  BROKER_HOST=$BROKER_HOST"
 
 If `${ZONE}` echoes empty, the env file isn't sourced — re-run the `set -a; source …; set +a` line.
 
+### Sanity-check: broker is serving TLS with a real cert
+
+Before §1 (which extracts the cert thumbprint), verify the broker is actually serving HTTPS — otherwise the openssl pipeline gets empty stdin and dies with the cryptic `unable to load certificate / Expecting: TRUSTED CERTIFICATE` error.
+
+**Use DoH for the DNS lookup** — laptop `dig` may be intercepted by Cloudflare WARP / Zscaler / Tailscale that rewrites `litentry.org` to `198.18.x.y` for tunnel routing. DoH bypasses that:
+
+```bash
+# Public IP that Let's Encrypt + AWS STS will actually hit:
+broker_ip=$(curl -sS "https://dns.google/resolve?name=${BROKER_HOST}&type=A" | jq -r '.Answer[0].data')
+echo "${BROKER_HOST} resolves publicly to $broker_ip"
+# → e.g. 3.214.219.209 — NOT 198.18.x.y. If you see 198.18.x.y here, your VPN
+#   is mis-routing the response (DoH should be immune; retry from a different network).
+
+# TLS handshake against the real EIP, bypassing local DNS:
+echo | openssl s_client -servername "${BROKER_HOST}" -connect "${broker_ip}:443" 2>&1 \
+  | grep -E '(subject=|verify return code)'
+# Expected:
+#   depth=0 CN = ${BROKER_HOST}
+#   verify return code: 0 (ok)
+#   subject=/CN=${BROKER_HOST}
+```
+
+If `subject=` echoes empty or `openssl s_client` prints `no peer certificate available`, the broker doesn't have a TLS cert yet — go back to [`docs/cloud-bootstrap.md` §5b](cloud-bootstrap.md#5b-issue-tls-certs--flip-nginx-onto-443) and run certbot + re-run `setup-broker-host.sh` to flip nginx onto `:443`. Then re-run this sanity-check before continuing to §1 below.
+
 ### 1. Activate OIDC federation for the test broker
 
 The broker is reachable, but AWS STS doesn't trust its JWTs yet. Follow [`docs/cloud-bootstrap.md` §9](cloud-bootstrap.md#9-oidc-federation-activation-after-broker-is-publicly-reachable) — register the test OIDC provider in IAM (separate ARN from prod's), swap the three `*-role-test` trust policies to the federated variant, apply PrincipalTag-scoped bucket policies.
@@ -73,9 +97,14 @@ The broker is reachable, but AWS STS doesn't trust its JWTs yet. Follow [`docs/c
 ```bash
 # Quick form (full explanation in cloud-bootstrap.md §9). $BROKER_HOST +
 # $ACCOUNT_ID come from the env file sourced in the "Shell setup" step above.
+# $broker_ip carries over from the sanity-check above (DoH-resolved EIP,
+# immune to laptop DNS interception). If your shell lost it: re-run
+#   broker_ip=$(curl -sS "https://dns.google/resolve?name=${BROKER_HOST}&type=A" | jq -r '.Answer[0].data')
 
-thumb=$(echo | openssl s_client -servername "$BROKER_HOST" -connect "$BROKER_HOST:443" 2>/dev/null \
+thumb=$(echo | openssl s_client -servername "$BROKER_HOST" -connect "${broker_ip}:443" 2>/dev/null \
         | openssl x509 -fingerprint -noout | awk -F'=' '{print $2}' | tr -d ':' | tr 'A-Z' 'a-z')
+[ -n "$thumb" ] || { echo "thumbprint empty — broker has no TLS cert; see cloud-bootstrap.md §5b" >&2; return 1; }
+echo "thumb=$thumb"
 
 AWS_PROFILE=agentkeys-admin aws iam create-open-id-connect-provider \
   --url "https://$BROKER_HOST" \

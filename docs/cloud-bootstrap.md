@@ -22,6 +22,7 @@ For each stack (prod and test) you stand up SEPARATELY:
 
 - Launch an EC2 — **t3.small minimum** (Ubuntu 22.04 LTS recommended). `t3.micro` runs the OS but its 1 GB RAM gets OOM-killed compiling `aws-sdk-s3` during `setup-broker-host.sh`. If you already have a t3.micro you can resize: `aws ec2 stop-instances` → `modify-instance-attribute --instance-type t3.small` → `start-instances` (EIP stays attached, INSTANCE_ID unchanged).
 - Allocate an EIP (or reuse one) and attach it to the EC2.
+- **Open SG ports 22 (SSH), 80 (certbot HTTP-01 challenge), 443 (TLS)** to `0.0.0.0/0`. **All three are required** — port 80 is needed for Let's Encrypt to validate domain ownership during cert issuance (step 5b), even though steady-state traffic only flows over 443. Verify with `aws ec2 describe-security-groups --group-ids <sg-id> --query 'SecurityGroups[].IpPermissions[].[FromPort,IpRanges[].CidrIp]'` — you should see all three ports.
 - Generate or import an SSH key pair (the `.pem` you'll keep as the fallback when EC2 Instance Connect is down). Confirm SSH works: `ssh -i your.pem ubuntu@<EIP>`.
 - The default `ubuntu` user is enough for now — the `agentkey` SSH login user (used by EC2 Instance Connect later) is created automatically by `setup-broker-host.sh` in step 5, along with the `ec2-instance-connect` package.
 - Note **INSTANCE_ID** + **EIP** — both go into the env files in step 2.
@@ -133,9 +134,52 @@ Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --test 
 
 For **prod**, the same flow applies — drop `--test` everywhere and the relocation moves the repo from whichever home dir you bootstrapped in to `/home/agentkey/`.
 
+### 5b. Issue TLS certs + flip nginx onto :443
+
+`setup-broker-host.sh` installs `certbot` but does NOT issue Let's Encrypt certs itself — issuance is DNS-dependent (the broker hostname must already resolve to this EIP on the public internet before Let's Encrypt's HTTP-01 challenger can validate it). Until you run the issuance below, nginx serves HTTP-only on `:80` with a `503 "TLS cert not yet issued"` placeholder on every non-ACME path — and **the OIDC federation step in [`docs/ci-setup.md`](ci-setup.md) §1 can't succeed because there's no cert to extract a thumbprint from**.
+
+```bash
+# Still on the broker host (as agentkey or ubuntu — both have sudo):
+for h in ${BROKER_HOST} ${SIGNER_HOST} ${AUDIT_HOST} ${EMAIL_HOST} ${CRED_HOST} ${MEMORY_HOST}; do
+  sudo certbot certonly --webroot -w /var/www/certbot -d "$h" \
+    --agree-tos -m <your-ops-email> --non-interactive
+done
+
+# Flip nginx from Phase A (HTTP-only) → Phase B (HTTPS) — the renderer in
+# setup-broker-host.sh picks Phase B automatically when /etc/letsencrypt/live/<host>/
+# exists. Re-running the script is the trigger:
+cd ~/agentKeys
+sudo bash scripts/setup-broker-host.sh --test --yes      # or drop --test for prod
+```
+
+The hostname env vars come from `/etc/agentkeys/broker.env` (which `setup-broker-host.sh` wrote at step 5). For **test**: `BROKER_HOST=test-broker.${ZONE}`, `SIGNER_HOST=signer-test.${ZONE}`, etc. For **prod**: drop the `-test` suffix.
+
+**Verify the cert is live** (bypass laptop DNS, which may be rewritten by WARP / Zscaler / Tailscale to `198.18.x.y` for `${ZONE}`):
+
+```bash
+# DoH lookup — proves Route 53 has the right EIP, not your laptop's local resolver
+curl -sS "https://dns.google/resolve?name=${BROKER_HOST}&type=A" | jq -r '.Answer[].data'
+# → should be your EIP, not 198.18.x.y
+
+# TLS handshake against the real EIP:
+echo | openssl s_client -servername "${BROKER_HOST}" -connect "$(curl -sS "https://dns.google/resolve?name=${BROKER_HOST}&type=A" | jq -r '.Answer[0].data'):443" 2>&1 \
+  | grep -E "subject="
+# → subject=/CN=<your-BROKER_HOST>
+```
+
+If `openssl s_client` returns `no peer certificate available`, certbot didn't finish or nginx isn't on Phase B yet. Check:
+- `sudo ls /etc/letsencrypt/live/` — should list all 6 hostnames as subdirs.
+- `sudo ss -tlnp | grep ':443'` — nginx should be on `0.0.0.0:443`.
+- `sudo tail /var/log/letsencrypt/letsencrypt.log` for the actual certbot failure.
+
+Common failures + fixes:
+- **`Connection timeout to … port 80`** — the SG is missing port 80 ingress. Re-check step 1's SG requirements (you need 22, 80, **and** 443).
+- **`DNS problem: NXDOMAIN`** — Route 53 doesn't have the A record yet, or DNS hasn't propagated. Wait 1-2 min, then retry. Quick check: `curl -sS "https://dns.google/resolve?name=<host>&type=A"` (do NOT rely on `dig` — local resolver may be lying).
+- **`No such file or directory: /var/www/certbot`** — Phase A nginx render didn't complete; re-run `sudo bash scripts/setup-broker-host.sh --test --yes` first.
+
 ---
 
-The rest of this doc explains **why** each step exists and how to recover from failures. Operators following the quick start above can skip to [`docs/chain-setup.md`](chain-setup.md) once step 5 completes.
+The rest of this doc explains **why** each step exists and how to recover from failures. Operators following the quick start above can skip to [`docs/chain-setup.md`](chain-setup.md) once step 5b completes.
 
 ```
 §1  Identities         — four IAM principals; concept first, then provider commands
@@ -826,8 +870,8 @@ The script:
 - Writes the dev_key_service master secret (one-shot at first boot, never rotated — rotation invalidates every previously-derived wallet).
 - Writes per-worker env files at `/etc/agentkeys/worker-{audit,email,creds,memory}.env`.
 - Writes systemd units for broker + signer + each worker, enables + starts.
-- Configures nginx vhosts for `${BROKER_HOST}` + `signer.${ZONE}` + 4 worker hosts (skip via `--without-nginx`).
-- Runs certbot for first-time TLS cert issuance (skip via `--without-certbot`).
+- Configures nginx vhosts for `${BROKER_HOST}` + `signer.${ZONE}` + 4 worker hosts (skip via `--without-nginx`). Vhost is rendered in two phases: Phase A (HTTP-only on `:80`, with the ACME challenge path under `/.well-known/acme-challenge/` and a 503 placeholder on `/`) when no cert is on disk; Phase B (HTTPS on `:443`, broker proxy on `/`) when `/etc/letsencrypt/live/<host>/fullchain.pem` exists. Re-running the script after certbot issuance flips A → B automatically.
+- **Installs certbot but does NOT run it.** Cert issuance is DNS-dependent — see quick-start §5b for the per-vhost `certbot certonly --webroot` recipe operators run manually once DNS is in place.
 - Mints broker keypairs (oidc + session) under `/var/lib/agentkeys/keys/`.
 
 Auto-detects bootstrap vs upgrade by reading the existing systemd unit's `Environment=` lines. Pass `--ref <branch>` to opt into an in-script `git fetch + pull`.
