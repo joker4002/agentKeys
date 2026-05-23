@@ -66,20 +66,43 @@ ONLY_STEP=""
 # while internally skipping the actual encrypt/decrypt + cross-class
 # rejection assertions. That's exactly the "hardcoded bypass" pattern
 # we want to forbid in CI.
-ALLOW_SKIP=0
-STEP_OUTCOMES=()    # filled in per-step: "ok|skip|fail" — drives final summary
+# --allow-skip is a per-reason allowlist, NOT a blanket bypass.
+#   --allow-skip                         → legacy: all reasons allowed (dev only)
+#   --allow-skip=scope-not-set           → only the scope-not-set prereq may skip
+#   --allow-skip=scope-not-set,broker-misconfig  → comma-separated set
+#
+# Codex H1 (2026-05-23): blanket --allow-skip in CI lets stage 3 report success
+# while bypassing the four-layer isolation invariants it's supposed to test
+# (worker chain-verify, cap data-class mismatch, etc). CI must pass an explicit
+# reason list, and prereq_missing must tag each skip with a reason so non-
+# allowlisted reasons fail closed.
+#
+# Reason taxonomy (extend as new prereq checks land):
+#   scope-not-set            agent's service scope not granted on chain
+#   agent-file-missing       no demo-agent file on disk
+#   agent-file-invalid       agent file missing required field
+#   broker-misconfig         broker missing chain RPC or contract addresses
+#   device-role-missing      device not granted ROLE_CAP_MINT on chain
+#   agent-sts-mint-failed    auth chain broken upstream of this stage's checks
+ALLOW_SKIP_REASONS=""   # empty = strict mode (every prereq dies); * = all
+STEP_OUTCOMES=()        # filled in per-step: "ok|skip|fail" — drives final summary
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --from-step)     FROM_STEP="$2"; shift 2 ;;
-    --to-step)       TO_STEP="$2"; shift 2 ;;
-    --only-step)     ONLY_STEP="$2"; shift 2 ;;
-    --allow-skip)    ALLOW_SKIP=1; shift ;;
+    --from-step)        FROM_STEP="$2"; shift 2 ;;
+    --to-step)          TO_STEP="$2"; shift 2 ;;
+    --only-step)        ONLY_STEP="$2"; shift 2 ;;
+    --allow-skip)       ALLOW_SKIP_REASONS="*"; shift ;;
+    --allow-skip=*)     ALLOW_SKIP_REASONS="${1#--allow-skip=}"; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
+
+# Back-compat alias for code paths that still test $ALLOW_SKIP (boolean).
+# 1 when any reason is allowed; 0 in strict mode.
+if [ -n "$ALLOW_SKIP_REASONS" ]; then ALLOW_SKIP=1; else ALLOW_SKIP=0; fi
 
 if [ -n "$ONLY_STEP" ]; then FROM_STEP="$ONLY_STEP"; TO_STEP="$ONLY_STEP"; fi
 STEP_NUM=$((FROM_STEP - 1))
@@ -98,25 +121,54 @@ skip() { printf "    ${C_WARN}skip${C_RESET}  %s\n" "$*" >&2; }
 die()  { printf "    ${C_ERR}fail${C_RESET}  %s\n" "$*" >&2; exit 1; }
 
 # Codex review fix (high): unmet-prereq paths must FAIL in strict mode.
-# In --allow-skip mode they still skip (dev iteration). The final summary
-# distinguishes ok vs skip vs fail per step so the demo can't claim
-# coverage for paths it didn't actually exercise.
+# In --allow-skip=<reason> mode they skip ONLY when reason is allowlisted.
+# The final summary distinguishes ok vs skip vs fail per step so the demo
+# can't claim coverage for paths it didn't actually exercise.
+#
+# Signature: prereq_missing <reason-tag> <message>
+#   reason-tag MUST come from the taxonomy at the top of this file.
+#   Reasons not in $ALLOW_SKIP_REASONS fail closed (return 1 → step dies).
+_reason_allowed() {
+  local reason="$1" allowlist="$ALLOW_SKIP_REASONS"
+  case "$allowlist" in
+    "")      return 1 ;;                # strict mode
+    "*")     return 0 ;;                # legacy --allow-skip (all reasons)
+    *)
+      # Comma-separated list — match the reason as a whole token.
+      case ",$allowlist," in
+        *",$reason,"*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+}
 prereq_missing() {
-  local msg="$1"
-  if [ "$ALLOW_SKIP" = "1" ]; then
-    skip "$msg  (--allow-skip set)"
-    STEP_OUTCOMES+=("$STEP_NUM:skip:$msg")
+  local reason msg
+  if [ $# -ge 2 ]; then
+    reason="$1"; shift; msg="$*"
+  else
+    # Untagged call-site (legacy) — treat as wildcard "unknown" reason which
+    # only the legacy --allow-skip (=*) allows. Strict + per-reason modes
+    # always fail untagged calls. Forces every call-site to migrate to a tag.
+    reason="UNTAGGED"; msg="$1"
+  fi
+  if _reason_allowed "$reason"; then
+    skip "$msg  (allowed skip reason: $reason)"
+    STEP_OUTCOMES+=("$STEP_NUM:skip:$reason:$msg")
     return 0
   fi
-  printf "    ${C_ERR}fail${C_RESET}  %s\n" "prereq missing — $msg (set --allow-skip to ignore for dev iteration)" >&2
-  STEP_OUTCOMES+=("$STEP_NUM:fail:$msg")
+  printf "    ${C_ERR}fail${C_RESET}  %s\n" "prereq missing [$reason] — $msg (allow via --allow-skip=$reason for dev iteration)" >&2
+  STEP_OUTCOMES+=("$STEP_NUM:fail:$reason:$msg")
   return 1
 }
 record_ok() { STEP_OUTCOMES+=("$STEP_NUM:ok:$1"); }
 should_run_step() { [ "$1" -ge "$FROM_STEP" ] && [ "$1" -le "$TO_STEP" ]; }
 
 # ─── Env ────────────────────────────────────────────────────────────────────
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+# ENV_FILE: caller-supplied env var takes precedence; default = prod.
+# Lets `ENV_FILE=scripts/operator-workstation.test.env bash harness/v2-stage3-demo.sh`
+# (or CI's in-place rewrite of the default path) re-point at test resources.
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE — run from a clone of agentKeys"
 set -a; . "$ENV_FILE"; set +a
 : "${OIDC_ISSUER:?OIDC_ISSUER unset (operator-workstation.env)}"
@@ -125,8 +177,20 @@ set -a; . "$ENV_FILE"; set +a
 : "${REGION:?REGION unset}"
 : "${VAULT_ROLE_ARN:?VAULT_ROLE_ARN unset}"
 : "${MEMORY_ROLE_ARN:?MEMORY_ROLE_ARN unset (operator-workstation.env — added in #90 Q3 followup)}"
+
+# Deployer-wallet resolution: prefer a raw private-key file (the CI path,
+# and the operator's test-deployer path) over a mnemonic. Set
+# HEIMA_DEPLOYER_KEY_FILE=/path/to/0x-key.txt to skip the mnemonic derive.
+# Mnemonic fallback preserves the existing operator dogfood flow that uses
+# ./test-hei in the repo root.
+DEPLOYER_KEY_FILE="${HEIMA_DEPLOYER_KEY_FILE:-}"
 MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-[ -f "$MNEMONIC_FILE" ] || die "missing mnemonic at $MNEMONIC_FILE"
+if [ -n "$DEPLOYER_KEY_FILE" ] && [ -f "$DEPLOYER_KEY_FILE" ]; then
+  USE_KEY_FILE=1
+else
+  USE_KEY_FILE=0
+  [ -f "$MNEMONIC_FILE" ] || die "no HEIMA_DEPLOYER_KEY_FILE set and no mnemonic at $MNEMONIC_FILE — set one or the other"
+fi
 
 # Hold state across steps in a temp dir so steps are individually re-runnable.
 STATE_DIR="${STAGE3_STATE_DIR:-/tmp/agentkeys-stage3}"
@@ -140,19 +204,43 @@ CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null |
 CALLER_LC=$(printf '%s' "$CALLER_ARN" | tr '[:upper:]' '[:lower:]')
 case "$CALLER_LC" in
   *user/agentkeys-admin*) ;;
-  *) die "current AWS profile is $CALLER_ARN — run \`awsp agentkeys-admin\` first (needed for step 8 cleanup + sanity bucket lookups)" ;;
+  # Soft-fail to warn: the admin check exists for step 8 (cleanup) +
+  # sanity bucket lookups. CI runs as the OIDC-assumed
+  # github-actions-agentkeys-e2e role which has list/get/delete on
+  # test buckets (per docs/ci-setup.md §4 inline policy
+  # agentkeys-e2e-verify-s3) — sufficient for steps 1-7 + the cleanup
+  # in step 8. Steps that genuinely need agentkeys-admin perms (none
+  # on the stage-3 critical path today) will fail loudly when they
+  # actually exercise IAM-admin actions. Same softening pattern as
+  # the equivalent check in v2-stage1-demo.sh + heima-scope-set.sh.
+  *) info "caller is $CALLER_ARN — may or may not have required perms; proceeding (admin needed for step 8 cleanup + bucket lookups)" ;;
 esac
 
 printf "\n=== v2 stage-3 demo: OIDC isolation proof ===\n  chain=%s issuer=%s vault=%s memory=%s\n\n" \
   "${AGENTKEYS_CHAIN:-heima}" "$OIDC_ISSUER" "$VAULT_BUCKET" "$MEMORY_BUCKET" >&2
 
-# Pre-derive wallet identity (used in many steps).
-if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
-  npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund || die "npm install ethers failed"
+# Pre-derive wallet identity (used in many steps). Two paths land on the
+# same (WALLET_KEY, WALLET_ADDR) pair:
+#   1. HEIMA_DEPLOYER_KEY_FILE — raw 0x-prefixed private key; preferred path
+#                                (CI + test-deployer dogfood). No npm + ethers
+#                                round-trip; relies only on `cast` (already on
+#                                PATH from foundry-toolchain action).
+#   2. HEIMA_DEPLOYER_MNEMONIC_FILE (defaults to ./test-hei) — legacy operator
+#                                dogfood path. Requires ethers via npm.
+if [ "$USE_KEY_FILE" = "1" ]; then
+  WALLET_KEY=$(tr -d '\r\n[:space:]' < "$DEPLOYER_KEY_FILE")
+  [[ "$WALLET_KEY" =~ ^0x[0-9a-fA-F]{64}$ ]] \
+    || die "HEIMA_DEPLOYER_KEY_FILE=$DEPLOYER_KEY_FILE: content not in 0x<64hex> form"
+  WALLET_ADDR=$(cast wallet address --private-key "$WALLET_KEY") \
+    || die "cast wallet address failed (cast on PATH? key valid?)"
+else
+  if [ ! -d "$REPO_ROOT/scripts/node_modules/ethers" ]; then
+    npm install --prefix "$REPO_ROOT/scripts" --silent --no-audit --no-fund || die "npm install ethers failed"
+  fi
+  DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
+  WALLET_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
+  WALLET_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
 fi
-DERIV_JSON=$(node "$REPO_ROOT/scripts/derive-evm-from-mnemonic.mjs" "$MNEMONIC_FILE")
-WALLET_KEY=$(echo "$DERIV_JSON" | jq -r .privateKey)
-WALLET_ADDR=$(echo "$DERIV_JSON" | jq -r .address)
 WALLET_LC=$(printf '%s' "$WALLET_ADDR" | tr '[:upper:]' '[:lower:]')
 OWN_ACTOR_OMNI=$(printf 'agentkeysevm%s' "$WALLET_LC" | shasum -a 256 | awk '{print $1}')
 # A different actor_omni for the negative test. Any 64-hex non-matching string.
@@ -474,7 +562,7 @@ cred_memory_roundtrip() {
   local agent_pk
   agent_pk=$(jq -r '.agent_private_key // empty' "$AGENT_FILE")
   if [ -z "$agent_pk" ] || [ "$agent_pk" = "null" ]; then
-    prereq_missing "agent file missing agent_private_key — cannot mint agent STS creds" || return 1
+    prereq_missing agent-file-invalid "agent file missing agent_private_key — cannot mint agent STS creds" || return 1
     return 0
   fi
   local agent_addr
@@ -527,7 +615,7 @@ cred_memory_roundtrip() {
     agent_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
   fi
   if [ -z "${agent_actor:-}" ] || [ "$agent_actor" = "null" ]; then
-    prereq_missing "no demo-agent file at $AGENT_FILE — run stage-1 step 12 first" || return 1
+    prereq_missing agent-file-missing "no demo-agent file at $AGENT_FILE — run stage-1 step 12 first" || return 1
     return 0
   fi
   if [ -z "${agent_dkh:-}" ]; then
@@ -535,7 +623,7 @@ cred_memory_roundtrip() {
     local agent_addr
     agent_addr=$(jq -r '.agent_address // .wallet_address // empty' "$AGENT_FILE")
     if [ -z "$agent_addr" ]; then
-      prereq_missing "agent file missing agent_address" || return 1
+      prereq_missing agent-file-invalid "agent file missing agent_address" || return 1
       return 0
     fi
     agent_dkh=$(cast keccak "$(printf '%s' "$agent_addr" | tr '[:upper:]' '[:lower:]')")
@@ -560,19 +648,19 @@ cred_memory_roundtrip() {
   body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
   if [ "$rc" != "200" ]; then
     if echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope|service not in scope"; then
-      prereq_missing "agent scope not set on chain — run \`bash harness/v2-stage1-demo.sh --webauthn\` (Touch ID at steps 11 + 13) first" || return 1
+      prereq_missing scope-not-set "agent scope not set on chain — run \`bash harness/v2-stage1-demo.sh --webauthn\` (Touch ID at steps 11 + 13) first" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP"; then
-      prereq_missing "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host" || return 1
+      prereq_missing broker-misconfig "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA|K3_EPOCH_COUNTER_ADDRESS_HEIMA.*unset"; then
-      prereq_missing "broker missing contract address env — redeploy broker host" || return 1
+      prereq_missing broker-misconfig "broker missing contract address env — redeploy broker host" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "DeviceRoleMissing|role_missing|cap_mint role"; then
-      prereq_missing "device not granted ROLE_CAP_MINT on chain — operator must register-with-role first" || return 1
+      prereq_missing device-role-missing "device not granted ROLE_CAP_MINT on chain — operator must register-with-role first" || return 1
       return 0
     fi
     cat <<EOF >&2
@@ -808,7 +896,7 @@ mint_agent_sts_for_role() {
 cross_class_rejection() {
   local cap_url="$1" worker_full_url="$2" worker_label="$3" cap_label="$4" art="$5"
   if [ ! -f "$AGENT_FILE" ]; then
-    prereq_missing "no demo-agent file — run stage-1 step 12 first" || return 1
+    prereq_missing agent-file-missing "no demo-agent file — run stage-1 step 12 first" || return 1
     return 0
   fi
   local a_actor a_dkh cap_body
@@ -823,19 +911,19 @@ cross_class_rejection() {
   if [ "$rc" != "200" ]; then
     body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
     if echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope"; then
-      prereq_missing "agent scope not set on chain — stage-1 step 13 setScopeWithWebauthn required" || return 1
+      prereq_missing scope-not-set "agent scope not set on chain — stage-1 step 13 setScopeWithWebauthn required" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP"; then
-      prereq_missing "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host" || return 1
+      prereq_missing broker-misconfig "broker missing AGENTKEYS_CHAIN_RPC_HTTP — redeploy broker host" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA|K3_EPOCH_COUNTER_ADDRESS_HEIMA.*unset"; then
-      prereq_missing "broker missing contract address env — redeploy broker host" || return 1
+      prereq_missing broker-misconfig "broker missing contract address env — redeploy broker host" || return 1
       return 0
     fi
     if echo "$body" | grep -qiE "DeviceRoleMissing|role_missing|cap_mint role"; then
-      prereq_missing "device not granted ROLE_CAP_MINT on chain" || return 1
+      prereq_missing device-role-missing "device not granted ROLE_CAP_MINT on chain" || return 1
       return 0
     fi
     die "$cap_url cap-mint returned HTTP $rc — body: $body"
@@ -854,7 +942,7 @@ cross_class_rejection() {
   if [ "$worker_label" = "memory" ]; then target_role="$MEMORY_ROLE_ARN"; else target_role="$VAULT_ROLE_ARN"; fi
   local sts_blob aki sak sst
   if ! sts_blob=$(mint_agent_sts_for_role "$target_role" "cross-$art"); then
-    prereq_missing "agent STS mint failed for $worker_label target — auth chain broken (broker?  agent file?)" || return 1
+    prereq_missing agent-sts-mint-failed "agent STS mint failed for $worker_label target — auth chain broken (broker?  agent file?)" || return 1
     return 0
   fi
   aki="${sts_blob%%;*}"; rest="${sts_blob#*;}"; sak="${rest%%;*}"; sst="${rest#*;}"
@@ -922,18 +1010,31 @@ if should_run_step 16; then
   printf "  wallet         : %s\n" "$WALLET_ADDR" >&2
   printf "  own omni       : 0x%s\n\n" "$OWN_ACTOR_OMNI" >&2
 
-  nstep=""; noutcome=""; nmsg=""; rest=""; nok=0; nskip=0; nfail=0
+  nstep=""; noutcome=""; nreason=""; nmsg=""; rest=""; nok=0; nskip=0; nfail=0
   printf "  Per-step outcome (from actual execution, not claimed coverage):\n" >&2
+  # Entry format:
+  #   ok:   "<step>:ok:<msg>"                       (record_ok — no reason tag)
+  #   skip: "<step>:skip:<reason>:<msg>"            (prereq_missing under allowed reason)
+  #   fail: "<step>:fail:<reason>:<msg>"            (prereq_missing under denied/strict)
   for entry in "${STEP_OUTCOMES[@]:-}"; do
     [ -z "$entry" ] && continue
     nstep="${entry%%:*}"
     rest="${entry#*:}"
     noutcome="${rest%%:*}"
-    nmsg="${rest#*:}"
+    rest="${rest#*:}"
     case "$noutcome" in
-      ok)   printf "    [%2s] ${C_OK}ok${C_RESET}    %s\n" "$nstep" "$nmsg" >&2; nok=$((nok+1)) ;;
-      skip) printf "    [%2s] ${C_WARN}skip${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nskip=$((nskip+1)) ;;
-      fail) printf "    [%2s] ${C_ERR}fail${C_RESET}  %s\n" "$nstep" "$nmsg" >&2; nfail=$((nfail+1)) ;;
+      ok)
+        nmsg="$rest"
+        printf "    [%2s] ${C_OK}ok${C_RESET}    %s\n" "$nstep" "$nmsg" >&2
+        nok=$((nok+1)) ;;
+      skip)
+        nreason="${rest%%:*}"; nmsg="${rest#*:}"
+        printf "    [%2s] ${C_WARN}skip${C_RESET}  [%s] %s\n" "$nstep" "$nreason" "$nmsg" >&2
+        nskip=$((nskip+1)) ;;
+      fail)
+        nreason="${rest%%:*}"; nmsg="${rest#*:}"
+        printf "    [%2s] ${C_ERR}fail${C_RESET}  [%s] %s\n" "$nstep" "$nreason" "$nmsg" >&2
+        nfail=$((nfail+1)) ;;
     esac
   done
   printf "\n  Totals: %sok=%d%s  %sskip=%d%s  %sfail=%d%s\n" \

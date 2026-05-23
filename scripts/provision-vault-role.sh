@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
 done
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 
 if [ -t 2 ]; then
   C_HEAD='\033[1;36m'; C_OK='\033[1;32m'; C_SKIP='\033[1;33m'
@@ -58,8 +58,21 @@ BROKER_HOST="${BROKER_HOST:?BROKER_HOST required}"
 OIDC_PROVIDER_ARN="${OIDC_PROVIDER_ARN:?OIDC_PROVIDER_ARN required}"
 VAULT_BUCKET="${VAULT_BUCKET:?VAULT_BUCKET required}"
 
-ROLE_NAME="agentkeys-vault-role"
-INLINE_POLICY_NAME="agentkeys-vault-role-inline"
+# ROLE_NAME derives from $VAULT_ROLE_ARN in the env file. This is what makes
+# the script honor --test mode (when ENV_FILE points at operator-workstation.test.env,
+# VAULT_ROLE_ARN ends in `agentkeys-vault-role-test`). Falls back to the
+# canonical prod name if VAULT_ROLE_ARN isn't set.
+#
+# DANGER if we instead hardcoded "agentkeys-vault-role": running this script
+# with ENV_FILE=...test.env would silently clobber the PROD role's trust
+# policy and inline policy with TEST broker URLs — incident on 2026-05-23
+# caught + reverted same turn.
+if [ -n "${VAULT_ROLE_ARN:-}" ]; then
+  ROLE_NAME="${VAULT_ROLE_ARN##*/}"
+else
+  ROLE_NAME="agentkeys-vault-role"
+fi
+INLINE_POLICY_NAME="${ROLE_NAME}-inline"
 
 # Caller identity (admin needed)
 caller_arn=$(aws sts get-caller-identity --query Arn --output text 2>&1) \

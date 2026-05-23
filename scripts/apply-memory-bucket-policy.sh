@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
 done
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 
 if [ -t 2 ]; then
   C_HEAD='\033[1;36m'; C_OK='\033[1;32m'; C_SKIP='\033[1;33m'

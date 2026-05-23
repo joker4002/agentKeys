@@ -1,6 +1,6 @@
 # Stage 7 — Generalized OIDC Provider
 
-> **Status (2026-04-28).** Architecturally complete. The Rust broker owns the OIDC surface end-to-end (discovery + JWKS + bearer-gated `mint-oidc-jwt`); the provisioner-scripts AWS-cred path is wired through the broker; the audit destination is the broker's local SQLite per [`architecture.md` §11](spec/architecture.md#11-audit-destination-is-pluggable). The remaining work is operational: deploy the broker on a public hostname so AWS / GCP / Tencent IAM can fetch the JWKS during OIDC-provider registration. That deployment recipe is split between this doc (broker bring-up) and [`cloud-setup.md`](./cloud-setup.md) (cloud account provisioning).
+> **Status (2026-04-28).** Architecturally complete. The Rust broker owns the OIDC surface end-to-end (discovery + JWKS + bearer-gated `mint-oidc-jwt`); the provisioner-scripts AWS-cred path is wired through the broker; the audit destination is the broker's local SQLite per [`architecture.md` §11](spec/architecture.md#11-audit-destination-is-pluggable). The remaining work is operational: deploy the broker on a public hostname so AWS / GCP / Tencent IAM can fetch the JWKS during OIDC-provider registration. That deployment recipe is split between this doc (broker bring-up) and [`cloud-bootstrap.md`](./cloud-bootstrap.md) (cloud account provisioning).
 
 ## What Stage 7 delivers
 
@@ -145,7 +145,7 @@ The `backend_error` vs `auth_failed` distinction is what oncall chases — keep 
 
 For the broker to be reachable by daemons on developer laptops / CI / cloud sandboxes — and for AWS to OIDC-federate against it — it needs a public HTTPS hostname. The split:
 
-- **Cloud-account provisioning** (DNS, EIP, SES/S3, IAM, OIDC federation): [`cloud-setup.md`](./cloud-setup.md).
+- **Cloud-account provisioning** (DNS, EIP, SES/S3, IAM, OIDC federation): [`cloud-bootstrap.md`](./cloud-bootstrap.md).
 - **Broker-host bootstrap** (binaries, systemd, nginx, certbot): this section + [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh).
 
 ### Topology
@@ -204,8 +204,8 @@ sudo bash scripts/setup-broker-host.sh
 
 The script is idempotent. Re-run after any operator-side change (cred-mode swap, issuer-URL fix, cert renewal). What's still manual:
 
-- **Cloud-side IAM, SES, S3, OIDC federation** → [`cloud-setup.md`](./cloud-setup.md).
-- **DNS A record + EIP** → [`cloud-setup.md` §5](./cloud-setup.md#5-ec2-broker-host-optional).
+- **Cloud-side IAM, SES, S3, OIDC federation** → [`cloud-bootstrap.md`](./cloud-bootstrap.md).
+- **DNS A record + EIP** → [`cloud-bootstrap.md` §5](./cloud-bootstrap.md#5-ec2-broker-host-optional).
 - **Initial cert issuance** → `sudo certbot certonly --webroot -w /var/www/certbot -d <host>` (the `--nginx` plugin chickens-and-eggs on the empty cert path; webroot doesn't).
 
 ### Smoke test (after deployment)
@@ -237,18 +237,18 @@ curl -sS --fail-with-body -X POST https://broker.litentry.org/v1/mint-aws-creds 
   -H "Authorization: Bearer $SESSION" | jq '{access_key_id, expiration, wallet}'
 ```
 
-If `.issuer` doesn't match the URL byte-for-byte, fix `BROKER_OIDC_ISSUER` on the host before [§4](./cloud-setup.md#4-oidc-federation-stage-7) — AWS rejects mismatches at `AssumeRoleWithWebIdentity` time.
+If `.issuer` doesn't match the URL byte-for-byte, fix `BROKER_OIDC_ISSUER` on the host before [§4](./cloud-bootstrap.md#4-oidc-federation-stage-7) — AWS rejects mismatches at `AssumeRoleWithWebIdentity` time.
 
 ## Operations
 
 - **Start, supervise, rotate, audit** → [`operator-runbook-stage7.md`](./operator-runbook-stage7.md).
-- **Cloud-account provisioning + OIDC federation** → [`cloud-setup.md`](./cloud-setup.md).
+- **Cloud-account provisioning + OIDC federation** → [`cloud-bootstrap.md`](./cloud-bootstrap.md).
 - **Don't expose `:8091` ingress.** Host firewall must drop `:8091` from anywhere except `127.0.0.1`. Nginx is the only legitimate caller.
 - **Cert renewal.** Certbot's renewal timer ships with the package (`sudo systemctl list-timers | grep certbot`). AWS doesn't pin the cert; thumbprint persistence comes from the LE intermediate CA.
 
 ## Operational follow-ups
 
-- **GCP / Tencent federation recipes** — equivalent of [`cloud-setup.md` §4](./cloud-setup.md#4-oidc-federation-stage-7) for Workload Identity Federation and Tencent CAM. JWT/JWKS shape works cross-cloud unchanged; only the registration step differs.
+- **GCP / Tencent federation recipes** — equivalent of [`cloud-bootstrap.md` §4](./cloud-bootstrap.md#4-oidc-federation-stage-7) for Workload Identity Federation and Tencent CAM. JWT/JWKS shape works cross-cloud unchanged; only the registration step differs.
 - **TEE-derived signer** — replace [`crates/agentkeys-broker-server/src/oidc.rs::OidcKeypair::load_or_generate`](../crates/agentkeys-broker-server/src/oidc.rs) with a TEE oracle when [`heima-gaps §3`](./spec/heima-gaps-vs-desired-architecture.md) closes. JWKS, JWT shape, STS exchange, and bucket-policy enforcement stay identical.
 - **Audit-destination swap** — point the audit log at a chain or sealed log per the [pluggable framing](spec/architecture.md#11-audit-destination-is-pluggable). Configuration choice, not a redesign.
 - **Stage 8 hand-off** — `s3://agentkeys-vault/<wallet>/` is the reuse point with [`stage8-wip.md`](./stage8-wip.md); ciphertext + per-epoch DEK rotation live there, not here.

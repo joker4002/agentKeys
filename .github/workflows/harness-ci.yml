@@ -1,0 +1,500 @@
+name: harness CI (no LLM)
+
+# Issue #66: deterministic, no-LLM, no-WebAuthn CI that runs the SAME
+# production harness scripts (harness/v2-stage{1,2,3}-demo.sh) against
+# a parallel TEST instance of the production environment.
+#
+# "Mirror production" means: same Heima mainnet chain, same Solidity
+# source files, same harness scripts, same broker code, same AWS
+# IAM/STS/S3 surfaces. The only delta is identifiers — a different
+# deployer wallet → different contract addresses; a different OIDC
+# provider URL → different IAM role + bucket. Every test resource
+# carries a -test suffix so a misconfigured run targeting prod fails
+# closed (the role/bucket simply won't exist in prod).
+#
+# Operator-provided GitHub repo secrets (one-shot setup, then immutable
+# for the life of the test environment):
+#
+#   TEST_OIDC_AWS_ROLE_ARN  IAM role assumed by this workflow via GitHub
+#                           Actions OIDC. Trust policy:
+#                             "token.actions.githubusercontent.com",
+#                             conditioned on this repo + ref. Inline policies:
+#                             1) agentkeys-e2e-assume-test-roles: sts:AssumeRole
+#                                on the three test data roles (data, vault,
+#                                memory).
+#                             2) agentkeys-e2e-verify-s3: s3:{ListBucket,
+#                                GetObject, HeadObject, DeleteObject} on the
+#                                three test buckets — required for the
+#                                harness verify step (head-object after
+#                                store) + the per-run S3 prefix cleanup
+#                                (`aws s3 rm ci/run-${RUN_ID}/`).
+#                           See docs/ci-setup.md §4 for the full setup recipe.
+#   TEST_ACCOUNT_ID         AWS account ID hosting the test infra.
+#                           Same account as prod is fine — isolation is
+#                           by resource name, not by account.
+#   TEST_AWS_REGION         e.g. us-east-1
+#   TEST_BROKER_HOST        test-broker.litentry.org (long-lived; AWS
+#                           validates OIDC issuer URLs byte-for-byte,
+#                           so this must outlast any single CI run).
+#   TEST_VAULT_BUCKET       agentkeys-vault-test-${ACCOUNT_ID}
+#   TEST_MEMORY_BUCKET      agentkeys-memory-test-${ACCOUNT_ID}
+#   TEST_VAULT_ROLE_ARN     arn:aws:iam::${ACCT}:role/agentkeys-vault-role-test
+#   TEST_MEMORY_ROLE_ARN    arn:aws:iam::${ACCT}:role/agentkeys-memory-role-test
+#   TEST_DATA_ROLE_ARN      arn:aws:iam::${ACCT}:role/agentkeys-data-role-test
+#   TEST_HEIMA_DEPLOYER_KEY 0x-prefixed Heima mainnet test wallet private
+#                           key (DIFFERENT from prod deployer). Deploys
+#                           the same crates/agentkeys-chain/src/*.sol to
+#                           new addresses on mainnet via the same
+#                           DeployAgentKeysV1.s.sol script. Solidity
+#                           bytecode is deterministic and contract
+#                           addresses derive from (deployer, nonce), so
+#                           a different key + same source = isolated
+#                           parallel contract set on the production
+#                           chain. Fund this wallet once from the
+#                           operator's personal Heima wallet.
+#   TEST_SCOPE_CONTRACT_ADDRESS_HEIMA      pinned addresses of the
+#   TEST_SIDECAR_REGISTRY_ADDRESS_HEIMA    test-deployer's mainnet deploy
+#   TEST_K3_EPOCH_COUNTER_ADDRESS_HEIMA    (so CI doesn't burn HEI on
+#   TEST_CREDENTIAL_AUDIT_ADDRESS_HEIMA     every run). One-shot deploy
+#   TEST_P256_VERIFIER_ADDRESS_HEIMA        per test-environment refresh.
+#   TEST_K11_VERIFIER_ADDRESS_HEIMA
+#
+# Gating: until TEST_OIDC_AWS_ROLE_ARN is set, the workflow's preflight
+# job surfaces a ::warning:: skip and exits clean — safe to merge before
+# the operator activates the test infra.
+#
+# WebAuthn: never invoked. harness/v2-stage1-demo.sh defaults to
+# WEBAUTHN_MODE=0 (line 131), v2-stage2-demo.sh accepts --stub, neither
+# this workflow nor the harness scripts call WebAuthn paths in this mode.
+#
+# LLM: never invoked. This workflow is plain cargo/forge/aws-cli/curl —
+# distinct from claude.yml + claude-code-review.yml which DO call @claude
+# on PR comments + reviews. This workflow consumes zero LLM tokens.
+
+on:
+  push:
+    branches: [main, evm]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "harness/**"
+      - "scripts/**"
+      - ".github/workflows/harness-ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Which harness stage to run (1, 2, 3, or all)"
+        required: false
+        default: "all"
+        type: choice
+        options: ["1", "2", "3", "all"]
+
+concurrency:
+  group: harness-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write   # GitHub Actions OIDC → assume TEST_OIDC_AWS_ROLE_ARN
+  contents: read
+
+jobs:
+  rust-checks:
+    name: cargo fmt + clippy + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # debug-profile cache: rust-checks runs cargo fmt + clippy + test,
+          # all of which build in debug mode under target/debug. Separate
+          # from the release cache used by harness-e2e (target/release) so
+          # neither job overwrites the other's artifacts.
+          shared-key: harness-ci-debug
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # --test-threads=1: broker tests mutate shared process env (HOME,
+      # AWS_*) and the keyring tests serialize on a per-process accounts
+      # map — same convention as the existing @claude review workflow.
+      - run: cargo test --workspace -- --test-threads=1
+
+  preflight:
+    # Gate the harness jobs on the test infra credentials being present.
+    # Until the operator sets TEST_OIDC_AWS_ROLE_ARN, the harness jobs
+    # surface as skipped rather than failing.
+    name: gate on test infra availability
+    runs-on: ubuntu-latest
+    needs: rust-checks
+    outputs:
+      should_run: ${{ steps.gate.outputs.should_run }}
+    steps:
+      - id: gate
+        run: |
+          if [ -n "${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "test infra credentials present; proceeding"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::TEST_OIDC_AWS_ROLE_ARN unset — harness E2E skipped. See workflow header for operator setup."
+          fi
+
+  harness-e2e:
+    name: harness/v2-stage*-demo.sh on Heima mainnet (test deployer)
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive  # forge install reads .gitmodules
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # release-profile cache for the harness build below. Distinct from
+          # harness-ci-debug used by rust-checks — release + debug live in
+          # different target/ subdirs, so sharing one cache key just means
+          # whichever job saves last wins, blowing away the other's reusable
+          # artifacts. Per-profile keys → both jobs cache effectively.
+          shared-key: harness-ci-release
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Preflight — validate TEST_* secret shape before AWS action
+        # Self-diagnoses the most common operator-setup errors so the failure
+        # tells you EXACTLY what to fix instead of a generic AWS-action error.
+        # GHA masks secret values, but unmasked LENGTH + computed shape checks
+        # are safe to log (they reveal "is it an ARN" without revealing the ARN).
+        env:
+          ROLE_ARN: ${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}
+          REGION_RAW: ${{ secrets.TEST_AWS_REGION }}
+          ACCT_RAW: ${{ secrets.TEST_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          fail=0
+          # Length-based shape check on TEST_OIDC_AWS_ROLE_ARN — full ARNs are
+          # always >= 35 chars (`arn:aws:iam::123456789012:role/x` = 33 minimum).
+          # Bare role names are typically <50 chars but don't have the "arn:" prefix.
+          arn_len="${#ROLE_ARN}"
+          if [ "$arn_len" -lt 35 ]; then
+            echo "::error::TEST_OIDC_AWS_ROLE_ARN is too short ($arn_len chars) — likely a bare role name, not a full ARN."
+            echo "::error::Expected: arn:aws:iam::<12-digit-account>:role/<name> (length ~50-80 chars)"
+            echo "::error::Fix: gh secret set TEST_OIDC_AWS_ROLE_ARN --body \"\$(aws iam get-role --role-name github-actions-agentkeys-e2e --query 'Role.Arn' --output text)\""
+            fail=1
+          fi
+          # Use bash substring (sliced positions) to verify the prefix without
+          # echoing the masked secret value itself.
+          arn_prefix="${ROLE_ARN:0:13}"
+          if [ "$arn_prefix" != "arn:aws:iam::" ]; then
+            echo "::error::TEST_OIDC_AWS_ROLE_ARN does not start with 'arn:aws:iam::' (first 13 chars hash differs)"
+            fail=1
+          fi
+          # Region sanity — must match xx-yyyy-N (e.g. us-east-1). Fallback to
+          # us-east-1 when empty handled at the action layer; reject malformed.
+          region_eff="${REGION_RAW:-us-east-1}"
+          if ! [[ "$region_eff" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]]; then
+            echo "::error::TEST_AWS_REGION shape invalid: '$region_eff' (expected xx-yyyy-N like 'us-east-1')"
+            fail=1
+          fi
+          # Account ID must be exactly 12 digits.
+          if ! [[ "$ACCT_RAW" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::TEST_ACCOUNT_ID shape invalid (expected 12 digits; got length ${#ACCT_RAW})"
+            fail=1
+          fi
+          if [ "$fail" = "1" ]; then
+            echo "::error::Preflight failed — re-run scripts/ci-set-github-secrets.sh to refresh secrets from canonical sources, then re-trigger the workflow."
+            exit 1
+          fi
+          echo "::notice::preflight ok: role_arn_len=$arn_len region=$region_eff account_id_len=${#ACCT_RAW}"
+
+      - name: Configure AWS credentials via OIDC (test role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.TEST_OIDC_AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          # Session name shows up in CloudTrail — keep traceable per run.
+          role-session-name: gh-ci-${{ github.run_id }}
+
+      - name: Build agentkeys CLI + workers (release)
+        # Build ONLY the three binaries the harness actually invokes at
+        # runtime — agentkeys (CLI), agentkeys-daemon, agentkeys-mock-server
+        # (same set as scripts/install-agentkeys-cli.sh L138). `--workspace`
+        # would also build agentkeys-broker-server + all 4 worker bins +
+        # agentkeys-chain — those run REMOTELY on the test-broker EC2, not
+        # on this runner, so building them here is pure cargo-time waste
+        # (~3-4min per run with cold cache). Drop to the minimum set.
+        run: |
+          cargo build --release \
+            -p agentkeys-cli \
+            -p agentkeys-daemon \
+            -p agentkeys-mock-server
+
+      - name: Materialize test deployer key + derive address (no argv leak)
+        # Codex M2 mitigation: previously, the env-file materialization step
+        # passed the test deployer secret directly as `cast wallet address
+        # --private-key "${{ secrets.TEST_HEIMA_DEPLOYER_KEY }}"`. GHA log
+        # masking redacts stdout but NOT /proc/<pid>/cmdline, so any process
+        # that snapshots the runner's process table during cast's lifetime
+        # could read the key from argv. Mitigation:
+        #   1. Pull the secret into the step's env: block (GHA already masks
+        #      env values in logs and they aren't reflected in argv unless
+        #      we explicitly pass them).
+        #   2. Write the key to a 0600 file FIRST.
+        #   3. Derive the public address with a small Python script that
+        #      reads the key from the file (not from argv).
+        # The python eth-keys derivation reads from the file via plain open(),
+        # never echoing or argv-passing the key. cast is no longer used here.
+        env:
+          DEPLOYER_KEY: ${{ secrets.TEST_HEIMA_DEPLOYER_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.agentkeys"
+          umask 077
+          printf '%s\n' "$DEPLOYER_KEY" > "$HOME/.agentkeys/heima-deployer.key"
+          chmod 600 "$HOME/.agentkeys/heima-deployer.key"
+          unset DEPLOYER_KEY  # shrink the window where it lives in env
+          # eth-keys is a self-contained pure-Python secp256k1 lib;
+          # installs in <2 s on ubuntu-latest runners. Avoids cast's argv
+          # exposure of the private key. pycryptodome provides the keccak256
+          # backend (eth-keys errors with "None of these hashing backends are
+          # installed: ['pycryptodome', 'pysha3']" otherwise).
+          pip3 install --quiet --user eth-keys eth-utils pycryptodome
+          DEPLOYER_ADDR=$(python3 - <<'PY'
+          import os, pathlib
+          from eth_keys import keys
+          key_hex = pathlib.Path(os.environ["HOME"] + "/.agentkeys/heima-deployer.key").read_text().strip()
+          if key_hex.startswith("0x"): key_hex = key_hex[2:]
+          print(keys.PrivateKey(bytes.fromhex(key_hex)).public_key.to_checksum_address())
+          PY
+          )
+          # Persist for downstream steps' use; safe to echo (address only).
+          echo "HEIMA_DEPLOYER_ADDR_HEIMA=$DEPLOYER_ADDR" >> "$GITHUB_ENV"
+          echo "::notice::derived test deployer address: $DEPLOYER_ADDR (no key on argv)"
+
+      - name: Compute zone from TEST_BROKER_HOST
+        # Codex M1: previously the workflow hardcoded "litentry.org" into
+        # the worker URLs + mail domain. That broke the "env-driven test
+        # stack" claim — a renamed or non-litentry test broker would source
+        # an env file that points at the wrong workers + mail bucket.
+        # setup-broker-host.sh --test derives companion hosts via:
+        #     derive_companion() { echo "${1}${SUFFIX}.${ISSUER_ZONE}"; }
+        # where ISSUER_ZONE = ${ISSUER_HOST#*.}. Mirror that exactly here so
+        # the workflow's env file matches setup-broker-host.sh --test's
+        # deployed reality byte-for-byte.
+        env:
+          TEST_BROKER_HOST: ${{ secrets.TEST_BROKER_HOST }}
+        run: |
+          set -euo pipefail
+          # Strip the leading "test-broker." (or first subdomain) → zone.
+          # e.g. "test-broker.litentry.org" → "litentry.org"
+          # If the host has no dot (single-label dev), keep the host itself.
+          if [[ "$TEST_BROKER_HOST" == *.* ]]; then
+            TEST_BROKER_ZONE="${TEST_BROKER_HOST#*.}"
+          else
+            TEST_BROKER_ZONE="$TEST_BROKER_HOST"
+          fi
+          echo "TEST_BROKER_ZONE=$TEST_BROKER_ZONE" >> "$GITHUB_ENV"
+          echo "::notice::derived TEST_BROKER_ZONE=$TEST_BROKER_ZONE from TEST_BROKER_HOST=$TEST_BROKER_HOST"
+
+      - name: Materialize the production env file with TEST values
+        # The harness scripts source scripts/operator-workstation.env
+        # unchanged. We OVERWRITE it with the test resource names so
+        # the entire production harness flow re-points at the test infra
+        # without modifying a single script — that's what "mirror production
+        # env" means. Same chain (heima mainnet), same .sol code, same scripts.
+        # Different deployer key → different contract addresses on the SAME
+        # mainnet → fully isolated parallel contract set.
+        #
+        # Codex M4 mitigation: all secrets flow through this step's env: block
+        # FIRST, then are referenced as $VAR inside the heredoc. The previous
+        # form ("${{ secrets.X }}" inlined into the heredoc body) made the
+        # shell execute the secret as a command if it contained $( ) or
+        # backticks — a malformed secret would run arbitrary code at heredoc
+        # eval time, BEFORE any post-write validator could catch it.
+        #
+        # With this pattern: GHA renders ${{ ... }} into yaml-scalar env
+        # values, the runner exports them as literal env strings, and the
+        # heredoc expands $VAR purely as variable substitution (NO
+        # re-evaluation of $( ) inside the value). The validator at the end
+        # is then a defense-in-depth check, not the only line of defense.
+        #
+        # All worker URLs + mail subdomains derive from $TEST_BROKER_ZONE
+        # (computed in the previous step) — same pattern as setup-broker-host.sh
+        # --test. The deployer address comes from the no-argv-leak python
+        # derivation; the key file already exists at
+        # $HOME/.agentkeys/heima-deployer.key.
+        env:
+          ACCOUNT_ID: ${{ secrets.TEST_ACCOUNT_ID }}
+          AWS_REGION_RAW: ${{ secrets.TEST_AWS_REGION }}
+          BROKER_HOST: ${{ secrets.TEST_BROKER_HOST }}
+          VAULT_BUCKET_RAW: ${{ secrets.TEST_VAULT_BUCKET }}
+          MEMORY_BUCKET_RAW: ${{ secrets.TEST_MEMORY_BUCKET }}
+          DATA_ROLE_ARN_RAW: ${{ secrets.TEST_DATA_ROLE_ARN }}
+          VAULT_ROLE_ARN_RAW: ${{ secrets.TEST_VAULT_ROLE_ARN }}
+          MEMORY_ROLE_ARN_RAW: ${{ secrets.TEST_MEMORY_ROLE_ARN }}
+          SCOPE_ADDR: ${{ secrets.TEST_SCOPE_CONTRACT_ADDRESS_HEIMA }}
+          REGISTRY_ADDR: ${{ secrets.TEST_SIDECAR_REGISTRY_ADDRESS_HEIMA }}
+          K3_ADDR: ${{ secrets.TEST_K3_EPOCH_COUNTER_ADDRESS_HEIMA }}
+          AUDIT_ADDR: ${{ secrets.TEST_CREDENTIAL_AUDIT_ADDRESS_HEIMA }}
+          P256_ADDR: ${{ secrets.TEST_P256_VERIFIER_ADDRESS_HEIMA }}
+          K11_ADDR: ${{ secrets.TEST_K11_VERIFIER_ADDRESS_HEIMA }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          REGION="${AWS_REGION_RAW:-us-east-1}"
+
+          # Codex M4 PRE-validate: refuse to materialize if any secret
+          # contains shell metacharacters. Defense-in-depth — even though
+          # the heredoc $VAR expansion is non-recursive, we catch operator
+          # mistakes (e.g. accidentally pasting `$(...)` into a secret) before
+          # the file is sourced downstream.
+          for var_name in ACCOUNT_ID BROKER_HOST VAULT_BUCKET_RAW MEMORY_BUCKET_RAW \
+                          DATA_ROLE_ARN_RAW VAULT_ROLE_ARN_RAW MEMORY_ROLE_ARN_RAW \
+                          SCOPE_ADDR REGISTRY_ADDR K3_ADDR AUDIT_ADDR P256_ADDR \
+                          K11_ADDR TEST_BROKER_ZONE HEIMA_DEPLOYER_ADDR_HEIMA; do
+            val="${!var_name:-}"
+            if printf '%s' "$val" | grep -qE '\$\(|`'; then
+              echo "::error::secret $var_name contains \$( ) or backtick → refusing to materialize env file"
+              exit 1
+            fi
+          done
+
+          cat > scripts/operator-workstation.env <<EOF
+          ACCOUNT_ID=$ACCOUNT_ID
+          REGION=$REGION
+          BROKER_HOST=$BROKER_HOST
+          OIDC_ISSUER=https://$BROKER_HOST
+          OIDC_PROVIDER_ARN=arn:aws:iam::$ACCOUNT_ID:oidc-provider/$BROKER_HOST
+          MAIL_DOMAIN=bots-test.$TEST_BROKER_ZONE
+          MAIL_BUCKET=agentkeys-mail-test-$ACCOUNT_ID
+          BUCKET=agentkeys-mail-test-$ACCOUNT_ID
+          VAULT_BUCKET=$VAULT_BUCKET_RAW
+          MEMORY_BUCKET=$MEMORY_BUCKET_RAW
+          DATA_ROLE_ARN=$DATA_ROLE_ARN_RAW
+          VAULT_ROLE_ARN=$VAULT_ROLE_ARN_RAW
+          MEMORY_ROLE_ARN=$MEMORY_ROLE_ARN_RAW
+          AGENTKEYS_SIGNER_URL=https://signer-test.$TEST_BROKER_ZONE
+          # Worker URLs derived from TEST_BROKER_ZONE → byte-for-byte match
+          # setup-broker-host.sh --test's derive_companion() output.
+          AGENTKEYS_WORKER_AUDIT_URL=https://audit-test.$TEST_BROKER_ZONE
+          AGENTKEYS_WORKER_EMAIL_URL=https://email-test.$TEST_BROKER_ZONE
+          AGENTKEYS_WORKER_CRED_URL=https://cred-test.$TEST_BROKER_ZONE
+          AGENTKEYS_WORKER_MEMORY_URL=https://memory-test.$TEST_BROKER_ZONE
+          BACKEND_URL=https://signer-test.$TEST_BROKER_ZONE
+          AGENTKEYS_CHAIN=heima
+          SCOPE_CONTRACT_ADDRESS_HEIMA=$SCOPE_ADDR
+          SIDECAR_REGISTRY_ADDRESS_HEIMA=$REGISTRY_ADDR
+          K3_EPOCH_COUNTER_ADDRESS_HEIMA=$K3_ADDR
+          CREDENTIAL_AUDIT_ADDRESS_HEIMA=$AUDIT_ADDR
+          P256_VERIFIER_ADDRESS_HEIMA=$P256_ADDR
+          K11_VERIFIER_ADDRESS_HEIMA=$K11_ADDR
+          HEIMA_DEPLOYER_KEY_FILE=$HOME/.agentkeys/heima-deployer.key
+          HEIMA_DEPLOYER_ADDR_HEIMA=$HEIMA_DEPLOYER_ADDR_HEIMA
+          # Per-run S3 prefix so concurrent runs don't step on each other's
+          # writes. Operator-side nightly sweep removes ci/run-* > 7d old.
+          CI_S3_PREFIX=ci/run-$RUN_ID
+          EOF
+
+          # Codex M4 POST-validate: belt-and-braces final check. Even with
+          # safe $VAR expansion, catch any future maintainer who reintroduces
+          # direct GHA expression substitution (double-brace) into the heredoc
+          # body. This guard converts a latent code-exec bug into a CI hard-fail.
+          if grep -nE '\$\(|`' scripts/operator-workstation.env; then
+            echo "::error::materialized env file contains \$( ) or backticks — refusing to ship."
+            echo "::error::Inspect secrets for embedded shell metacharacters, or the heredoc body for direct GHA double-brace substitution."
+            exit 1
+          fi
+          echo "::notice::env file materialized + safety-validated (no \$( ), no backticks; all secrets routed via env: block)"
+
+      - name: Stage 1 — chain reachability + identity bootstrap
+        if: ${{ inputs.stage == 'all' || inputs.stage == '1' || inputs.stage == '' }}
+        # --skip-deploy:    contracts are pre-deployed once per test-env
+        #                   refresh (operator one-shot) and pinned in
+        #                   TEST_*_HEIMA secrets, so CI doesn't burn HEI
+        #                   on every push.
+        # --skip-email:     SES email-link round-trip is exercised separately;
+        #                   identity bootstrap here uses wallet_sig.
+        # --skip-provision: vault/memory bucket+role+policy were provisioned
+        #                   by the operator's `setup-cloud.sh --test` one-shot;
+        #                   the CI assumed-role (github-actions-agentkeys-e2e)
+        #                   deliberately lacks IAM-admin perms to (re)create
+        #                   them. Same model as --skip-deploy: one-shot infra
+        #                   provisioning lives on the operator's laptop, not
+        #                   on the ephemeral runner.
+        # No --webauthn:    stub-mode K11 (WEBAUTHN_MODE=0 default).
+        run: |
+          AGENTKEYS_CHAIN=heima \
+            bash harness/v2-stage1-demo.sh --skip-deploy --skip-email --skip-provision
+
+      - name: Stage 2 — multi-master + recovery (stub mode)
+        if: ${{ inputs.stage == 'all' || inputs.stage == '2' || inputs.stage == '' }}
+        run: |
+          AGENTKEYS_CHAIN=heima \
+            bash harness/v2-stage2-demo.sh --stub --skip-build
+
+      - name: Stage 3 — per-actor + per-data-class PrincipalTag isolation
+        if: ${{ inputs.stage == 'all' || inputs.stage == '3' || inputs.stage == '' }}
+        # The capstone: stage-3 is the layer with the highest security
+        # invariant payload (per CLAUDE.md "Per-actor + per-data-class
+        # isolation invariants" table). Requires AWS STS
+        # AssumeRoleWithWebIdentity → which requires AWS to fetch the
+        # OIDC issuer's JWKS over public TLS. The long-lived test broker
+        # (TEST_BROKER_HOST) satisfies that; the same code path proves
+        # the prod IAM trust policy + bucket policy are correctly scoped.
+        #
+        # Codex H1 (2026-05-23): blanket --allow-skip allowed ANY prereq
+        # to skip → CI could report success while bypassing every isolation
+        # check. Replaced with --allow-skip=<reason> allowlist that only
+        # permits the ONE structurally-unfixable skip in CI: setScopeWithWebauthn
+        # requires a real WebAuthn assertion (scripts/heima-scope-set.sh L172),
+        # which a no-Touch-ID runner cannot produce. Every OTHER prereq
+        # (agent-file-missing, broker-misconfig, device-role-missing,
+        # agent-sts-mint-failed, agent-file-invalid) now fails closed → CI
+        # cannot pass with a broken auth chain or missing agent setup, only
+        # with the documented Touch-ID-impossible scope grant.
+        run: |
+          AGENTKEYS_CHAIN=heima \
+            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set
+
+      - name: Clean up harness test data (bots/<actor_omni>/ prefix)
+        if: always()
+        # Codex M3 mitigation: the harness writes to s3://<bucket>/bots/<actor_omni>/<class>/...
+        # (NOT to ci/run-*, which was the previous prefix — a fiction; no
+        # consumer of CI_S3_PREFIX exists in the harness). To clean up, we
+        # delete under bots/<actor_omni>/ for the current test deployer's
+        # omni. The IAM policy (docs/ci-setup.md §4 statement
+        # CleanupTestBucketsBotsPrefixOnly) only grants DeleteObject on
+        # bots/*, so even a typo here cannot escape that prefix → AWS will
+        # reject AccessDenied.
+        env:
+          VAULT_BUCKET: ${{ secrets.TEST_VAULT_BUCKET }}
+          MEMORY_BUCKET: ${{ secrets.TEST_MEMORY_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HEIMA_DEPLOYER_ADDR_HEIMA:-}" ]; then
+            echo "::warning::HEIMA_DEPLOYER_ADDR_HEIMA unset — skipping S3 cleanup."
+            exit 0
+          fi
+          # actor_omni derivation mirrors harness/scripts/heima-register-first-master.sh:
+          #   operator_omni = sha256(printf 'agentkeysevm%s' <lowercase-addr>)
+          # For cleanup purposes we use the same scheme — same input, same omni.
+          addr_lc=$(printf '%s' "$HEIMA_DEPLOYER_ADDR_HEIMA" | tr '[:upper:]' '[:lower:]')
+          actor_omni=$(printf 'agentkeysevm%s' "$addr_lc" | shasum -a 256 | awk '{print $1}')
+          PREFIX="bots/$actor_omni/"
+          echo "::notice::cleaning S3 under prefix $PREFIX"
+          for bucket in "$VAULT_BUCKET" "$MEMORY_BUCKET"; do
+            [ -n "$bucket" ] || continue
+            aws s3 rm "s3://$bucket/$PREFIX" --recursive 2>/dev/null || true
+          done

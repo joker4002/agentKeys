@@ -52,7 +52,16 @@ export AGENTKEYS_CHAIN
 
 FUND_AMOUNT_HEI="${FUND_AMOUNT_HEI:-100}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+# ENV_FILE: caller-supplied (e.g. setup-heima.sh --test exports
+# operator-workstation.test.env) takes precedence; falls back to prod.
+# CRITICAL for idempotency: this is BOTH the source of `*_HEIMA` addresses
+# for the cast-code skip-deploy check (line ~295) AND the destination of
+# newly-deployed addresses written by env_set in step 6 (line ~413). A
+# test invocation pointed at the prod env file silently short-circuits
+# (prod addrs already on-chain → skip deploy → no test contracts created),
+# OR clobbers prod's contract pointers when it does write. Honor the
+# caller's choice.
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 # Per-chain deployer key file: ~/.agentkeys/heima-deployer.key for mainnet,
 # ~/.agentkeys/heima-paseo-deployer.key for testnet. Keeps the keys for
 # the two chains separate so an operator who's used both doesn't

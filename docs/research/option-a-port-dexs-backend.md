@@ -174,7 +174,7 @@ The endpoints clients actually call. Each is a Rust port of the equivalent dexs-
 
 **JWT issuance:** initially HS256 with our own secret (matches dexs-backend's pattern). Later, Phase 3 lets us issue TEE-RSA JWTs by calling `omni_userLogin`. Both can coexist: HS256 for "we authenticated you locally"; TEE-RSA for "we got a TEE-attested session for you." The CLI prefers the TEE-RSA path when available.
 
-**SES integration for email codes:** reuse `agentkeys-data-role` (already has `ses:SendRawEmail` permission per `cloud-setup.md §3.2`). The mailer module composes `From: noreply@bots.litentry.org`, `To: <user>`, `Subject: AgentKeys verification code`.
+**SES integration for email codes:** reuse `agentkeys-data-role` (already has `ses:SendRawEmail` permission per `cloud-bootstrap.md §3.2`). The mailer module composes `From: noreply@bots.litentry.org`, `To: <user>`, `Subject: AgentKeys verification code`.
 
 **CLI changes** (`crates/agentkeys-cli/src/lib.rs`):
 - `agentkeys init` grows subcommands: `init wallet --mnemonic-file <path>`, `init wallet --keystore <path>`, `init email <addr>`, `init google`, `init passkey`. The default `init` interactively prompts.

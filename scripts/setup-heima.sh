@@ -59,8 +59,20 @@ set -euo pipefail
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE="$SCRIPT_DIR/operator-workstation.env"
 
+# ENV_FILE drives BOTH the idempotency read (existing *_HEIMA addresses)
+# AND the persist write (step 7's env_set inside heima-bring-up.sh).
+# Precedence (resolved after CLI parse below):
+#   1. --env-file <path>      (CLI flag, highest priority)
+#   2. $ENV_FILE env var      (inherited from caller — e.g. ci-setup.md recipe)
+#   3. --test → operator-workstation.test.env  (ergonomic shorthand)
+#   4. operator-workstation.env  (prod default)
+# Snapshot the caller-supplied env-var value so the CLI parser can detect it.
+ENV_FILE_FROM_ENV="${ENV_FILE:-}"
+unset ENV_FILE
+
+EXPLICIT_ENV_FILE=""
+TEST_MODE=0
 AGENTKEYS_CHAIN_ARG=""
 SESSION_ID="${SESSION_ID:-alice}"
 AGENT_LABEL="demo-agent"
@@ -91,6 +103,9 @@ while [ $# -gt 0 ]; do
     --from-step)    FROM_STEP="$2"; shift 2 ;;
     --to-step)      TO_STEP="$2"; shift 2 ;;
     --only-step)    FROM_STEP="$2"; TO_STEP="$2"; shift 2 ;;
+    --env-file)     EXPLICIT_ENV_FILE="$2"; shift 2 ;;
+    --env-file=*)   EXPLICIT_ENV_FILE="${1#*=}"; shift ;;
+    --test)         TEST_MODE=1; shift ;;
     --help|-h)
       sed -n '2,55p' "$0" | sed 's/^# //; s/^#//'
       exit 0
@@ -98,6 +113,23 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
+
+# Resolve ENV_FILE per documented precedence.
+if [ -n "$EXPLICIT_ENV_FILE" ]; then
+  ENV_FILE="$EXPLICIT_ENV_FILE"
+elif [ -n "$ENV_FILE_FROM_ENV" ]; then
+  ENV_FILE="$ENV_FILE_FROM_ENV"
+elif [ "$TEST_MODE" = "1" ]; then
+  ENV_FILE="$SCRIPT_DIR/operator-workstation.test.env"
+else
+  ENV_FILE="$SCRIPT_DIR/operator-workstation.env"
+fi
+# Critical: export so heima-bring-up.sh + verify-heima-contracts.sh inherit
+# the SAME env file. Otherwise step 6 reads prod addresses for idempotency
+# check (skip-already-deployed fires against prod state) AND step 7 writes
+# the freshly-deployed test addresses back to the prod env file (clobbers
+# the live broker's contract pointers).
+export ENV_FILE
 
 if [ -n "$AGENTKEYS_CHAIN_ARG" ]; then
   export AGENTKEYS_CHAIN="$AGENTKEYS_CHAIN_ARG"
@@ -123,8 +155,19 @@ AGENTKEYS_BIN="$REPO_ROOT/target/release/agentkeys"
 [ ! -x "$AGENTKEYS_BIN" ] && AGENTKEYS_BIN="$(command -v agentkeys || true)"
 
 # ─── Run steps ────────────────────────────────────────────────────────────────
+# Env-file banner — surfaces test-vs-prod isolation upfront so the operator
+# can't miss a prod-env-file run that would clobber prod's *_HEIMA addresses
+# (or silently short-circuit a test deploy via prod's idempotency cache).
+ENV_BASENAME="$(basename "$ENV_FILE")"
+if [ "$TEST_MODE" = "1" ] || [[ "$ENV_BASENAME" == *test* ]]; then
+  STACK_LABEL="${COLOR_WARN}TEST${COLOR_RESET}"
+else
+  STACK_LABEL="${COLOR_OK}PROD${COLOR_RESET}"
+fi
 printf "${COLOR_HEAD}=== AgentKeys Heima setup: chain=%s session=%s ===${COLOR_RESET}\n" \
   "$AGENTKEYS_CHAIN" "$SESSION_ID" >&2
+printf "  stack:    %b\n" "$STACK_LABEL" >&2
+printf "  env_file: %s\n" "$ENV_FILE" >&2
 printf "  steps %d..%d (of %d)\n\n" "$FROM_STEP" "$TO_STEP" "$STEP_TOTAL" >&2
 
 do_step_1() {
@@ -160,17 +203,50 @@ do_step_3() {
 }
 
 do_step_4() {
-  CUR_STEP=4; step "Chain bring-up: deployer key + funding + contract deploy + address persist"
-  # `heima-bring-up.sh` is the single, idempotent owner of this entire
-  # flow. It pre-checks every mutation (`[ -f key_path ]`, `cast balance`,
-  # `cast code addr`) and short-circuits when state already matches; on a
-  # second run it logs `skip` per step + exits 0. We delegate end-to-end
-  # rather than re-implementing per-substep here, because the previous
-  # version's `--only-step gen-key` + `--target deployer` flags don't
-  # exist on the underlying scripts — and a setup script that calls
-  # non-existent flags silently does the wrong thing (runs the FULL
-  # bring-up when only key-gen was requested; `--target deployer` is
-  # rejected because `heima-fund-account.sh` only accepts `--to <0x…>`).
+  CUR_STEP=4; step "Generate/reuse deployer key"
+  # Path precedence:
+  #   1. HEIMA_DEPLOYER_KEY_FILE env override   (CI / test instance)
+  #   2. $HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key  (default)
+  #
+  # The override lets the test instance use a SEPARATE deployer wallet on
+  # the same Heima mainnet — different (deployer, nonce) → different
+  # contract addresses on the same chain → isolated test contract set.
+  # Without this override, AGENTKEYS_CHAIN=heima always picks up the prod
+  # key, the cast-code idempotency check sees prod contracts already
+  # exist, and step 6 short-circuits with no new deploy.
+  local key_path="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key}"
+  export HEIMA_DEPLOYER_KEY_FILE="$key_path"   # propagate to heima-*.sh helpers
+  if [ -f "$key_path" ]; then
+    skip "deployer key already exists at $key_path"
+  else
+    # Delegate to bring-up's key gen (it persists to the same path the
+    # env var points at via the same HEIMA_DEPLOYER_KEY_FILE export).
+    bash "$SCRIPT_DIR/heima-bring-up.sh" --only-step gen-key 2>/dev/null || true
+    [ -f "$key_path" ] || die "deployer key generation failed — see heima-bring-up.sh; or pre-create with: cast wallet new --json | jq -r .[0].private_key > $key_path && chmod 600 $key_path"
+    ok "deployer key generated at $key_path"
+  fi
+}
+
+do_step_5() {
+  CUR_STEP=5; step "Fund deployer (sudo on paseo; balance-check on mainnet)"
+  # Delegate to heima-bring-up.sh's canonical fund step:
+  #   - paseo: Alice sudo auto-tops-up the deployer
+  #   - mainnet: balance-check; if low, prints fund-from-personal-wallet
+  #     instructions and exits non-zero (NEVER auto-spends real HEI).
+  # SKIP_DEPLOY=1 stops bring-up after the fund step so this orchestrator's
+  # do_step_6 owns the deploy invocation (avoids double-deploy).
+  # Do NOT call heima-fund-account.sh here — that script sends FROM the
+  # deployer (used to bootstrap agent wallets), not TO the deployer.
+  if [ "$YES" = "1" ]; then
+    SKIP_DEPLOY=1 bash "$SCRIPT_DIR/heima-bring-up.sh" --yes
+  else
+    SKIP_DEPLOY=1 bash "$SCRIPT_DIR/heima-bring-up.sh"
+  fi
+}
+
+do_step_6() {
+  CUR_STEP=6; step "Deploy stage-1 contracts (idempotent — skip if already on-chain)"
+  # heima-bring-up.sh checks `cast code` on every claimed address before deploying.
   if [ "$YES" = "1" ]; then
     bash "$SCRIPT_DIR/heima-bring-up.sh" --yes
   else
@@ -178,39 +254,9 @@ do_step_4() {
   fi
 }
 
-do_step_5() {
-  CUR_STEP=5; step "Top up deployer wallet (if low)"
-  # bring-up.sh's internal funding step runs `cast balance` first + skips
-  # if the deployer already has enough — but on `heima` mainnet it
-  # refuses to auto-spend real HEI per its own safety guard. This step
-  # is a no-op on mainnet (bring-up surfaces a clear "fund manually
-  # from your personal wallet" message instead); on `heima-paseo` it's
-  # the sudo-via-Alice auto-funding.
-  #
-  # We invoke the dedicated helper here in case the operator wants to
-  # top up beyond the bring-up's minimum. Deployer address is derived
-  # from the persisted key.
-  local key_path="$HOME/.agentkeys/${AGENTKEYS_CHAIN}-deployer.key"
-  if [ ! -f "$key_path" ]; then
-    skip "deployer key not present — step 4 should have created it; skipping top-up"
-    return
-  fi
-  local deployer_addr
-  deployer_addr=$(cast wallet address --private-key "0x$(cat "$key_path")" 2>/dev/null) || {
-    skip "could not derive deployer address from $key_path; skipping top-up"
-    return
-  }
-  bash "$SCRIPT_DIR/heima-fund-account.sh" --to "$deployer_addr"
-}
-
-do_step_6() {
-  CUR_STEP=6; step "(reserved — chain bring-up handled by step 4)"
-  ok "no-op — heima-bring-up.sh already deployed contracts in step 4"
-}
-
 do_step_7() {
-  CUR_STEP=7; step "(reserved — address persistence handled by step 4)"
-  ok "no-op — heima-bring-up.sh already persisted contract addresses in step 4"
+  CUR_STEP=7; step "Persist contract addresses (handled inside heima-bring-up)"
+  ok "operator-workstation.env updated by heima-bring-up if needed"
 }
 
 do_step_8() {

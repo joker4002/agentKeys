@@ -332,7 +332,7 @@ If the curl errors or the decimal doesn't match the profile's `chain_id`, fix th
 |---|---|---|
 | Broker host (`broker.<zone>` + signer-only `signer.<zone>`, nginx, certbot, systemd units) | Stage 7 demo §0 prereqs | **Inherited unchanged.** Skip ahead to §0 of this doc to verify it's up. |
 | `agentkeys init --email` / `--oauth2-google` identity ceremony + SIWE round-trip | Stage 7 demo §1, §2 | **Inherited with an addition** — stage 1 inserts the WebAuthn binding ceremony (K11) between identity verify and SIWE. See §1 below. |
-| AWS prereqs (OIDC provider, `agentkeys-data-role` trust policy, bucket policy with PrincipalTag isolation) | [cloud-setup.md](cloud-setup.md) §3-§4 | **Inherited with a one-line policy change**: PrincipalTag key is `agentkeys_actor_omni` (was `agentkeys_user_wallet`) and the resource path keys on `bots/<actor_omni_hex>/` (was `bots/<wallet>/`). See §3 below. |
+| AWS prereqs (OIDC provider, `agentkeys-data-role` trust policy, bucket policy with PrincipalTag isolation) | [cloud-bootstrap.md](cloud-bootstrap.md) §3-§4 | **Inherited with a one-line policy change**: PrincipalTag key is `agentkeys_actor_omni` (was `agentkeys_user_wallet`) and the resource path keys on `bots/<actor_omni_hex>/` (was `bots/<wallet>/`). See §3 below. |
 | `--credential-backend=s3 --envelope-version=v2` writing to `bots/<actor_omni_hex>/credentials/<service>.enc` | PR #87 + the stage-1-step-1 commit on this branch | **Live now** — works against the existing S3 backend; no chain or sidecar required. See §4 below. |
 | Sidecar daemon (localhost proxy + cap-token cache + host-local policy) | Stage 1 new | **In progress** (see §6 below). Today's stub error from `--credential-backend=sidecar` is the placeholder until the daemon ships. |
 | Heima EVM contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) | Stage 1 new | **In progress** (see §5 below). Demo uses a single all-in-one deploy script. |
@@ -369,7 +369,7 @@ What you should have at the end of §0:
 
 The combined orchestrator at [`harness/v2-stage1-demo.sh`](../harness/v2-stage1-demo.sh) walks the full stage-1 demo in one command. It composes the existing scripts ([`install-agentkeys-cli.sh`](../scripts/install-agentkeys-cli.sh), [`agentkeys-init-email-demo.sh`](../scripts/agentkeys-init-email-demo.sh), [`heima-bring-up.sh`](../scripts/heima-bring-up.sh)) — it doesn't reinvent them — so you can still run the underlying scripts individually for finer-grained debugging.
 
-**Idempotency model**: each step checks "is this already done?" before doing the work — same `cloud-setup.md`-style pattern (e.g. "if OIDC provider ARN already ends in $BROKER_HOST, skip create"). Re-running the full script is always safe; only steps with missing artifacts execute.
+**Idempotency model**: each step checks "is this already done?" before doing the work — same `cloud-bootstrap.md`-style pattern (e.g. "if OIDC provider ARN already ends in $BROKER_HOST, skip create"). Re-running the full script is always safe; only steps with missing artifacts execute.
 
 | # | Step | Skip if … | Underlying tool |
 |---|------|-----------|-----------------|
@@ -651,13 +651,13 @@ The tx is what makes the device "real" on chain — until it lands, broker cap-m
 
 ---
 
-## §2 — AWS prerequisites (inherited from cloud-setup.md with one-line v2 change)
+## §2 — AWS prerequisites (inherited from cloud-bootstrap.md with one-line v2 change)
 
 Stage 1's only AWS-side change vs the stage-7 deployment is the PrincipalTag key + S3 prefix. Everything else (OIDC provider, role trust policy, bucket existence, IAM role attachments) is inherited verbatim.
 
 ### §2.1 — Inherited unchanged
 
-Run [cloud-setup.md §3 + §4](cloud-setup.md) end-to-end if you haven't already. This provisions:
+Run [cloud-bootstrap.md §3 + §4](cloud-bootstrap.md) end-to-end if you haven't already. This provisions:
 
 - `agentkeys-{admin,broker,daemon}` IAM users
 - `agentkeys-data-role` with OIDC trust policy (federated against `$OIDC_ISSUER`)
@@ -689,7 +689,7 @@ bash scripts/apply-vault-bucket-policy.sh     # → vault bucket gets v2 policy
 bash scripts/cleanup-mail-bucket-policy.sh    # → mail bucket policy reverts to email-only
 ```
 
-**Why not the design doc's `Principal: { AWS: "*" }` shape with `StringNotEquals` tag-presence check?** cloud-setup.md §4.3 warns negated string operators on missing context keys evaluate as TRUE — a JWT carrying no tags claim would silently bypass the check. The scripts above use `Principal: $vault_role_arn` + `Null: { "aws:PrincipalTag/agentkeys_actor_omni": "false" }` (the safer §4.4 pattern). Same isolation guarantee, no false-allow on missing tags.
+**Why not the design doc's `Principal: { AWS: "*" }` shape with `StringNotEquals` tag-presence check?** cloud-bootstrap.md §4.3 warns negated string operators on missing context keys evaluate as TRUE — a JWT carrying no tags claim would silently bypass the check. The scripts above use `Principal: $vault_role_arn` + `Null: { "aws:PrincipalTag/agentkeys_actor_omni": "false" }` (the safer §4.4 pattern). Same isolation guarantee, no false-allow on missing tags.
 
 The bucket policy ALSO has to be set per-data-class once memory / audit / email / payment-audit buckets are provisioned. For stage 1 we ship `$VAULT_BUCKET` only; the rest land in stage 2. **The credentials-service WORKER (arch.md §15.1) — Lambda + mTLS to signer for encrypt/decrypt — is deferred to stage 2 (tracked in [issue #91](https://github.com/litentry/agentKeys/issues/91)).** Today the CLI does client-side encrypt + direct S3 PUT through the OIDC-assumed `agentkeys-vault-role`; the worker will take over the encrypt/decrypt step without changing the envelope shape.
 
@@ -1355,7 +1355,7 @@ Per-iteration error → fix log: [`docs/v2-stage1-iteration-log.md`](v2-stage1-i
 - **Stage 1 deliverable inventory** — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
 - **Architecture v2 (single source of truth)** — [docs/arch.md](arch.md)
 - **Stage 7 demo (parent for inherited §0 prereqs + §1 init + §3 OIDC/STS)** — [docs/stage7-demo-and-verification.md](stage7-demo-and-verification.md)
-- **Cloud setup (parent for AWS IAM, OIDC provider, bucket policy)** — [docs/cloud-setup.md](cloud-setup.md)
+- **Cloud setup (parent for AWS IAM, OIDC provider, bucket policy)** — [docs/cloud-bootstrap.md](cloud-bootstrap.md)
 - **Heima EVM source** — [github.com/litentry/heima/parachain/runtime/heima/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/heima/src/lib.rs) (search `pub ChainId: u64 = 212013`)
 - **Polkadot.js Apps for Heima** — [polkadot.js.org/apps](https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Frpc.litentry-parachain.litentry.io#/explorer)
 - **Heima Statescan** — [heima.statescan.io](https://heima.statescan.io/)

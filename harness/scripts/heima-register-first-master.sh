@@ -100,7 +100,32 @@ DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
 K11_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json"
 [ -f "$K11_FILE" ] || die "K11 enrollment not found at $K11_FILE — run \`agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI\` first"
 MODE=$(jq -r .mode "$K11_FILE")
-[ "$MODE" = "webauthn" ] || die "K11 file at $K11_FILE has mode=$MODE (expected 'webauthn') — re-enroll with --webauthn"
+# Mode gate. WebAuthn is the only acceptable mode for production-chain
+# registration; the stage-1 CI stub is opt-in via AGENTKEYS_STAGE1_STUB_OK=1
+# (set ONLY by harness/v2-stage1-demo.sh; setup-heima.sh + every other
+# operator script never sets it). The on-chain contract only enforces
+# length != 0 on the pubkey today (arch.md §22b.1 stage-1 simplification),
+# so without this env gate a local harness run could write a stub K11 file
+# into $HOME/.agentkeys/k11/, and a later prod `setup-heima.sh` run from
+# the same $HOME would silently register a synthetic non-WebAuthn-backed
+# master device on Heima mainnet. Codex adversarial review 2026-05-23 [H2].
+case "$MODE" in
+  webauthn) ;;
+  stage1-stub)
+    if [ "${AGENTKEYS_STAGE1_STUB_OK:-0}" != "1" ]; then
+      die "K11 file at $K11_FILE has mode=stage1-stub but AGENTKEYS_STAGE1_STUB_OK is unset.
+This file was written by the harness CI stub path and MUST NOT be registered
+on Heima mainnet via setup-heima.sh / heima-register-first-master.sh from a
+prod operator's machine. Re-enroll with --webauthn for real ceremony, or
+re-run via harness/v2-stage1-demo.sh which sets the env gate explicitly.
+(Codex H2: stage1-stub bypass on prod chain blocked.)"
+    fi
+    info "stage1-stub mode accepted under AGENTKEYS_STAGE1_STUB_OK=1 (CI/harness path)"
+    ;;
+  *)
+    die "K11 file at $K11_FILE has mode=$MODE (expected 'webauthn' or 'stage1-stub' under AGENTKEYS_STAGE1_STUB_OK=1) — re-enroll with --webauthn"
+    ;;
+esac
 COSE_HEX=$(jq -r .cose_pubkey_hex "$K11_FILE")
 COSE_NOPREFIX="${COSE_HEX#0x}"
 [ "${#COSE_NOPREFIX}" = "130" ] || die "K11 cose_pubkey_hex unexpected length ${#COSE_NOPREFIX} (expected 130)"

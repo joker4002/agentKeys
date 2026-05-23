@@ -4,10 +4,10 @@ This runbook is the canonical guide for deploying and operating the
 AgentKeys pluggable broker introduced in Stage 7 / issue
 [litentry/agentKeys#64](https://github.com/litentry/agentKeys/issues/64).
 
-It supersedes the section of `cloud-setup.md` that covers the
+It supersedes the section of `cloud-bootstrap.md` that covers the
 pre-pluggable broker only when you are deploying the v0 pluggable
 build. The pre-Stage-7 broker (PR #60 + PR #61) continues to use
-`cloud-setup.md` §4.
+`cloud-bootstrap.md` §4.
 
 > **This runbook is a Phase 0 draft (US-015).** Phase E (US-039) lands
 > the final form: full troubleshooting, restore drill, env-var table
@@ -33,19 +33,19 @@ markers in the block below — no command runs on both.
 
 | | Operator workstation | Broker host (EC2 / VM resolved by `BROKER_HOST` DNS) |
 |---|---|---|
-| **Role** | Has your `agentkeys-admin` AWS profile + the `$ACCOUNT_ID` / `$BROKER_HOST` shell vars from `cloud-setup.md §0`. Used to mint resources in AWS and to look up the account ID. | Public-facing host AWS IAM reaches at `https://$BROKER_HOST` to fetch `/.well-known/jwks.json`. Where the `agentkeys-broker-server` process actually runs and where the ES256 private keys live. |
+| **Role** | Has your `agentkeys-admin` AWS profile + the `$ACCOUNT_ID` / `$BROKER_HOST` shell vars from `cloud-bootstrap.md §0`. Used to mint resources in AWS and to look up the account ID. | Public-facing host AWS IAM reaches at `https://$BROKER_HOST` to fetch `/.well-known/jwks.json`. Where the `agentkeys-broker-server` process actually runs and where the ES256 private keys live. |
 | **Has the binary?** | Optional (only if you `cargo build`). Not used in this Quickstart. | **Yes — required.** Install via `scripts/setup-broker-host.sh` (puts it in `/usr/local/bin`) or `cargo install --path crates/agentkeys-broker-server` on the host. |
 | **Holds private keys?** | No. | Yes — `~/.agentkeys/broker/{oidc,session}-keypair.json`. The keys NEVER leave the host; AWS only sees the public half via the broker's public JWKS endpoint. |
 | **Quickstart steps** | Step 0 only. | Steps 1, 2, 3. |
 
-**Run cloud-setup.md §0 + §3 + §4 first** — the broker has no useful
+**Run cloud-bootstrap.md §0 + §3 + §4 first** — the broker has no useful
 state without those AWS-side resources (IAM role, OIDC provider, DNS).
 
 ```bash
 # ════════════════════════════════════════════════════════════════════
 #  STEP 0 — ON OPERATOR WORKSTATION
 # ════════════════════════════════════════════════════════════════════
-# These vars come from cloud-setup.md §0; if you've already sourced
+# These vars come from cloud-bootstrap.md §0; if you've already sourced
 # them in this shell, they're already exported. They live on your
 # workstation only — the broker host has no awsp + no admin profile.
 awsp agentkeys-admin
@@ -83,12 +83,12 @@ chmod 600 ~/.agentkeys/broker/{oidc,session}-keypair.json
 #      installs the mock-server as a systemd unit on this host's loopback,
 #      so the value is `http://127.0.0.1:8090`. See "What is the backend?"
 #      below.
-#    BROKER_DATA_ROLE_ARN: the role created by cloud-setup.md §3.2 —
+#    BROKER_DATA_ROLE_ARN: the role created by cloud-bootstrap.md §3.2 —
 #      derived from ACCOUNT_ID; paste the value you echoed on the
 #      workstation in step 0 (12-digit string).
 #    BROKER_OIDC_ISSUER: the public hostname the broker advertises to AWS
 #      as its JWT issuer; AWS reads JWKS from <issuer>/.well-known/jwks.json.
-#      Per cloud-setup.md §4.1 this MUST be `https://<your-broker-host>` exactly,
+#      Per cloud-bootstrap.md §4.1 this MUST be `https://<your-broker-host>` exactly,
 #      with no trailing slash and no path.
 ACCOUNT_ID=<paste-12-digits-from-step-0>
 BROKER_HOST=broker.litentry.org   # same hostname AWS will reach
@@ -124,7 +124,7 @@ solve **opposite problems** and never refer to the same service.
 | **Direction** | Broker calls **OUT** to it (server-to-server). | Broker is identified **AS** it (broker = the issuer). |
 | **Who reads it** | The broker process itself. | AWS IAM, when it validates a JWT during `sts:AssumeRoleWithWebIdentity`. |
 | **What lives there** | The legacy session-validation backend (`agentkeys-mock-server` today; chain backend in v0.2+). Exposes `/healthz` + `/session/validate`. | The broker itself — `<issuer>/.well-known/openid-configuration` and `<issuer>/.well-known/jwks.json` are served by the same `agentkeys-broker-server` process this runbook deploys. |
-| **Network exposure** | **Internal only.** `scripts/setup-broker-host.sh` colocates the mock-server on the broker host's loopback, so the value is `http://127.0.0.1:8090`. Never publicly reachable. | **Public-facing TLS-terminated URL.** AWS IAM must be able to fetch the JWKS over the open internet — exactly the URL given in `cloud-setup.md §4.1` (`https://broker.litentry.org`). |
+| **Network exposure** | **Internal only.** `scripts/setup-broker-host.sh` colocates the mock-server on the broker host's loopback, so the value is `http://127.0.0.1:8090`. Never publicly reachable. | **Public-facing TLS-terminated URL.** AWS IAM must be able to fetch the JWKS over the open internet — exactly the URL given in `cloud-bootstrap.md §4.1` (`https://broker.litentry.org`). |
 | **Validated against** | Broker's own readiness probe (Tier-2 `/healthz`). | AWS IAM matches the JWT's `iss` claim **byte-for-byte** at `AssumeRoleWithWebIdentity` time. Trailing slashes, scheme, path — all matter. |
 | **What it returns** | A JSON `{"valid":true,...}` body when the broker calls `POST /session/validate` with a legacy bearer. | A JWKS JSON document (the broker's ES256 public key, with `kid`). |
 | **Stage** | Pre-Stage-7 path. Post-Stage-7, Phase 0 SIWE wallet-sig auth replaces this for new daemons; the backend stays only to serve `/v1/auth/exchange` for legacy daemons during the migration window (Plan §3.5.7). | Stage 7 onward — the broker IS the issuer. Was previously stamped by the mock-server. |
@@ -360,7 +360,7 @@ In dev, `BROKER_DEV_MODE=true` relaxes the HTTPS rule.
 
 ## AWS IAM Trust
 
-Per the existing `cloud-setup.md` §4 OIDC federation pattern: create
+Per the existing `cloud-bootstrap.md` §4 OIDC federation pattern: create
 an IAM OIDC provider for `BROKER_OIDC_ISSUER`, then a role with a trust
 policy granting `sts:AssumeRoleWithWebIdentity` to that provider scoped
 by `aud=sts.amazonaws.com` and a `sub` prefix.
@@ -418,7 +418,7 @@ runtime for credential minting. After cutover you can:
   `GetCallerIdentity` startup probe (the probe is informational — its
   failure does not refuse to boot post-migration).
 
-After cutover (cloud-setup.md §4 done, all daemons on the new flow),
+After cutover (cloud-bootstrap.md §4 done, all daemons on the new flow),
 you can remove the `agentkeys-daemon-assume-role` inline policy from
 the `agentkeys-daemon` IAM user — it grants `sts:AssumeRole` on a
 role whose trust policy no longer permits that action.

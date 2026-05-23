@@ -47,6 +47,14 @@
 #   --skip-email          assume ~/.agentkeys/$SESSION_ID/session.json exists
 #   --skip-smoke          skip the S3 envelope round-trip
 #   --skip-deploy         skip the chain bring-up (contract deploy)
+#   --skip-provision      skip step 7 (vault bucket + role + policy provisioning).
+#                         Use in CI / non-admin paths where the test infra is
+#                         already provisioned by the operator one-shot and the
+#                         current AWS caller lacks IAM-admin perms to create
+#                         buckets/roles. Mirrors --skip-deploy: the sub-scripts
+#                         require agentkeys-admin caller identity, which CI
+#                         (assumed via OIDC into github-actions-agentkeys-e2e)
+#                         doesn't have.
 #   --confirm             pause for Enter before chain deploy
 #   --debug               enable `set -x` (very chatty)
 #   --webauthn            use REAL WebAuthn ceremony for K11 enroll (step 11)
@@ -126,6 +134,7 @@ SKIP_BUILD=0
 SKIP_EMAIL=0
 SKIP_SMOKE=0
 SKIP_DEPLOY=0
+SKIP_PROVISION=0
 CONFIRM=0
 DEBUG=0
 # WEBAUTHN_MODE: 0 = stage-1 stub (CI-friendly, no Touch ID prompt — default).
@@ -135,7 +144,11 @@ DEBUG=0
 WEBAUTHN_MODE=0
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+# ENV_FILE: caller-supplied env var takes precedence; default = prod.
+# Lets `ENV_FILE=scripts/operator-workstation.test.env bash harness/v2-stage1-demo.sh`
+# (or CI's in-place rewrite of the default path) both point at test resources
+# without modifying the script. Matches the same plumbing in setup-heima.sh.
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 
 # Resolve agentkeys binary — prefer workspace-local builds (operator just
 # built / is iterating). Falls back to PATH (installed via
@@ -172,6 +185,7 @@ while [ $# -gt 0 ]; do
     --skip-email)      SKIP_EMAIL=1; shift ;;
     --skip-smoke)      SKIP_SMOKE=1; shift ;;
     --skip-deploy)     SKIP_DEPLOY=1; shift ;;
+    --skip-provision)  SKIP_PROVISION=1; shift ;;
     --confirm)         CONFIRM=1; shift ;;
     --debug)           DEBUG=1; shift ;;
     --webauthn)        WEBAUTHN_MODE=1; shift ;;
@@ -325,15 +339,18 @@ do_step_5() {
   fi
 }
 
-# ─── Step 6: email-init Alice session ───────────────────────────────────────
+# ─── Step 6: init Alice session (email magic-link OR wallet_sig fallback) ───
+# Two paths land at the same on-disk shape (~/.agentkeys/$SESSION_ID/session.json):
+#   1. Email magic-link — interactive, used by operators dogfooding locally.
+#   2. wallet_sig SIWE — non-interactive, used by CI (no human to click links).
+#                        Triggered when --skip-email is passed AND
+#                        $HEIMA_DEPLOYER_KEY_FILE points at a usable key.
+#                        Mirrors v2-stage3-demo.sh step 1's flow.
 do_step_6() {
-  step "Initialize session ($SESSION_ID) via email magic-link"
+  step "Initialize session ($SESSION_ID) via email magic-link or wallet_sig"
   local session_file="$HOME/.agentkeys/$SESSION_ID/session.json"
-  if [ "$SKIP_EMAIL" = "1" ]; then
-    skip "--skip-email set"
-    [ -f "$session_file" ] || die "but $session_file missing — drop --skip-email or run init manually"
-    return 0
-  fi
+
+  # Reuse a fresh session.json regardless of init mode.
   if [ -f "$session_file" ]; then
     local age_sec
     age_sec=$(( $(date +%s) - $(stat -f %m "$session_file" 2>/dev/null \
@@ -344,18 +361,104 @@ do_step_6() {
     fi
     info "$session_file exists but is ${age_sec}s old; re-initing to refresh JWT"
   fi
+
+  if [ "$SKIP_EMAIL" = "1" ]; then
+    local key_file="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/heima-deployer.key}"
+    if [ -f "$key_file" ]; then
+      info "--skip-email + deployer key available → wallet_sig SIWE init"
+      info "using key file: $key_file"
+      wallet_sig_init_session "$key_file" "$session_file" \
+        || die "wallet_sig session init failed (broker $OIDC_ISSUER reachable? key valid?)"
+      ok "session JWT persisted at $session_file (via wallet_sig)"
+      return 0
+    fi
+    skip "--skip-email set"
+    die "$session_file missing AND no deployer key at $key_file — drop --skip-email, run init manually, or set HEIMA_DEPLOYER_KEY_FILE"
+  fi
+
   info "NOTE: when the macOS keychain dialog appears, click 'Always Allow' (or Touch ID)"
   info "running: bash scripts/agentkeys-init-email-demo.sh --session-id $SESSION_ID"
   AGENTKEYS_SESSION_ID="$SESSION_ID" \
     bash "$REPO_ROOT/scripts/agentkeys-init-email-demo.sh" --session-id "$SESSION_ID" \
     || die "agentkeys-init-email-demo.sh failed — see output above"
   [ -f "$session_file" ] || die "expected $session_file to exist after init"
-  ok "session JWT persisted at $session_file"
+  ok "session JWT persisted at $session_file (via email magic-link)"
+}
+
+# wallet_sig SIWE init — mints a session JWT from a deployer wallet's private
+# key without any human interaction. The broker's /v1/auth/wallet plug-in must
+# be enabled (BROKER_AUTH_METHODS contains "wallet_sig"). Used by CI; mirrors
+# the working flow in v2-stage3-demo.sh step 1.
+#
+# Writes session.json with the schema agentkeys-core/session_store.rs expects:
+#   { token, wallet, scope: null, ttl_seconds, created_at }
+wallet_sig_init_session() {
+  local key_file="$1" session_file="$2"
+  local key wallet_addr start_resp request_id siwe_msg sig verify_resp jwt
+
+  key=$(tr -d '\r\n[:space:]' < "$key_file")
+  case "$key" in
+    0x*) ;;
+    *) fail "wallet_sig: $key_file content does not start with 0x"; return 1 ;;
+  esac
+
+  wallet_addr=$(cast wallet address --private-key "$key" 2>/dev/null) \
+    || { fail "wallet_sig: cast wallet address failed (cast on PATH? key valid?)"; return 1; }
+  info "wallet_sig: signing as $wallet_addr"
+
+  # SIWE chain_id = 1: the broker treats this as a replay-binding nonce only,
+  # NOT a chain hop — matches v2-stage3-demo.sh's CHAIN_ID_FOR_SIWE.
+  start_resp=$(curl -sSf -X POST "${OIDC_ISSUER}/v1/auth/wallet/start" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg addr "$wallet_addr" --argjson cid 1 \
+          '{address: $addr, chain_id: $cid}')" 2>&1) \
+    || { fail "wallet_sig: /v1/auth/wallet/start failed: $start_resp"; return 1; }
+
+  request_id=$(echo "$start_resp" | jq -r '.request_id // empty')
+  siwe_msg=$(echo "$start_resp" | jq -r '.siwe_message // empty')
+  [ -z "$request_id" ] && { fail "wallet_sig: /v1/auth/wallet/start missing request_id: $start_resp"; return 1; }
+  [ -z "$siwe_msg" ] && { fail "wallet_sig: /v1/auth/wallet/start missing siwe_message: $start_resp"; return 1; }
+
+  sig=$(cast wallet sign --private-key "$key" "$siwe_msg" 2>/dev/null) \
+    || { fail "wallet_sig: cast wallet sign failed"; return 1; }
+
+  verify_resp=$(curl -sSf -X POST "${OIDC_ISSUER}/v1/auth/wallet/verify" \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg rid "$request_id" --arg sig "$sig" \
+          '{request_id: $rid, signature: $sig}')" 2>&1) \
+    || { fail "wallet_sig: /v1/auth/wallet/verify failed: $verify_resp"; return 1; }
+
+  jwt=$(echo "$verify_resp" | jq -r '.session_jwt // .jwt // empty')
+  [ -z "$jwt" ] && { fail "wallet_sig: /v1/auth/wallet/verify missing session JWT: $verify_resp"; return 1; }
+
+  mkdir -p "$(dirname "$session_file")"
+  umask 077
+  jq -n \
+    --arg token "$jwt" \
+    --arg wallet "$wallet_addr" \
+    --argjson ttl 18000 \
+    --argjson now "$(date +%s)" \
+    '{token: $token, wallet: $wallet, scope: null, ttl_seconds: $ttl, created_at: $now}' \
+    > "$session_file"
+  chmod 600 "$session_file"
 }
 
 # ─── Step 7: provision vault infrastructure (arch.md §17 per-data-class) ────
 do_step_7() {
   step "Provision vault infra (bucket + role + policy)"
+  # Skip-provision: CI + any non-admin path where infra is pre-provisioned
+  # by an operator one-shot. The four sub-scripts below all require the
+  # caller to be `agentkeys-admin` (they create buckets, roles, and apply
+  # policies — IAM-admin perms). CI's caller is the OIDC-assumed
+  # github-actions-agentkeys-e2e role, which deliberately can NOT create
+  # buckets / roles / policies (least-privilege). So in CI, infra is
+  # pre-provisioned by `setup-cloud.sh --test` + `provision-vault-*.sh`
+  # invoked once by the operator with agentkeys-admin perms; the harness
+  # just exercises the already-provisioned bucket via assumed STS creds.
+  if [ "$SKIP_PROVISION" = "1" ]; then
+    skip "--skip-provision set; assuming vault/memory bucket+role+policy already provisioned (operator one-shot)"
+    return 0
+  fi
   # Per arch.md §17 (per-data-class buckets) + §17.2 (per-bucket IAM
   # role): credentials and email MUST live in separate S3 buckets with
   # separate IAM roles, so a bug widening one role doesn't widen all
@@ -590,6 +693,12 @@ do_step_10() {
     info "skipping — no SidecarRegistry address yet (run step 9 chain bring-up first)"
     return 0
   fi
+  # AGENTKEYS_STAGE1_STUB_OK=1 opts THIS specific stage-1 invocation into
+  # accepting a stage1-stub K11 file (CI / WEBAUTHN_MODE=0 path). Without
+  # the env, heima-register-first-master.sh refuses stage1-stub → prevents
+  # a stale stub K11 file in $HOME/.agentkeys/k11/ from being accepted by
+  # a later prod setup-heima.sh run. Codex H2 mitigation.
+  AGENTKEYS_STAGE1_STUB_OK=1 \
   bash "$REPO_ROOT/scripts/heima-device-register.sh" \
     --registry-address "$registry_addr" \
     --roles cap-mint,recovery,scope-mgmt \
@@ -710,9 +819,18 @@ do_step_11() {
     fi
     info "writing stage-1 K11 stub enrollment for operator_omni=0x$operator_omni"
     mkdir -p "$(dirname "$enrollment_file")"
-    local cred_id cose ts
+    local cred_id cose_x cose_y cose ts
     cred_id=$(printf 'agentkeys-k11-stub-cred:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
-    cose=$(printf 'agentkeys-k11-stub-cose:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    # cose_pubkey_hex must be 130 hex chars: '04' uncompressed-P256 prefix +
+    # 64-char X + 64-char Y. Real WebAuthn writes a real P256 pubkey here;
+    # the stub fills X/Y with deterministic sha256 outputs so the SHAPE
+    # passes harness/scripts/heima-register-first-master.sh's length=130
+    # check + the slice extraction (X=positions 2..66, Y=positions 66..130).
+    # The bytes don't lie on the P256 curve, but the on-chain contract
+    # only checks `length != 0` per arch.md §22b.1 stage-1 simplification.
+    cose_x=$(printf 'agentkeys-k11-stub-cose-x:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    cose_y=$(printf 'agentkeys-k11-stub-cose-y:0x%s' "$operator_omni" | shasum -a 256 | awk '{print $1}')
+    cose="04${cose_x}${cose_y}"
     ts=$(date +%s)
     (umask 077 && jq -n \
       --arg op "0x$operator_omni" \
@@ -794,8 +912,13 @@ main() {
   in_scope 7  && do_step_7
   in_scope 8  && do_step_8
   in_scope 9  && do_step_9
-  in_scope 10 && do_step_10
+  # Step 11 (K11 enrollment) must run BEFORE step 10 (register master device):
+  # harness/scripts/heima-register-first-master.sh refuses to run without the
+  # K11 enrollment file at ~/.agentkeys/k11/<operator_omni>.json. The step
+  # numbers reflect the conceptual flow (register-then-enroll for explanation
+  # purposes); the actual execution dependency is enroll-then-register.
   in_scope 11 && do_step_11
+  in_scope 10 && do_step_10
   in_scope 12 && do_step_12
   in_scope 13 && do_step_13
   in_scope 14 && do_step_14

@@ -32,6 +32,10 @@ PROFILE_NAME="agentkeys-daemon"
 WITH_NGINX="yes"             # default: install + configure nginx (opt out via --without-nginx)
 WITH_CERTBOT="yes"           # default: install certbot (opt out via --without-certbot)
 ASSUME_YES=false
+TEST_MODE=false              # --test: suffix every derived hostname + bucket with "-test"
+                             # so a single flag replaces the 8 explicit
+                             # --signer-host / --vault-bucket / --email-from / etc.
+                             # overrides for the test broker.
 PULL_REF=""                  # --ref <branch-or-tag>: opt-in git fetch+checkout+pull
 SIGNER_HOST=""               # --signer-host: hostname for the dedicated signer listener
 AUDIT_HOST=""                # --audit-host: hostname for tier-A audit-relay worker (default audit.<zone>)
@@ -83,6 +87,7 @@ while (( $# > 0 )); do
     --yes|-y)             ASSUME_YES=true; shift ;;
     --upgrade|--skip-pull) shift ;;        # back-compat no-ops (script is idempotent; --ref drives any pull)
     --ref)                PULL_REF="$2"; shift 2 ;;
+    --test)               TEST_MODE=true; shift ;;
     --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
     --audit-host)         AUDIT_HOST="$2"; shift 2 ;;
     --email-host)         EMAIL_HOST="$2"; shift 2 ;;
@@ -337,6 +342,34 @@ EOF
   #                            --without-certbot to opt out)
 fi
 
+# ─── Auto-derive --issuer-url + --account-id from operator-workstation.env ──
+# When the operator-workstation.env in the repo has ZONE + ACCOUNT_ID set
+# (the default on every clone of this repo), the operator can omit those
+# flags. With --test set, ZONE → "https://test-broker.${ZONE}"; without,
+# → "https://broker.${ZONE}". CLI flags still win when explicitly passed.
+__opw_env="$REPO_ROOT/scripts/operator-workstation.env"
+if [[ -f "$__opw_env" ]]; then
+  if [[ -z "$ISSUER_URL" ]]; then
+    __zone=$(grep '^ZONE=' "$__opw_env" | head -1 | cut -d= -f2)
+    if [[ -n "$__zone" ]]; then
+      if [[ "$TEST_MODE" == "true" ]]; then
+        ISSUER_URL="https://test-broker.${__zone}"
+      else
+        ISSUER_URL="https://broker.${__zone}"
+      fi
+      log "Derived --issuer-url=$ISSUER_URL from ZONE=$__zone in $__opw_env"
+    fi
+  fi
+  if [[ -z "$ACCOUNT_ID" ]]; then
+    __acct=$(grep '^ACCOUNT_ID=' "$__opw_env" | head -1 | cut -d= -f2)
+    if [[ -n "$__acct" ]]; then
+      ACCOUNT_ID="$__acct"
+      log "Derived --account-id=$ACCOUNT_ID from $__opw_env"
+    fi
+  fi
+fi
+unset __opw_env __zone __acct
+
 # ─── Validate inputs ─────────────────────────────────────────────────────────
 [[ -n "$ISSUER_URL" ]] || die "--issuer-url is required (e.g. https://broker.litentry.org). Drop --non-interactive for an interactive walk-through."
 case "$ISSUER_URL" in
@@ -365,11 +398,22 @@ ISSUER_HOST="${ISSUER_HOST%%/*}"
 # audit/email/cred/memory hosts are "audit.foo.com" / "email.foo.com" / etc.
 # If ISSUER_HOST has no dots (unlikely), fall back to "<label>.${ISSUER_HOST}".
 ISSUER_ZONE="${ISSUER_HOST#*.}"   # everything after the first label
+
+# --test mode appends "-test" to every derived hostname/bucket/email so
+# a single flag swaps prod ↔ test without 8 explicit overrides. The
+# operator can still override any individual flag (e.g. --vault-bucket)
+# and that wins.
+if [[ "$TEST_MODE" == "true" ]]; then
+  SUFFIX="-test"
+else
+  SUFFIX=""
+fi
+
 if [[ "$ISSUER_ZONE" == "$ISSUER_HOST" ]]; then
   # No dot — single-label hostname (dev/localhost). Prefix with "<label>.".
-  derive_companion() { echo "${1}.${ISSUER_HOST}"; }
+  derive_companion() { echo "${1}${SUFFIX}.${ISSUER_HOST}"; }
 else
-  derive_companion() { echo "${1}.${ISSUER_ZONE}"; }
+  derive_companion() { echo "${1}${SUFFIX}.${ISSUER_ZONE}"; }
 fi
 if [[ -z "$SIGNER_HOST" ]]; then
   SIGNER_HOST="$(derive_companion signer)"
@@ -384,15 +428,35 @@ if [[ -z "$MEMORY_HOST" ]]; then MEMORY_HOST="$(derive_companion memory)";fi
 # Production will split each service to its own machine + IAM principal;
 # see CLAUDE.md "for production, we will isolate all the services".
 [[ -z "$CHAIN_RPC" ]]       && CHAIN_RPC="https://rpc.heima-parachain.heima.network"
-[[ -z "$VAULT_BUCKET" ]]    && VAULT_BUCKET="agentkeys-vault-${ACCOUNT_ID}"
-[[ -z "$MEMORY_BUCKET" ]]   && MEMORY_BUCKET="agentkeys-memory-${ACCOUNT_ID}"
+[[ -z "$VAULT_BUCKET" ]]    && VAULT_BUCKET="agentkeys-vault${SUFFIX}-${ACCOUNT_ID}"
+[[ -z "$MEMORY_BUCKET" ]]   && MEMORY_BUCKET="agentkeys-memory${SUFFIX}-${ACCOUNT_ID}"
+# Test mode flips the email-from default to the -test subdomain too
+# (operator can still override via --email-from).
+if [[ "$TEST_MODE" == "true" ]] && [[ "$BROKER_EMAIL_FROM_ADDRESS" == "noreply-test@bots.litentry.org" ]]; then
+  BROKER_EMAIL_FROM_ADDRESS="noreply-test@bots-test.${ISSUER_ZONE}"
+fi
 # Contract addresses pulled from operator-workstation.env on Heima Mainnet.
 # Source the repo-committed env file so a fresh broker host inherits the
 # same canonical addresses as the operator laptop (no manual sync needed).
-if [[ -f "$REPO_ROOT/scripts/operator-workstation.env" ]]; then
-  # shellcheck disable=SC1091
-  set -a; . "$REPO_ROOT/scripts/operator-workstation.env"; set +a
+# Source operator-workstation.env for canonical contract addresses + hostnames.
+# CRITICAL: pick the right variant per --test. In test mode we MUST source
+# operator-workstation.test.env (which has SIGNER_HOST=signer-test.${ZONE})
+# rather than the prod env (which has SIGNER_HOST=signer.${ZONE}) — sourcing
+# prod would clobber the test-suffix SIGNER_HOST that derive_companion just
+# set, leaving nginx with `server_name signer.litentry.org` on the test box
+# while certbot issued certs for `signer-test.litentry.org`. Incident
+# 2026-05-23: caught by no-TLS-cert response from signer-test, traced to
+# this hardcoded prod-env source after --test ran.
+_env_file_to_source="$REPO_ROOT/scripts/operator-workstation.env"
+if [[ "$TEST_MODE" == "true" ]] && [[ -f "$REPO_ROOT/scripts/operator-workstation.test.env" ]]; then
+  _env_file_to_source="$REPO_ROOT/scripts/operator-workstation.test.env"
 fi
+if [[ -f "$_env_file_to_source" ]]; then
+  # shellcheck disable=SC1091
+  set -a; . "$_env_file_to_source"; set +a
+  log "Sourced env file: $_env_file_to_source"
+fi
+unset _env_file_to_source
 [[ -z "$SCOPE_ADDR" ]]      && SCOPE_ADDR="${SCOPE_CONTRACT_ADDRESS_HEIMA:-}"
 [[ -z "$REGISTRY_ADDR" ]]   && REGISTRY_ADDR="${SIDECAR_REGISTRY_ADDRESS_HEIMA:-}"
 [[ -z "$K3_COUNTER_ADDR" ]] && K3_COUNTER_ADDR="${K3_EPOCH_COUNTER_ADDRESS_HEIMA:-}"
@@ -659,6 +723,72 @@ if ! id -u agentkeys >/dev/null 2>&1; then
   sudo useradd --system --home /var/lib/agentkeys --shell /usr/sbin/nologin agentkeys
 fi
 sudo install -d -m 0700 -o agentkeys -g agentkeys /var/lib/agentkeys
+
+# Operator SSH login user (separate from the `agentkeys` daemon system
+# user). Used by EC2 Instance Connect — the IAM ec2-instance-connect
+# policy condition `ec2:osuser=agentkey` requires this exact username.
+# Idempotent — re-running on a host where the user already exists is a no-op.
+if ! id -u agentkey >/dev/null 2>&1; then
+  log "Creating agentkey SSH login user (for EC2 Instance Connect)"
+  sudo useradd --create-home --shell /bin/bash agentkey
+  echo "agentkey ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/agentkey >/dev/null
+  sudo chmod 0440 /etc/sudoers.d/agentkey
+fi
+
+# Mirror ubuntu's authorized_keys into agentkey's .ssh so the .pem
+# fallback path of ssh-broker.sh also lands as `agentkey` (not as
+# `ubuntu`). Without this, ssh-broker.sh's non-fallback path drops into
+# /home/agentkey/ while the fallback path drops into /home/ubuntu/ —
+# operator sees different files depending on which alias they used.
+# Mirroring the keys means both SSH methods end up in the same home
+# dir → same files visible everywhere.
+if [[ -f /home/ubuntu/.ssh/authorized_keys ]] \
+   && ! sudo test -s /home/agentkey/.ssh/authorized_keys; then
+  log "Mirroring ubuntu's authorized_keys → agentkey's .ssh (so .pem fallback lands as agentkey too)"
+  sudo install -d -m 0700 -o agentkey -g agentkey /home/agentkey/.ssh
+  sudo install -m 0600 -o agentkey -g agentkey \
+    /home/ubuntu/.ssh/authorized_keys \
+    /home/agentkey/.ssh/authorized_keys
+fi
+
+# Ensure ec2-instance-connect is installed so sshd's AuthorizedKeysCommand
+# can resolve the ephemeral keys pushed via aws ec2-instance-connect
+# send-ssh-public-key. Recent Ubuntu AMIs include the package but NOT
+# the sshd drop-in config — we add both here, idempotently.
+if ! [[ -x /usr/share/ec2-instance-connect/eic_run_authorized_keys ]]; then
+  log "Installing ec2-instance-connect (required by ssh-broker.sh non-fallback path)"
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y ec2-instance-connect >/dev/null \
+      || warn "ec2-instance-connect install failed — SSH via Instance Connect will need manual fix"
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y ec2-instance-connect >/dev/null \
+      || warn "ec2-instance-connect install failed — SSH via Instance Connect will need manual fix"
+  else
+    warn "unknown package manager — install ec2-instance-connect manually if SSH via Instance Connect fails"
+  fi
+fi
+
+# Wire sshd to resolve ephemeral keys via the Instance Connect helper.
+# On some Ubuntu AMIs the package install doesn't drop the sshd config
+# fragment — when that happens, `sudo sshd -T | grep authorizedkeyscommand`
+# returns "none", and EC2 Instance Connect's SendSSHPublicKey + ssh login
+# fails with "Permission denied (publickey)" even with the right OS user.
+EIC_DROPIN=/etc/ssh/sshd_config.d/60-ec2-instance-connect.conf
+EIC_HELPER=/usr/share/ec2-instance-connect/eic_run_authorized_keys
+if [[ -x "$EIC_HELPER" ]] && ! sudo sshd -T 2>/dev/null | grep -qi "^authorizedkeyscommand $EIC_HELPER"; then
+  log "Writing $EIC_DROPIN to wire sshd → ec2-instance-connect"
+  sudo install -d -m 0755 /etc/ssh/sshd_config.d
+  sudo tee "$EIC_DROPIN" >/dev/null <<EOF
+AuthorizedKeysCommand $EIC_HELPER %u %f
+AuthorizedKeysCommandUser ec2-instance-connect
+EOF
+  # Some Ubuntu sshd_config files don't Include /etc/ssh/sshd_config.d
+  # — add it idempotently so the drop-in is actually picked up.
+  if ! grep -q '^Include /etc/ssh/sshd_config\.d' /etc/ssh/sshd_config 2>/dev/null; then
+    echo 'Include /etc/ssh/sshd_config.d/*.conf' | sudo tee -a /etc/ssh/sshd_config >/dev/null
+  fi
+  sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || warn "sshd reload failed — restart manually"
+fi
 
 if [[ "$CRED_MODE" == "profile" ]]; then
   sudo install -d -m 0700 -o agentkeys -g agentkeys /var/lib/agentkeys/.aws
@@ -1502,6 +1632,43 @@ EOF
   fi
 fi
 
+# ─── 10. Relocate repo from /home/ubuntu/ to /home/agentkey/ ─────────────────
+# When the operator runs setup-broker-host.sh from /home/ubuntu/agentKeys
+# (the documented "ssh as ubuntu fallback → git clone → bootstrap" flow),
+# steady-state operator work (ssh-agentkeys-test as `agentkey`) would
+# otherwise land in /home/agentkey/ which has no repo. Move the source
+# tree there + chown to agentkey so the operator sees their files via
+# the regular SSH path.
+#
+# Idempotent: only relocates if the repo is currently in /home/ubuntu/
+# AND /home/agentkey/agentKeys doesn't already exist. Re-runs from
+# /home/agentkey/agentKeys are no-ops.
+if [[ "$REPO_ROOT" == /home/ubuntu/* ]] && [[ ! -e /home/agentkey/agentKeys ]]; then
+  log "Relocating $REPO_ROOT → /home/agentkey/agentKeys (steady-state agentkey access)"
+  sudo mv "$REPO_ROOT" /home/agentkey/agentKeys
+  sudo chown -R agentkey:agentkey /home/agentkey/agentKeys
+  REPO_MOVED=1
+else
+  REPO_MOVED=0
+fi
+
+# Free ~1.5GB by removing root's Rust toolchain (used only by this script to
+# build the broker binaries; the running services don't need it). Operators
+# who want interactive `cargo` as the agentkey user should install rustup
+# under their own $HOME — see the post-run NOTE below + docs/cloud-bootstrap.md
+# §5 "Optional: install rustup for dev-loop cargo runs as agentkey".
+#
+# Idempotent: rm -rf on a missing path is a no-op. Future re-runs of this
+# script will reinstall rustup as root automatically (the toolchain step
+# earlier in the script handles bootstrap from scratch).
+if [[ -d /root/.cargo ]] || [[ -d /root/.rustup ]]; then
+  log "Removing root's Rust toolchain (~1.5GB) — binaries are built + installed"
+  sudo rm -rf /root/.cargo /root/.rustup
+  ROOT_RUST_CLEANED=1
+else
+  ROOT_RUST_CLEANED=0
+fi
+
 cat <<EOF
   Smoke test (from a client machine — NOT this host):
     curl -sS -o /dev/null -w 'HTTP %{http_code}\n' $ISSUER_URL/healthz        # expect: HTTP 200
@@ -1509,8 +1676,33 @@ cat <<EOF
     curl -sf $ISSUER_URL/.well-known/jwks.json | jq '.keys[0].kid'
     curl -sS -o /dev/null -w 'HTTP %{http_code}\n' https://$SIGNER_HOST/healthz  # expect: HTTP 200 (after certbot)
 
-  Then continue with docs/cloud-setup.md §4 "OIDC federation" to register
+  Then continue with docs/cloud-bootstrap.md §9 "OIDC federation" to register
   the OIDC provider with AWS IAM and verify cloud-enforced isolation.
 
 ================================================================================
 EOF
+
+if [[ "$REPO_MOVED" == "1" ]]; then
+  cat <<EOF
+
+  NOTE: repo was moved /home/ubuntu/agentKeys → /home/agentkey/agentKeys.
+  Your current shell's \$PWD is now stale. After this script exits:
+    1. exit                 # the ubuntu SSH session
+    2. ssh-agentkeys-test   # from your laptop — lands as agentkey
+    3. cd ~/agentKeys       # → /home/agentkey/agentKeys (with the repo)
+
+  Root's Rust toolchain has been removed (\`/root/.cargo\`, \`/root/.rustup\`)
+  to save ~1.5GB. If you want interactive \`cargo\` as the agentkey user
+  (e.g. for dev-loop clippy / test runs that mirror the CI Linux env),
+  install rustup under your own \$HOME once after reconnecting:
+
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \\
+      | sh -s -- -y --default-toolchain stable --profile minimal
+    source "\$HOME/.cargo/env"
+    echo 'source "\$HOME/.cargo/env"' >> ~/.bashrc
+
+  Then \`cargo clippy --workspace --all-targets -- -D warnings\` runs the
+  same lint set CI uses (matching x86_64-linux + stable channel).
+================================================================================
+EOF
+fi

@@ -36,7 +36,7 @@ For v0.1: run on a host you trust, rotate the daemon key on a schedule (§3), wa
 
 | Task | Where |
 |---|---|
-| AWS account provisioning (IAM, SES, S3, OIDC federation) | [`cloud-setup.md`](./cloud-setup.md) |
+| AWS account provisioning (IAM, SES, S3, OIDC federation) | [`cloud-bootstrap.md`](./cloud-bootstrap.md) |
 | Broker-host bootstrap (binaries, systemd, nginx, certbot) | [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) + [`stage7-wip.md` §"Remote deployment"](./stage7-wip.md#remote-deployment) |
 | Broker-host upgrade (pull + rebuild broker + stop/swap/start, with one-step rollback) | `bash scripts/setup-broker-host.sh --upgrade` |
 | Stage 7 design + acceptance test | [`stage7-wip.md`](./stage7-wip.md) |
@@ -76,7 +76,7 @@ The broker resolves AWS credentials through the SDK default provider chain. Pick
 
 ### 2.1 EC2 instance profile (recommended on AWS)
 
-The host's instance profile (`agentkeys-broker-host`, see [`cloud-setup.md` §3.4](./cloud-setup.md#34-agentkeys-broker-host-instance-profile-optional-ec2-only)) carries `sts:AssumeRole` on `agentkeys-data-role`. The SDK pulls credentials from IMDS automatically — no env vars, no shared files, no rotation runbook. Verify with `aws sts get-caller-identity` from the host.
+The host's instance profile (`agentkeys-broker-host`, see [`cloud-bootstrap.md` §3.4](./cloud-bootstrap.md#34-agentkeys-broker-host-instance-profile-optional-ec2-only)) carries `sts:AssumeRole` on `agentkeys-data-role`. The SDK pulls credentials from IMDS automatically — no env vars, no shared files, no rotation runbook. Verify with `aws sts get-caller-identity` from the host.
 
 ### 2.2 Named profile (non-EC2 hosts)
 
@@ -201,9 +201,9 @@ Bearer tokens are stored as `sha256(token)` so a leaked audit DB cannot be repla
 | `/readyz` returns 503 with `backend_unreachable` | `BROKER_BACKEND_URL` wrong / mock-server down | Check the URL; restart the backend. |
 | `/readyz` returns 503 with `sts_error` | Daemon key invalid, expired, or missing `sts:AssumeRole` permission | `aws sts get-caller-identity` with the same env / profile. |
 | `mint-aws-creds` returns 401 | Bearer expired or issued against a different backend | Caller re-runs `agentkeys init` against `BROKER_BACKEND_URL`. |
-| `mint-aws-creds` returns 502 with `sts_error` | Trust policy on `agentkeys-data-role` doesn't allow the daemon user | Check the role's trust policy; see [`cloud-setup.md` §3.2](./cloud-setup.md#32-agentkeys-data-role). |
+| `mint-aws-creds` returns 502 with `sts_error` | Trust policy on `agentkeys-data-role` doesn't allow the daemon user | Check the role's trust policy; see [`cloud-bootstrap.md` §3.2](./cloud-bootstrap.md#32-agentkeys-data-role). |
 | `mint-oidc-jwt` returns 502 / discovery doc `iss` ≠ requested URL | `BROKER_OIDC_ISSUER` mismatch | sed the systemd unit; see [`stage7-wip.md`](./stage7-wip.md). |
-| AWS rejects `AssumeRoleWithWebIdentity` | `BROKER_OIDC_ISSUER` and `aws iam create-open-id-connect-provider --url` disagree byte-for-byte | Re-register the OIDC provider per [`cloud-setup.md` §4.2](./cloud-setup.md#42-register-the-oidc-provider). |
+| AWS rejects `AssumeRoleWithWebIdentity` | `BROKER_OIDC_ISSUER` and `aws iam create-open-id-connect-provider --url` disagree byte-for-byte | Re-register the OIDC provider per [`cloud-bootstrap.md` §4.2](./cloud-bootstrap.md#42-register-the-oidc-provider). |
 | Audit DB grows unbounded | No retention policy in v0.1 | Cron `DELETE FROM mint_log WHERE minted_at < ?` + `VACUUM`. |
 
 ---
@@ -220,7 +220,7 @@ Bearer tokens are stored as `sha256(token)` so a leaked audit DB cannot be repla
 
 ## 9. Further reading
 
-- [`cloud-setup.md`](./cloud-setup.md) — one-time AWS provisioning (DNS, SES, S3, IAM, OIDC federation).
+- [`cloud-bootstrap.md`](./cloud-bootstrap.md) — one-time AWS provisioning (DNS, SES, S3, IAM, OIDC federation).
 - [`stage7-wip.md`](./stage7-wip.md) — Stage 7 design + acceptance test.
 - [`dev-setup.md`](./dev-setup.md) — three-role guide for app developers and end users.
 - [`spec/threat-model-key-custody.md`](./spec/threat-model-key-custody.md) — the broader security position the broker is one component of.

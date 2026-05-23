@@ -56,7 +56,7 @@ have jq   || die "jq not found"
 have curl || die "curl not found"
 
 # Source operator-workstation.env to populate $REGION + $WORKER_*_HOST.
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE not found — run from a clone of agentKeys"
 # shellcheck disable=SC1090
 set -a; . "$ENV_FILE"; set +a

@@ -102,7 +102,11 @@ cd "$REPO_ROOT"
 AGENTKEYS_CHAIN="${AGENTKEYS_CHAIN:-heima}"
 PROFILE_NAME_UC=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
 
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+# ENV_FILE: caller-supplied env var takes precedence; default = prod.
+# `ENV_FILE=scripts/operator-workstation.test.env bash harness/v2-stage2-demo.sh`
+# (or CI's in-place rewrite of the default path) re-points the stage at test
+# resources without modifying the script. Same plumbing as setup-heima.sh.
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE — run scripts/setup-dev-env.sh first"
 set -a; . "$ENV_FILE"; set +a
 

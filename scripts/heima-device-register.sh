@@ -23,7 +23,7 @@ log()  { printf "${C_HEAD}==>${C_RESET} %s\n" "$*" >&2; }
 die()  { printf "    ${C_ERR}fail${C_RESET} %s\n" "$*" >&2; exit 1; }
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$REPO_ROOT/scripts/operator-workstation.env"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
 set -a; . "$ENV_FILE"; set +a
 
@@ -49,13 +49,27 @@ MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY" | tr '[:upper:]' '
 OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR" | shasum -a 256 | awk '{print $1}')
 
 # Strip flags the legacy callers may still pass that the new
-# heima-register-first-master.sh doesn't accept (--roles is the main one;
-# new script defaults to roles=7 which is what stage-1 demo wants anyway).
+# harness/scripts/heima-register-first-master.sh doesn't accept:
+#   --roles         (new script defaults to roles=7 which is stage-1 spec)
+#   --session-id    (new script doesn't take a session; it uses the deployer
+#                    key directly. Harness step 10 passes --session-id alice
+#                    as a passthrough for other helpers in the chain that
+#                    need it — first-master doesn't.)
+# Both eaten + their value (if separate-arg form) shifted past.
 FORWARDED_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --roles|--roles=*) shift; [ "${1#-}" = "$1" ] && shift ;; # eat value if separate
-    *) FORWARDED_ARGS+=("$1"); shift ;;
+    --roles|--session-id)
+      shift
+      [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && shift  # eat value if separate
+      ;;
+    --roles=*|--session-id=*)
+      shift  # `--flag=value` form: single shift
+      ;;
+    *)
+      FORWARDED_ARGS+=("$1")
+      shift
+      ;;
   esac
 done
 
