@@ -72,6 +72,6 @@ jobs:
           else
             gh issue create --repo "${{ github.repository }}" \
               --title "$title" \
-              --label "kind/automation,priority/p2" \
+              --label "kind/devx,priority/p2" \
               --body "$(printf 'Automated audit of litentry/projects/19 workflows found drift from pm/expected-workflows.json.\n\nFix in UI: https://github.com/orgs/litentry/projects/19/workflows\n\n## Audit output\n\n```\n%s\n```' "$(cat audit.txt)")"
           fi
