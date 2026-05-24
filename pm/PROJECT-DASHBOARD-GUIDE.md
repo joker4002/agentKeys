@@ -4,6 +4,34 @@ The GitHub Project [`litentry/projects/19`](https://github.com/orgs/litentry/pro
 
 This guide covers: how to use the board day-to-day, which columns mean what, how CI integration flows events to the board, weekly cadence.
 
+## Known gotcha — "Priority" field zombies
+
+GitHub's `deleteProjectV2Field` mutation on a system-reserved field name (notably **Priority**) does NOT fully delete. It renames the old field to **"Project Priority"** and creates a fresh empty placeholder under the original name. Run delete-recreate twice and you get "Project Project Priority", and so on.
+
+`pm/scripts/setup-project-fields.sh` now auto-cleans these zombies at the start of every run via a `cleanup_zombies` pass — you should never have to think about it. If you see a `Project Priority` (or `Project Phase`, etc.) field in the UI's field list, just re-run `bash pm/scripts/setup-project-fields.sh` and it'll be cleaned up.
+
+**Why this isn't 100% fixed**: GitHub's Priority field is "suggested" by the platform and may respawn after item changes regardless of what we do. The cleanup pass handles the immediate fallout, but if you ever see Priority show 0 options on the board, re-run setup-project-fields.sh.
+
+## What's automated vs what's UI-only
+
+GitHub's Projects v2 API has **specific limits**. Knowing what's automatable up front saves an hour of wasted "why isn't this scripted" debugging.
+
+| Capability | Automated? | How |
+|---|---|---|
+| Add new issue to board | ✅ | Built-in "Auto-add to project" workflow (already enabled) |
+| Set Status on add / close / PR-merge | ✅ | Built-in workflows (Item added / Item closed / Pull request merged — all enabled) |
+| Auto-close issue when Status=Done | ✅ | Built-in "Auto-close issue" workflow |
+| Link PR to issue | ✅ | Built-in "Pull request linked to issue" workflow |
+| Sync `priority/p*` + `phase/v*` labels → fields | ✅ | `.github/workflows/pm-sync-fields-from-labels.yml` (this repo) |
+| Create / configure project fields | ✅ | `pm/scripts/setup-project-fields.sh` |
+| Audit workflow drift | ✅ | `.github/workflows/pm-workflow-audit.yml` (daily) |
+| Bulk backfill historical issues | ✅ | `bash pm/scripts/add-to-project.sh` |
+| **Configure a workflow's filter expression** | ❌ | **UI ONLY** — API has no `updateProjectV2Workflow` mutation |
+| **Configure a workflow's trigger / action** | ❌ | **UI ONLY** — same reason |
+| **Create or configure custom views (group-by, layout, filters)** | ❌ | **UI ONLY** — no `createProjectV2View` / `updateProjectV2View` mutation exists |
+
+The UI-only items live at `https://github.com/orgs/litentry/projects/19/workflows` and the view-config panel of each board view. They're one-time clicks and don't drift often, but you cannot version-control them. Compensate with `pm-workflow-audit.yml` which catches "someone toggled a workflow off in the UI."
+
 ## Quick start
 
 ### One-time setup
@@ -14,16 +42,37 @@ gh auth refresh -s project,read:project
 
 # Verify access
 gh project list --owner litentry | grep "19"
+
+# Create project fields (Priority/Phase/Estimate/Risk/Notes)
+bash pm/scripts/setup-project-fields.sh
 ```
 
-### Add an issue to the board
+### Add a CI secret for the GitHub Actions
+
+The 2 PM workflows (`pm-workflow-audit.yml`, `pm-sync-fields-from-labels.yml`) need a token with org-project scopes — the default `GITHUB_TOKEN` does not have them.
+
+1. Create a fine-grained PAT at https://github.com/settings/tokens
+   - Org permissions: **Projects = read & write**
+   - Repo permissions: **Issues = read & write**, **Pull requests = read**
+2. Add as repo secret: `gh secret set PM_PROJECT_TOKEN < token.txt`
+
+### Add an issue to the board (rarely needed — built-in workflow does it)
 
 ```bash
-# Add one issue
-bash pm/scripts/add-to-project.sh 103
+# Fallback only; "Auto-add to project" built-in workflow handles new issues
+bash pm/scripts/add-to-project.sh 103          # one issue
+bash pm/scripts/add-to-project.sh              # all open issues (backfill)
+```
 
-# Add all currently-open issues
-bash pm/scripts/add-to-project.sh
+### Sync labels → fields (manual trigger)
+
+The `.github/workflows/pm-sync-fields-from-labels.yml` Action handles this automatically on every label change. For backfill of pre-existing issues, trigger manually:
+
+```bash
+gh workflow run pm-sync-fields-from-labels.yml
+# Or run locally:
+bash pm/scripts/sync-fields-from-labels.sh        # all open issues
+bash pm/scripts/sync-fields-from-labels.sh 103    # one issue
 ```
 
 ### Open the board
@@ -88,13 +137,16 @@ Recommended split for THIS repo:
 
 ### How to fix the cluttered Labels column
 
-1. Run `bash pm/scripts/setup-project-fields.sh` — creates Priority, Phase, Estimate, Iteration, Risk, Notes as fields
-2. In the project UI, open your "By Labels" view → click ⋯ on the Labels column header → "Hide field"
-3. Add the new fields as columns (drag from the field list at right)
-4. Change "Group by" from Labels to **Priority** (or **Phase**) — gives clean grouping
-5. (Optional) Bulk-populate field values from existing labels via the project's grid UI (select multi-rows → edit field)
+1. Run `bash pm/scripts/setup-project-fields.sh` — creates Priority, Phase, Estimate, Iteration, Risk, Notes as fields. **Idempotent**: rebuilds GitHub's empty-by-default built-in Priority/Size fields with the proper P0..P3 / XS..XL options.
+2. Backfill all existing issues onto the board: `bash pm/scripts/add-to-project.sh`
+3. Bulk-populate Priority + Phase fields from existing `priority/p*` + `phase/v*` labels:
+   - **CI path** (preferred): `gh workflow run pm-sync-fields-from-labels.yml`
+   - **Local path**: `bash pm/scripts/sync-fields-from-labels.sh`
+4. In the project UI, open your "By Labels" view → click ⋯ on the Labels column header → "Hide field"
+5. Add the new fields as columns (drag from the field list at right)
+6. Change "Group by" from Labels to **Priority** (or **Phase**) — gives clean grouping
 
-Result: cluttered 5-chip Labels cells disappear; you get clean single-value dropdowns per field.
+Result: cluttered 5-chip Labels cells disappear; you get clean single-value dropdowns per field. **Going forward**, the `.github/workflows/pm-sync-fields-from-labels.yml` Action auto-syncs on every label change — no manual step needed.
 
 ### Built-in workflows — prefer these over scripts
 
@@ -116,21 +168,25 @@ GitHub Projects ships ~10 built-in workflow automations. These replace a chunk o
 
 ### Script ↔ workflow split (what each is for)
 
-| Job | Use workflow | Use script |
-|---|---|---|
-| Add new issue to board | ✅ Auto-add to project | `add-to-project.sh` only for one-time backfill of pre-existing issues |
-| Set initial Status when added | ✅ Item added to project | — |
-| Move to Done when closed | ✅ Item closed | — |
-| Close issue when Status=Done | ✅ Auto-close issue | — |
-| Link PR to issue | ✅ "Closes #N" in PR body | — |
-| Move to Done when PR merged | ✅ Pull request merged | — |
-| Create repo milestones / labels | ❌ no workflow exists | `sync-milestones.sh`, `sync-labels.sh` |
-| Bulk-assign milestones + labels to existing issues | ❌ no workflow | `sync-issues.sh` |
-| Create new issues from a declarative list | ❌ no workflow | `create-issues.sh` |
-| Create project field definitions | ❌ no workflow | `setup-project-fields.sh` |
-| Audit categorization state | ❌ no workflow | `audit.sh` |
+Three layers: GitHub's **built-in workflows** (UI-configured), our **GitHub Actions** (`.github/workflows/pm-*.yml`, version-controlled), and **bash scripts** (local + CI fallback).
 
-**Rule**: if there's a workflow for it, use the workflow. Scripts exist for the gaps the workflows don't cover (repo-level state, batch issue creation, field definitions).
+| Job | Built-in workflow | Our GH Action | Bash script |
+|---|---|---|---|
+| Add new issue to board | ✅ Auto-add to project | — | `add-to-project.sh` (backfill only) |
+| Set initial Status when added | ✅ Item added to project | — | — |
+| Move to Done when closed | ✅ Item closed | — | — |
+| Close issue when Status=Done | ✅ Auto-close issue | — | — |
+| Link PR to issue | ✅ Pull request linked to issue | — | — |
+| Move to Done when PR merged | ✅ Pull request merged | — | — |
+| **Sync `priority/p*` + `phase/v*` labels → fields** | ❌ no built-in | ✅ `pm-sync-fields-from-labels.yml` (issues.labeled) | `sync-fields-from-labels.sh` (backfill + local) |
+| **Audit workflow drift** | ❌ no built-in | ✅ `pm-workflow-audit.yml` (daily) | `check-workflows.sh` |
+| Create repo milestones / labels | ❌ no built-in | (could move to GHA) | `sync-milestones.sh`, `sync-labels.sh` |
+| Bulk-assign milestones + labels to existing issues | ❌ no built-in | (could move to GHA) | `sync-issues.sh` |
+| Create new issues from a declarative list | ❌ no built-in | — | `create-issues.sh` |
+| Create project field definitions | ❌ no built-in | — | `setup-project-fields.sh` (one-time) |
+| Audit categorization state | ❌ no built-in | — | `audit.sh` |
+
+**Rule**: built-in workflow > our GH Action > bash script. Use the highest layer that covers the job. Scripts exist for: one-time bootstrap (setup-project-fields), batch creation (create-issues), and local debugging fallback for everything else.
 
 ### One-time workflow configuration checklist
 
@@ -155,15 +211,15 @@ After the board exists:
 ### Engineer creating new work
 
 ```bash
-# Quick path — direct gh CLI
+# Just create the issue with the right labels — built-in + GH Action workflows do the rest:
+#   1. "Auto-add to project" built-in workflow → adds it to the board with Status=Todo
+#   2. pm-sync-fields-from-labels.yml GH Action → mirrors priority/* + phase/* labels into the
+#      Priority + Phase project fields
 gh issue create --repo litentry/agentKeys \
   --title "Phase 2: <something>" \
   --body "Scope..." \
   --milestone "M2: First vendor wedge (incl memory system)" \
   --label "area/mcp,kind/feature,phase/v2,priority/p2"
-
-# Then add to project board
-bash pm/scripts/add-to-project.sh <issue_number>
 ```
 
 For repeatable issue creation (e.g., planning a sprint), prefer the declarative path:

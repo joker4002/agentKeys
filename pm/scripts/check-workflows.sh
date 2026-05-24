@@ -2,6 +2,9 @@
 # pm/scripts/check-workflows.sh
 # Read-only: audits the workflows on litentry/projects/19 against expected-workflows.json.
 #
+# PRIMARY RUNNER: .github/workflows/pm-workflow-audit.yml runs this daily in CI
+# and opens a tracking issue on drift. Local invocation is the fallback / debugging path.
+#
 # IMPORTANT LIMITATION: GitHub's public GraphQL API exposes only the workflow's
 # name + enabled state, NOT the filter expression or action configuration.
 # So this script can verify "the right workflows are enabled" but NOT "they're
