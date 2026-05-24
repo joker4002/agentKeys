@@ -22,7 +22,7 @@ When you finish this guide you will have:
 5. **Proven cloud-enforced per-user isolation** — `omni_A`'s derived
    wallet reads its own prefix; `omni_B`'s derived wallet returns
    `AccessDenied` from S3 itself, not from app code.
-6. Inspected the audit log + metrics + idempotency cache.
+6. Inspected the audit log + metrics.
 7. Exercised capability grants and wallet recovery.
 
 The guide assumes the build deployed includes:
@@ -1438,18 +1438,21 @@ contains only `ses:SendRawEmail`.
 
 ---
 
-## 5. Mint AWS creds — two paths, post-issue-#71
+## 5. Mint AWS creds — single client-side path, post-issue-#71 / #72
 
-After issue #71 Option A landed, the auto-provision pipeline mints AWS
-creds **client-side** by combining `/v1/mint-oidc-jwt` (broker call) +
-`AssumeRoleWithWebIdentity` (daemon-side STS call). The broker no longer
-needs an IAM principal at runtime.
+After issue #71 Option A landed (caller-side migration) and PR #96 / issue
+#72 deleted the legacy `/v1/mint-aws-creds` server-side aggregator, the
+auto-provision pipeline mints AWS creds **client-side** by combining
+`/v1/mint-oidc-jwt` (broker call) + `AssumeRoleWithWebIdentity`
+(daemon-side STS call). The broker no longer needs an IAM principal at
+runtime, and no longer holds the mint pipeline at all — it's a pure JWT
+signer.
 
-`/v1/mint-aws-creds` (server-side aggregator) **still works** for callers
-who want server-side enforcement of audit + grants + idempotency — but
-the production auto-provision path no longer hits it.
+The old `POST /v1/mint-aws-creds` route now returns 404. Daemons that
+still try to call it will see a hard failure; re-deploy with a binary
+that uses `fetch_via_broker_default_ttl()` (the OIDC-first helper).
 
-### 5.1 The new daemon-side flow (auto-provision uses this)
+### 5.1 The daemon-side flow (auto-provision uses this)
 
 ```bash
 # === ON OPERATOR WORKSTATION === (or anywhere with the JWT)
@@ -1514,44 +1517,7 @@ Inside `agentkeys-provisioner`, the `fetch_via_broker_default_ttl()`
 helper does the same two-step internally and returns an `AwsTempCreds`
 struct ready for env-var injection into the scraper subprocess.
 
-### 5.2 The server-side aggregator (parallel architectural endpoint — not curl-able)
-
-`/v1/mint-aws-creds` is NOT a legacy / backward-compat shim — it's the
-broker-as-policy-point endpoint upgraded in issue-64 (US-027: grant
-resolution + atomic counter). It does §5.1's steps 1+2 internally
-plus the audit-anchor write, and returns temp creds in the same shape.
-
-**Why no curl example.** The endpoint requires `auth.address` +
-`auth.signature` — an EIP-191 signature by the wallet bound in the
-session JWT over the canonical body (sans `auth.signature`). The
-broker enforces three checks ([handlers/mint.rs:125–145](../crates/agentkeys-broker-server/src/handlers/mint.rs#L125)):
-
-1. `ecrecover(canonical, auth.signature) == auth.address`
-2. `auth.address == claims.agentkeys.wallet_address`
-3. Atomic grant-store consume for `(actor_omni, daemon_address, service)`
-
-For an auto-init operator: `wallet_address = master_wallet`, but the
-signer's strict JWT-omni check ([dev_keys.rs:98](../crates/agentkeys-mock-server/src/handlers/dev_keys.rs#L98))
-only signs with `JWT.omni_account = actor_omni` — which recovers to
-`derived_address(actor_omni)`, not `master_wallet`. Check 2 fails.
-
-For a §2 manual SIWE operator: `wallet_address = derived_address(actor_omni)`,
-the signer signs with `actor_omni`, ecrecover matches, and the endpoint
-returns creds. But that's already what §5.1 does without the audit-write
-overhead, so the curl is operator-unfriendly.
-
-**Realistic callers.** Test fixtures with in-memory signing keys (see
-[`crates/agentkeys-broker-server/tests/mint_v2_flow.rs:201–237`](../crates/agentkeys-broker-server/tests/mint_v2_flow.rs#L201)
-for the working canonical-body + EIP-191 pattern), and the future TEE
-worker (issue #74 step 2) which will hold the master_wallet key inside
-the enclave.
-
-**For end-to-end demos, use §5.1 (client-side flow) or §5.3 (CLI
-provision).** They both exercise the same STS path; §5.2's audit
-record is a server-side bonus that operators rarely need to invoke
-directly.
-
-### 5.3 Auto-provision pipeline against live broker.litentry.org
+### 5.2 Auto-provision pipeline against live broker.litentry.org
 
 The end-to-end auto-provision trigger is the CLI's `provision`
 subcommand. `agentkeys provision <service>` loads the saved session
@@ -1951,7 +1917,7 @@ exercise this end-to-end against the stub.
 
 ---
 
-## 12. Metrics + idempotency (Phase D-rest)
+## 12. Metrics (Phase D-rest)
 
 ### 12.1 Prometheus metrics
 
@@ -1968,7 +1934,6 @@ curl -sS --fail-with-body https://broker.litentry.org/metrics | head -30
 # agentkeys_broker_mints_failed_total 0
 # agentkeys_broker_audit_writes_total 14
 # agentkeys_broker_auth_attempts_total 23
-# agentkeys_broker_idempotency_hits_total 3
 # …
 ```
 
@@ -1976,40 +1941,22 @@ When `BROKER_METRICS_ENABLED` is unset or `false`, `/metrics` returns
 404 — operators not running a Prometheus scraper should leave it
 disabled to avoid leaking counter shapes to unauthenticated probers.
 
-### 12.2 Idempotency-Key
+### 12.2 Idempotency-Key (retired with `/v1/mint-aws-creds` in PR #96)
 
-```bash
-KEY=$(uuidgen | tr '[:upper:]' '[:lower:]')
+Server-side idempotency dedup lived in the now-deleted
+`/v1/mint-aws-creds` handler. With the route gone (issue #72), no
+broker route honors the `Idempotency-Key` header. The only cost-bounding
+knob is `BROKER_OIDC_JWT_TTL_SECONDS` (default 300s) — every call to
+`/v1/mint-oidc-jwt` re-signs and writes a fresh `mint_log` row, and
+every call to `sts:AssumeRoleWithWebIdentity` is a fresh AWS API call
+(no caching in the provisioner — see
+[`crates/agentkeys-provisioner/src/aws_creds.rs::fetch_via_broker`](../crates/agentkeys-provisioner/src/aws_creds.rs#L128)
+which fetches a fresh JWT and assumes a fresh role every invocation).
+Callers that need batching, dedup, or rate-limiting must implement it
+client-side.
 
-# First call — mints + caches.
-curl -i -X POST $OIDC_ISSUER/v1/mint-aws-creds \
-  -H "Authorization: Bearer $SESSION_JWT_A" \
-  -H "Idempotency-Key: $KEY" \
-  -H 'content-type: application/json' \
-  -d '{...}'      # full mint body
-# HTTP/2 200
-# x-idempotency: miss
-
-# Same key + same body within 5 min — returns cached response.
-curl -i -X POST $OIDC_ISSUER/v1/mint-aws-creds \
-  -H "Authorization: Bearer $SESSION_JWT_A" \
-  -H "Idempotency-Key: $KEY" \
-  -H 'content-type: application/json' \
-  -d '{...}'
-# HTTP/2 200
-# x-idempotency: hit          ← no re-mint, no STS quota burn
-
-# Same key + DIFFERENT body — 422.
-curl -i -X POST $OIDC_ISSUER/v1/mint-aws-creds \
-  -H "Authorization: Bearer $SESSION_JWT_A" \
-  -H "Idempotency-Key: $KEY" \
-  -H 'content-type: application/json' \
-  -d '{...different...}'
-# HTTP/2 422
-```
-
-`BROKER_REQUEST_BODY_LIMIT_BYTES` (default 1 MiB) caps body size at
-the router level.
+`BROKER_REQUEST_BODY_LIMIT_BYTES` (default 1 MiB) still caps body size
+at the router level for every endpoint.
 
 ---
 
@@ -2216,12 +2163,16 @@ structural plumbing is in place but the live integration isn't wired:
   every daemon has been issued a grant.
 - **Histogram metrics + per-handler counter bumps.** Counter shapes
   ship; latency histograms land in V0.1-FOLLOWUPS.
-- **Retire `/v1/mint-aws-creds` entirely.** The provisioner / MCP /
-  daemon use `/v1/mint-oidc-jwt` + client-side
-  `AssumeRoleWithWebIdentity` (issue #71 Option A). The route stays
-  for callers who want server-side gates; once every operator's
-  pipeline confirms the new path works in production, the route can
-  be dropped.
+- **Retire `/v1/mint-aws-creds` entirely.** ✅ Done in PR #96 (issue
+  #72). The provisioner / MCP / daemon use `/v1/mint-oidc-jwt` +
+  client-side `AssumeRoleWithWebIdentity` (issue #71 Option A); the
+  legacy server-side aggregator route was deleted along with its
+  handler (`handlers/mint.rs`) and tests (`tests/mint_v2_flow.rs`).
+  The route now returns 404. Server-side gates dropped with the
+  route: Phase B `try_consume` grants, Idempotency-Key dedup, and
+  multi-anchor audit coordination. Isolation now rides on
+  `/v1/mint-oidc-jwt`'s audit row + AWS CloudTrail + PrincipalTag/bucket
+  policy per `arch.md §17.2`.
 - **Retire `/v1/auth/exchange` and backend `/session/validate`.**
   Issue #74 step 1's CLI/daemon rewrite (this PR) removed every
   in-tree caller of the legacy `/session/create` → bearer →
@@ -2476,12 +2427,20 @@ sudo sqlite3 /var/lib/agentkeys/.agentkeys/broker/audit.sqlite \
   -header -column
 ```
 
-After the OIDC-only migration, the daemon-side path is invisible to
-the broker's audit log (the broker only sees `/v1/mint-oidc-jwt`
-calls). Use AWS CloudTrail's `AssumeRoleWithWebIdentity` events for
-the STS-side audit trail. If you need server-side audit row coverage
-of the actual mint, hit `/v1/mint-aws-creds` instead — it audits before
-returning creds.
+After the OIDC-only migration (issue #71) + `/v1/mint-aws-creds`
+retirement (issue #72 / PR #96), the daemon-side STS call is invisible
+to the broker's audit log — the broker only sees `/v1/mint-oidc-jwt`
+calls. The full audit chain is:
+
+- `/v1/mint-oidc-jwt` writes the JWT-mint row to
+  `~/.agentkeys/broker/audit.sqlite` (`mint_log` table) via
+  `state.audit.record_mint(...)`.
+- AWS CloudTrail's `AssumeRoleWithWebIdentity` events capture the
+  actual STS exchange, with the role + session name as named in §5.1.
+
+There is no longer a "server-side audit row of the actual mint" — the
+mint IS the daemon's STS call, and that's audited by AWS, not the
+broker.
 
 ---
 

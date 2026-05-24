@@ -1,39 +1,38 @@
 # pm/ — Project management automation
 
-Declarative source-of-truth for milestones, labels, and issue categorization in this repo, plus scripts that idempotently sync them to GitHub.
+Declarative source-of-truth for milestones + labels in this repo, plus minimal idempotent scripts that sync state to GitHub.
 
 ## Purpose
 
-Avoid hand-clicking the GitHub UI. Treat milestones / labels / issue assignments as **code** under version control, with idempotent shell scripts that reconcile GitHub state to whatever the JSON files declare. Re-runnable safely; CI-friendly; reviewable in diffs.
+Avoid hand-clicking the GitHub UI for **declarative** PM state. Milestones + labels live as code under version control; idempotent shell scripts reconcile GitHub state to whatever the JSON files declare.
 
-The associated GitHub Project (private) is [`litentry/projects/19`](https://github.com/orgs/litentry/projects/19) — see [`PROJECT-DASHBOARD-GUIDE.md`](./PROJECT-DASHBOARD-GUIDE.md) for how to use it.
+**Per-issue categorization (Kind / Priority / Size) lives in project fields, not labels.** Use the `/agentkeys-issue-create` skill to create new issues with all required metadata pre-filled.
+
+The associated GitHub Project (private) is [`litentry/projects/19`](https://github.com/orgs/litentry/projects/19) — see [`PROJECT-DASHBOARD-GUIDE.md`](./PROJECT-DASHBOARD-GUIDE.md) for board usage.
+
+The 7-milestone roadmap detail (M1-M7 + post-M7 horizons + strategic risks) lives in [`docs/spec/plans/milestones-roadmap.md`](../docs/spec/plans/milestones-roadmap.md) — the operational companion to [`docs/arch.md`](../docs/arch.md) (architecture) and [`docs/research/agent-iam-strategy.md`](../docs/research/agent-iam-strategy.md) (positioning).
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | [`milestones.json`](./milestones.json) | The 7 roadmap milestones (M1–M7). One JSON object per milestone with title + description + state. |
-| [`labels.json`](./labels.json) | Label taxonomy: `area/*`, `kind/*`, `phase/*`, `status/*`, `priority/*`. One JSON object per label with name + description + color. |
-| [`issue-assignments.json`](./issue-assignments.json) | Maps existing open issues to milestones + labels. Lets us reproduce the categorization from scratch if needed. |
-| [`scripts/sync-milestones.sh`](./scripts/sync-milestones.sh) | Idempotent — creates missing milestones, updates description/state for existing ones. Skips no-op. |
-| [`scripts/sync-labels.sh`](./scripts/sync-labels.sh) | Idempotent — creates missing labels, updates description/color for existing ones. Skips no-op. |
-| [`scripts/sync-issues.sh`](./scripts/sync-issues.sh) | Idempotent — assigns milestone + labels to each issue listed in `issue-assignments.json`. Skips when already correct. |
-| [`scripts/audit.sh`](./scripts/audit.sh) | Read-only — lists open issues, groups by milestone, flags uncategorized. Run anytime to see PM state. |
-| [`scripts/add-to-project.sh`](./scripts/add-to-project.sh) | Adds an issue (or all open) to the litentry/projects/19 board. Requires `gh auth refresh -s project,read:project` once. |
-| [`PROJECT-DASHBOARD-GUIDE.md`](./PROJECT-DASHBOARD-GUIDE.md) | How to use the project board day-to-day + CI integration. |
+| [`labels.json`](./labels.json) | Repo label taxonomy (post-migration: `area/*`, `status/*`, human-attention flags, community labels). Single source for `sync-labels.sh`. |
+| [`scripts/sync-milestones.sh`](./scripts/sync-milestones.sh) | Idempotent — creates missing milestones, updates description/state for existing ones. |
+| [`scripts/sync-labels.sh`](./scripts/sync-labels.sh) | Idempotent — creates missing labels, updates description/color for existing ones. |
+| [`scripts/setup-project-fields.sh`](./scripts/setup-project-fields.sh) | Idempotent — creates the project's typed fields (Priority/Kind/Risk/Notes/Iteration). Cleans `Project <Name>` zombies left by GitHub's delete-recreate behavior. |
+| [`scripts/sync-size-from-effort.sh`](./scripts/sync-size-from-effort.sh) | One-shot bulk-populate of the Size project field by parsing each issue's "## Effort" body section. |
+| [`scripts/add-to-project.sh`](./scripts/add-to-project.sh) | Adds an issue (or all open) to the project board. Mostly a backfill tool; the built-in "Auto-add to project" workflow handles new issues. |
+| [`scripts/audit.sh`](./scripts/audit.sh) | Read-only — lists open issues, groups by milestone, flags uncategorized. |
+| [`PROJECT-DASHBOARD-GUIDE.md`](./PROJECT-DASHBOARD-GUIDE.md) | How to use the project board day-to-day + automation surface map. |
 
 ## Prerequisites
 
 ```bash
 gh --version          # >= 2.40
-jq --version          # >= 1.6 (for JSON parsing)
+jq --version          # >= 1.6
 gh auth status        # logged in as a member of litentry/agentKeys
-```
-
-For project board scripts (`add-to-project.sh`):
-
-```bash
-gh auth refresh -s project,read:project  # one-time
+gh auth refresh -s project,read:project  # one-time, for the project-board scripts
 ```
 
 ## Quick start
@@ -44,7 +43,7 @@ cd pm
 # Reconcile GitHub state to declared state (safe to re-run)
 ./scripts/sync-labels.sh
 ./scripts/sync-milestones.sh
-./scripts/sync-issues.sh
+./scripts/setup-project-fields.sh
 
 # Check current state
 ./scripts/audit.sh
@@ -52,36 +51,32 @@ cd pm
 
 ## How to add a new milestone
 
-Edit `milestones.json`, then run `./scripts/sync-milestones.sh`. The script will create it (or update if title matched an existing milestone).
+Edit `milestones.json`, then run `./scripts/sync-milestones.sh`.
 
 ## How to add a new label
 
-Edit `labels.json`, then run `./scripts/sync-labels.sh`. Same idempotent shape.
+Edit `labels.json`, then run `./scripts/sync-labels.sh`.
 
-## How to assign an issue to a milestone + labels
+**Red is reserved** for human-interaction labels (status/blocked, status/investigating, needs-arch-review, needs-investigation, vendor-blocker). Area labels avoid the red family — pick a distinct non-red color per area.
 
-Edit `issue-assignments.json` — add or update the entry for the issue number, then run `./scripts/sync-issues.sh`. The script reconciles each issue to the declared assignment.
+## How to create a new issue
 
-## How to handle new issues
+**Recommended:** use the `/agentkeys-issue-create` Claude Code skill — it walks you through Kind / Priority / Size / Area / Milestone / Blocked-by dropdowns and creates the issue with the right labels + project field values.
 
-When you create a new issue via `gh issue create` (or web UI), the milestone/labels you assign at creation time are authoritative — but you should ALSO add the new entry to `issue-assignments.json` for reproducibility. Without that, re-running `sync-issues.sh` won't touch your new issue, which is fine; it just means it's outside the declarative state.
-
-Recommended pattern:
+Direct CLI fallback (set fields in the project UI afterward, or via the skill):
 
 ```bash
-# Recommended path: use the /agentkeys-issue-create skill (interactive, fills all metadata)
-# Or directly with gh:
 gh issue create --repo litentry/agentKeys \
   --title "..." --body "..." \
   --milestone "M1: First MCP demo + Volcano Ark PoC" \
   --label "area/mcp"
-
-# Then set Kind / Priority / Size in the project UI (or let the skill do it)
 ```
+
+Issue dependencies (blocked-by / blocking / parent) use GitHub's **native issue relationships** — UI side panel → "Relationships" or keyboard shortcuts (`B B` blocked-by, `B X` blocking, `Opt+Shift+P` parent). Do NOT create labels or project fields for dependencies.
 
 ## Labels schema (post-migration)
 
-Repo labels are now LEAN. Most categorization moved to project fields. Remaining label namespaces:
+Repo labels are LEAN. Most categorization moved to project fields. Remaining label namespaces:
 
 | Namespace | Examples | Purpose |
 |---|---|---|
@@ -95,8 +90,6 @@ Repo labels are now LEAN. Most categorization moved to project fields. Remaining
 - `kind/*` → **Kind field** (Feature / Bug / Research / Docs / Refactor / Security / CI)
 - `phase/v*` → **Milestones** (M1..M7)
 
-**Red is reserved** for human-interaction labels (status/blocked, needs-*, vendor-blocker). Area labels avoid the red family.
-
 ## Milestones overview
 
 | ID | Title | Theme |
@@ -109,7 +102,7 @@ Repo labels are now LEAN. Most categorization moved to project fields. Remaining
 | M6 | TEE integration + enhanced security | Phase 6 — production crypto hardening, key rotation depth |
 | M7 | Standards + ecosystem | Phase 7 — MCP extensions, OAuth-for-Agents, partnerships |
 
-The 7-milestone roadmap is the canonical scope plan; milestone descriptions in [`milestones.json`](./milestones.json) carry the authoritative one-line scope per phase.
+Full per-milestone detail in [`docs/spec/plans/milestones-roadmap.md`](../docs/spec/plans/milestones-roadmap.md).
 
 ## Why JSON not YAML
 

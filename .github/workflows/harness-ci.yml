@@ -59,9 +59,33 @@ name: harness CI (no LLM)
 #   TEST_P256_VERIFIER_ADDRESS_HEIMA        per test-environment refresh.
 #   TEST_K11_VERIFIER_ADDRESS_HEIMA
 #
+# Additional secrets for the optional path-conditional auto-deploy of the
+# test broker EC2 (issue #101 — see docs/ci-setup.md §7):
+#
+#   OIDC_AWS_ROLE_ARN_DEPLOY  IAM role assumed by deploy-test-broker. Trust
+#                             policy: federated on GitHub Actions OIDC,
+#                             conditioned on repo:litentry/agentKeys:*.
+#                             Inline policy: ssm:SendCommand on
+#                             document/AWS-RunShellScript +
+#                             one EC2 instance ARN (= TEST_BROKER_INSTANCE_ID).
+#                             Provisioned by scripts/provision-ci-deploy-role.sh.
+#                             SEPARATE from TEST_OIDC_AWS_ROLE_ARN by design:
+#                             e2e role exercises the workload (sts:AssumeRole
+#                             on data roles, S3 verify), deploy role drives
+#                             the broker re-deploy on EC2. Separation of
+#                             duties — a compromise of one doesn't grant
+#                             the other's capability.
+#   TEST_BROKER_INSTANCE_ID   EC2 instance ID (i-xxxxxxxxxxxxxxxxx) hosting
+#                             test-broker.${ZONE}. Pinned in the deploy role's
+#                             inline SSM policy so a leaked session cred
+#                             cannot SendCommand on any other EC2.
+#
 # Gating: until TEST_OIDC_AWS_ROLE_ARN is set, the workflow's preflight
 # job surfaces a ::warning:: skip and exits clean — safe to merge before
-# the operator activates the test infra.
+# the operator activates the test infra. The auto-deploy gate is a
+# distinct check (OIDC_AWS_ROLE_ARN_DEPLOY + TEST_BROKER_INSTANCE_ID
+# both present) so harness validation can be activated without
+# auto-deploy, and vice versa.
 #
 # WebAuthn: never invoked. harness/v2-stage1-demo.sh defaults to
 # WEBAUTHN_MODE=0 (line 131), v2-stage2-demo.sh accepts --stub, neither
@@ -90,14 +114,27 @@ on:
         default: "all"
         type: choice
         options: ["1", "2", "3", "all"]
+      force_deploy_broker:
+        description: "Force deploy-test-broker even if no broker paths changed (dry-run validation)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
 
 concurrency:
   group: harness-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  id-token: write   # GitHub Actions OIDC → assume TEST_OIDC_AWS_ROLE_ARN
+  id-token: write       # GitHub Actions OIDC → assume TEST_OIDC_AWS_ROLE_ARN
+                        # (and OIDC_AWS_ROLE_ARN_DEPLOY for deploy-test-broker)
   contents: read
+  pull-requests: read   # dorny/paths-filter@v3 on pull_request events queries
+                        # the GitHub REST API (/repos/.../pulls/N/files) to list
+                        # changed paths. Without this, the API returns
+                        # 'Bad credentials' and the detect-changes job fails.
+                        # Required only on PR triggers; workflow_dispatch +
+                        # push triggers don't need it (no PR to query).
 
 jobs:
   rust-checks:
@@ -126,6 +163,44 @@ jobs:
       # map — same convention as the existing @claude review workflow.
       - run: cargo test --workspace -- --test-threads=1
 
+  detect-changes:
+    # Issue #101: path-conditional triggers for auto-deploy of the test broker.
+    # Computes `broker_changed` so deploy-test-broker can skip when a PR only
+    # touches docs/harness/test infra — saves ~3 min cargo rebuild + ssm wait
+    # per CI run, and avoids touching the test EC2 from PRs that don't need to.
+    #
+    # Path-filter false-negative caveats (see issue #101 "Trade-offs"):
+    #   - workspace-shared crates (agentkeys-types, agentkeys-signer-protocol)
+    #     ripple into the broker → listed in the filter conservatively.
+    #   - Cargo.lock changes → also listed (a transitive dep bump can affect
+    #     broker behavior at runtime).
+    name: detect changed paths (broker / contracts)
+    runs-on: ubuntu-latest
+    outputs:
+      broker_changed: ${{ steps.f.outputs.broker }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # paths-filter needs the merge-base to diff against; default fetch
+          # is shallow. fetch-depth=0 ⇒ full history (cheap on a small repo).
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            broker:
+              - 'crates/agentkeys-broker-server/**'
+              - 'crates/agentkeys-worker-*/**'
+              - 'crates/agentkeys-signer-protocol/**'
+              - 'crates/agentkeys-types/**'
+              - 'crates/agentkeys-core/**'
+              - 'scripts/setup-broker-host.sh'
+              - 'scripts/setup-broker-host.sh.d/**'
+              - 'scripts/broker.env'
+              - 'scripts/broker.test.env'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+
   preflight:
     # Gate the harness jobs on the test infra credentials being present.
     # Until the operator sets TEST_OIDC_AWS_ROLE_ARN, the harness jobs
@@ -135,6 +210,7 @@ jobs:
     needs: rust-checks
     outputs:
       should_run: ${{ steps.gate.outputs.should_run }}
+      deploy_ready: ${{ steps.gate.outputs.deploy_ready }}
     steps:
       - id: gate
         run: |
@@ -145,11 +221,281 @@ jobs:
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             echo "::warning::TEST_OIDC_AWS_ROLE_ARN unset — harness E2E skipped. See workflow header for operator setup."
           fi
+          # deploy_ready: both deploy-side secrets must be present. Independent
+          # of should_run so an operator can opt INTO harness validation
+          # without enabling auto-deploy (e.g. while still vetting the deploy
+          # role's blast radius).
+          if [ -n "${{ secrets.OIDC_AWS_ROLE_ARN_DEPLOY }}" ] && [ -n "${{ secrets.TEST_BROKER_INSTANCE_ID }}" ]; then
+            echo "deploy_ready=true" >> "$GITHUB_OUTPUT"
+            echo "deploy secrets present; auto-deploy eligible"
+          else
+            echo "deploy_ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OIDC_AWS_ROLE_ARN_DEPLOY or TEST_BROKER_INSTANCE_ID unset — auto-deploy skipped. See docs/ci-setup.md §7."
+          fi
+
+  deploy-test-broker:
+    # Issue #101: drives `setup-broker-host.sh --test --yes` on the test broker
+    # EC2 via AWS SSM whenever a PR/push changes broker-affecting paths.
+    #
+    # Why deploy BEFORE harness-e2e (vs the issue's `needs: harness-e2e`):
+    # the failure mode this fixes is "harness scripts at version B vs broker
+    # binary at version A → spurious pass or confusing failure". Deploying
+    # first means harness-e2e validates the SAME revision the PR proposes —
+    # so a broker bug introduced by the PR is caught in the same PR, not
+    # leaked to whoever pushes next. Trade-off: a broker bug that crashes on
+    # startup will fail the deploy and skip harness-e2e (which is also the
+    # right signal — there's nothing to test).
+    #
+    # Concurrency: cross-PR races on the test EC2 are possible (PR-A deploys
+    # version A, PR-B deploys version B mid-flight, PR-A's harness sees B).
+    # Mitigation deferred to the followup PR — first cut accepts the race
+    # since concurrent broker-touching PRs are rare and the test EC2 is
+    # disposable. To add later: `concurrency: group: test-broker-deploy`
+    # with `cancel-in-progress: false` so deploys queue.
+    name: deploy broker to test EC2 (path-conditional)
+    needs: [preflight, detect-changes]
+    if: |
+      needs.preflight.outputs.should_run == 'true' &&
+      needs.preflight.outputs.deploy_ready == 'true' &&
+      (needs.detect-changes.outputs.broker_changed == 'true' ||
+       (github.event_name == 'workflow_dispatch' && inputs.force_deploy_broker == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC (deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.OIDC_AWS_ROLE_ARN_DEPLOY }}
+          aws-region: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          # Session name shows up in CloudTrail — distinct from the e2e
+          # role's session-name pattern so the deploy invocations are
+          # filterable separately.
+          role-session-name: gh-deploy-${{ github.run_id }}
+
+      - name: Sanity-check the test broker EC2 is SSM-managed
+        # Fail fast with a clear remediation path. Three failure modes are
+        # distinguished:
+        #   - AccessDenied → deploy role lacks ssm:DescribeInstanceInformation.
+        #     Operator re-runs provision-ci-deploy-role.sh on their laptop;
+        #     the inline policy is idempotently refreshed to include it.
+        #   - Empty/None  → instance genuinely not registered (no agent, no
+        #     profile, wrong region). Operator SSH-debugs or re-runs
+        #     setup-broker-host.sh which auto-installs amazon-ssm-agent.
+        #   - Other state → unexpected; fail loud with the value for triage.
+        env:
+          REGION: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          INSTANCE_ID: ${{ secrets.TEST_BROKER_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+          stderr_file=$(mktemp)
+          state=$(aws ssm describe-instance-information \
+            --region "$REGION" \
+            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text 2>"$stderr_file" || echo "")
+          if grep -q "AccessDenied" "$stderr_file"; then
+            echo "::error::Deploy role lacks ssm:DescribeInstanceInformation."
+            echo "::error::Fix: re-run scripts/provision-ci-deploy-role.sh on the operator laptop —"
+            echo "::error::the inline policy is now refreshed with the missing perm (idempotent)."
+            rm -f "$stderr_file"
+            exit 1
+          fi
+          rm -f "$stderr_file"
+          [ -z "$state" ] && state="None"
+          case "$state" in
+            Online)
+              echo "::notice::SSM agent online on $INSTANCE_ID"
+              ;;
+            None)
+              echo "::error::$INSTANCE_ID is not SSM-managed (state=$state)."
+              echo "::error::SSH into the broker EC2 and run scripts/setup-broker-host.sh --test --yes —"
+              echo "::error::it auto-installs amazon-ssm-agent. See docs/ci-setup.md §7.1."
+              exit 1
+              ;;
+            *)
+              echo "::error::SSM agent state = $state on $INSTANCE_ID (expected Online)"
+              exit 1
+              ;;
+          esac
+
+      - name: Compute deploy ref (PR head or push branch)
+        # GitHub provides GITHUB_HEAD_REF for PRs (source branch) and
+        # GITHUB_REF_NAME for push events. Falling through to "evm" as a
+        # safety net for manual workflow_dispatch on the default branch.
+        # The test EC2 fetches + checks out this ref before re-running
+        # setup-broker-host.sh, so the deployed binary matches the PR.
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-evm}}"
+          if [ -z "$ref" ]; then
+            echo "::error::could not derive a ref to deploy"
+            exit 1
+          fi
+          # Refuse refs that contain shell metacharacters (defense-in-depth
+          # — GitHub already validates branch names, but the value is
+          # interpolated into a remote shell snippet below).
+          if printf '%s' "$ref" | grep -qE '[^A-Za-z0-9._/-]'; then
+            echo "::error::ref '$ref' contains unsupported characters"
+            exit 1
+          fi
+          echo "DEPLOY_REF=$ref" >> "$GITHUB_ENV"
+          echo "::notice::will deploy ref: $ref"
+
+      - name: SendCommand — fetch + checkout + setup-broker-host.sh --test --yes
+        env:
+          REGION: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          INSTANCE_ID: ${{ secrets.TEST_BROKER_INSTANCE_ID }}
+          # Operator-pinnable override; the auto-discover loop below covers the
+          # common candidates when this isn't set.
+          REPO_DIR_OVERRIDE: ${{ secrets.TEST_BROKER_REPO_DIR }}
+        run: |
+          set -euo pipefail
+          # Compose the remote shell script. `$DEPLOY_REF` is interpolated by
+          # the runner's shell (GHA env block makes it visible here); the
+          # remote SSM-driven shell sees the literal branch name. The remote
+          # shell runs as root (SSM-default on Ubuntu AMIs); git ops use
+          # `sudo -u <owner>` so the working tree stays owned by whoever
+          # originally cloned it (typically ubuntu, sometimes agentkeys / root).
+          #
+          # Repo location auto-discovery: try TEST_BROKER_REPO_DIR override
+          # first, then common candidates. Fail fast with a clear remediation
+          # path if no candidate has the repo. Avoids the 'cd: can\'t cd to
+          # /home/ubuntu/agentKeys' failure mode when the operator cloned to
+          # a non-default path.
+          read -r -d '' deploy_script <<EOF || true
+          set -euo pipefail
+          REPO_DIR_OVERRIDE="\${REPO_DIR_OVERRIDE:-$REPO_DIR_OVERRIDE}"
+          REPO_DIR=""
+          for candidate in "\$REPO_DIR_OVERRIDE" /home/ubuntu/agentKeys /home/ubuntu/agentkeys /home/ubuntu/agentkey /home/agentkey/agentKeys /home/agentkey/agentkeys /home/agentkeys/agentKeys /opt/agentkeys /srv/agentkeys /root/agentKeys /root/agentkeys; do
+            [ -n "\$candidate" ] || continue
+            if [ -f "\$candidate/scripts/setup-broker-host.sh" ]; then
+              REPO_DIR=\$candidate
+              break
+            fi
+          done
+          if [ -z "\$REPO_DIR" ]; then
+            echo "could not locate the agentKeys checkout on this EC2" >&2
+            echo "candidates tried: \$REPO_DIR_OVERRIDE /home/ubuntu/agentKeys /home/agentkey/agentKeys /opt/agentkeys /srv/agentkeys /root/agentKeys etc." >&2
+            echo "Fix: pin the path via the TEST_BROKER_REPO_DIR repo secret." >&2
+            exit 2
+          fi
+          echo "using repo at \$REPO_DIR"
+          REPO_OWNER=\$(stat -c '%U' "\$REPO_DIR")
+          echo "tree is owned by \$REPO_OWNER"
+          cd "\$REPO_DIR"
+          sudo -u "\$REPO_OWNER" git fetch --prune origin
+          sudo -u "\$REPO_OWNER" git checkout "$DEPLOY_REF" || sudo -u "\$REPO_OWNER" git checkout "origin/$DEPLOY_REF"
+          sudo -u "\$REPO_OWNER" git pull --ff-only origin "$DEPLOY_REF" 2>/dev/null || true
+          bash scripts/setup-broker-host.sh --test --yes --non-interactive
+          EOF
+
+          # jq --arg passes the multi-line script outside of shell parameter
+          # expansion (no modifier bugs per CLAUDE.md heredoc-trap rule).
+          params=$(jq -n --arg script "$deploy_script" '{
+            commands: [$script],
+            executionTimeout: ["900"]
+          }')
+
+          cmd_id=$(aws ssm send-command \
+            --region "$REGION" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "gh-ci deploy ${GITHUB_RUN_ID} ref=${DEPLOY_REF}" \
+            --parameters "$params" \
+            --query 'Command.CommandId' \
+            --output text)
+          echo "SSM_COMMAND_ID=$cmd_id" >> "$GITHUB_ENV"
+          echo "::notice::SSM SendCommand queued: $cmd_id"
+
+      - name: Poll SSM command until completion
+        env:
+          REGION: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
+          INSTANCE_ID: ${{ secrets.TEST_BROKER_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+          # Poll every 10s for up to 15 min. The command runs setup-broker-host.sh
+          # which rebuilds + restarts broker/signer/4 workers; cold cargo cache
+          # can be ~10min, warm ~3min.
+          for i in $(seq 1 90); do
+            sleep 10
+            status=$(aws ssm get-command-invocation \
+              --region "$REGION" \
+              --command-id "$SSM_COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query 'Status' \
+              --output text 2>/dev/null || echo "Pending")
+            echo "iter=$i status=$status"
+            case "$status" in
+              Success)
+                aws ssm get-command-invocation \
+                  --region "$REGION" \
+                  --command-id "$SSM_COMMAND_ID" \
+                  --instance-id "$INSTANCE_ID" \
+                  --query 'StandardOutputContent' \
+                  --output text | tail -200
+                echo "::notice::deploy ok (ssm command $SSM_COMMAND_ID)"
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut)
+                echo "::error::SSM command terminal status: $status"
+                aws ssm get-command-invocation \
+                  --region "$REGION" \
+                  --command-id "$SSM_COMMAND_ID" \
+                  --instance-id "$INSTANCE_ID" \
+                  --query '{stdout:StandardOutputContent,stderr:StandardErrorContent}' \
+                  --output json
+                exit 1
+                ;;
+              Pending|InProgress|Delayed)
+                continue
+                ;;
+              *)
+                echo "::warning::unexpected status: $status"
+                ;;
+            esac
+          done
+          echo "::error::SSM command $SSM_COMMAND_ID did not complete within 15min"
+          exit 1
 
   harness-e2e:
     name: harness/v2-stage*-demo.sh on Heima mainnet (test deployer)
-    needs: preflight
-    if: needs.preflight.outputs.should_run == 'true'
+    needs: [preflight, deploy-test-broker]
+    # Codex adversarial review (PR #102) confirmed: the harness's chain-mutating
+    # scripts (heima-fund-account.sh + heima-agent-create.sh) share ONE Heima
+    # test deployer wallet. The outer `concurrency: harness-ci-${{ github.ref }}`
+    # only cancels in-flight runs on the SAME ref — concurrent runs on DIFFERENT
+    # refs (PR branch + manual dispatch, two PRs, etc.) share the deployer and
+    # collide on nonce in the Heima mempool, surfacing as
+    # `replacement transaction underpriced`.
+    #
+    # This second concurrency group, scoped to the deployer (not the ref),
+    # serializes harness-e2e runs globally. `cancel-in-progress: false` queues
+    # subsequent runs instead of cancelling them — so a long-running harness
+    # doesn't lose work to a newer push.
+    concurrency:
+      group: heima-test-deployer-nonce
+      cancel-in-progress: false
+    # Run when:
+    #   - preflight gates green (test infra is set up)
+    #   - AND either:
+    #       (a) deploy-test-broker succeeded (PR re-deployed the broker
+    #           to test EC2, validating fresh broker code), OR
+    #       (b) deploy-test-broker was skipped (no broker paths changed
+    #           OR deploy_ready=false — the EC2's existing binary still
+    #           covers the harness contract).
+    # always() forces evaluation even when the upstream `if:` skips
+    # deploy-test-broker (GHA treats `needs:` deps with skipped jobs as
+    # failing the implicit `success()` filter without always()).
+    if: |
+      always() &&
+      needs.preflight.outputs.should_run == 'true' &&
+      (needs.deploy-test-broker.result == 'success' ||
+       needs.deploy-test-broker.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

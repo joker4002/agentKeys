@@ -125,8 +125,8 @@ async fn main() -> anyhow::Result<()> {
         "Tier-1 boot complete; Tier-2 reachability checks deferred until after listener bind"
     );
 
-    // Legacy mint-log table opened alongside the plugin-trait audit anchors;
-    // mint_v2 mirrors success/failure rows here for monitoring continuity.
+    // Mint-log table opened alongside the plugin-trait audit anchors;
+    // /v1/mint-oidc-jwt writes success/failure rows here via record_mint.
     let audit = AuditLog::open(&config.audit_db_path)?;
 
     // Issue #71 OIDC-only migration: the broker mint flow uses
@@ -177,7 +177,6 @@ async fn main() -> anyhow::Result<()> {
         nonce_store: boot_artifacts.nonce_store,
         grant_store: boot_artifacts.grant_store,
         identity_link_store: boot_artifacts.identity_link_store,
-        idempotency_store: boot_artifacts.idempotency_store,
         metrics: Arc::new(agentkeys_broker_server::metrics::Metrics::new()),
         tier2: Arc::clone(&tier2),
         #[cfg(feature = "auth-email-link")]

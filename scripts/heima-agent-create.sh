@@ -200,13 +200,27 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
+# Resolve PENDING nonce for the master wallet — same protection as the
+# heima-fund-account.sh fix in PR #102. If the prior run's registerAgentDevice
+# tx is still in the mempool, the default `latest` nonce derivation collides.
+PENDING_NONCE=$(cast nonce "$MASTER_ADDR" --rpc-url "$RPC_HTTP" --block pending 2>/dev/null || echo "")
+if [ -n "$PENDING_NONCE" ]; then
+  log "pending nonce for master = $PENDING_NONCE"
+  CAST_ARGS+=(--nonce "$PENDING_NONCE")
+fi
+
 log "Submitting registerAgentDevice tx via cast send …"
 set +e
 CAST_OUT=$(cast "${CAST_ARGS[@]}" 2>&1)
 CAST_RC=$?
 set -e
 if [ "$CAST_RC" != "0" ]; then
-  echo "    cast send FAILED (exit $CAST_RC). Output:" >&2
+  if printf '%s\n' "$CAST_OUT" | grep -qi "replacement transaction underpriced"; then
+    echo "    cast send FAILED: prior tx with same nonce is pending in Heima mempool." >&2
+    echo "    Wait ~1 minute and re-run. Output:" >&2
+  else
+    echo "    cast send FAILED (exit $CAST_RC). Output:" >&2
+  fi
   echo "$CAST_OUT" >&2
   exit 1
 fi

@@ -7,9 +7,7 @@ use crate::metrics::Metrics;
 use crate::oidc::OidcKeypair;
 use crate::plugins::audit::AuditPolicy;
 use crate::plugins::PluginRegistry;
-use crate::storage::{
-    AuthNonceStore, GrantStore, IdempotencyStore, IdentityLinkStore, WalletStore,
-};
+use crate::storage::{AuthNonceStore, GrantStore, IdentityLinkStore, WalletStore};
 use crate::sts::StsClient;
 
 /// Tier-2 reachability state shared with the /readyz handler.
@@ -39,20 +37,17 @@ pub struct AppState {
     pub audit_policy: AuditPolicy,
     pub wallet_store: Arc<WalletStore>,
     pub nonce_store: Arc<AuthNonceStore>,
-    /// Capability grants (Phase B, US-025/026/027). Always compiled in;
-    /// the mint endpoint consults this even if no grant has yet been
-    /// issued (Phase 0 grant-less mints continue to work via the
-    /// implicit-grant fallback documented in mint.rs).
+    /// Capability grants (Phase B, US-025/026/027). Backs the
+    /// `/v1/grant/{create,list,revoke}` CRUD endpoints. The mint-time
+    /// `try_consume` enforcement point disappeared with mint_v2 in PR #96
+    /// (issue #72); grants are kept in-tree for master-managed audit and
+    /// potential future re-introduction at the JWT-mint site.
     pub grant_store: Arc<GrantStore>,
     /// Identity links (Phase B, US-028). Maps verified identities
     /// (email, oauth2 sub, secondary EVM wallet) to their owning master
     /// OmniAccount. Recovery flow consults this to find which master
     /// should sign the recovery grant.
     pub identity_link_store: Arc<IdentityLinkStore>,
-    /// Idempotency-Key dedup (Phase D-rest, US-037). Mint endpoint
-    /// consults this on every request that carries an Idempotency-Key
-    /// header.
-    pub idempotency_store: Arc<IdempotencyStore>,
     /// Atomic counters surfaced via /metrics (Phase D-rest, US-036).
     pub metrics: Arc<Metrics>,
     pub tier2: Arc<Tier2State>,
