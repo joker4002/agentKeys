@@ -36,7 +36,11 @@ if [ $# -gt 0 ]; then
   issues=("$@")
 else
   echo "Adding all open issues..."
-  mapfile -t issues < <(gh issue list --repo "$REPO" --state open --limit 200 --json number --jq '.[].number')
+  # bash 3.2-portable (macOS default) — avoid `mapfile` which is bash 4+
+  issues=()
+  while IFS= read -r n; do
+    [ -n "$n" ] && issues+=("$n")
+  done < <(gh issue list --repo "$REPO" --state open --limit 200 --json number --jq '.[].number')
 fi
 
 for issue in "${issues[@]}"; do

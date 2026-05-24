@@ -52,8 +52,49 @@ open "https://github.com/orgs/litentry/projects/19"
 
 - **Priority**: P0 / P1 / P2 / P3 (matches the `priority/*` labels)
 - **Status**: Todo / In Progress / In Review / Done (manual workflow stage, separate from `status/*` labels which capture deeper semantics)
+- **Phase**: v0 / v1 / v2 / v3 / v4 (matches `phase/*` labels — one value per issue)
 - **Estimate**: T-shirt (XS / S / M / L / XL) or week-bucket — pick whichever the team prefers
 - **Iteration**: 2-week sprint windows (optional; only if running formal sprints)
+- **Risk**: Low / Medium / High / Critical (for surfacing items needing extra scrutiny)
+- **Notes**: Free-form one-line context per item
+
+**Run `bash pm/scripts/setup-project-fields.sh` to create all of these via gh CLI.**
+
+### Labels vs Fields — when to use which
+
+The most common project-board pain point is "all labels pile into one cluttered column." The fix is splitting concerns between **labels** (repo-level, multi-value, render as stacked chips) and **fields** (project-level, single-value, render as their own column with a dropdown).
+
+| Concept | Use a label | Use a field |
+|---|---|---|
+| Issue can have many values | ✅ `area/*` (an issue may touch broker + signer) | ❌ |
+| Issue has exactly one value | ❌ (label pile-up problem) | ✅ Priority, Phase, Estimate |
+| PM workflow state | ❌ | ✅ Status (built-in) |
+| Cross-cutting semantic flag | ✅ `needs-arch-review`, `vendor-blocker`, `kind/security` | ❌ |
+| Render as its own column | ❌ | ✅ |
+| Show in repo issue list | ✅ | ❌ (project only) |
+
+Recommended split for THIS repo:
+
+| What | Where | Why |
+|---|---|---|
+| Priority | **Field** (Priority: P0-P3) | One value per issue, want its own column |
+| Phase | **Field** (Phase: v0-v4) | Same |
+| Status (workflow) | **Field** (built-in Status) | Same |
+| Area | **Label** (`area/*`) | Multi-value — an issue can touch broker + signer + audit |
+| Kind | **Label** (`kind/*`) | One value but semantic (lives at repo level for non-project consumers) |
+| Phase | Both label AND field (redundant, keep label for repo non-project users; field for clean board) | Duplication is OK — board users see field, repo users see label |
+| `needs-arch-review`, `vendor-blocker` | **Label** | Cross-cutting flag visible from repo issue list |
+| `status/deprecated`, `status/investigating` | **Label** | Semantic flag distinct from workflow status |
+
+### How to fix the cluttered Labels column
+
+1. Run `bash pm/scripts/setup-project-fields.sh` — creates Priority, Phase, Estimate, Iteration, Risk, Notes as fields
+2. In the project UI, open your "By Labels" view → click ⋯ on the Labels column header → "Hide field"
+3. Add the new fields as columns (drag from the field list at right)
+4. Change "Group by" from Labels to **Priority** (or **Phase**) — gives clean grouping
+5. (Optional) Bulk-populate field values from existing labels via the project's grid UI (select multi-rows → edit field)
+
+Result: cluttered 5-chip Labels cells disappear; you get clean single-value dropdowns per field.
 
 ### Recommended workflows (Project Settings → Workflows)
 
