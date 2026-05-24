@@ -1,6 +1,8 @@
 # v2 stage 1 — fresh-start demo (Litentry/Heima EVM backbone)
 
-**Audience**: operators bringing up a **brand new** v2 stage-1 deployment from scratch. Everything inherited from the stage-7 demo is called out explicitly so you know exactly which steps are unchanged and which are stage-1 additions.
+**Status (2026-05-24)**: this doc is transitional. The v1/v2 staging name retires after v2-stage3 ships green; M1-M7 ([`docs/spec/plans/milestones-roadmap.md`](spec/plans/milestones-roadmap.md)) is the forward-facing framing. Until then, this remains the operator runbook for stage-1 bring-up.
+
+**Audience**: operators bringing up a **brand new** v2 stage-1 deployment from scratch. Everything previously inherited from the stage-7 demo is called out explicitly — that demo doc is now archived; inline pointers below go to the archive when the historical step is still relevant.
 
 **This doc is fresh-start only.** Operators migrating from a live PR #87 / stage-7 `S3CredentialBackend` deployment are out of scope — the dual-read code path that landed in [PR #87+stage-1-step-1](crates/agentkeys-core/src/s3_backend.rs) covers that case mechanically, no operator runbook required.
 
@@ -8,7 +10,7 @@
 
 **Reference docs**:
 - Stage 1 deliverable inventory — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
-- Stage 7 demo (parent for §0 prereqs, §1 init, §2 SIWE, §3 OIDC+STS, §4 isolation proof, §5 provision) — [docs/stage7-demo-and-verification.md](stage7-demo-and-verification.md)
+- Stage 7 demo (parent for §0 prereqs, §1 init, §2 SIWE, §3 OIDC+STS, §4 isolation proof, §5 provision) — [docs/archived/stage7-demo-and-verification-2026-04.md](archived/stage7-demo-and-verification-2026-04.md)
 - Architecture v2 (single source of truth) — [docs/arch.md](arch.md)
 
 ---
@@ -345,7 +347,7 @@ If the curl errors or the decimal doesn't match the profile's `chain_id`, fix th
 
 > **One-command demo:** if you just want to walk the whole stage-1 demo end-to-end with no copy-paste, run [`harness/v2-stage1-demo.sh`](../harness/v2-stage1-demo.sh) — it composes every shipped step (preflight → CLI build → email-init → S3 smoke test → chain bring-up) into one idempotent flow. Each step has a "skip if already done" check, so re-runs are safe; use `--from-step N` / `--only-step N` to resume after a failure. See [§0.0 below](#00--one-command-demo-via-scriptsv2-stage1-demosh).
 
-This entire section is **identical** to [stage7-demo-and-verification.md §0](stage7-demo-and-verification.md#0-prerequisites-checklist). Run it once and skip directly to §1 of this doc when complete. The stage-7 §0 walks through:
+This entire section is **identical** to [archived stage7 demo §0](archived/stage7-demo-and-verification-2026-04.md#0-prerequisites-checklist). Run it once and skip directly to §1 of this doc when complete. The stage-7 §0 walks through:
 
 | Substep | What it sets up | When to skip |
 |---|---|---|
@@ -538,7 +540,7 @@ sequenceDiagram
 
 ### §1.1 — Stage 0 + 1 + 3 (inherited from stage 7 §1-§2)
 
-Run the stage-7 init flow exactly as documented in [stage7-demo-and-verification.md §1-§2](stage7-demo-and-verification.md), one tenant at a time:
+Run the stage-7 init flow exactly as documented in [archived stage7 demo §1-§2](archived/stage7-demo-and-verification-2026-04.md), one tenant at a time:
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -1354,7 +1356,7 @@ Per-iteration error → fix log: [`docs/v2-stage1-iteration-log.md`](v2-stage1-i
 
 - **Stage 1 deliverable inventory** — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
 - **Architecture v2 (single source of truth)** — [docs/arch.md](arch.md)
-- **Stage 7 demo (parent for inherited §0 prereqs + §1 init + §3 OIDC/STS)** — [docs/stage7-demo-and-verification.md](stage7-demo-and-verification.md)
+- **Stage 7 demo (parent for inherited §0 prereqs + §1 init + §3 OIDC/STS)** — [docs/archived/stage7-demo-and-verification-2026-04.md](archived/stage7-demo-and-verification-2026-04.md)
 - **Cloud setup (parent for AWS IAM, OIDC provider, bucket policy)** — [docs/cloud-bootstrap.md](cloud-bootstrap.md)
 - **Heima EVM source** — [github.com/litentry/heima/parachain/runtime/heima/src/lib.rs](https://github.com/litentry/heima/blob/dev/parachain/runtime/heima/src/lib.rs) (search `pub ChainId: u64 = 212013`)
 - **Polkadot.js Apps for Heima** — [polkadot.js.org/apps](https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Frpc.litentry-parachain.litentry.io#/explorer)
