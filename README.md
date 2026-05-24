@@ -54,6 +54,8 @@ cargo test -p agentkeys-provisioner
 
 Staged build plan in [`docs/spec/plans/development-stages.md`](docs/spec/plans/development-stages.md). Each stage has a `harness/stage-N-done.sh` gate that must exit 0 before the stage is marked complete. Contributor workflow: [`CLAUDE.md`](CLAUDE.md).
 
+**Inner-loop guide for broker + operator-side dev:** [`docs/spec/broker-and-operator-dev-guide.md`](docs/spec/broker-and-operator-dev-guide.md) — how to run the broker, signer, and mock-server locally, point the operator scripts at them, and use `harness/v2-stage*-demo.sh` for edit-build-test cycles.
+
 Version control uses [jj (Jujutsu)](https://github.com/jj-vcs/jj), not raw git.
 
 ## License
