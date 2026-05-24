@@ -48,7 +48,7 @@ existing_fields_json=$(gh api graphql -f query='
 # "Project Priority", "Project Project Priority", etc. — clutter that confuses operators
 # and breaks group-by-field views. Detect + delete any "Project <managed-name>" zombie.
 cleanup_zombies() {
-  local managed_names="Priority Phase Estimate Risk Notes"
+  local managed_names="Priority Kind Phase Estimate Risk Notes"
   for n in $managed_names; do
     local zombie_name="Project $n"
     local zombie_id
@@ -135,14 +135,18 @@ create_field() {
 
 echo "setup-project-fields target=$PROJECT_OWNER/$PROJECT_NUMBER"
 
-# Priority — single-select, four levels matching priority/* labels
-create_field "Priority" SINGLE_SELECT "P0,P1,P2,P3"
+# Priority — single-select, mapped from priority/p* labels (p0→Urgent, etc.)
+create_field "Priority" SINGLE_SELECT "Urgent,High,Medium,Low"
 
-# Phase — single-select, matches phase/* labels (one phase per issue is the norm)
-create_field "Phase" SINGLE_SELECT "v0,v1,v2,v3,v4"
+# Kind — single-select, mapped from kind/* labels (one kind per issue)
+create_field "Kind" SINGLE_SELECT "Feature,Bug,Research,Docs,Refactor,Security,CI"
 
-# Estimate — t-shirt sizes for rough sizing
-create_field "Estimate" SINGLE_SELECT "XS,S,M,L,XL"
+# Phase — DEPRECATED. We use GitHub Milestones for phase tracking now.
+# The Phase field may still exist on the project; this script leaves it untouched.
+# Delete it manually via the UI when ready.
+
+# Estimate — DEPRECATED. GitHub's built-in Size field (XS/S/M/L/XL) replaces it.
+# Leave existing Estimate column untouched if present.
 
 # Iteration — sprint window (project's built-in Iteration type; if not supported,
 # fall back to a TEXT field that operators fill manually). gh CLI doesn't support
@@ -156,17 +160,19 @@ create_field "Risk" SINGLE_SELECT "Low,Medium,High,Critical"
 # Notes — free-form text for one-line context per item
 create_field "Notes" TEXT
 
+# Issue dependencies: use GitHub's native issue relationships (UI "Relationships"
+# panel → "Mark as blocked by" / "Mark as blocking"). Do NOT create a project-level
+# "Blocked by" field — the native feature gives you typed cross-issue links the
+# project UI surfaces directly, no field needed.
+
 echo ""
 echo "ok setup-project-fields complete"
 echo ""
 echo "NEXT STEPS in the project UI (https://github.com/orgs/$PROJECT_OWNER/projects/$PROJECT_NUMBER):"
-echo "  1. Open a view (e.g. 'By Labels') → click ⋯ on the Labels column → 'Hide field'"
-echo "  2. Click ⋯ at the top right of the view → 'Group by' → pick 'Priority' or 'Phase'"
-echo "  3. Add new columns for the fields we just created (drag from the field list)"
-echo "  4. To bulk-populate field values from existing labels, run:"
-echo "     bash pm/scripts/sync-fields-from-labels.sh   (or trigger via Actions)"
-echo "  5. Going forward: .github/workflows/pm-sync-fields-from-labels.yml syncs"
-echo "     automatically when issues get labeled/relabeled — no manual step needed."
+echo "  1. Open a view → click ⋯ on the Labels column → 'Hide field' if it's still showing"
+echo "  2. Click ⋯ at the top right of the view → 'Group by' → pick 'Priority' or 'Kind' or 'Milestone'"
+echo "  3. Add new columns for the fields (drag from the field list)"
+echo "  4. Set Priority + Size on issues manually, or use the /agentkeys-issue-create skill for new ones."
 echo ""
 echo "Once configured: the cluttered Labels column disappears; Priority and Phase"
 echo "render as clean dropdowns; Status stays as the workflow column."
