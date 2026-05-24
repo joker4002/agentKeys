@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # pm/scripts/add-to-project.sh
 # Adds an issue (or all open) to the litentry/projects/19 GitHub Project board.
+#
+# PRIMARILY A BACKFILL / FALLBACK TOOL.
+# For new issues going forward, prefer the project's built-in "Auto-add to project"
+# workflow (configure filter = `repo:litentry/agentKeys is:issue` in Project settings).
+# See pm/PROJECT-DASHBOARD-GUIDE.md "Built-in workflows" section.
+#
+# Use this script only when:
+#   - Backfilling pre-existing issues that predate the workflow
+#   - Auto-add workflow is misconfigured and you need a quick manual add
+#   - Adding a specific issue from a different repo (script accepts repo override)
+#
 # Requires: gh auth refresh -s project,read:project (one-time)
 
 set -euo pipefail

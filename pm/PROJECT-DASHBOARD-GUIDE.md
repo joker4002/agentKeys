@@ -96,17 +96,51 @@ Recommended split for THIS repo:
 
 Result: cluttered 5-chip Labels cells disappear; you get clean single-value dropdowns per field.
 
-### Recommended workflows (Project Settings → Workflows)
+### Built-in workflows — prefer these over scripts
 
-These are built-in GitHub Project automations — enable in the project's "Workflows" tab:
+GitHub Projects ships ~10 built-in workflow automations. These replace a chunk of what the `pm/scripts/` would otherwise do — use them first; scripts are fallback / batch-only.
 
-| Trigger | Action |
-|---|---|
-| Item added to project | Set Status → Todo |
-| Issue closed | Set Status → Done |
-| PR merged | Set Status → Done; close linked issue |
-| PR opened | Set Status → In Review |
-| Code change requested | Set Status → In Progress |
+| Workflow | Default? | Configure | Replaces script? |
+|---|---|---|---|
+| **Auto-add to project** | needs filter set | Filter: `repo:litentry/agentKeys is:issue` | ✅ Replaces `add-to-project.sh` for new issues (script becomes one-time backfill) |
+| **Auto-add sub-issues to project** | on | (no config) | New (no script equivalent) |
+| **Auto-close issue** | on | When Status = Done → close issue | New (no script equivalent) |
+| **Item added to project** | on | Set Status → Todo on add | New |
+| **Item closed** | on | Set Status → Done on close | New |
+| **Pull request linked to issue** | on | (no config; uses "Closes #N" in PR body) | New |
+| **Pull request merged** | on | When PR merged → linked issue Status → Done | New |
+| **Auto-archive items** | off | Auto-archive after N days in Done | New — recommend enabling with 30-day threshold |
+| **Code changes requested** | off | When PR review = changes requested → Status → In Progress | Optional |
+| **Code review approved** | off | When PR review = approved → Status → Ready to merge | Optional |
+| **Item reopened** | off | When closed item is reopened → Status → Todo | Optional |
+
+### Script ↔ workflow split (what each is for)
+
+| Job | Use workflow | Use script |
+|---|---|---|
+| Add new issue to board | ✅ Auto-add to project | `add-to-project.sh` only for one-time backfill of pre-existing issues |
+| Set initial Status when added | ✅ Item added to project | — |
+| Move to Done when closed | ✅ Item closed | — |
+| Close issue when Status=Done | ✅ Auto-close issue | — |
+| Link PR to issue | ✅ "Closes #N" in PR body | — |
+| Move to Done when PR merged | ✅ Pull request merged | — |
+| Create repo milestones / labels | ❌ no workflow exists | `sync-milestones.sh`, `sync-labels.sh` |
+| Bulk-assign milestones + labels to existing issues | ❌ no workflow | `sync-issues.sh` |
+| Create new issues from a declarative list | ❌ no workflow | `create-issues.sh` |
+| Create project field definitions | ❌ no workflow | `setup-project-fields.sh` |
+| Audit categorization state | ❌ no workflow | `audit.sh` |
+
+**Rule**: if there's a workflow for it, use the workflow. Scripts exist for the gaps the workflows don't cover (repo-level state, batch issue creation, field definitions).
+
+### One-time workflow configuration checklist
+
+After the board exists:
+
+1. **Open** [https://github.com/orgs/litentry/projects/19/workflows](https://github.com/orgs/litentry/projects/19/workflows)
+2. **Auto-add to project** — click → set filter to `repo:litentry/agentKeys is:issue` → save
+3. **Verify the other enabled workflows** (green dots) are configured per the table above; most need no edits
+4. **Optionally enable**: Auto-archive items (recommend 30-day threshold), Code review approved
+5. Done. From now on, new issues from `litentry/agentKeys` auto-land on the board with Status=Todo; merged PRs auto-move linked issues to Done and close them.
 
 ## Day-to-day usage
 
