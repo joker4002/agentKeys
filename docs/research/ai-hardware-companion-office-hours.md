@@ -8,13 +8,15 @@ Mode: Startup
 
 **Working title naming note**: This doc uses "aiosandbox" as the in-session working title. There is a separate open-source `aiosandbox` npm library from Ant International — name conflict resolution is required before any public launch (see §Dependencies trademark check). Treat the title as a placeholder, not a committed brand.
 
-> **Implementation update (2026-05-24)**: implementation work moved into [issue #103](https://github.com/litentry/agentKeys/issues/103) and pivoted away from a from-scratch ESP32 firmware build to a cloud-side bridge that integrates the existing xiaozhi-esp32 firmware (already running on the MagicLick 2.5 device on hand) with NousResearch Hermes-agent. The v0 demo timeline is **~1-2 weeks**, not the multi-week estimate originally projected. See:
-> - [`docs/research/xiaozhi-esp32-magiclink.md`](./xiaozhi-esp32-magiclink.md) — hardware research + Option 1 (use xiaozhi firmware) vs Option 2 (rewrite firmware) decision
-> - [`docs/research/xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) — architecture diagrams + per-turn latency budget
-> - [`docs/research/xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) — three risks verified against actual code, plus a fourth discovered (cold agent construction needs pooling)
-> - [`docs/research/tuya-vs-xiaozhi.md`](./tuya-vs-xiaozhi.md) — Tuya is a different role than xiaozhi (closed PaaS for brand-owners vs open firmware for makers); AgentKeys sits above both
+> **Strategic update (2026-05-24)**: this brainstorm doc captured a wedge-discovery moment. The strategic direction has since sharpened into "Agent IAM for the AI device era" — see [`docs/research/agent-iam-strategy.md`](./agent-iam-strategy.md) for the source of truth on positioning, scope, and 12-month roadmap. Headline shifts that override sections below:
 >
-> The §Recommended Approach / §Pricing structure / §Cross-Vendor Memory Model below are unchanged. The shift is in the firmware-and-runtime layer (now leverages xiaozhi + Hermes upstream instead of building both ourselves), not in the AgentKeys-side architecture.
+> - **Positioning**: three-layer (AI Device Account / Agent IAM / Trust Substrate) told to three audiences (consumer / B2B / regulator). Don't lead with "Agent IAM" in consumer contexts; don't lead with "memory portability" anywhere — authority is the category.
+> - **Phase 1 demo**: three acts (permissioned memory + deterministic denial + online revocation), not memory-only. Parent-control web UI is a Phase 1 deliverable; without it the IAM positioning is invisible to end-users.
+> - **Architecture commitments tightened**: revocation is *immediate online, bounded TTL/cache offline* (not "no propagation delay"); audit is *two-tier* (real-time off-chain feed + batched 10-min Heima anchor, not real-time on-chain); delegation is *schema-only in v1*; zero orchestration in v1 is a hard line.
+> - **Implementation path**: cap-token machinery is shipped (Stage 7+); new work is the MCP server wrapper + parent web UI + three-act demo storyboard + vendor onboarding. Timeline ~2 weeks.
+> - **Companion docs**: [`xiaozhi-esp32-magiclink.md`](./xiaozhi-esp32-magiclink.md) (hardware decision), [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) (MCP-direct architecture), [`xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) (risk verification), [`volcano-ark-mcp-integration.md`](./volcano-ark-mcp-integration.md) (Phase 2 adapter), [`tuya-vs-xiaozhi.md`](./tuya-vs-xiaozhi.md) (vendor-cloud landscape).
+>
+> The §Recommended Approach / §Pricing structure / §Cross-Vendor Memory Model below are unchanged at their level of abstraction — they remain valid wedge-level analysis. The strategic doc is the authoritative anchor for what we ship, in what order, with what commitments.
 
 ## Problem Statement
 

@@ -4,13 +4,28 @@
 **Tracking issue:** [#103](https://github.com/litentry/agentKeys/issues/103)
 **Branch:** `claude/hopeful-mccarthy-15e5ba`
 
-> ## ⚠ PIVOT 2026-05-24 — read [`docs/research/xiaozhi-esp32-magiclink.md`](../../research/xiaozhi-esp32-magiclink.md) before implementing
+> ## ⚠ PIVOT 2026-05-24 (multiple rounds) — read strategic anchor FIRST: [`docs/research/agent-iam-strategy.md`](../../research/agent-iam-strategy.md)
 >
-> The demo hardware on hand is a **MagicLick 2.5** (ESP32-S3 + ES8311 audio codec + 128×128 LCD + dual-network WiFi/4G) running **xiaozhi-esp32 v1.9.4** firmware. The xiaozhi-esp32 framework already ships the entire voice pipeline (offline wake-word → streaming ASR → LLM → streaming TTS → OPUS audio transport over WebSocket or MQTT+UDP) and supports 70+ boards.
+> **Strategic frame**: AgentKeys is the **Agent IAM and memory control plane** for the AI device era. This issue ships Phase 1 from the strategy doc — a three-act demo that proves AgentKeys is Agent IAM, not chatbot infrastructure.
 >
-> "Hermes agent" in this plan refers to **[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** — a real MIT-licensed Python agent framework, NOT an internal AgentKeys runtime as the original §C4 mistakenly stated. Hermes ships its own memory loop, multi-interface gateway (Telegram/Discord/Slack/Signal/CLI), LLM-agnostic model selection, and runs inside Docker / SSH / Modal / Daytona / Vercel Sandbox out of the box.
+> **Hardware** (verified): MagicLick 2.5 (ESP32-S3 + ES8311 + 128×128 LCD + WiFi/4G) running xiaozhi-esp32 v1.9.4. See [`docs/research/xiaozhi-esp32-magiclink.md`](../../research/xiaozhi-esp32-magiclink.md).
 >
-> **Direction (decided)**: keep the existing xiaozhi-esp32 firmware on the device unchanged. Build the integration cloud-side via a new **`xiaozhi-hermes-bridge`** that speaks xiaozhi's WebSocket protocol while routing the agent loop to Hermes-agent (which in turn pulls memory from `agentkeys-daemon` per §C3). Reduces v0 effort from ~3 months (custom firmware) to **~1-2 weeks** (server-side adapter only — revised down from earlier ~2-3 week estimate based on the risk-verification research; see [`docs/research/xiaozhi-hermes-risks.md`](../../research/xiaozhi-hermes-risks.md) for grounded effort breakdown).
+> **Architecture** (MCP-direct, NOT Hermes-bridge): xiaozhi-server has first-class MCP support (`core/providers/tools/server_mcp/`). We register the AgentKeys MCP server in `mcp_server_settings.json`; the LLM (Qwen/Kimi/Doubao/Claude) calls our tools directly. No fork, no Hermes middleman. Hermes joins Phase 3 as a callable MCP tool (`hermes.execute_task`) the LLM can invoke for complex agentic work — not as the LLM-caller replacement. See [`docs/research/xiaozhi-hermes-architecture.md`](../../research/xiaozhi-hermes-architecture.md).
+>
+> **Phase 1 demo (three acts)** — replaces the single-act memory injection demo described below. Goal: <5-minute vendor pitch that reads as Agent IAM, not chatbot.
+> - **Act 1 — Permissioned Memory**: device reads ONLY the memory namespace it's allowed to read (not "the device knows you" — "the device knows what it's allowed to know about you")
+> - **Act 2 — Deterministic Denial**: user asks for a spend over the daily cap; `agentkeys.permission.check` returns `denied: daily_spend_cap_exceeded`; device refuses. No LLM in the decision.
+> - **Act 3 — Online Revocation**: parent opens AgentKeys web UI, revokes payment scope; next device attempt fails immediately on online cap-token check.
+>
+> **Four architecture commitments** (corrected from earlier loose framing):
+> 1. **Revocation**: *immediate online, bounded TTL/cache offline*. Not "no propagation delay." High-risk actions always online; low-risk reads use short-lived cached caps; offline mode denies sensitive actions by default.
+> 2. **Audit (two-tier)**: real-time off-chain feed in parent-control UI + 10-min batched Merkle root anchored to Heima. NOT real-time on-chain. Heima explorer is tamper-evidence proof, not the UX surface.
+> 3. **Delegation**: `agentkeys.delegation.grant` is **schema-documented but not active** in v1. Returns `not_implemented_in_v1`. Active delegation lands in Phase 4.
+> 4. **Zero orchestration in v1** — hard line. If a vendor needs orchestration, they pick a runtime (Hermes/OpenClaw/their own) via Phase 3 MCP tools.
+>
+> **What's NEW vs what's shipped**: cap-token machinery (broker, signer, K3/K10 HDKD, memory/cred/audit workers, per-actor isolation per issue #90) is already shipped via Stage 7+. New work for Phase 1: MCP server wrapper around existing backend RPCs (~1 week), parent-control web UI (mobile-responsive, ~3-4 days), two-tier audit wiring (~1 day), demo runbook (~half day). Total ~2 weeks.
+>
+> **Sections below**: §C3 (mock memory + daemon endpoint) still useful as backend context. §C4 (custom Hermes runtime as Rust crate) is **SUPERSEDED** — use the AgentKeys MCP server pattern from [`docs/research/volcano-ark-mcp-integration.md`](../../research/volcano-ark-mcp-integration.md). §C5 (Dockerfile with hermes-runtime) is **SUPERSEDED**. §C6 (custom ESP32 firmware) **SUPERSEDED for MagicLick demo** — firmware is unchanged. §C7 (deploy script) needs rework to provision the MCP server + xiaozhi-server stock + parent web UI instead of the bridge. The "Implementation order" and "Effort estimate" sections below reflect the older bridge-fork plan and should be read as historical context, not current spec.
 >
 > **What this means for the original plan sections:**
 > - §C3 (mock memory + daemon endpoint) — **STILL VALID**, no changes
