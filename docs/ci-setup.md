@@ -365,6 +365,122 @@ gh workflow run harness-ci.yml --repo litentry/agentKeys --field stage=3
 
 When the workflow passes against the test stack, CI is live. Every subsequent push to a PR triggers it; you're done.
 
+### 7. (Optional) Wire auto-deploy of the test broker (issue [#101](https://github.com/litentry/agentKeys/issues/101))
+
+Without this step, the workflow validates against the **already-deployed** test broker. If a PR changes broker code (`crates/agentkeys-broker-server/**`, `crates/agentkeys-worker-*/**`, `crates/agentkeys-signer-protocol/**`, `scripts/setup-broker-host.sh*`, or any workspace-shared crate the broker links against), the test broker binary silently drifts from the PR's source tree — the harness then exercises *old* broker code against *new* harness scripts, producing either spurious passes or confusing failures.
+
+Step 7 wires a second OIDC role (`github-actions-agentkeys-deploy`) plus two new GitHub secrets. When activated, the workflow's `detect-changes` job sees broker-affecting paths in the diff, the `deploy-test-broker` job assumes that role, and `aws ssm send-command` drives `setup-broker-host.sh --test --yes` on the test EC2 — re-deploying the broker so `harness-e2e` validates the PR's actual code. The deploy job is **gated three ways**:
+
+1. `paths-filter` boolean (no broker code changed → skip).
+2. Both deploy secrets present (`OIDC_AWS_ROLE_ARN_DEPLOY` + `TEST_BROKER_INSTANCE_ID`).
+3. `preflight.outputs.should_run == 'true'` (test infra fully wired).
+
+If any gate fails, the deploy job is **skipped, not failed** — `harness-e2e` still runs against the existing broker binary. So this step is fully opt-in; partial activation is safe.
+
+#### 7.1 Run the provisioning script
+
+```bash
+awsp agentkeys-admin
+# Look up the test broker EC2 instance ID (one-shot — pin it once):
+TEST_BROKER_INSTANCE_ID=$(aws ec2 describe-instances \
+  --region "$REGION" \
+  --filters "Name=ip-address,Values=$(curl -sS "https://dns.google/resolve?name=$BROKER_HOST&type=A" | jq -r '.Answer[0].data')" \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text)
+echo "$TEST_BROKER_INSTANCE_ID"   # → i-xxxxxxxxxxxxxxxxx
+
+# Idempotent provisioning — safe to re-run. Use --fix-ssm on the FIRST run
+# so the script auto-attaches AmazonSSMManagedInstanceCore to the broker EC2's
+# instance profile if it's missing (a fresh EC2 commonly lacks this policy).
+bash scripts/provision-ci-deploy-role.sh \
+  --test-broker-instance-id "$TEST_BROKER_INSTANCE_ID" \
+  --env-file scripts/operator-workstation.test.env \
+  --fix-ssm
+```
+
+The script:
+
+- Creates / refreshes the `github-actions-agentkeys-deploy` IAM role with a federated trust policy on the GitHub Actions OIDC provider, scoped to `repo:litentry/agentKeys:*` (any branch in this repo can trigger; the workflow's path filter + preflight gate further restrict when the role is actually used).
+- Attaches an inline policy `agentkeys-ci-deploy-ssm` with:
+  - `ssm:SendCommand` on `document/AWS-RunShellScript` + the one instance ARN (so even if the role's session creds leaked, the worst a third party can do is re-run setup-broker-host.sh on the test EC2 — a destructive op there is `terraform apply`-style: idempotent, recoverable, and contained to the test environment).
+  - `ssm:GetCommandInvocation` / `ssm:ListCommandInvocations` / `ssm:DescribeInstanceInformation` for status polling + the workflow's pre-deploy sanity check.
+  - `ec2:DescribeInstances` scoped to the one instance ID, for the workflow's pre-deploy sanity check.
+
+> Already provisioned the role before `ssm:DescribeInstanceInformation` was added to the policy template? Re-run the provisioning script. `put-role-policy` is idempotent — it overwrites the inline policy with the current source-of-truth shape, picking up any added permissions.
+- Verifies the test EC2 is registered with SSM (`PingStatus = Online`). With `--fix-ssm`, auto-remediates the common "instance profile is missing AmazonSSMManagedInstanceCore" case by attaching the policy and polling for up to 3 min for the SSM agent to refresh its creds. Without `--fix-ssm`, just reports the failure with manual fix instructions.
+
+**SSM remediation modes (what `--fix-ssm` covers, what it doesn't):**
+
+| Failure | What `--fix-ssm` does | What it CAN'T fix automatically |
+|---|---|---|
+| Instance profile missing `AmazonSSMManagedInstanceCore` | Attaches the policy, polls for Online | (handled) |
+| Policy already attached, agent process running with stale creds | Polls until agent refreshes (~1-3 min typical) | If poll times out: SSH + `sudo systemctl restart amazon-ssm-agent`, OR `aws ec2 reboot-instances …` |
+| Instance has NO instance profile at all | Creates a dedicated `agentkeys-test-broker-ssm` role + instance profile (EC2 trust + `AmazonSSMManagedInstanceCore`) and associates it with the EC2. IMDS surfaces the new creds within ~30s. Safe because the broker's app-layer AWS access uses static creds from `broker.env`, not IMDS — adding IMDS-served creds can only ADD capability for the SSM agent, not displace anything. | (handled) |
+| SSM Agent not installed (no `amazon-ssm-agent` unit) | Reports state; can't reach the box to install (operator's laptop has no SSH-into-EC2 capability from the provision script) | Re-run `bash scripts/setup-broker-host.sh --test --yes` on the EC2 — it now installs `amazon-ssm-agent` (snap preferred, .deb fallback) as part of broker bootstrap. One-shot manual recovery if you don't want to re-run the full setup: `ssh test-broker 'sudo snap install amazon-ssm-agent --classic && sudo systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service'` |
+| Private VPC subnet without an SSM VPC endpoint | Reports state | Operator wires the VPC endpoint (unlikely for a public-IP broker, but possible) |
+
+Re-running the script after any of the operator-side fixes is safe (idempotent — every step is `get-*` pre-checked before any mutation).
+
+#### 7.2 Set the two new repo secrets
+
+```bash
+# Print the deploy role ARN you just provisioned (script also prints this):
+role_arn=$(aws iam get-role --role-name github-actions-agentkeys-deploy \
+  --query 'Role.Arn' --output text)
+
+gh secret set OIDC_AWS_ROLE_ARN_DEPLOY --repo litentry/agentKeys --body "$role_arn"
+gh secret set TEST_BROKER_INSTANCE_ID  --repo litentry/agentKeys --body "$TEST_BROKER_INSTANCE_ID"
+```
+
+| Secret | Purpose |
+|---|---|
+| `OIDC_AWS_ROLE_ARN_DEPLOY` | ARN of `github-actions-agentkeys-deploy` — assumed by the `deploy-test-broker` job via GitHub Actions OIDC. |
+| `TEST_BROKER_INSTANCE_ID` | EC2 instance ID (`i-…`) hosting `test-broker.${ZONE}`. The deploy role's inline policy is scoped to *this single instance*. |
+| `TEST_BROKER_REPO_DIR` | **Optional.** Absolute path of the agentKeys git checkout on the EC2 (e.g. `/home/ubuntu/agentKeys`). The deploy workflow auto-discovers across common candidates (`/home/ubuntu/agentKeys`, `/home/ubuntu/agentkeys`, `/opt/agentkeys`, `/srv/agentkeys`, `/root/agentKeys`), so this only needs to be set when the operator cloned to a non-standard path and the workflow's auto-discover step prints `could not locate the agentKeys checkout`. |
+
+#### 7.3 Dry-run validate
+
+Trigger the workflow manually with `force_deploy_broker=true` so the deploy fires regardless of whether the latest commit touched broker paths.
+
+**Pre-merge — `--ref` is required.** `gh workflow run` reads the workflow definition from the *default branch* (`main`) unless you tell it otherwise. Since the `force_deploy_broker` input lives on the PR branch, dispatching without `--ref` fails with `HTTP 422: Unexpected inputs provided: ["force_deploy_broker"]`. Pass `--ref` so GHA reads the workflow YAML (and its inputs) from the PR branch instead:
+
+```bash
+gh workflow run harness-ci.yml --repo litentry/agentKeys \
+  --ref claude/adoring-bell-1b9ca8 \
+  --field stage=1 \
+  --field force_deploy_broker=true
+```
+
+Replace `claude/adoring-bell-1b9ca8` with your actual PR branch name (`git rev-parse --abbrev-ref HEAD` if you're on it locally).
+
+**Post-merge — `--ref` is optional.** Once this PR is on `main`, dispatching without `--ref` will work because the input is part of the default-branch workflow definition. (The `--ref` form still works and lets you target any branch.)
+
+Then in the run logs:
+
+- `deploy-test-broker` should show `SSM agent online on i-…` (sanity check passed).
+- The `SendCommand` step prints the command ID; the next step polls until `Success`.
+- On success: the tail of `StandardOutputContent` shows `setup-broker-host.sh` finishing cleanly (`ok systemd unit … active`, `ok nginx running`, etc.).
+- On failure: stdout + stderr are dumped to the GHA log. The most common cause is `git checkout` failing on the EC2 because the source tree doesn't have the PR branch fetched — fix by ssh-ing into the box and running `sudo -u ubuntu git fetch --prune origin` once.
+
+#### 7.4 Disable / disarm
+
+Remove either secret to disarm — the workflow's `preflight.outputs.deploy_ready` will flip to `false` and the deploy job silently skips:
+
+```bash
+gh secret delete OIDC_AWS_ROLE_ARN_DEPLOY --repo litentry/agentKeys
+# or
+gh secret delete TEST_BROKER_INSTANCE_ID --repo litentry/agentKeys
+```
+
+The IAM role can stay provisioned indefinitely — without the secret it can't be assumed by GHA, and the inline SSM perms are scoped to one instance.
+
+#### Out of scope for issue #101
+
+Per [issue #101](https://github.com/litentry/agentKeys/issues/101) "Out of scope":
+
+- **Prod broker auto-deploy** — never. The prod broker EC2 stays manual via `bash scripts/setup-broker-host.sh --upgrade` from the operator laptop, per CLAUDE.md "Remote broker host (single entry point)".
+- **Auto-deploy of test Heima EVM contracts** — deferred to a follow-up PR (issue #101 rollout plan step 7). Contract redeploys mint new addresses and require the `SECRETS_REWRITE_PAT` token to update six `TEST_*_ADDRESS_HEIMA` secrets — more risk than the broker deploy, so it ships separately.
+- **Mainnet prod contract redeploy** — never automatic. Manual via `bash scripts/setup-heima.sh` only.
+
 ## What the workflow does on every run
 
 1. Restores submodules + Rust toolchain + Foundry + cargo cache.
