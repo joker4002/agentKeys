@@ -12,7 +12,7 @@ Mode: Startup
 >
 > - **Positioning**: three-layer (AI Device Account / Agent IAM / Trust Substrate) told to three audiences (consumer / B2B / regulator). Don't lead with "Agent IAM" in consumer contexts; don't lead with "memory portability" anywhere — authority is the category.
 > - **Phase 1 demo**: three acts (permissioned memory + deterministic denial + online revocation), not memory-only. Parent-control web UI is a Phase 1 deliverable; without it the IAM positioning is invisible to end-users.
-> - **Architecture commitments tightened**: revocation is *immediate online, bounded TTL/cache offline* (not "no propagation delay"); audit is *two-tier* (real-time off-chain feed + batched 10-min Heima anchor, not real-time on-chain); delegation is *schema-only in v1*; zero orchestration in v1 is a hard line.
+> - **Architecture commitments tightened**: revocation is *immediate online, bounded TTL/cache offline* (not "no propagation delay"); audit is *two-tier* (real-time off-chain feed + batched 2-min on-chain anchor, not real-time on-chain); delegation is *schema-only in v1*; zero orchestration in v1 is a hard line.
 > - **Implementation path**: cap-token machinery is shipped (Stage 7+); new work is the MCP server wrapper + parent web UI + three-act demo storyboard + vendor onboarding. Timeline ~2 weeks.
 > - **Companion docs**: [`xiaozhi-esp32-magiclink.md`](./xiaozhi-esp32-magiclink.md) (hardware decision), [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) (MCP-direct architecture), [`xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) (risk verification), [`volcano-ark-mcp-integration.md`](./volcano-ark-mcp-integration.md) (Phase 2 adapter), [`tuya-vs-xiaozhi.md`](./tuya-vs-xiaozhi.md) (vendor-cloud landscape).
 >

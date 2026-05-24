@@ -109,22 +109,22 @@ For the demo: show the high-risk path with immediate revocation (the dramatic mo
 
 ### 3.2 Audit: real-time off-chain feed + batched on-chain anchor
 
-**Wrong commitment**: *"audit row appears on Heima explorer in real-time"* (would contradict batched anchoring + cost a fortune in gas).
+**Wrong commitment**: *"audit row appears on-chain in real-time"* (would contradict batched anchoring + cost real gas + tie us to one chain).
 
 **Correct commitment**:
 
-> **Off-chain audit feed is real-time, shown in the parent-control web UI. On-chain audit anchor is batched (10-minute Merkle root) on Heima, shown on Heima explorer as tamper-evidence proof.**
+> **Off-chain audit feed is real-time, shown in the parent-control web UI. On-chain audit anchor is a batched 2-minute Merkle root posted to the audit chain (chain-agnostic — modern fast-finality chains with cheap gas make sub-block batching viable), shown on the chain's block explorer as tamper-evidence proof.**
 
 Two-tier audit:
 
 | Tier | What | Where shown | Latency | Purpose |
 |---|---|---|---|---|
 | Off-chain feed | Every authority event (cap mint, permission check, memory read, credential fetch, revocation) | Parent-control web UI + AgentKeys API | Real-time (~100ms) | UX, monitoring, dispute resolution |
-| On-chain anchor | Merkle root of off-chain events for a 10-min window | Heima explorer | 10 min | Tamper-evidence, cryptographic proof, regulatory export |
+| On-chain anchor | Merkle root of off-chain events for a 2-min window | Configured chain's block explorer | 2 min | Tamper-evidence, cryptographic proof, regulatory export |
 
-Demo language: *"The parent sees the audit event instantly in the app. The cryptographic audit batch is later anchored on Heima for tamper-evidence — visible on the Heima explorer 10 minutes after."*
+Demo language: *"The parent sees the audit event instantly in the app. The cryptographic audit batch is anchored on-chain for tamper-evidence within ~2 minutes — verifiable on the block explorer."*
 
-Heima explorer is **trust proof, not real-time UX**. Parent-control web UI is the experience surface.
+The block explorer is **trust proof, not real-time UX**. Parent-control web UI is the experience surface. Chain choice is a deployment config (per arch.md the current backend is the operator-chosen substrate; the strategy doc stays chain-agnostic on positioning).
 
 ### 3.3 Delegation: schema/preview in v1, not active
 
@@ -153,6 +153,62 @@ Agent IAM is correct for B2B / investor / partner / CTO audiences. It's sharp, w
 
 Three audiences, three pitches, one product. Don't conflate.
 
+### 3.5 Memory namespace model (early-phase, composes with the 4-type taxonomy)
+
+The existing AgentKeys memory design ([`docs/plan/agentkeys-memory-design.md`](../plan/agentkeys-memory-design.md), committed on `main` as `53ccc9f`) defines four STRUCTURAL types — `profile` (single CAS-mutable file), `procedural` (append + occasional rewrite), `semantic` (one S3 object per ULID), `episodic` (date-prefixed per ULID). These are how memory is STORED on the per-actor S3 prefix.
+
+For Agent IAM, we add an ORTHOGONAL semantic dimension: **namespaces**. These are how memory is SCOPED for permission and discovery. Namespaces compose with structural types — a memory item belongs to one namespace AND one structural type.
+
+**Composition example** (Kevin owns a MagicLick + FoloToy):
+```
+Memory item: { type: "semantic", namespace: "travel", line: "Kevin asked about Chengdu customs clearance" }
+Memory item: { type: "profile",  namespace: "personal", line: "Lives in Shanghai, allergic to peanuts" }
+Memory item: { type: "episodic", namespace: "family", line: "Anniversary dinner reservation 2026-06-15" }
+```
+
+The MagicLick's cap-token grants `namespaces_allowed: ["travel"]`. It can read the first item, NOT the second or third. The toy's reply to *"where am I going this weekend?"* references Chengdu (travel) but never reveals the peanut allergy (personal) or the anniversary (family).
+
+**Why this composes cleanly with the existing memory design**:
+
+- The 4-type S3 key derivation in [memory-design §3.2a](../plan/agentkeys-memory-design.md) is unchanged. No new path components in v0. (S3 layout: `bots/<actor>/memory/{profile.json.enc, procedural.jsonl.enc, semantic/<ulid>.enc, episodic/<date>/<ulid>.enc}` — exactly as designed.)
+- Namespaces live in the wire-format metadata + line envelope, NOT in the S3 key derivation. The memory worker filters at retrieval time.
+- Cap-tokens add a `namespaces_allowed: ["personal", "travel"]` claim. The worker enforces the filter deterministically (no LLM, no fuzzy matching — string-set membership check).
+- Future evolution: if scale / perf demands a path-prefixed namespace layout for cheap S3 LIST per namespace, migration is well-defined (rewrite per-actor under `bots/<actor>/memory/<namespace>/{...}` paths); cap-tokens already speak the namespace language at that point.
+
+**v0 default namespaces** (keep the list small — 4):
+
+| Namespace | Purpose | Typical writer | Typical reader |
+|---|---|---|---|
+| `personal` | User's own profile, preferences, health, history | Any device the user owns | Trusted personal devices |
+| `family` | Family-context memory (spouse, kids, shared events, household) | Vetted family-aware devices | Family-context apps |
+| `work` | Work projects, contacts, deadlines, work travel | Work-context apps + devices | Work-context apps + devices |
+| `travel` | Trip planning, location context, near-term itinerary | Travel-context apps + devices | Travel-context apps + toys/wearables |
+
+A device's cap-token scopes which namespaces it can read AND write. The MagicLick demo Act 1 (Permissioned Memory) shows the toy with `cap = {namespaces_allowed: ["travel"]}` — reads ONLY `travel`, sees nothing in `personal` / `family` / `work` even though they exist for the same actor.
+
+**What we explicitly defer** (not in v0):
+
+- Path-prefixed namespace layout (no S3 layout changes; namespaces stay metadata-only)
+- Per-namespace embedding indexes (v0 uses the existing global index per memory-design §5)
+- Cross-namespace memory sharing rules beyond cap-token consent toggles
+- Dynamic / user-defined namespaces (v0 uses the 4 defaults; user-defined lands Phase 4 with the ACL-maturity work)
+- `kids`, `device`, `temp` namespaces from the original Agent IAM proposal — `kids` folds into `family` for v0 (split when per-namespace ACL granularity matures in Phase 4); `device` and `temp` are out of scope as user-visible concepts
+
+**Future namespace evolution** (Phase 3-4):
+- Phase 3: add `device` namespace for device-local memory that doesn't sync cross-vendor
+- Phase 4: split `kids` out of `family` once per-namespace ACL granularity is mature
+- Phase 4: add `temp` namespace with TTL semantics for auto-expiring task memory
+- Phase 4: user-defined custom namespaces via parent-control UI
+
+**arch.md compatibility check** (no contradictions found, verified 2026-05-24):
+
+- ✅ Memory data_class binding ([arch.md §17.5](../arch.md)) unchanged — namespaces are inside the data_class, not parallel to it
+- ✅ Per-actor isolation via PrincipalTag ([arch.md §17](../arch.md)) unchanged — namespaces are inside the actor's prefix
+- ✅ Cap-token format extensible — adding `namespaces_allowed` is additive (existing cap verifier ignores unknown fields gracefully per its design)
+- ✅ Memory worker never calls an LLM (memory-design §1 invariant 1) — namespace filter is deterministic string-set membership, no inference
+- ✅ K3 epoch rotation ([arch.md §16](../arch.md), memory-design §8.3) unchanged — namespaces are envelope metadata, not part of the keying material
+- ✅ Architecture-as-source-of-truth (CLAUDE.md policy) — once v0 namespaces ship, arch.md §17 gets an additive paragraph + memory-design §3 adds the namespace field to the wire format. No conflicting canonical names introduced.
+
 ---
 
 ## 4. Revised Phase 1 (ship in ~2 weeks)
@@ -175,7 +231,7 @@ Already-shipped backend (per CLAUDE.md Stage 7+) provides the heavy lifting:
 | Signer (K3 / K10 HDKD per arch.md §17) | ✅ exists |
 | Memory worker (per-actor S3 isolation) | ✅ exists (`agentkeys-worker-memory`, issue #92) |
 | Credential worker (per-actor + per-data-class isolation) | ✅ exists (`agentkeys-worker-creds`, issue #90) |
-| Audit worker (off-chain + Heima anchoring) | ✅ exists (`agentkeys-worker-audit`) |
+| Audit worker (off-chain + on-chain anchoring) | ✅ exists (`agentkeys-worker-audit`) |
 | OIDC issuer (federation) | ✅ exists |
 | Per-actor + per-data-class isolation invariants | ✅ exists (issue #90) |
 
@@ -214,7 +270,7 @@ The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-
 - LLM decides this requires payment authority; calls `agentkeys.permission.check(actor=O_kevin_001, scope="payment.spend", amount_rmb=600)`
 - AgentKeys deterministic policy engine returns `denied: daily_spend_cap_exceeded (cap=500, requested=600, period=daily)`
 - LLM (because we trained the prompt this way) refuses politely and explains
-- Audit row appears in parent-control web UI **instantly**; Heima explorer anchor visible in next 10-min batch
+- Audit row appears in parent-control web UI **instantly**; chain explorer anchor visible in next 2-min batch
 - **Headline**: policy decides, not the LLM. Cap-bounded blast radius. Cryptographically auditable later.
 
 **Act 3 — Online Revocation** (parent UI → device denies, bounded)
@@ -233,7 +289,7 @@ The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-
 | AgentKeys MCP server | 7 active tools wrapping existing backend RPCs | The integration surface vendors plug into |
 | xiaozhi-server deploy with MCP config | Stock xinnan-tech build, our MCP server registered in `mcp_server_settings.json` | Demo runtime; vendor sees no fork required |
 | Parent-control web UI (mobile-responsive) | One page: actor list, scope toggles, revoke buttons, audit feed | The face of "Agent IAM" — without this, Act 3 isn't a demo |
-| Two-tier audit | Real-time off-chain feed + 10-min batched Heima anchor | §3.2 corrected architecture |
+| Two-tier audit | Real-time off-chain feed + 2-min batched on-chain anchor | §3.2 corrected architecture |
 | Bounded revocation model | Immediate online; documented TTL/cache for offline | §3.1 corrected architecture |
 | Three mock memory namespaces | `profile`, `travel`, `family` (only `travel` readable by demo actor) | Shows scoped access in Act 1 |
 | Demo runbook + 15-min vendor pitch script | Operator can re-run; vendor sees value in 5 min | Distribution-ready |
@@ -261,7 +317,7 @@ Sequenced to test the Agent IAM thesis with minimum viable surface, then deepen 
 
 ### Phase 0 — Done (Stage 7+)
 
-Broker, signer, memory/cred/audit workers, OIDC issuer, per-actor + per-data-class isolation (issue #90), Heima EVM integration, HDKD identity tree. All cap-token machinery shipped.
+Broker, signer, memory/cred/audit workers, OIDC issuer, per-actor + per-data-class isolation (issue #90), on-chain anchoring backend (currently Heima per arch.md, swappable per the chain-agnostic design), HDKD identity tree. All cap-token machinery shipped.
 
 ### Phase 1 — Agent IAM v0 demo (0-2 weeks)
 

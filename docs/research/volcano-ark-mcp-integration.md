@@ -101,13 +101,13 @@ There are two ways to integrate with an MCP marketplace:
 │  • signer (K3 / K10 HDKD per arch.md §17)                   │
 │  • agentkeys-worker-memory (S3 bots/<actor>/memory/*)       │
 │  • agentkeys-worker-creds (S3 vault, per-actor isolation)   │
-│  • agentkeys-worker-audit (off-chain + Heima anchoring)     │
+│  • agentkeys-worker-audit (off-chain + on-chain anchoring)  │
 │  • agentkeys-daemon (existing memory endpoint per issue #103)│
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
                   ┌──────────────────┐
-                  │ AWS S3, Heima    │
+                  │ AWS S3, audit    │
                   │ chain, etc.      │
                   └──────────────────┘
 ```
@@ -241,7 +241,7 @@ Kevin owns two devices from two different vendors. Both terminate at AgentKeys.
                   │   K3 → K10 HDKD      │
                   │                      │
                   │ ONE audit ledger     │
-                  │   off-chain + Heima  │
+                  │   off-chain + chain  │
                   └──────────────────────┘
 ```
 

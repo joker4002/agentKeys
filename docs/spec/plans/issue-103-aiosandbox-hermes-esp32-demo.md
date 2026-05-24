@@ -19,7 +19,7 @@
 >
 > **Four architecture commitments** (corrected from earlier loose framing):
 > 1. **Revocation**: *immediate online, bounded TTL/cache offline*. Not "no propagation delay." High-risk actions always online; low-risk reads use short-lived cached caps; offline mode denies sensitive actions by default.
-> 2. **Audit (two-tier)**: real-time off-chain feed in parent-control UI + 10-min batched Merkle root anchored to Heima. NOT real-time on-chain. Heima explorer is tamper-evidence proof, not the UX surface.
+> 2. **Audit (two-tier)**: real-time off-chain feed in parent-control UI + **2-min batched Merkle root anchored on-chain** (chain choice is deployment config; the strategy stays chain-agnostic per [`agent-iam-strategy.md`](../../research/agent-iam-strategy.md) §3.2). NOT real-time on-chain. The chain explorer is tamper-evidence proof, not the UX surface.
 > 3. **Delegation**: `agentkeys.delegation.grant` is **schema-documented but not active** in v1. Returns `not_implemented_in_v1`. Active delegation lands in Phase 4.
 > 4. **Zero orchestration in v1** — hard line. If a vendor needs orchestration, they pick a runtime (Hermes/OpenClaw/their own) via Phase 3 MCP tools.
 >
@@ -76,7 +76,7 @@ The office-hours diagnostic surfaced that the next critical step is a working de
 - Pricing / billing / activation flow (no Stripe ACP / Alipay+ AMP)
 - Cap-token enforcement on the memory read path (mock memory is read with a static signed URL for v0)
 - Parent-control / consumer mobile app
-- Audit anchoring to Heima (off-chain audit only for v0)
+- On-chain audit anchoring (off-chain audit only for v0; on-chain batch in Phase 2+)
 - Real-time revocation UI
 
 ## Architecture
