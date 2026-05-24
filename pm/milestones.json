@@ -1,0 +1,39 @@
+{
+  "milestones": [
+    {
+      "title": "M1: First MCP demo + Volcano Ark PoC",
+      "state": "open",
+      "description": "Phase 1 of the Agent IAM roadmap. Ship the v0 three-act IAM demo: permissioned memory + deterministic denial + online revocation on MagicLick 2.5 (xiaozhi-esp32 firmware) with AgentKeys MCP server registered in xiaozhi-server's mcp_server_settings.json, plus Volcano Ark MCP server marketplace registration as a PoC for the second rail. Strategic anchor: docs/research/agent-iam-strategy.md §4. Goal: <5-minute vendor pitch reads as Agent IAM, not chatbot."
+    },
+    {
+      "title": "M2: First vendor wedge (incl memory system)",
+      "state": "open",
+      "description": "Phase 2. Land the first paid vendor pilot at $2-3/active-device/mo. Includes memory system productionization: namespace-aware MCP wiring, vendor onboarding portal (tenant tokens, per-vendor billing, attributed devices), parent-control consumer mobile-responsive web UI graduated to first-class, Tuya Cloud Development connector for brand-owner OEM volume, audit dashboard with two-tier (off-chain feed + 2-min on-chain batch). Goal: one signed pilot + 10+ end-users + first Pro upgrades."
+    },
+    {
+      "title": "M3: Runtime neutrality",
+      "state": "open",
+      "description": "Phase 3. Prove 'the same authority layer works across different agent runtimes.' Hermes-MCP (hermes.execute_task as a callable tool), OpenClaw-MCP, Doubao agent compatibility, Claude Code / Codex CLI compatibility, Python + TypeScript SDKs for non-MCP integration paths. Goal: 3+ runtimes integrated, demonstrably interoperable through the same AgentKeys backend."
+    },
+    {
+      "title": "M4: Capability + revocation depth",
+      "state": "open",
+      "description": "Phase 4. Take the v1 schema-only delegation tools and ship the production versions: active delegation chains (parent agent → child agent with scope narrowing + TTL inheritance + revocation cascade + audit chain), approval workflows (high-risk actions push to parent app for one-tap approval), policy versioning, audit replay, memory namespace ACL maturity (cross-vendor consent ceremony in production), family / work / kids memory separation. Goal: first enterprise customer."
+    },
+    {
+      "title": "M5: Native mobile app + biometric",
+      "state": "open",
+      "description": "Phase 5. Graduate the parent-control web UI to native iOS + Android app. K11 WebAuthn integration via platform authenticator (Touch ID / Face ID on iOS, BiometricPrompt on Android). Recovery + scope grants from mobile. YubiKey / roaming-authenticator support as alternate K11. Real macOS LAContext for CLI biometric gating."
+    },
+    {
+      "title": "M6: TEE integration + enhanced security",
+      "state": "open",
+      "description": "Phase 6. Production crypto hardening: TEE worker for omni-anchored EVM keypair derivation (replace dev_key_service), MSK / HDKD K4 wallet derivation depth, TEE-as-paymaster sponsored audit for low-latency reads (Pattern 4 from #5), TEE-side access control / security groups for child paths, TEE-side per-session rate limits, on-chain encrypted vault hardening to prevent harvest-now-decrypt-later, device-key auth for /dev/* signer endpoints, K3 rotation eager re-encryption tool."
+    },
+    {
+      "title": "M7: Standards + ecosystem",
+      "state": "open",
+      "description": "Phase 7 (post-12-months, contingent on Phase 1-6 deployed traction). Propose MCP extensions for IAM-grade auth headers (session keys, cap-token forwarding, audit-chain headers). OAuth-for-Agents specification engagement (IETF / W3C working groups). Reference implementations for non-MCP runtimes (raw HTTP/gRPC clients). Brand-owner partnerships: Tuya, Xiaomi (Phase 3c deferred from Tuya doc), Alibaba Smart Home. Goal: become the reference implementation that every new agent runtime + IoT cloud integrates with by default."
+    }
+  ]
+}
