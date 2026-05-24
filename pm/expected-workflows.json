@@ -46,8 +46,8 @@
     },
     {
       "name": "Auto-archive items",
-      "should_be_enabled": false,
-      "_note_on_should_be_enabled": "Recommend enabling with 30-day threshold to keep the board lean, but not strictly required. Setting should_be_enabled=false here means the check script won't flag it as missing; flip to true once you've enabled it.",
+      "should_be_enabled": true,
+      "_note_on_should_be_enabled": "Enabled per operator decision (recommended). Keeps the board lean by auto-archiving items 30+ days in Done.",
       "verify_in_ui": "Filter: is:closed updated:<@today-30d. Action: archive.",
       "purpose": "Auto-archives items 30+ days in Done; keeps active views uncluttered."
     },
