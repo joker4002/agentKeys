@@ -1,0 +1,77 @@
+name: pm — project workflow audit
+
+# Daily drift check: confirms the 11 built-in workflows on litentry/projects/19
+# still match pm/expected-workflows.json. Catches "someone disabled a workflow
+# in the UI by accident."
+#
+# IMPORTANT LIMITATION: GitHub's API exposes only workflow name + enabled state,
+# NOT the filter expression or action body. So this audit catches "workflow got
+# turned off" but cannot catch "filter got edited from
+# `repo:litentry/agentKeys is:issue` to something broken."
+# That class of drift must still be eyeballed in the UI.
+#
+# Required repo secret: PM_PROJECT_TOKEN
+#   - Fine-grained PAT or PAT (classic) with `project` + `read:project` + `repo` scopes
+#   - Scope: org-level read access to litentry/projects/19
+#   - Create at: https://github.com/settings/tokens
+
+on:
+  schedule:
+    # Daily at 14:00 UTC (07:00 PT, 22:00 SGT) — pick a time engineers are around
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main, evm]
+    paths:
+      - 'pm/expected-workflows.json'
+      - 'pm/scripts/check-workflows.sh'
+      - '.github/workflows/pm-workflow-audit.yml'
+
+permissions:
+  contents: read
+  issues: write  # to open drift-detected issue
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PM_PROJECT_TOKEN }}
+      PROJECT_OWNER: litentry
+      PROJECT_NUMBER: '19'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Run workflow audit
+        id: audit
+        run: |
+          set +e
+          bash pm/scripts/check-workflows.sh > audit.txt 2>&1
+          rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          cat audit.txt
+          exit 0  # never fail the job; open an issue instead
+
+      - name: Open drift issue on mismatch
+        if: steps.audit.outputs.exit_code != '0'
+        run: |
+          # Avoid duplicates: only open if no open issue with the same title exists
+          title="pm: project workflow drift detected ($(date -u +%Y-%m-%d))"
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --state open --search "in:title \"project workflow drift detected\"" \
+            --json number --jq 'length')
+          if [ "$existing" -gt 0 ]; then
+            echo "drift issue already open; appending comment instead"
+            issue_num=$(gh issue list --repo "${{ github.repository }}" \
+              --state open --search "in:title \"project workflow drift detected\"" \
+              --json number --jq '.[0].number')
+            gh issue comment "$issue_num" --repo "${{ github.repository }}" \
+              --body "$(printf 'Re-detected on %s.\n\n```\n%s\n```' "$(date -u)" "$(cat audit.txt)")"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$title" \
+              --label "kind/automation,priority/p2" \
+              --body "$(printf 'Automated audit of litentry/projects/19 workflows found drift from pm/expected-workflows.json.\n\nFix in UI: https://github.com/orgs/litentry/projects/19/workflows\n\n## Audit output\n\n```\n%s\n```' "$(cat audit.txt)")"
+          fi

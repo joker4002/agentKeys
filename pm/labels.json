@@ -1,0 +1,49 @@
+{
+  "labels": [
+    { "name": "area/mcp", "color": "0e8a16", "description": "MCP server, MCP tool integration, MCP protocol work" },
+    { "name": "area/memory", "color": "0e8a16", "description": "Memory worker, namespaces, semantic/episodic/profile/procedural storage" },
+    { "name": "area/identity", "color": "0e8a16", "description": "HDKD actor tree, K-key inventory, identity ceremony" },
+    { "name": "area/broker", "color": "0e8a16", "description": "Broker server, cap-token issuance, OIDC issuance" },
+    { "name": "area/signer", "color": "0e8a16", "description": "Signer / TEE worker, K3 / K10 / K11 handling" },
+    { "name": "area/tee", "color": "0e8a16", "description": "TEE-specific work (signer, attestation, sealing)" },
+    { "name": "area/audit", "color": "0e8a16", "description": "Audit worker, two-tier audit (off-chain feed + on-chain anchor)" },
+    { "name": "area/credential", "color": "0e8a16", "description": "Credential worker, vault, per-data-class isolation" },
+    { "name": "area/payment", "color": "0e8a16", "description": "Payment worker, spending caps, ACP/AMP rail adapters" },
+    { "name": "area/ui", "color": "0e8a16", "description": "Parent-control UI, vendor onboarding portal, audit dashboard" },
+    { "name": "area/firmware", "color": "0e8a16", "description": "ESP32 firmware, device-side code, MCU work" },
+    { "name": "area/ci", "color": "0e8a16", "description": "CI pipelines, GitHub Actions workflows, harness automation" },
+    { "name": "area/infra", "color": "0e8a16", "description": "Deployment, broker host, scripts/setup-*.sh, AWS / chain provisioning" },
+    { "name": "area/cli", "color": "0e8a16", "description": "agentkeys CLI, operator workstation" },
+    { "name": "area/daemon", "color": "0e8a16", "description": "agentkeys-daemon (sidecar) work" },
+    { "name": "area/scraper", "color": "0e8a16", "description": "Provisioner scrapers, automation for service signup flows" },
+    { "name": "area/docs", "color": "0e8a16", "description": "Documentation, runbooks, architecture, research" },
+
+    { "name": "kind/feature", "color": "a2eeef", "description": "New feature implementation" },
+    { "name": "kind/bug", "color": "d73a4a", "description": "Defect; something broken or behaving wrong" },
+    { "name": "kind/refactor", "color": "fbca04", "description": "Internal restructuring; no external behavior change" },
+    { "name": "kind/research", "color": "ffb760", "description": "Investigation, exploration, prototyping" },
+    { "name": "kind/docs", "color": "0075ca", "description": "Documentation-only change" },
+    { "name": "kind/security", "color": "b60205", "description": "Security-sensitive — apply extra review rigor" },
+    { "name": "kind/devx", "color": "c5def5", "description": "Developer experience, internal tooling, ergonomics" },
+
+    { "name": "phase/v0", "color": "5319e7", "description": "Already shipped (Stage 7+ era)" },
+    { "name": "phase/v1", "color": "5319e7", "description": "Phase 1 work (M1 + immediate follow-ups)" },
+    { "name": "phase/v2", "color": "5319e7", "description": "Phase 2-3 work (vendor wedge + runtime neutrality)" },
+    { "name": "phase/v3", "color": "5319e7", "description": "Phase 4-5 work (delegation depth + native mobile)" },
+    { "name": "phase/v4", "color": "5319e7", "description": "Phase 6-7 work (TEE depth + standards)" },
+
+    { "name": "status/ready", "color": "0e8a16", "description": "Ready for engineering pickup" },
+    { "name": "status/blocked", "color": "d93f0b", "description": "Blocked on external dependency or upstream decision" },
+    { "name": "status/investigating", "color": "fbca04", "description": "Under investigation; scope not yet locked" },
+    { "name": "status/deprecated", "color": "cfd3d7", "description": "No longer relevant; flagged for close after review" },
+    { "name": "status/in-progress", "color": "1d76db", "description": "Active engineering work in flight" },
+
+    { "name": "priority/p0", "color": "b60205", "description": "Critical — drop other work" },
+    { "name": "priority/p1", "color": "d93f0b", "description": "High — this milestone's headline" },
+    { "name": "priority/p2", "color": "fbca04", "description": "Medium — important but not blocking" },
+    { "name": "priority/p3", "color": "c5def5", "description": "Low — nice to have, can slip" },
+
+    { "name": "needs-arch-review", "color": "5319e7", "description": "Needs explicit arch.md compatibility review before merge" },
+    { "name": "vendor-blocker", "color": "b60205", "description": "Blocks a vendor pilot or partnership conversation" }
+  ]
+}
