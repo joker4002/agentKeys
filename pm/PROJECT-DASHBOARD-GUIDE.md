@@ -22,10 +22,12 @@ GitHub's Projects v2 API has **specific limits**. Knowing what's automatable up 
 | Set Status on add / close / PR-merge | ✅ | Built-in workflows (Item added / Item closed / Pull request merged — all enabled) |
 | Auto-close issue when Status=Done | ✅ | Built-in "Auto-close issue" workflow |
 | Link PR to issue | ✅ | Built-in "Pull request linked to issue" workflow |
-| Sync `priority/p*` + `phase/v*` labels → fields | ✅ | `.github/workflows/pm-sync-fields-from-labels.yml` (this repo) |
+| Sync `priority/p*` + `kind/*` labels → Priority/Kind fields | ✅ | `.github/workflows/pm-sync-fields-from-labels.yml` (this repo) |
+| Auto-archive closed PRs from the board | ✅ | `.github/workflows/pm-auto-archive-closed-pr.yml` |
 | Create / configure project fields | ✅ | `pm/scripts/setup-project-fields.sh` |
 | Audit workflow drift | ✅ | `.github/workflows/pm-workflow-audit.yml` (daily) |
 | Bulk backfill historical issues | ✅ | `bash pm/scripts/add-to-project.sh` |
+| Create a new issue with canonical labels + fields | ✅ | `/agentkeys-issue-create` Claude Code skill |
 | **Configure a workflow's filter expression** | ❌ | **UI ONLY** — API has no `updateProjectV2Workflow` mutation |
 | **Configure a workflow's trigger / action** | ❌ | **UI ONLY** — same reason |
 | **Create or configure custom views (group-by, layout, filters)** | ❌ | **UI ONLY** — no `createProjectV2View` / `updateProjectV2View` mutation exists |
@@ -43,13 +45,14 @@ gh auth refresh -s project,read:project
 # Verify access
 gh project list --owner litentry | grep "19"
 
-# Create project fields (Priority/Phase/Estimate/Risk/Notes)
+# Create project fields (Priority/Kind/Risk/Notes/Iteration/Blocked-by)
+# Idempotent: detects existing fields with empty options and rebuilds; cleans "Project X" zombies.
 bash pm/scripts/setup-project-fields.sh
 ```
 
 ### Add a CI secret for the GitHub Actions
 
-The 2 PM workflows (`pm-workflow-audit.yml`, `pm-sync-fields-from-labels.yml`) need a token with org-project scopes — the default `GITHUB_TOKEN` does not have them.
+The 3 PM workflows (`pm-workflow-audit.yml`, `pm-sync-fields-from-labels.yml`, `pm-auto-archive-closed-pr.yml`) need a token with org-project scopes — the default `GITHUB_TOKEN` does not have them.
 
 1. Create a fine-grained PAT at https://github.com/settings/tokens
    - Org permissions: **Projects = read & write**
@@ -210,16 +213,20 @@ After the board exists:
 
 ### Engineer creating new work
 
+**Recommended**: invoke the `/agentkeys-issue-create` Claude Code skill — it walks you through Kind / Priority / Size / Area / Milestone / Blocked-by dropdowns and creates the issue with the right labels + project-field values.
+
+Direct CLI fallback (project field values must be set separately in the UI):
+
 ```bash
-# Just create the issue with the right labels — built-in + GH Action workflows do the rest:
-#   1. "Auto-add to project" built-in workflow → adds it to the board with Status=Todo
-#   2. pm-sync-fields-from-labels.yml GH Action → mirrors priority/* + phase/* labels into the
-#      Priority + Phase project fields
 gh issue create --repo litentry/agentKeys \
-  --title "Phase 2: <something>" \
+  --title "<something>" \
   --body "Scope..." \
   --milestone "M2: First vendor wedge (incl memory system)" \
-  --label "area/mcp,kind/feature,phase/v2,priority/p2"
+  --label "area/mcp"
+
+# Then in the project UI: set Kind, Priority, Size on the new item.
+# Or wait for pm-sync-fields-from-labels.yml — it auto-syncs priority/* labels if you
+# add them (but priority labels were removed in the migration; field is now primary).
 ```
 
 For repeatable issue creation (e.g., planning a sprint), prefer the declarative path:

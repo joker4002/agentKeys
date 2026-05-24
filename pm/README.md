@@ -69,26 +69,33 @@ When you create a new issue via `gh issue create` (or web UI), the milestone/lab
 Recommended pattern:
 
 ```bash
-# Create issue with milestone + labels inline
+# Recommended path: use the /agentkeys-issue-create skill (interactive, fills all metadata)
+# Or directly with gh:
 gh issue create --repo litentry/agentKeys \
   --title "..." --body "..." \
   --milestone "M1: First MCP demo + Volcano Ark PoC" \
-  --label "area/mcp,kind/feature,priority/p1"
+  --label "area/mcp"
 
-# Then record it in issue-assignments.json for the next sync to honor
+# Then set Kind / Priority / Size in the project UI (or let the skill do it)
 ```
 
-## Labels schema
+## Labels schema (post-migration)
 
-Five label namespaces. An issue typically has one from each, plus optional extras:
+Repo labels are now LEAN. Most categorization moved to project fields. Remaining label namespaces:
 
 | Namespace | Examples | Purpose |
 |---|---|---|
-| `area/*` | `area/mcp`, `area/memory`, `area/firmware` | Which subsystem |
-| `kind/*` | `kind/feature`, `kind/bug`, `kind/research` | What kind of work |
-| `phase/*` | `phase/v0`, `phase/v1`, `phase/v2` | Coarse roadmap phase (orthogonal to milestone for cross-milestone work) |
-| `status/*` | `status/ready`, `status/blocked`, `status/investigating`, `status/deprecated` | Workflow state |
-| `priority/*` | `priority/p0`, `priority/p1`, `priority/p2`, `priority/p3` | Triage priority |
+| `area/*` | `area/mcp`, `area/memory`, `area/firmware` (17 total, distinct colors per area) | Which subsystem — multi-value, renders as repo-list filter |
+| `status/*` | `status/ready`, `status/in-progress`, `status/deprecated` (non-red); `status/blocked`, `status/investigating` (red) | Workflow state |
+| Human-attention flags (red) | `needs-arch-review`, `needs-investigation`, `vendor-blocker` | Flagged for human follow-up |
+| Community labels | `good first issue`, `help wanted` | Community discoverability |
+
+**Migrated to project fields (no longer labels):**
+- `priority/p0..p3` → **Priority field** (Urgent / High / Medium / Low)
+- `kind/*` → **Kind field** (Feature / Bug / Research / Docs / Refactor / Security / CI)
+- `phase/v*` → **Milestones** (M1..M7)
+
+**Red is reserved** for human-interaction labels (status/blocked, needs-*, vendor-blocker). Area labels avoid the red family.
 
 ## Milestones overview
 

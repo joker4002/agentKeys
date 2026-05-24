@@ -1,0 +1,84 @@
+name: pm — auto-archive closed PRs in project
+
+# When a PR closes (merged or not), archive its project board item immediately.
+# Built-in "Auto-archive items" workflow only archives by age (30+ days closed),
+# which leaves the active views cluttered with freshly-closed PRs. This Action
+# archives on close so the board stays focused on in-flight + open work.
+#
+# Required repo secret: PM_PROJECT_TOKEN (same as the other pm-* workflows)
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to archive (for manual re-runs)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PM_PROJECT_TOKEN }}
+      PROJECT_OWNER: litentry
+      PROJECT_NUMBER: '19'
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Determine PR number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve project ID + PR item ID
+        id: resolve
+        run: |
+          project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json | jq -r '.id')
+          echo "project_id=$project_id" >> "$GITHUB_OUTPUT"
+
+          pr_num="${{ steps.pr.outputs.number }}"
+          item_id=$(gh api graphql -f query='
+            query($owner: String!, $number: Int!) {
+              organization(login: $owner) {
+                projectV2(number: $number) {
+                  items(first: 100, orderBy: {field: POSITION, direction: ASC}) {
+                    nodes {
+                      id
+                      content { ... on PullRequest { number } }
+                    }
+                  }
+                }
+              }
+            }
+          ' -F "owner=$PROJECT_OWNER" -F "number=$PROJECT_NUMBER" \
+            | jq -r --arg n "$pr_num" '.data.organization.projectV2.items.nodes[] | select(.content.number == ($n|tonumber)) | .id' \
+            | head -n1)
+
+          if [ -z "$item_id" ] || [ "$item_id" = "null" ]; then
+            echo "info PR #$pr_num is not on the project board — nothing to archive"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "item_id=$item_id" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Archive the PR's project item
+        if: steps.resolve.outputs.found == 'true'
+        run: |
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!) {
+              archiveProjectV2Item(input: { projectId: $project, itemId: $item }) {
+                item { id }
+              }
+            }
+          ' -F "project=${{ steps.resolve.outputs.project_id }}" -F "item=${{ steps.resolve.outputs.item_id }}" \
+            >/dev/null && echo "ok archived PR #${{ steps.pr.outputs.number }} from project board"

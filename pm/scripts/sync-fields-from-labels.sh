@@ -3,8 +3,14 @@
 # Mirrors issue labels into project single-select fields.
 #
 # Mapping:
-#   label `priority/p0`..`priority/p3` → Priority field = P0..P3
-#   label `phase/v0`..`phase/v4`       → Phase field    = v0..v4
+#   label `priority/p0` → Priority field = Urgent
+#   label `priority/p1` → Priority field = High
+#   label `priority/p2` → Priority field = Medium
+#   label `priority/p3` → Priority field = Low
+#   label `kind/feature` → Kind field = Feature (case-insensitive match for all kind/* labels)
+#   label `kind/bug` → Kind field = Bug, etc.
+#   label `phase/v0`..`phase/v4` → Phase field = v0..v4 (DEPRECATED — milestones replace this;
+#                                  kept here for back-compat until Phase field is removed)
 #
 # Usage:
 #   bash pm/scripts/sync-fields-from-labels.sh           # all open issues in PM_REPO
@@ -57,31 +63,36 @@ fields_json=$(gh api graphql -f query='
 ' -F "id=$project_id")
 
 priority_field_id=$(echo "$fields_json" | jq -r '.data.node.fields.nodes[] | select(.name == "Priority") | .id')
-phase_field_id=$(echo "$fields_json" | jq -r '.data.node.fields.nodes[] | select(.name == "Phase") | .id')
+kind_field_id=$(echo "$fields_json"     | jq -r '.data.node.fields.nodes[] | select(.name == "Kind")     | .id')
+phase_field_id=$(echo "$fields_json"    | jq -r '.data.node.fields.nodes[] | select(.name == "Phase")    | .id')
 
 # Forgiving mode: if a field is missing, warn + skip syncing that label class
 # instead of aborting. Operator can add the missing field via setup-project-fields.sh
 # and re-run; the existing one still gets synced today.
 if [ -z "$priority_field_id" ] || [ "$priority_field_id" = "null" ]; then
-  echo "warn Priority field not found — skipping priority/* label sync. Run setup-project-fields.sh to enable."
+  echo "warn Priority field not found — skipping priority/* label sync."
   priority_field_id=""
 fi
+if [ -z "$kind_field_id" ] || [ "$kind_field_id" = "null" ]; then
+  echo "warn Kind field not found — skipping kind/* label sync."
+  kind_field_id=""
+fi
 if [ -z "$phase_field_id" ] || [ "$phase_field_id" = "null" ]; then
-  echo "warn Phase field not found — skipping phase/* label sync. Run setup-project-fields.sh to enable."
+  echo "info Phase field not found — skipping phase/* (expected once Phase is dropped)."
   phase_field_id=""
 fi
 
-if [ -z "$priority_field_id" ] && [ -z "$phase_field_id" ]; then
-  echo "fail neither Priority nor Phase field exists; nothing to sync"
+if [ -z "$priority_field_id" ] && [ -z "$kind_field_id" ] && [ -z "$phase_field_id" ]; then
+  echo "fail no syncable fields exist; nothing to do"
   exit 1
 fi
 
-echo "priority_field_id=${priority_field_id:-<missing>} phase_field_id=${phase_field_id:-<missing>}"
+echo "priority_field_id=${priority_field_id:-<missing>} kind_field_id=${kind_field_id:-<missing>} phase_field_id=${phase_field_id:-<missing>}"
 
 # Build label→option-id maps (bash 3.2 compatible: parallel arrays, not associative)
-# priority/p0 → P0 option id, etc.
 priority_options=$(echo "$fields_json" | jq -c '.data.node.fields.nodes[] | select(.name == "Priority") | .options')
-phase_options=$(echo "$fields_json" | jq -c '.data.node.fields.nodes[] | select(.name == "Phase") | .options')
+kind_options=$(echo "$fields_json"     | jq -c '.data.node.fields.nodes[] | select(.name == "Kind")     | .options')
+phase_options=$(echo "$fields_json"    | jq -c '.data.node.fields.nodes[] | select(.name == "Phase")    | .options')
 
 # Helper: given (label_value, options_json), return option ID matching the value (case-insensitive)
 option_id_for() {
@@ -90,6 +101,17 @@ option_id_for() {
   local lower
   lower=$(echo "$label_value" | tr '[:upper:]' '[:lower:]')
   echo "$options_json" | jq -r --arg v "$lower" '.[] | select((.name | ascii_downcase) == $v) | .id' | head -n1
+}
+
+# Priority needs an explicit mapping (label "p0" → option "Urgent", not a direct name match)
+priority_label_to_option_name() {
+  case "$1" in
+    p0) echo "Urgent" ;;
+    p1) echo "High"   ;;
+    p2) echo "Medium" ;;
+    p3) echo "Low"    ;;
+    *)  echo ""       ;;
+  esac
 }
 
 # --- Per-issue sync ------------------------------------------------------------
@@ -137,13 +159,43 @@ sync_one() {
   local labels
   labels=$(gh issue view "$issue_num" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
 
-  # --- Priority -------------------------------------------------------------
+  # --- Priority (explicit mapping: p0→Urgent, p1→High, p2→Medium, p3→Low) ---
   local priority_label
   priority_label=$(echo "$labels" | grep -E '^priority/' | head -n1 | sed 's|^priority/||' || true)
   if [ -n "$priority_label" ] && [ -n "$priority_field_id" ]; then
-    local p_opt
-    p_opt=$(option_id_for "$priority_label" "$priority_options")
-    if [ -n "$p_opt" ]; then
+    local p_option_name
+    p_option_name=$(priority_label_to_option_name "$priority_label")
+    if [ -n "$p_option_name" ]; then
+      local p_opt
+      p_opt=$(option_id_for "$p_option_name" "$priority_options")
+      if [ -n "$p_opt" ]; then
+        gh api graphql -f query='
+          mutation($project: ID!, $item: ID!, $field: ID!, $opt: String!) {
+            updateProjectV2ItemFieldValue(input: {
+              projectId: $project
+              itemId: $item
+              fieldId: $field
+              value: { singleSelectOptionId: $opt }
+            }) { projectV2Item { id } }
+          }
+        ' -F "project=$project_id" -F "item=$item_id" -F "field=$priority_field_id" -f "opt=$p_opt" \
+          >/dev/null && echo "ok  #$issue_num Priority=$p_option_name (from priority/$priority_label)" \
+          || echo "fail #$issue_num Priority mutation"
+      else
+        echo "warn #$issue_num Priority option '$p_option_name' not found in field — re-run setup-project-fields.sh"
+      fi
+    else
+      echo "warn #$issue_num unknown priority label 'priority/$priority_label' (expected p0..p3)"
+    fi
+  fi
+
+  # --- Kind (direct case-insensitive match: kind/feature → Feature) ---------
+  local kind_label
+  kind_label=$(echo "$labels" | grep -E '^kind/' | head -n1 | sed 's|^kind/||' || true)
+  if [ -n "$kind_label" ] && [ -n "$kind_field_id" ]; then
+    local k_opt
+    k_opt=$(option_id_for "$kind_label" "$kind_options")
+    if [ -n "$k_opt" ]; then
       gh api graphql -f query='
         mutation($project: ID!, $item: ID!, $field: ID!, $opt: String!) {
           updateProjectV2ItemFieldValue(input: {
@@ -153,15 +205,15 @@ sync_one() {
             value: { singleSelectOptionId: $opt }
           }) { projectV2Item { id } }
         }
-      ' -F "project=$project_id" -F "item=$item_id" -F "field=$priority_field_id" -f "opt=$p_opt" \
-        >/dev/null && echo "ok  #$issue_num Priority=$priority_label" \
-        || echo "fail #$issue_num Priority mutation"
+      ' -F "project=$project_id" -F "item=$item_id" -F "field=$kind_field_id" -f "opt=$k_opt" \
+        >/dev/null && echo "ok  #$issue_num Kind=$kind_label" \
+        || echo "fail #$issue_num Kind mutation"
     else
-      echo "warn #$issue_num priority label '$priority_label' has no matching field option"
+      echo "warn #$issue_num kind label 'kind/$kind_label' has no matching field option"
     fi
   fi
 
-  # --- Phase -----------------------------------------------------------------
+  # --- Phase (deprecated; kept for back-compat until field removed) ---------
   local phase_label
   phase_label=$(echo "$labels" | grep -E '^phase/' | head -n1 | sed 's|^phase/||' || true)
   if [ -n "$phase_label" ] && [ -n "$phase_field_id" ]; then

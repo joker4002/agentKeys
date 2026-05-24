@@ -48,7 +48,7 @@ existing_fields_json=$(gh api graphql -f query='
 # "Project Priority", "Project Project Priority", etc. — clutter that confuses operators
 # and breaks group-by-field views. Detect + delete any "Project <managed-name>" zombie.
 cleanup_zombies() {
-  local managed_names="Priority Phase Estimate Risk Notes"
+  local managed_names="Priority Kind Phase Estimate Risk Notes"
   for n in $managed_names; do
     local zombie_name="Project $n"
     local zombie_id
@@ -135,14 +135,18 @@ create_field() {
 
 echo "setup-project-fields target=$PROJECT_OWNER/$PROJECT_NUMBER"
 
-# Priority — single-select, four levels matching priority/* labels
-create_field "Priority" SINGLE_SELECT "P0,P1,P2,P3"
+# Priority — single-select, mapped from priority/p* labels (p0→Urgent, etc.)
+create_field "Priority" SINGLE_SELECT "Urgent,High,Medium,Low"
 
-# Phase — single-select, matches phase/* labels (one phase per issue is the norm)
-create_field "Phase" SINGLE_SELECT "v0,v1,v2,v3,v4"
+# Kind — single-select, mapped from kind/* labels (one kind per issue)
+create_field "Kind" SINGLE_SELECT "Feature,Bug,Research,Docs,Refactor,Security,CI"
 
-# Estimate — t-shirt sizes for rough sizing
-create_field "Estimate" SINGLE_SELECT "XS,S,M,L,XL"
+# Phase — DEPRECATED. We use GitHub Milestones for phase tracking now.
+# The Phase field may still exist on the project; this script leaves it untouched.
+# Delete it manually via the UI when ready.
+
+# Estimate — DEPRECATED. GitHub's built-in Size field (XS/S/M/L/XL) replaces it.
+# Leave existing Estimate column untouched if present.
 
 # Iteration — sprint window (project's built-in Iteration type; if not supported,
 # fall back to a TEXT field that operators fill manually). gh CLI doesn't support
@@ -155,6 +159,11 @@ create_field "Risk" SINGLE_SELECT "Low,Medium,High,Critical"
 
 # Notes — free-form text for one-line context per item
 create_field "Notes" TEXT
+
+# Blocked by — TEXT, list of "#NN, #MM" issue refs that block this one. We do a
+# topological sort manually in views; the field is the source of truth for the
+# blocking-graph until GitHub ships a real issue-relationship field type.
+create_field "Blocked by" TEXT
 
 echo ""
 echo "ok setup-project-fields complete"
