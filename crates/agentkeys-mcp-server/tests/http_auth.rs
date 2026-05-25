@@ -133,7 +133,11 @@ async fn tools_list_works_through_http() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let tools = body["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 10, "should expose 7 active + 3 schema-only");
+    assert_eq!(
+        tools.len(),
+        7,
+        "should expose 7 active tools (M4 schema-only stubs are dispatchable via tools/call but not advertised in tools/list — see tools/mod.rs)"
+    );
 
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for expected in [
@@ -144,10 +148,18 @@ async fn tools_list_works_through_http() {
         "agentkeys.cap.mint",
         "agentkeys.cap.revoke",
         "agentkeys.audit.append",
+    ] {
+        assert!(names.contains(&expected), "missing tool: {expected}");
+    }
+    // M4 stubs must NOT be in tools/list (callable via tools/call only).
+    for stubbed in [
         "agentkeys.delegation.grant",
         "agentkeys.delegation.revoke",
         "agentkeys.approval.request",
     ] {
-        assert!(names.contains(&expected), "missing tool: {expected}");
+        assert!(
+            !names.contains(&stubbed),
+            "M4 stub {stubbed} should not be in tools/list"
+        );
     }
 }
