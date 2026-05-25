@@ -136,7 +136,7 @@ config = {
     'transport': 'streamable-http',
     'headers': {
         'Authorization': 'Bearer demo-tok',
-        'X-AgentKeys-Actor': 'O_kevin_001',
+        'X-AgentKeys-Actor': '0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7',
     }
 }
 
@@ -168,10 +168,10 @@ async def main():
     print('\n  --- Act 1: user says "Where am I going this weekend?" ---')
     print('  fake-LLM picks: agentkeys.memory.get(namespace="travel")')
     r = await client.call_tool('agentkeys_memory_get', {
-        'actor': 'O_kevin_001',
+        'actor': '0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7',
         'namespace': 'travel',
-        'operator_omni': 'O_kevin_op',
-        'device_key_hash': '0xdeadbeef',
+        'operator_omni': '0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8',
+        'device_key_hash': '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
     })
     body = r.content[0].text
     assert 'Chengdu' in body, body
@@ -180,7 +180,7 @@ async def main():
     print('\n  --- Act 2: user says "Order me 600 RMB of hotpot" ---')
     print('  fake-LLM picks: agentkeys.permission.check(scope="payment.spend", amount_rmb=600)')
     r = await client.call_tool('agentkeys_permission_check', {
-        'actor': 'O_kevin_001',
+        'actor': '0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7',
         'scope': 'payment.spend',
         'params': {'amount_rmb': 600},
     })
@@ -191,17 +191,38 @@ async def main():
     print(f'  ✓ Act 2 verdict: deny (cap=500). LLM uses this to refuse politely.')
 
     print('\n  --- Act 3: parent revokes; user retries ---')
-    print('  fake-LLM picks: agentkeys.cap.revoke + agentkeys.audit.append')
-    r = await client.call_tool('agentkeys_cap_revoke', {'cap_id': 'cap-abc'})
+    print('  fake-LLM picks: agentkeys.cap.mint → cap.revoke → audit.append')
+    mint = await client.call_tool('agentkeys_cap_mint', {
+        'actor': '0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7',
+        'op': 'memory_get',
+        'params': {
+            'operator_omni': '0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8',
+            'service': 'memory',
+            'device_key_hash': '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        },
+        'ttl': 300,
+    })
+    import json as _j
+    cap_id = _j.loads(mint.content[0].text)['cap']['payload']['nonce']
+    print(f'  ✓ cap.mint returned cap_id={cap_id[:8]}…')
+
+    r = await client.call_tool('agentkeys_cap_revoke', {'cap_id': cap_id})
     assert 'in_memory' in r.content[0].text
-    print('  ✓ Act 3a — cap.revoke recorded')
+    print('  ✓ Act 3a — cap.revoke(known cap_id) recorded')
+
+    try:
+        await client.call_tool('agentkeys_cap_revoke', {'cap_id': 'this-cap-was-never-minted'})
+        raise AssertionError('cap.revoke(unknown) should have failed')
+    except Exception as e:
+        assert 'unknown cap_id' in str(e), str(e)
+        print('  ✓ Act 3 — cap.revoke(unknown) rejected (not a rubber-stamp)')
 
     r = await client.call_tool('agentkeys_audit_append', {
-        'actor': 'O_kevin_001',
+        'actor': '0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7',
         'event': {
-            'operator_omni': 'O_kevin_op',
+            'operator_omni': '0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8',
             'op_kind': 3,
-            'op_body': {'cap_id': 'cap-abc', 'reason': 'parent_revoke'},
+            'op_body': {'cap_id': cap_id, 'reason': 'parent_revoke'},
             'result': 0,
             'intent_text': 'parent revoked payment access',
         }

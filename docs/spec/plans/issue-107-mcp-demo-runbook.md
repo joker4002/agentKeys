@@ -32,7 +32,7 @@ cargo run -p agentkeys-mcp-server -- \
 Expected log lines:
 
 ```text
-INFO agentkeys_mcp_server: backend=in-memory (dev demo); seeded with O_kevin_001 fixtures
+INFO agentkeys_mcp_server: backend=in-memory (dev demo); seeded with three-act fixture (actor 0xa0c7…01a0c7)
 INFO agentkeys_mcp_server: agentkeys-mcp-server listening (HTTP) addr=127.0.0.1:8088
 ```
 
@@ -40,9 +40,9 @@ What got seeded into the in-memory backend:
 
 | Actor | Namespace | Content |
 |---|---|---|
-| `O_kevin_001` | `travel` | "Chengdu trip — Apr 12 to 16, hotpot at Yulin." |
-| `O_kevin_001` | `family` | "Wife's bday Aug 3 (gift idea: hiking boots)." |
-| `O_kevin_001` | `profile` | "Allergic to shellfish. Prefers windowed flights." |
+| `0xa0c7…01a0c7` | `travel` | "Chengdu trip — Apr 12 to 16, hotpot at Yulin." |
+| `0xa0c7…01a0c7` | `family` | "Wife's bday Aug 3 (gift idea: hiking boots)." |
+| `0xa0c7…01a0c7` | `profile` | "Allergic to shellfish. Prefers windowed flights." |
 
 A default vendor token `magiclick:demo-tok` is auto-seeded in dev mode so the runbook stays one-command. Override with `--vendor-tokens` if you need a different pair.
 
@@ -56,7 +56,7 @@ curl -sS http://127.0.0.1:8088/healthz
 
 curl -sS -X POST http://127.0.0.1:8088/mcp \
   -H "authorization: Bearer demo-tok" \
-  -H "x-agentkeys-actor: O_kevin_001" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
   -H "content-type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' \
   | python3 -c "import sys,json;print(len(json.load(sys.stdin)['result']['tools']),'tools')"
@@ -70,7 +70,7 @@ The MCP host (xiaozhi-server / Claude / etc.) decides it needs memory context an
 ```bash
 curl -sS -X POST http://127.0.0.1:8088/mcp \
   -H "authorization: Bearer demo-tok" \
-  -H "x-agentkeys-actor: O_kevin_001" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
   -H "content-type: application/json" \
   -d '{
     "jsonrpc":"2.0",
@@ -78,10 +78,10 @@ curl -sS -X POST http://127.0.0.1:8088/mcp \
     "params":{
       "name":"agentkeys.memory.get",
       "arguments":{
-        "actor":"O_kevin_001",
+        "actor":"0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7",
         "namespace":"travel",
-        "operator_omni":"O_kevin_op",
-        "device_key_hash":"0xdeadbeef"
+        "operator_omni":"0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8",
+        "device_key_hash":"0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
       }
     },
     "id":1
@@ -98,7 +98,7 @@ Expected `structuredContent`:
 }
 ```
 
-**Why this matters:** the device's cap-token is bound to the `travel` namespace. The MCP server forwards the namespace; the (mocked) worker enforces it. In production, the cap binds cryptographically (M4 follow-up to #108); for the dev demo, the in-memory backend honors the namespace key.
+**Why this matters — and what's M1 vs M4:** in this dev demo the MCP server forwards `namespace` to the in-memory backend, which honors it as a storage key. That makes the dev demo visibly namespace-scoped. **In M1 production**, the real memory worker today does NOT enforce `namespace` cryptographically — the wire field flows through but the S3 key derivation only uses `(actor, service)`. Lifting `namespace` into the SIGNED `CapPayload` so the worker can enforce it is M4 follow-up to #108 ([plan §6](issue-107-mcp-server-phase1.md#6-what-did-not-land-deferred)). The dev demo demonstrates the wire shape; cryptographic enforcement lands later.
 
 ### 4. Act 2 — Deterministic Denial
 
@@ -107,7 +107,7 @@ The MCP host calls `permission.check` to authorize a 600 RMB hotpot order. The p
 ```bash
 curl -sS -X POST http://127.0.0.1:8088/mcp \
   -H "authorization: Bearer demo-tok" \
-  -H "x-agentkeys-actor: O_kevin_001" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
   -H "content-type: application/json" \
   -d '{
     "jsonrpc":"2.0",
@@ -115,7 +115,7 @@ curl -sS -X POST http://127.0.0.1:8088/mcp \
     "params":{
       "name":"agentkeys.permission.check",
       "arguments":{
-        "actor":"O_kevin_001",
+        "actor":"0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7",
         "scope":"payment.spend",
         "params":{"amount_rmb":600}
       }
@@ -139,56 +139,66 @@ Expected `structuredContent`:
 
 ### 5. Act 3 — Online Revocation
 
-Two steps: revoke the cap, then append the audit event.
+Three steps: mint a cap, revoke that exact cap by its nonce, and append the audit event. Then verify that revoking an unknown cap fails — a real revoke list, not a rubber stamp.
 
 ```bash
-# 5a. revoke
-curl -sS -X POST http://127.0.0.1:8088/mcp \
+# 5a. Mint a memory_get cap so we have a real cap_id to revoke.
+CAP=$(curl -sS -X POST http://127.0.0.1:8088/mcp \
   -H "authorization: Bearer demo-tok" \
-  -H "x-agentkeys-actor: O_kevin_001" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
   -H "content-type: application/json" \
   -d '{
     "jsonrpc":"2.0",
     "method":"tools/call",
     "params":{
-      "name":"agentkeys.cap.revoke",
-      "arguments":{"cap_id":"cap-abc-123"}
-    },
-    "id":1
-  }' | python3 -m json.tool
-
-# 5b. audit row appears
-curl -sS -X POST http://127.0.0.1:8088/mcp \
-  -H "authorization: Bearer demo-tok" \
-  -H "x-agentkeys-actor: O_kevin_001" \
-  -H "content-type: application/json" \
-  -d '{
-    "jsonrpc":"2.0",
-    "method":"tools/call",
-    "params":{
-      "name":"agentkeys.audit.append",
+      "name":"agentkeys.cap.mint",
       "arguments":{
-        "actor":"O_kevin_001",
-        "event":{
-          "operator_omni":"O_kevin_op",
-          "op_kind":3,
-          "op_body":{"cap_id":"cap-abc-123","reason":"parent_revoke"},
-          "result":0,
-          "intent_text":"parent revoked payment access"
-        }
+        "actor":"0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7",
+        "op":"memory_get",
+        "params":{
+          "operator_omni":"0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8",
+          "service":"memory",
+          "device_key_hash":"0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        },
+        "ttl":300
       }
     },
     "id":1
-  }' | python3 -m json.tool
+  }')
+# Pick `cap_id` (the cap's nonce) out of the response — `jq` or `python3`:
+CAP_ID=$(echo "$CAP" | jq -r '.result.structuredContent.cap.payload.nonce' 2>/dev/null \
+  || echo "$CAP" | python3 -c "import sys,json;print(json.load(sys.stdin)['result']['structuredContent']['cap']['payload']['nonce'])")
+echo "cap_id = $CAP_ID"
+
+# 5b. Revoke THAT cap (by its nonce).
+curl -sS -X POST http://127.0.0.1:8088/mcp \
+  -H "authorization: Bearer demo-tok" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
+  -H "content-type: application/json" \
+  -d "$(printf '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"agentkeys.cap.revoke","arguments":{"cap_id":"%s"}},"id":1}' "$CAP_ID")" \
+  | python3 -m json.tool
+
+# 5c. Try to revoke a cap that was never minted — MUST fail. This is the
+# difference from a rubber-stamp implementation.
+curl -sS -X POST http://127.0.0.1:8088/mcp \
+  -H "authorization: Bearer demo-tok" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
+  -H "content-type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"agentkeys.cap.revoke","arguments":{"cap_id":"this-cap-was-never-minted"}},"id":1}' \
+  | python3 -m json.tool
+
+# 5d. Audit row for the revoke event.
+curl -sS -X POST http://127.0.0.1:8088/mcp \
+  -H "authorization: Bearer demo-tok" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
+  -H "content-type: application/json" \
+  -d "$(printf '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"agentkeys.audit.append","arguments":{"actor":"0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7","event":{"operator_omni":"0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8","op_kind":3,"op_body":{"cap_id":"%s","reason":"parent_revoke"},"result":0,"intent_text":"parent revoked payment access"}}},"id":1}' "$CAP_ID")" \
+  | python3 -m json.tool
 ```
 
-Expected `structuredContent` for the audit append:
+Expected: 5b succeeds (`"revocation":"in_memory"`), 5c returns a JSON-RPC error with body `unknown cap_id: this-cap-was-never-minted`, 5d returns `{"ok": true, "envelope_hash": "0x<32-byte sha256>"}`. The `envelope_hash` is a SHA-256 over the audit input — two different appends produce two different hashes.
 
-```json
-{"ok": true, "envelope_hash": "0x0100000000000000000000000000000000000000000000000000000000000000"}
-```
-
-**Why this matters:** revoke + audit are decoupled by design. In production, revoke hits the broker's revocation list (M4); audit lands in the worker queue and gets anchored on-chain in the next 2-min batch per #109. In dev mode, both are in-memory but the wire shape is identical.
+**Why this matters:** revoke + audit are decoupled by design. The dev backend tracks minted nonces and refuses to revoke unknown ones — so a typo or a stale cap surfaces immediately. In M1 production, broker-side revocation is still a follow-up (`cap.revoke` is a graceful stub against the real backend per [plan §6](issue-107-mcp-server-phase1.md#6-what-did-not-land-deferred)); the dev demo shows the contract the broker will honor in M4.
 
 ### 6. Acceptance-criterion #3 — auth negative paths
 
@@ -198,7 +208,7 @@ Demonstrate the bearer + actor scoping rules from the issue:
 # Wrong token → 401
 curl -sS -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8088/mcp \
   -H "authorization: Bearer nope" \
-  -H "x-agentkeys-actor: O_kevin_001" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
   -H "content-type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
 # → 401
@@ -227,7 +237,7 @@ The 3 deferred tools return the exact wire shape from the issue:
 ```bash
 curl -sS -X POST http://127.0.0.1:8088/mcp \
   -H "authorization: Bearer demo-tok" \
-  -H "x-agentkeys-actor: O_kevin_001" \
+  -H "x-agentkeys-actor: 0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7" \
   -H "content-type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"agentkeys.delegation.grant","arguments":{}},"id":1}' \
   | python3 -m json.tool

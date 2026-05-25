@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         )),
         BackendKind::InMemory => {
             tracing::info!(
-                "backend=in-memory (dev demo); seeded with O_kevin_001 fixtures"
+                "backend=in-memory (dev demo); seeded with three-act fixture (actor 0xa0c7…01a0c7)"
             );
             Arc::new(InMemoryBackend::new_with_demo_fixture())
         }

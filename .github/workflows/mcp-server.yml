@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "crates/agentkeys-mcp-server/**"
+      - "scripts/mcp-demo-mode-a.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
   pull_request:
     paths:
       - "crates/agentkeys-mcp-server/**"
+      - "scripts/mcp-demo-mode-a.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
@@ -35,6 +37,11 @@ jobs:
         run: cargo test -p agentkeys-mcp-server --all-features
       - name: cargo clippy
         run: cargo clippy -p agentkeys-mcp-server --all-targets -- -D warnings
+      # Phase A dev-mode demo smoke — boots the binary with --backend in-memory
+      # and walks the three-act storyboard end-to-end via curl. Catches drift
+      # between code and runbook §A in `docs/spec/plans/issue-107-mcp-demo-runbook.md`.
+      - name: mcp demo (mode A — dev smoke)
+        run: bash scripts/mcp-demo-mode-a.sh
 
   image:
     name: build + publish image

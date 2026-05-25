@@ -5,15 +5,20 @@
 //! in-memory` is enough to walk the three-act storyboard without
 //! deploying a broker, memory worker, or audit worker.
 //!
-//! Seeded by default with the storyboard fixtures from
-//! `docs/research/agent-iam-strategy.md` §4.3:
-//!   - actor `O_kevin_001`, namespace `travel`:  Chengdu trip context
-//!   - actor `O_kevin_001`, namespace `family`:  bday note
-//!   - actor `O_kevin_001`, namespace `profile`: allergy note
+//! The fixture actor / operator / device IDs are real hex32 strings
+//! (matches the broker's `validate_hex32` regex `0x[0-9a-f]{64}`) so
+//! payloads exercised in dev mode also wire-cleanly to a real broker.
+//!
+//! Each minted cap carries a unique nonce; the backend tracks minted
+//! and revoked nonces so:
+//!   - `cap.revoke(cap_id)` for an unknown id returns an error.
+//!   - `memory.{get,put}` with a revoked or expired cap is rejected.
+//!   - The smoke script can mint → revoke → retry and prove denial.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,7 +27,15 @@ use super::{
     CapToken, MemoryGetInput, MemoryGetResult, MemoryPutInput, MemoryPutResult, RevokeResult,
 };
 
-pub const DEMO_ACTOR: &str = "O_kevin_001";
+/// Demo fixture identities — all real hex32 (`0x` + 64 hex chars) so the
+/// MCP server forwards them to a real broker/worker without re-validation
+/// failures.
+pub const DEMO_ACTOR: &str =
+    "0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7";
+pub const DEMO_OPERATOR: &str =
+    "0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8";
+pub const DEMO_DEVICE_KEY_HASH: &str =
+    "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
 pub struct InMemoryBackend {
     inner: Mutex<Inner>,
@@ -32,7 +45,13 @@ pub struct InMemoryBackend {
 struct Inner {
     memory: HashMap<(String, String), String>,
     audit: Vec<AuditAppendInput>,
-    revoked: Vec<String>,
+    minted: HashMap<String, MintedCap>,
+    revoked: HashSet<String>,
+}
+
+struct MintedCap {
+    actor: String,
+    expires_at: u64,
 }
 
 impl Default for InMemoryBackend {
@@ -63,6 +82,22 @@ impl InMemoryBackend {
             content.to_string(),
         );
     }
+
+    fn now_unix() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Extract `payload.nonce` from a cap-token JSON value; that's the
+    /// `cap_id` we track for revocation + mint provenance.
+    fn cap_id_of(cap: &Value) -> Option<String> {
+        cap.get("payload")
+            .and_then(|p| p.get("nonce"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
 }
 
 #[async_trait]
@@ -73,10 +108,20 @@ impl Backend for InMemoryBackend {
         req: CapMintRequest,
         _session_bearer: &str,
     ) -> Result<CapToken, BackendError> {
-        let issued_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let issued_at = Self::now_unix();
+        let expires_at = issued_at + req.ttl_seconds;
+        let nonce = uuid::Uuid::new_v4().to_string();
+
+        {
+            let mut g = self.inner.lock().unwrap();
+            g.minted.insert(
+                nonce.clone(),
+                MintedCap {
+                    actor: req.actor_omni.clone(),
+                    expires_at,
+                },
+            );
+        }
 
         Ok(json!({
             "payload": {
@@ -88,30 +133,59 @@ impl Backend for InMemoryBackend {
                 "device_key_hash": req.device_key_hash,
                 "k3_epoch":      1,
                 "issued_at":     issued_at,
-                "expires_at":    issued_at + req.ttl_seconds,
-                "nonce":         "in-memory-nonce"
+                "expires_at":    expires_at,
+                "nonce":         nonce
             },
             "broker_sig": "in-memory-signature"
         }))
     }
 
     async fn cap_revoke(&self, cap_id: &str) -> Result<RevokeResult, BackendError> {
-        self.inner.lock().unwrap().revoked.push(cap_id.to_string());
+        let mut g = self.inner.lock().unwrap();
+        if !g.minted.contains_key(cap_id) {
+            return Err(BackendError::Http {
+                status: 404,
+                body: format!("unknown cap_id: {cap_id}"),
+            });
+        }
+        let newly_inserted = g.revoked.insert(cap_id.to_string());
         Ok(RevokeResult {
             ok: true,
             revocation: "in_memory".into(),
-            note: Some(format!("dev-mode revoke; cap_id={cap_id} recorded locally")),
+            note: Some(if newly_inserted {
+                format!("dev-mode revoke; cap_id={cap_id} now denied for subsequent calls")
+            } else {
+                format!("dev-mode revoke; cap_id={cap_id} was already revoked (idempotent)")
+            }),
         })
     }
 
     async fn memory_put(&self, input: MemoryPutInput) -> Result<MemoryPutResult, BackendError> {
-        let actor = input
-            .cap
-            .get("payload")
-            .and_then(|p| p.get("actor_omni"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let cap_id = Self::cap_id_of(&input.cap).ok_or_else(|| BackendError::Http {
+            status: 400,
+            body: "cap missing payload.nonce".into(),
+        })?;
+        let actor = {
+            let g = self.inner.lock().unwrap();
+            if g.revoked.contains(&cap_id) {
+                return Err(BackendError::Http {
+                    status: 403,
+                    body: format!("cap revoked: cap_id={cap_id}"),
+                });
+            }
+            let minted = g.minted.get(&cap_id).ok_or_else(|| BackendError::Http {
+                status: 403,
+                body: format!("cap not minted by this backend: cap_id={cap_id}"),
+            })?;
+            if minted.expires_at <= Self::now_unix() {
+                return Err(BackendError::Http {
+                    status: 403,
+                    body: format!("cap expired: cap_id={cap_id}"),
+                });
+            }
+            minted.actor.clone()
+        };
+
         let plaintext = String::from_utf8(
             base64::Engine::decode(
                 &base64::engine::general_purpose::STANDARD,
@@ -134,13 +208,30 @@ impl Backend for InMemoryBackend {
     }
 
     async fn memory_get(&self, input: MemoryGetInput) -> Result<MemoryGetResult, BackendError> {
-        let actor = input
-            .cap
-            .get("payload")
-            .and_then(|p| p.get("actor_omni"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let cap_id = Self::cap_id_of(&input.cap).ok_or_else(|| BackendError::Http {
+            status: 400,
+            body: "cap missing payload.nonce".into(),
+        })?;
+        let actor = {
+            let g = self.inner.lock().unwrap();
+            if g.revoked.contains(&cap_id) {
+                return Err(BackendError::Http {
+                    status: 403,
+                    body: format!("cap revoked: cap_id={cap_id}"),
+                });
+            }
+            let minted = g.minted.get(&cap_id).ok_or_else(|| BackendError::Http {
+                status: 403,
+                body: format!("cap not minted by this backend: cap_id={cap_id}"),
+            })?;
+            if minted.expires_at <= Self::now_unix() {
+                return Err(BackendError::Http {
+                    status: 403,
+                    body: format!("cap expired: cap_id={cap_id}"),
+                });
+            }
+            minted.actor.clone()
+        };
 
         let g = self.inner.lock().unwrap();
         let content = g
@@ -166,14 +257,38 @@ impl Backend for InMemoryBackend {
         &self,
         input: AuditAppendInput,
     ) -> Result<AuditAppendResult, BackendError> {
+        // Compute a real content-dependent SHA-256 over a deterministic
+        // serialization of the input. Not the production worker's canonical
+        // CBOR envelope hash, but every distinct (actor, operator, op_kind,
+        // result, op_body, intent_text, ts) gets a distinct hash. Two
+        // identical-content appends in different ticks differ via the
+        // monotonically increasing append index.
+        let ts = Self::now_unix();
         let mut g = self.inner.lock().unwrap();
-        g.audit.push(input.clone());
-        let idx = g.audit.len() as u8;
-        let mut bytes = [0u8; 32];
-        bytes[0] = idx;
+        let idx = g.audit.len();
+        let op_body = serde_json::to_string(&input.op_body).unwrap_or_default();
+        let intent = input.intent_text.clone().unwrap_or_default();
+        let preimage = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            input.actor_omni,
+            input.operator_omni,
+            input.op_kind,
+            input.result,
+            ts,
+            idx,
+            op_body,
+            intent,
+            "agentkeys-mcp-server/in-memory/v1",
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        let digest = hasher.finalize();
+
+        g.audit.push(input);
+
         Ok(AuditAppendResult {
             ok: true,
-            envelope_hash: format!("0x{}", hex::encode(bytes)),
+            envelope_hash: format!("0x{}", hex::encode(digest)),
         })
     }
 }

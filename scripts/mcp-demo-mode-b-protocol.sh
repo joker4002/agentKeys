@@ -59,7 +59,7 @@ EXPECTED_TOOLS = {
 }
 
 async def main():
-    headers = {'Authorization': 'Bearer demo-tok', 'X-AgentKeys-Actor': 'O_kevin_001'}
+    headers = {'Authorization': 'Bearer demo-tok', 'X-AgentKeys-Actor': '0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7'}
     async with streamablehttp_client(URL, headers=headers) as (r, w, _sid):
         async with ClientSession(r, w) as session:
             init = await session.initialize()
@@ -75,26 +75,46 @@ async def main():
             print(f'  ✓ tools/list → all 10 expected tools')
 
             act2 = await session.call_tool('agentkeys.permission.check',
-                {'actor':'O_kevin_001','scope':'payment.spend','params':{'amount_rmb':600}})
+                {'actor':'0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7','scope':'payment.spend','params':{'amount_rmb':600}})
             text = act2.content[0].text
             assert 'daily_spend_cap_exceeded' in text, text
             assert 'cap=500, requested=600, period=daily' in text, text
             print('  ✓ Act 2 — deterministic deny, storyboard wording verbatim')
 
             act1 = await session.call_tool('agentkeys.memory.get',
-                {'actor':'O_kevin_001','namespace':'travel',
-                 'operator_omni':'O_kevin_op','device_key_hash':'0xdeadbeef'})
+                {'actor':'0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7','namespace':'travel',
+                 'operator_omni':'0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8','device_key_hash':'0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'})
             assert 'Chengdu' in act1.content[0].text, act1.content[0].text
             print('  ✓ Act 1 — memory.get(travel) returns Chengdu fixture')
 
-            revoke = await session.call_tool('agentkeys.cap.revoke', {'cap_id':'cap-abc'})
+            # Act 3: mint a real cap, revoke it by nonce, prove unknown revokes fail.
+            mint = await session.call_tool('agentkeys.cap.mint', {
+                'actor':'0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7',
+                'op':'memory_get',
+                'params':{'operator_omni':'0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8',
+                          'service':'memory',
+                          'device_key_hash':'0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'},
+                'ttl':300})
+            import json as _j
+            cap_id = _j.loads(mint.content[0].text)['cap']['payload']['nonce']
+            assert cap_id, 'cap.mint did not return a nonce'
+            print(f'  ✓ Act 3 — cap.mint returned cap_id={cap_id[:8]}…')
+
+            revoke = await session.call_tool('agentkeys.cap.revoke', {'cap_id': cap_id})
             assert 'in_memory' in revoke.content[0].text
-            print('  ✓ Act 3a — cap.revoke records in-memory (M1 stub)')
+            print('  ✓ Act 3a — cap.revoke(known) records in-memory (M1 stub)')
+
+            try:
+                await session.call_tool('agentkeys.cap.revoke', {'cap_id':'this-cap-was-never-minted'})
+                raise AssertionError('cap.revoke(unknown) should have errored')
+            except Exception as e:
+                assert 'unknown cap_id' in str(e), str(e)
+                print('  ✓ Act 3 — cap.revoke(unknown) rejected (not a rubber-stamp)')
 
             audit = await session.call_tool('agentkeys.audit.append', {
-                'actor':'O_kevin_001',
-                'event':{'operator_omni':'O_kevin_op','op_kind':3,
-                         'op_body':{'cap_id':'cap-abc'},'result':0,
+                'actor':'0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7',
+                'event':{'operator_omni':'0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8','op_kind':3,
+                         'op_body':{'cap_id': cap_id},'result':0,
                          'intent_text':'parent revoked payment access'}
             })
             assert '0x' in audit.content[0].text
