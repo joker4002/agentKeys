@@ -499,6 +499,40 @@ if [ "$WITH_NGINX" = "yes" ] && [ "$WITH_CERTBOT" = "yes" ]; then
       echo "     --certbot-email <addr> later to attach a recovery address.)" >&2
     fi
 
+    # DNS pre-flight: certbot fails with NXDOMAIN if the A record isn't
+    # live yet. Check before attempting — a clear skip with an action
+    # item is much more useful than a cryptic certbot error.
+    MY_IP=$(curl -sf --max-time 5 http://checkip.amazonaws.com 2>/dev/null \
+              || curl -sf --max-time 5 https://api.ipify.org 2>/dev/null \
+              || echo "")
+    DNS_IP=$(dig +short A "$DOMAIN" 2>/dev/null | head -1 \
+               || getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -1 \
+               || echo "")
+
+    DNS_OK="yes"
+    if [ -z "$DNS_IP" ]; then
+      DNS_OK="no"
+      echo "    DNS A record for ${DOMAIN} is not yet visible (NXDOMAIN)." >&2
+      echo "    Certbot's http-01 challenge will fail until DNS resolves." >&2
+      echo >&2
+      echo "    ACTION REQUIRED — create an A record in your DNS provider:" >&2
+      echo "      Name:  ${DOMAIN}" >&2
+      echo "      Type:  A" >&2
+      echo "      Value: ${MY_IP:-<PUBLIC_IP_OF_THIS_HOST>}" >&2
+      echo "      TTL:   300 (5 min)" >&2
+      echo >&2
+      echo "    Wait for TTL propagation, then re-run this script." >&2
+      echo "    The relay + MCP services are already running on port ${RELAY_PORT}." >&2
+      echo "    TLS and the wss:// URLs activate on the next run." >&2
+      skip "cert deferred — DNS A record for ${DOMAIN} not yet live"
+    elif [ -n "$MY_IP" ] && [ "$DNS_IP" != "$MY_IP" ]; then
+      DNS_OK="no"
+      echo "    DNS A for ${DOMAIN} resolves to ${DNS_IP}, but this host is ${MY_IP}." >&2
+      echo "    Update the A record to point at ${MY_IP} and re-run." >&2
+      skip "cert deferred — DNS A for ${DOMAIN} → ${DNS_IP} (expected ${MY_IP})"
+    fi
+
+    if [ "$DNS_OK" = "yes" ]; then
     # Webroot mode (NOT --nginx) — issues the cert without mutating
     # the vhost we just wrote. The phase-B flip is our job; certbot
     # only puts files under /etc/letsencrypt/.
@@ -560,8 +594,9 @@ EOF
     printf '%s\n' "$phase_b_vhost" | sudo tee "$NGINX_SITE" >/dev/null
     ok "rewrote ${NGINX_SITE##*/} to phase B (TLS on)"
     RELOAD_NGINX=1
-  fi
-fi
+    fi  # DNS_OK
+  fi    # cert not yet present
+fi      # WITH_NGINX && WITH_CERTBOT
 
 # ─── 9. nginx reload (only if drift) + post-checks ───────────────────
 if [ "$WITH_NGINX" = "yes" ]; then
