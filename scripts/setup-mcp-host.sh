@@ -201,33 +201,54 @@ else
   DEPS_DIRTY=1
 fi
 
-# Healthy venv = .venv/bin/python3 exists AND runs. A failed first attempt
-# (e.g. python3-venv missing) can leave a half-built .venv directory; we
-# treat that as broken and recreate.
+# Venv health check — verify that the relay's key deps are actually
+# importable, NOT just that python3 starts. A half-built venv (e.g. from
+# a prior pip install that silently failed) has working python3 but no
+# uvicorn/fastapi; the relay then crashes on import at systemd start.
 VENV_HEALTHY="no"
-if sudo test -x "$INSTALL_DIR/src/.venv/bin/python3"; then
-  if sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/python3" -c "pass" 2>/dev/null; then
+VENV_REASON=""
+if sudo test -x "$INSTALL_DIR/src/.venv/bin/python3" && \
+   sudo test -x "$INSTALL_DIR/src/.venv/bin/pip"; then
+  if sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/python3" \
+       -c "import uvicorn, fastapi, websockets, loguru" 2>/dev/null; then
     VENV_HEALTHY="yes"
+  else
+    VENV_REASON="key deps (uvicorn/fastapi/websockets/loguru) not importable"
   fi
+else
+  VENV_REASON=".venv/bin/python3 or .venv/bin/pip missing"
 fi
 
 if [ "$VENV_HEALTHY" = "yes" ]; then
   if [ "${DEPS_DIRTY:-0}" = "1" ]; then
-    sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet -r "$INSTALL_DIR/src/requirements.txt"
+    sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet \
+        -r "$INSTALL_DIR/src/requirements.txt" \
+      || fail "pip install -r requirements.txt failed after src moved (see above)"
     ok "venv: pip install -r requirements.txt (src moved)"
   else
-    skip "venv already exists + healthy + src unchanged"
+    skip "venv healthy + key deps importable + src unchanged"
   fi
 else
+  ok "venv unhealthy ($VENV_REASON) — rebuilding"
   # Wipe a half-built venv from a prior failed run, if any.
   if sudo test -d "$INSTALL_DIR/src/.venv"; then
     sudo rm -rf "$INSTALL_DIR/src/.venv"
     ok "removed broken half-built venv from a prior failed run"
   fi
-  sudo -u "$RUN_USER" python3 -m venv "$INSTALL_DIR/src/.venv"
-  sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet --upgrade pip
-  sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet -r "$INSTALL_DIR/src/requirements.txt"
-  ok "created venv + installed requirements.txt"
+  sudo -u "$RUN_USER" python3 -m venv "$INSTALL_DIR/src/.venv" \
+    || fail "python3 -m venv failed (apt install python3-venv?)"
+  sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet --upgrade pip \
+    || fail "pip --upgrade failed"
+  sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet \
+      -r "$INSTALL_DIR/src/requirements.txt" \
+    || fail "pip install -r requirements.txt failed (see above)"
+  # Re-verify after install — catches a silent partial install.
+  if ! sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/python3" \
+       -c "import uvicorn, fastapi, websockets, loguru" 2>/dev/null; then
+    fail "venv install completed but key deps still not importable — rerun with verbose pip"
+  fi
+  ok "created venv + installed requirements.txt + verified deps"
+  RESTART_RELAY=1
 fi
 
 # ─── 4. Build + install agentkeys-mcp-server binary ──────────────────
