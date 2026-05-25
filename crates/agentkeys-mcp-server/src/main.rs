@@ -4,8 +4,8 @@ use clap::Parser;
 use std::sync::Arc;
 
 use agentkeys_mcp_server::{
-    backend::HttpBackend,
-    config::{Cli, Config, Transport},
+    backend::{Backend, HttpBackend, InMemoryBackend},
+    config::{BackendKind, Cli, Config, Transport},
     server::Server,
     transport,
 };
@@ -22,12 +22,20 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::from_cli(cli)?;
 
-    let backend = HttpBackend::new(
-        config.broker_url.clone(),
-        config.memory_url.clone(),
-        config.audit_url.clone(),
-    );
-    let server = Arc::new(Server::new(config.clone(), Arc::new(backend)));
+    let backend: Arc<dyn Backend> = match config.backend {
+        BackendKind::Http => Arc::new(HttpBackend::new(
+            config.broker_url.clone(),
+            config.memory_url.clone(),
+            config.audit_url.clone(),
+        )),
+        BackendKind::InMemory => {
+            tracing::info!(
+                "backend=in-memory (dev demo); seeded with O_kevin_001 fixtures"
+            );
+            Arc::new(InMemoryBackend::new_with_demo_fixture())
+        }
+    };
+    let server = Arc::new(Server::new(config.clone(), backend));
 
     match config.transport {
         Transport::Http => {

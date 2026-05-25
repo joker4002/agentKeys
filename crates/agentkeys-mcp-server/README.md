@@ -23,6 +23,20 @@ etc.) can call.
 
 ## Run
 
+### Dev demo (in-memory backend, no external services)
+
+```bash
+cargo run -p agentkeys-mcp-server -- \
+  --backend in-memory \
+  --listen 127.0.0.1:8088
+```
+
+Auto-seeds vendor `magiclick:demo-tok` + three memory namespaces (`travel`,
+`family`, `profile`) on actor `O_kevin_001`. Walk the three-act
+storyboard with `bash scripts/mcp-demo-mode-a.sh` (asserts each act's
+exact wire shape). Full step-by-step walkthrough:
+[`docs/spec/plans/issue-107-mcp-demo-runbook.md`](../../docs/spec/plans/issue-107-mcp-demo-runbook.md).
+
 ### Local (HTTP, against a real broker / workers)
 
 ```bash

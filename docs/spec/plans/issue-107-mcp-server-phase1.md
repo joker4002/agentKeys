@@ -115,15 +115,19 @@ three_acts.rs:         5 /  5  (acceptance #5)
 total:                31 / 31
 ```
 
-## 5. Live demo runbook (operator-driven, acceptance #7)
+## 5. Demo runbook
 
-1. Deploy this server alongside a live broker + workers per
-   [`docs/spec/plans/execution-plan.md`](execution-plan.md).
-2. Add to xiaozhi-server's `mcp_server_settings.json` (recipe in
-   [`README.md`](../../../crates/agentkeys-mcp-server/README.md)).
-3. Walk the three-act storyboard with the operator. The tool calls land
-   on this server's `/mcp` endpoint; verify in `audit_worker`'s queue
-   that the Act 3 audit row arrives within the configured cadence.
+Full two-mode runbook in
+[`issue-107-mcp-demo-runbook.md`](issue-107-mcp-demo-runbook.md).
+
+- **Mode A — dev / fresh-laptop.** No broker, no workers, no hardware.
+  Boots `--backend in-memory` and walks Acts 1/2/3 via `curl`. Asserted
+  by `scripts/mcp-demo-mode-a.sh` (regression check for the runbook
+  itself).
+- **Mode B — full xiaozhi-server + MagicLick.** Operator-driven; needs
+  live broker + workers (per `scripts/setup-broker-host.sh` +
+  `scripts/setup-heima.sh`), a Doubao or Qwen API key, and a MagicLick
+  2.5 toy. Stays a draft until verified on real hardware.
 
 ## 6. What did NOT land (deferred)
 

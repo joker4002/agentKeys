@@ -9,16 +9,18 @@
 //! Splitting on a trait keeps unit tests deterministic and integration
 //! tests free of real network dependencies.
 
+pub mod audit;
 pub mod broker;
 pub mod http_backend;
+pub mod in_memory;
 pub mod memory;
-pub mod audit;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use http_backend::HttpBackend;
+pub use in_memory::InMemoryBackend;
 
 /// Op discriminator that maps onto the four broker cap-mint endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

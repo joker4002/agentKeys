@@ -19,6 +19,13 @@ pub struct Cli {
     #[arg(long, env = "MCP_TRANSPORT", default_value = "http")]
     pub transport: String,
 
+    /// Backend mode: `http` (default — talks to real broker + workers via
+    /// `--broker-url` / `--memory-url` / `--audit-url`) or `in-memory`
+    /// (seeded with the three-act demo fixture; no external services
+    /// needed; for the fresh-laptop dev demo).
+    #[arg(long, env = "MCP_BACKEND", default_value = "http")]
+    pub backend: String,
+
     /// HTTP bind address.
     #[arg(long, env = "MCP_LISTEN", default_value = "0.0.0.0:8088")]
     pub listen: SocketAddr,
@@ -52,6 +59,7 @@ pub struct Cli {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub transport: Transport,
+    pub backend: BackendKind,
     pub listen: SocketAddr,
     pub broker_url: Option<String>,
     pub memory_url: Option<String>,
@@ -67,12 +75,24 @@ pub enum Transport {
     Stdio,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Http,
+    InMemory,
+}
+
 impl Config {
     pub fn from_cli(cli: Cli) -> anyhow::Result<Self> {
         let transport = match cli.transport.as_str() {
             "http" => Transport::Http,
             "stdio" => Transport::Stdio,
             other => anyhow::bail!("unknown transport `{other}` (expected http|stdio)"),
+        };
+
+        let backend = match cli.backend.as_str() {
+            "http" => BackendKind::Http,
+            "in-memory" | "in_memory" => BackendKind::InMemory,
+            other => anyhow::bail!("unknown backend `{other}` (expected http|in-memory)"),
         };
 
         let mut vendor_tokens = HashMap::new();
@@ -83,8 +103,15 @@ impl Config {
             vendor_tokens.insert(vendor.trim().to_string(), token.trim().to_string());
         }
 
+        // In-memory dev mode auto-seeds a default vendor token if the
+        // operator didn't supply one, so the runbook stays one-command.
+        if backend == BackendKind::InMemory && vendor_tokens.is_empty() {
+            vendor_tokens.insert("magiclick".into(), "demo-tok".into());
+        }
+
         Ok(Self {
             transport,
+            backend,
             listen: cli.listen,
             broker_url: cli.broker_url,
             memory_url: cli.memory_url,
@@ -98,6 +125,7 @@ impl Config {
     pub fn for_tests() -> Self {
         Self {
             transport: Transport::Http,
+            backend: BackendKind::Http,
             listen: "127.0.0.1:0".parse().unwrap(),
             broker_url: None,
             memory_url: None,

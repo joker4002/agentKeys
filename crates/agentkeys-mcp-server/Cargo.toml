@@ -33,5 +33,3 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
-base64 = "0.22"
-hex = "0.4"
