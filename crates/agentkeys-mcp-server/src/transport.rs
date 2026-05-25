@@ -117,3 +117,101 @@ pub async fn run_stdio(server: Arc<Server>) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// xiaozhi MCP-endpoint relay transport.
+///
+/// Connects out to a relay URL of the form
+/// `ws[s]://host:port/mcp_endpoint/mcp/?token=...`. The relay forwards
+/// MCP JSON-RPC frames between this server (acting as the tool) and
+/// the xiaozhi-server / xiaozhi cloud (acting as the client). No
+/// firmware on the xiaozhi device needs to change — the relay is the
+/// integration point.
+///
+/// Wire format is identical to the stdio transport: one JSON-RPC
+/// message per WebSocket text frame. The token in the URL authenticates
+/// the tool side; no per-call Bearer + actor headers (the xiaozhi cloud
+/// sets the binding via the token + agent config).
+///
+/// Auto-reconnects with exponential backoff (mirrors xiaozhi's own
+/// `mcp_pipe.py`: 1s → 600s).
+pub async fn run_mcp_endpoint(server: std::sync::Arc<Server>, url: String) -> anyhow::Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let caller = CallerContext::local_stdio();
+    let mut backoff_secs: u64 = 1;
+    const MAX_BACKOFF_SECS: u64 = 600;
+
+    loop {
+        tracing::info!(url = %url, "mcp-endpoint: connecting");
+        let conn = match tokio_tungstenite::connect_async(&url).await {
+            Ok((ws, _resp)) => ws,
+            Err(e) => {
+                tracing::warn!(error = %e, backoff_secs, "mcp-endpoint: connect failed; backing off");
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+                continue;
+            }
+        };
+        tracing::info!("mcp-endpoint: connected; awaiting MCP frames");
+        backoff_secs = 1;
+
+        let (mut write, mut read) = conn.split();
+
+        while let Some(frame) = read.next().await {
+            let frame = match frame {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(error = %e, "mcp-endpoint: read error; will reconnect");
+                    break;
+                }
+            };
+
+            let text = match frame {
+                Message::Text(t) => t,
+                Message::Close(_) => {
+                    tracing::info!("mcp-endpoint: relay closed connection");
+                    break;
+                }
+                Message::Ping(payload) => {
+                    let _ = write.send(Message::Pong(payload)).await;
+                    continue;
+                }
+                _ => continue,
+            };
+
+            let req: crate::mcp::Request = match serde_json::from_str(&text) {
+                Ok(r) => r,
+                Err(e) => {
+                    let resp = crate::mcp::Response::error(
+                        None,
+                        crate::mcp::codes::PARSE_ERROR,
+                        format!("parse error: {e}"),
+                    );
+                    let _ = write
+                        .send(Message::Text(serde_json::to_string(&resp).unwrap()))
+                        .await;
+                    continue;
+                }
+            };
+
+            // MCP `notifications/initialized` has no `id` and expects no
+            // response — match xiaozhi's mcp_endpoint_handler.py.
+            let is_notification = req.id.is_none();
+            let resp = server.dispatch(&caller, "", req).await;
+            if !is_notification {
+                if let Err(e) = write
+                    .send(Message::Text(serde_json::to_string(&resp).unwrap()))
+                    .await
+                {
+                    tracing::warn!(error = %e, "mcp-endpoint: write error; will reconnect");
+                    break;
+                }
+            }
+        }
+
+        tracing::info!(backoff_secs, "mcp-endpoint: disconnected; reconnecting");
+        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+    }
+}

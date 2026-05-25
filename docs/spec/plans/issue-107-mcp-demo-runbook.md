@@ -276,329 +276,282 @@ For those, see mode **B** below.
 
 ---
 
-## B. Full xiaozhi-server + MagicLick demo (operator-driven)
+## B. Full xiaozhi demo via the MCP-endpoint relay (no firmware flash, no LLM key)
 
-> This is a **draft runbook**. The dev-mode demo (mode A) is fully validated by automated tests + hands-on smoke. Mode B requires a live broker deploy + MagicLick hardware + an LLM provider key — none of which can be reproduced inside the repo's test environment. **Verify each step on real hardware before merging refinements back here.**
+> **Hardware-free, account-light.** The xiaozhi cloud already runs the LLM and already talks to xiaozhi devices in the wild. We register our MCP server as a tool with that cloud — no firmware to flash, no Doubao/Qwen key to provision. The only thing you need from xiaozhi's side is **a xiaozhi.me account with one agent (智能体)** so they hand us a relay URL to connect to. Mode D in the repo verifies this whole loop against a local mock relay, so every layer is exercised before you ever touch a real device.
 
 ### B.1 Topology
 
 ```
-┌────────────────────┐    audio + WebSocket    ┌────────────────────────┐
-│   MagicLick 2.5    │ ─────────────────────── │   xiaozhi-server       │
-│   (xiaozhi-esp32   │                         │   (stock xinnan-tech)  │
-│    firmware 1.9.4) │                         │                        │
-└────────────────────┘                         │   MCP client →         │
-                                               └───────────┬────────────┘
-                                                           │ JSON-RPC over HTTP
-                                                           ▼
-                                              ┌────────────────────────┐
-                                              │   agentkeys-mcp-server │
-                                              │   --backend http       │
-                                              └─────┬────────┬─────────┘
-                                                    │        │
-                                                    ▼        ▼
-                                          ┌──────────────┐ ┌──────────────┐
-                                          │ broker       │ │ memory       │
-                                          │ + audit      │ │ + cred       │
-                                          │   worker     │ │   worker     │
-                                          └──────────────┘ └──────────────┘
-                                                    │
-                                                    ▼
-                                          ┌──────────────────┐
-                                          │ Heima parachain  │
-                                          │ (chain anchor)   │
-                                          └──────────────────┘
+┌──────────────────────┐       audio / ws        ┌─────────────────────────┐
+│  any xiaozhi device  │ ─────────────────────── │  xiaozhi cloud (LLM,    │
+│  already in the wild │                         │  STT, TTS, intent)      │
+└──────────────────────┘                         │                         │
+                                                 │  智控台 + mcp_endpoint  │
+                                                 │  config: ws://relay/... │
+                                                 └────────────┬────────────┘
+                                                              │ ws
+                                                              ▼
+                                              ┌───────────────────────────┐
+                                              │  mcp-endpoint-server      │
+                                              │  (relay; one Python proc, │
+                                              │   github.com/xinnan-tech/ │
+                                              │   mcp-endpoint-server)    │
+                                              └─────┬────────────┬────────┘
+                                                    │ tool path  │ client path
+                                                    │            │
+                                                    ▼            ▼
+                              ┌──────────────────────────────────────────┐
+                              │  agentkeys-mcp-server                    │
+                              │  --transport mcp-endpoint                │
+                              │  --mcp-endpoint ws://relay/.../?token=…  │
+                              └─────┬────────────────┬───────────────────┘
+                                    │                │
+                                    ▼                ▼
+                          ┌──────────────┐ ┌──────────────┐
+                          │ broker       │ │ memory       │
+                          │ + audit      │ │ + cred       │
+                          │   worker     │ │   worker     │
+                          └──────────────┘ └──────────────┘
+                                    │
+                                    ▼
+                          ┌──────────────────┐
+                          │ Heima parachain  │
+                          └──────────────────┘
 ```
 
-### B.2 Prerequisites (fresh laptop → demo, no shortcuts)
+What this path eliminates from the original draft:
 
-1. **AWS access** — `agentkeys-admin` profile, per [`docs/cloud-setup.md`](../../cloud-setup.md). Verify with `aws sts get-caller-identity --profile agentkeys-admin`.
-2. **Heima chain access** — operator wallet funded on Heima mainnet (`AGENTKEYS_CHAIN=heima`). Required for broker boot + audit anchor.
+- No MagicLick toy needs to be flashed. The xiaozhi cloud runs the device's voice loop. Any xiaozhi device already paired with your agent works.
+- No Doubao/Qwen API key. The xiaozhi cloud's LLM is the one that decides to call our tools — your agent config (system prompt) tunes that.
+- No Docker. The MCP server, the relay, and the broker all live as systemd units on the same EC2 host per the existing `setup-broker-host.sh` pattern.
+
+### B.2 Prerequisites (fresh laptop → demo)
+
+1. **AWS access** — `agentkeys-admin` profile, per [`docs/cloud-setup.md`](../../cloud-setup.md).
+2. **Heima chain access** — operator wallet funded on Heima mainnet (`AGENTKEYS_CHAIN=heima`).
 3. **Operator workstation env** sourced: `set -a && source scripts/operator-workstation.env && set +a`.
-4. **Foundry installed** for chain-side bring-up (`forge`, `cast`, `anvil`). Pin via `foundryup`.
-5. **Docker** for the broker + worker images.
-6. **ESP-IDF + esptool** for flashing MagicLick (xiaozhi-esp32 firmware build).
-7. **LLM provider key**:
-   - Doubao (Volcano Engine) — get from [console.volcengine.com](https://console.volcengine.com/) — recommended for the demo (matches Volcano Ark vendor pitch in #112).
-   - Qwen — alternative; get from Alibaba Cloud Model Studio.
-8. **A MagicLick 2.5 toy** (xiaozhi-esp32 v1.9.4 hardware). Without one, mode B falls back to the xiaozhi-server CLI client + a USB microphone.
+4. **A xiaozhi.me account** with one agent (智能体) created. Free tier is fine.
+5. **uv** (Python launcher) on the laptop — required for the mode-B/C/D pre-flight scripts. `brew install uv` or [official installer](https://docs.astral.sh/uv/).
+6. **Rust toolchain** (matches `rust-toolchain.toml`).
+7. **Foundry + Docker** are NOT prerequisites for this path (Foundry only if you also need to redeploy contracts; Docker is intentionally not used).
 
-### B.3 Stand up the chain + broker + workers
+You do NOT need: a MagicLick toy, a Doubao/Qwen API key, Ollama, or ESP-IDF.
+
+### B.3 Pre-flight against the repo — no cloud account needed yet
+
+Run all four hardware-free smoke scripts first. If any fails, fix it before touching the EC2 host.
 
 ```bash
-# One-command idempotent bring-up of contracts, master device, agent,
-# scopes, K11, audit row. See CLAUDE.md "Heima chain (single entry point)".
+bash scripts/mcp-demo-mode-a.sh                  # curl + in-memory backend
+bash scripts/mcp-demo-mode-b-protocol.sh         # Anthropic mcp SDK (uv)
+bash scripts/mcp-demo-mode-c-xiaozhi-client.sh   # xiaozhi-server's ServerMCPClient
+bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh # xiaozhi-style WS relay
+```
+
+Mode D is the closest hardware-free approximation of B: it spins up a tiny mock relay that mirrors `xinnan-tech/mcp-endpoint-server`'s tool/client routing exactly, then drives the relay from a fake xiaozhi client through all three acts. When this passes, the only difference between dev and prod is the relay binary and the cloud-side talker.
+
+### B.4 Stand up the chain + broker + workers
+
+One-command idempotent bring-up of the existing AgentKeys infra per CLAUDE.md's "single entry point" rules:
+
+```bash
 AGENTKEYS_CHAIN=heima bash scripts/setup-heima.sh
-
-# One-command broker host setup (binary install, systemd unit, nginx + TLS,
-# audit-worker + memory-worker + cred-worker side by side). See CLAUDE.md
-# "Remote broker host (single entry point)".
 bash scripts/setup-broker-host.sh --upgrade
-
-# Verify deployed contracts via read-only RPC (zero gas).
 AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh
 ```
 
-Outputs to capture for the next step:
+Capture for the next step:
 
 - `BROKER_URL=https://broker.litentry.org`
 - `MEMORY_WORKER_URL=https://memory.litentry.org`
 - `AUDIT_WORKER_URL=https://audit.litentry.org`
-- One actor omni (`O_kevin_001` or the actor produced by `heima-agent-register.sh`)
-- Device key hash (`0x…` from `heima-device-register.sh` output)
-- A signed vendor bearer token (mint via the M2 portal in production; for the demo, use a static value the broker recognizes)
+- A real actor omni from `heima-agent-register.sh` (32-byte hex).
+- A device key hash from `heima-device-register.sh` (32-byte hex).
 
-### B.4 Deploy `agentkeys-mcp-server` next to the broker
+### B.5 Deploy `mcp-endpoint-server` on the EC2 broker host (systemd, not Docker)
 
-The MCP server is one static binary. Deploy options:
+The relay is a small Python service. Run it native; do NOT pull in Docker — the existing host already has nginx + TLS + systemd via `setup-broker-host.sh`, and a Docker daemon would be new operational surface for no benefit.
 
-- **Docker** (recommended for a clean prod-like demo):
-  ```bash
-  docker build -t agentkeys-mcp-server \
-    -f crates/agentkeys-mcp-server/Dockerfile .
-
-  docker run -d --name mcp \
-    -p 8088:8088 \
-    -e AGENTKEYS_BROKER_URL=https://broker.litentry.org \
-    -e AGENTKEYS_MEMORY_URL=https://memory.litentry.org \
-    -e AGENTKEYS_AUDIT_URL=https://audit.litentry.org \
-    -e MCP_VENDOR_TOKENS="magiclick:$VENDOR_BEARER" \
-    agentkeys-mcp-server
-  ```
-- **Systemd unit** on the broker host alongside the existing broker (smaller blast radius, same TLS termination via nginx). Reuse the pattern from `scripts/setup-broker-host.sh` — add a `mcp.service` clone, listen on `127.0.0.1:8088`, proxy via a new nginx server block `mcp.litentry.org`. **(Not yet automated — the script wires the broker + workers; this is a follow-up to land as a `--mcp` flag.)**
-
-Smoke the deploy from outside the host:
+On the broker host:
 
 ```bash
-curl -sS https://mcp.litentry.org/healthz
-# → {"name":"agentkeys-mcp-server","ok":true}
+# As the agentkeys user. Install once into a venv.
+sudo -u agentkeys -i bash <<'EOF'
+mkdir -p /opt/agentkeys/mcp-endpoint && cd /opt/agentkeys/mcp-endpoint
+git clone --depth 1 https://github.com/xinnan-tech/mcp-endpoint-server.git src
+cd src
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+EOF
 
-curl -sS -X POST https://mcp.litentry.org/mcp \
-  -H "authorization: Bearer $VENDOR_BEARER" \
-  -H "x-agentkeys-actor: $ACTOR_OMNI" \
-  -H "content-type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' \
-  | python3 -c "import sys,json;print(len(json.load(sys.stdin)['result']['tools']),'tools')"
-# → 10 tools
+# systemd unit
+sudo tee /etc/systemd/system/mcp-endpoint-server.service >/dev/null <<'EOF'
+[Unit]
+Description=MCP endpoint relay (xiaozhi tool registration)
+After=network-online.target
+
+[Service]
+Type=simple
+User=agentkeys
+WorkingDirectory=/opt/agentkeys/mcp-endpoint/src
+ExecStart=/opt/agentkeys/mcp-endpoint/src/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+Environment=PORT=8004
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now mcp-endpoint-server
+journalctl -u mcp-endpoint-server -n 50 --no-pager
 ```
 
-### B.5 Seed memory namespaces
+The startup log prints two URLs (see [`docs/mcp-endpoint-enable.md`](https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-enable.md)):
 
-The mock fixture from mode A was hardcoded. In production, namespaces are filled by user-driven memory writes through xiaozhi-server. To pre-seed for the demo, use `memory.put` directly:
+```
+智控台MCP参数配置:    http://<host-or-eip>:8004/mcp_endpoint/health?key=…
+单模块部署MCP接入点:  ws://<host-or-eip>:8004/mcp_endpoint/mcp/?token=…
+```
+
+Save both. The first goes into the xiaozhi-server `server.mcp_endpoint` config (or 智控台 → 参数管理 → `server.mcp_endpoint` for the cloud path). The second is the `MCP_ENDPOINT` env var the MCP server connects to.
+
+Follow-up to land later — fold this step into `scripts/setup-broker-host.sh --with-mcp-endpoint` so the relay becomes one-command idempotent like everything else on the host.
+
+### B.6 Deploy `agentkeys-mcp-server` on EC2 with `--transport mcp-endpoint`
+
+Native systemd, no Docker. Two units side by side on the same host: `mcp-endpoint-server` (relay) and `agentkeys-mcp-server` (tool).
 
 ```bash
-for NS in travel family profile; do
-  case $NS in
-    travel)  CONTENT="Chengdu trip — Apr 12 to 16, hotpot at Yulin." ;;
-    family)  CONTENT="Wife's bday Aug 3 (gift idea: hiking boots)." ;;
-    profile) CONTENT="Allergic to shellfish. Prefers windowed flights." ;;
-  esac
+# Build the binary on the host (or ship a pre-built static binary via release tooling later).
+sudo -u agentkeys -i bash <<EOF
+cd /opt/agentkeys
+git clone --depth 1 -b main https://github.com/litentry/agentKeys.git src
+cd src
+cargo build --release -p agentkeys-mcp-server
+EOF
 
-  curl -sS -X POST https://mcp.litentry.org/mcp \
-    -H "authorization: Bearer $VENDOR_BEARER" \
-    -H "x-agentkeys-actor: $ACTOR_OMNI" \
-    -H "x-agentkeys-session-bearer: $SESSION_JWT" \
-    -H "content-type: application/json" \
-    -d "$(jq -n \
-      --arg actor "$ACTOR_OMNI" \
-      --arg ns "$NS" \
-      --arg content "$CONTENT" \
-      --arg op "$OPERATOR_OMNI" \
-      --arg dkh "$DEVICE_KEY_HASH" \
-      '{
-        jsonrpc:"2.0",
-        method:"tools/call",
-        params:{
-          name:"agentkeys.memory.put",
-          arguments:{
-            actor:$actor, namespace:$ns, content:$content,
-            operator_omni:$op, device_key_hash:$dkh
-          }
-        },
-        id:1
-      }')"
-done
+# systemd unit
+sudo tee /etc/systemd/system/agentkeys-mcp-server.service >/dev/null <<'EOF'
+[Unit]
+Description=AgentKeys MCP server (xiaozhi MCP-endpoint tool)
+After=network-online.target mcp-endpoint-server.service
+Wants=mcp-endpoint-server.service
+
+[Service]
+Type=simple
+User=agentkeys
+WorkingDirectory=/opt/agentkeys/src
+ExecStart=/opt/agentkeys/src/target/release/agentkeys-mcp-server \
+  --transport mcp-endpoint \
+  --backend http \
+  --mcp-endpoint ${MCP_ENDPOINT}
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/etc/agentkeys/mcp.env
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Operator-set env file (chmod 600). Holds the relay URL + the backend URLs.
+sudo install -d -m 0750 -o agentkeys -g agentkeys /etc/agentkeys
+sudo tee /etc/agentkeys/mcp.env >/dev/null <<'EOF'
+MCP_ENDPOINT=ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=<tool-token-from-relay-startup>
+AGENTKEYS_BROKER_URL=https://broker.litentry.org
+AGENTKEYS_MEMORY_URL=https://memory.litentry.org
+AGENTKEYS_AUDIT_URL=https://audit.litentry.org
+EOF
+sudo chmod 0600 /etc/agentkeys/mcp.env
+sudo chown agentkeys:agentkeys /etc/agentkeys/mcp.env
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentkeys-mcp-server
+journalctl -u agentkeys-mcp-server -n 50 --no-pager
 ```
 
-Verify each landed by reading back:
+Expected log line on first connect:
 
-```bash
-for NS in travel family profile; do
-  echo "--- $NS ---"
-  curl -sS -X POST https://mcp.litentry.org/mcp \
-    -H "authorization: Bearer $VENDOR_BEARER" \
-    -H "x-agentkeys-actor: $ACTOR_OMNI" \
-    -H "x-agentkeys-session-bearer: $SESSION_JWT" \
-    -H "content-type: application/json" \
-    -d "$(jq -n \
-      --arg actor "$ACTOR_OMNI" \
-      --arg ns "$NS" \
-      --arg op "$OPERATOR_OMNI" \
-      --arg dkh "$DEVICE_KEY_HASH" \
-      '{
-        jsonrpc:"2.0",
-        method:"tools/call",
-        params:{
-          name:"agentkeys.memory.get",
-          arguments:{
-            actor:$actor, namespace:$ns,
-            operator_omni:$op, device_key_hash:$dkh
-          }
-        },
-        id:1
-      }')" \
-    | jq '.result.structuredContent.content'
-done
+```
+INFO agentkeys_mcp_server: mcp-endpoint: connected; awaiting MCP frames
 ```
 
-### B.6 Clone + configure xiaozhi-server
+If the connection fails, the binary backs off and retries every 1–600s with exponential backoff (matches `mcp_pipe.py`'s reconnection policy). Watch `journalctl -u agentkeys-mcp-server -f`.
 
-xiaozhi-server is at https://github.com/xinnan-tech/xiaozhi-esp32-server. The version pinned by [`docs/research/xiaozhi-hermes-architecture.md`](../../research/xiaozhi-hermes-architecture.md) is the one with first-class MCP support — no fork needed.
+### B.7 Register the relay URL on your xiaozhi.me agent (智控台)
 
-```bash
-git clone https://github.com/xinnan-tech/xiaozhi-esp32-server.git ~/code/xiaozhi-server
-cd ~/code/xiaozhi-server
-# Last verified against commit 7f73dae (2026-05); this is the commit
-# whose mcp_client.py we inspected when writing this runbook. Pin via
-# `git checkout 7f73dae` if you need byte-for-byte reproduction.
-```
+There are two registration paths depending on how you deploy xiaozhi-server. The official guide is at [`docs/mcp-endpoint-enable.md`](https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-enable.md); the short version:
 
-**Critical config rules** (verified against the upstream `mcp_client.py` at
-commit `7f73dae` — `main/xiaozhi-server/core/providers/tools/server_mcp/mcp_client.py`):
+**Full-module (智控台) deploy:**
 
-1. **File path**: the runtime file is `main/xiaozhi-server/data/.mcp_server_settings.json`
-   (note the leading `.` AND the `data/` prefix). The `mcp_server_settings.json`
-   at the repo root is a template only and is NOT read at runtime.
-2. **Transport**: include `"transport": "streamable-http"` explicitly. Default is `sse`;
-   our server only implements POST `/mcp` (Streamable HTTP), not SSE.
-3. **Headers**: every key under `headers` is forwarded by the client unchanged
-   (`mcp.client.streamable_http.streamablehttp_client`), so `X-AgentKeys-Actor`
-   and `X-AgentKeys-Session-Bearer` round-trip correctly.
+1. 智控台 → 参数字典 → 系统功能配置 → enable `MCP接入点` and save.
+2. 智控台 → 参数字典 → 参数管理 → search `server.mcp_endpoint` and set its value to the `智控台MCP参数配置` URL from §B.5 (`http://<host>:8004/mcp_endpoint/health?key=...`).
+3. 智控台 → 智能体管理 → 配置角色 → 编辑功能 → MCP接入点 → save.
 
-Write `main/xiaozhi-server/data/.mcp_server_settings.json`:
+**Single-module deploy:**
 
-```json
-{
-  "mcpServers": {
-    "agentkeys": {
-      "url": "https://mcp.litentry.org/mcp",
-      "transport": "streamable-http",
-      "headers": {
-        "Authorization": "Bearer ${AGENTKEYS_VENDOR_BEARER}",
-        "X-AgentKeys-Actor": "${AGENTKEYS_ACTOR_OMNI}",
-        "X-AgentKeys-Session-Bearer": "${AGENTKEYS_SESSION_JWT}"
-      }
-    }
-  }
-}
-```
-
-**Two pre-flights — no LLM, no hardware needed** — let you catch
-integration bugs before paying for a Doubao key or sourcing a MagicLick:
-
-```bash
-# 1. Raw protocol layer — drives via the Anthropic mcp SDK directly.
-bash scripts/mcp-demo-mode-b-protocol.sh
-
-# 2. xiaozhi-server's actual integration code — instantiates their
-#    ServerMCPClient class (the class their production code uses) and
-#    walks the three acts through it. Bundles a deterministic fake-LLM
-#    so the full LLM → ServerMCPClient → our /mcp loop is asserted
-#    without any real model or paid API key.
-bash scripts/mcp-demo-mode-c-xiaozhi-client.sh
-```
-
-Mode C is the closest hardware-free approximation of the live demo:
-it loads `core.providers.tools.server_mcp.mcp_client.ServerMCPClient`
-from xiaozhi-server's actual source tree (commit `7f73dae`) and uses
-it to call every tool exactly as xiaozhi-server would at runtime. When
-this passes, the only remaining failure modes are LLM tool-choice
-(prompt engineering + model capability) and MagicLick audio I/O
-(physical hardware) — neither is reachable from inside this codebase.
-
-The xiaozhi-server LLM provider config (Doubao or Qwen) goes in the server's main config — see xiaozhi-server's README for the exact path. For Doubao:
+Edit `data/.config.yaml` (note the leading dot + `data/` prefix; verified against `xinnan-tech/xiaozhi-esp32-server@7f73dae`):
 
 ```yaml
-llm:
-  provider: doubao
-  api_key: ${DOUBAO_API_KEY}
-  model: doubao-pro-32k    # or whatever the current production model is
+server:
+  websocket: ws://<host>:<port>/xiaozhi/v1/
+  http_port: 8002
+
+mcp_endpoint: ws://<host>:8004/mcp_endpoint/mcp/?token=<tool-token>
 ```
 
-System prompt addition — tell the LLM about the AgentKeys tools so Act 2 lands cleanly:
+Restart xiaozhi-server. The startup log should now print `mcp接入点是 ws://...`. When your agent connects, look for: `当前支持的函数列表: [..., 'agentkeys_permission_check', 'agentkeys_memory_get', 'agentkeys_cap_mint', ...]`.
 
-```
-You have access to AgentKeys MCP tools (agentkeys.*). For any payment or
-spending action, you MUST call agentkeys.permission.check first. If the
-result is verdict=deny, refuse the user politely and explain the daily
-cap exceeded. For memory reads, scope by namespace; never assume the
-device can read every namespace.
-```
+### B.8 Run the three acts
 
-Start xiaozhi-server per its own README.
+Any voice device already paired with your xiaozhi agent works. Or use xiaozhi-server's text-input diagnostic to skip the audio loop entirely (no MagicLick toy required).
 
-### B.7 Flash MagicLick 2.5
-
-Get the xiaozhi-esp32 firmware that pairs with the server version you cloned (v1.9.4 per the strategy doc). Build + flash:
-
-```bash
-# from the xiaozhi-esp32 repo
-idf.py set-target esp32s3
-idf.py build
-esptool.py --chip esp32s3 --port /dev/cu.usbserial-* write_flash ...
-```
-
-Configure the device's WiFi + the xiaozhi-server URL (via the on-device captive portal or pre-flashed nvs partition).
-
-### B.8 Walk the three acts on hardware
-
-Power on MagicLick. Press the talk button. Run each act:
-
-1. **Act 1**: *"我这周末去哪里玩？"* (Where am I going this weekend?)
-   - Expected: Doubao/Qwen calls `memory.get(namespace="travel")`, the MCP server fetches the Chengdu fixture, the LLM synthesizes a TTS reply naming Chengdu.
-   - **Verify**: `tail -f /var/log/agentkeys-mcp-server.log` shows a single `memory.get` call with `namespace=travel`.
-2. **Act 2**: *"帮我点 600 块的火锅"* (Order me 600 RMB of hotpot.)
-   - Expected: LLM calls `permission.check(scope="payment.spend", amount_rmb=600)`, gets `verdict=deny`, refuses politely.
-   - **Verify**: `tail -f /var/log/agentkeys-mcp-server.log` shows `permission.check` returning `daily_spend_cap_exceeded`. Parent-control UI (M4) shows the audit row in <1s.
-3. **Act 3**: On the parent-control UI (when it lands per #111), revoke FoloToy payment access. User says *"再试一次"* (Try again). Same scope; this time `permission.check` returns deny with a revocation-flavored reason. (M1 has no revocation list yet; this act is the *demo of intent* — see plan §6.)
+1. **Act 1**: ask *"我这周末去哪里玩？"* (Where am I going this weekend?)
+   - Expected: the cloud LLM calls `agentkeys.memory.get(namespace="travel")`, the relay forwards to the MCP server, the MCP server hits the live memory worker, the LLM synthesizes a TTS reply naming Chengdu.
+   - **Verify**: `journalctl -u agentkeys-mcp-server -f` shows the tool call land; `journalctl -u mcp-endpoint-server -f` shows the relay forwarding.
+2. **Act 2**: ask *"帮我点 600 块的火锅"* (Order me 600 RMB of hotpot.)
+   - Expected: `agentkeys.permission.check` returns `verdict=deny, reason=daily_spend_cap_exceeded, explanation=cap=500, requested=600, period=daily`. The LLM refuses politely.
+   - **Verify**: tail the MCP server log; the verdict came from `crate::policy::PolicyEngine`, deterministic and pure.
+3. **Act 3**: From the parent-control UI (or via curl through the relay against the same agent) call `agentkeys.cap.revoke(<cap_id>)`. Re-ask "帮我点 200 块的火锅" — `permission.check` denies via the revoked cap path (or, in M1, succeeds because broker revoke is an M4 follow-up; the demo here is of the *flow*).
 
 ### B.9 What to capture for the vendor pitch
 
-- A 15-second video of Act 1 (LLM names the city correctly).
-- A 15-second video of Act 2 (LLM refuses politely; parent UI shows the audit row).
-- A screenshot of the chain explorer with the audit anchor batch in the next 2-min window.
-- Time-from-talk-button-press to LLM response — should be < 3 s for memory reads, < 1 s for permission checks.
+- A 15-second video of Act 1 (cloud LLM names the city correctly).
+- A 15-second video of Act 2 (cloud LLM refuses politely; the parent UI shows the audit row).
+- A screenshot of the chain explorer showing the audit anchor batch in the next 2-min window.
+- Time from voice trigger to MCP tool call landing on the broker — should be <500 ms for `permission.check`, ~1 s for `memory.get` (S3 + decrypt round trip).
 
 ### B.10 Tear down
 
 ```bash
-docker stop mcp && docker rm mcp
-# Broker + workers stay up — they're shared infra, don't pull them down
-# unless you're decommissioning the whole environment.
+sudo systemctl disable --now agentkeys-mcp-server mcp-endpoint-server
+# Broker + workers stay up — shared infra. Only stop them when decommissioning the env.
 ```
 
-### B.11 What's verified vs what still needs hardware
+### B.11 What's verified vs operator-driven
 
-**Verified — automatable, no hardware:**
+**Verified — automatable, no hardware, no LLM key, no xiaozhi account needed** (run in CI):
 
-- ✅ MCP wire protocol compliance (`initialize` / `tools/list` / `tools/call` / error envelope) — `scripts/mcp-demo-mode-b-protocol.sh` drives the server with the same Anthropic Python SDK xiaozhi-server uses, asserting every act.
-- ✅ xiaozhi-server's config file path + transport requirement — read from upstream source at commit `7f73dae`.
-- ✅ Header pass-through (`X-AgentKeys-Actor`, `X-AgentKeys-Session-Bearer`) — code-traced through `mcp_client.py`.
+- ✅ MCP wire protocol over Streamable HTTP (`mode-b-protocol.sh`).
+- ✅ xiaozhi-server's `ServerMCPClient` integration code (`mode-c-xiaozhi-client.sh`).
+- ✅ xiaozhi-style relay topology (tool side + client side, same token, two ws paths) — `mode-d-xiaozhi-endpoint.sh` spins up a mock relay and runs every act through it.
+- ✅ Hardened dev demo with 19 assertions, port-free preflight, JSON-RPC parse, content-dependent envelope hash, hex32 wire-compatible fixtures (`mode-a.sh`).
 
-**Operator-driven — needs hardware / external account / live deploy:**
+**Operator-driven — needs a live deploy + a xiaozhi.me account**:
 
-- 🔌 LLM tool-choice (Doubao or Qwen actually deciding to call `permission.check` for "order me hotpot"). Tune the system prompt per §B.6.
-- 🎤 MagicLick audio I/O (wake-word + STT + TTS round-trip). Test independently with xiaozhi-server's own diagnostic mode before adding AgentKeys.
-- ☁️ Live broker + workers deployed via `scripts/setup-broker-host.sh` + `scripts/setup-heima.sh`.
-- 💳 LLM provider account funded (Doubao/Qwen API key).
+- ☁️ Live broker + workers (one-command via `setup-broker-host.sh` + `setup-heima.sh`).
+- 🔑 `mcp-endpoint-server` deployed as systemd next to the broker.
+- 🆔 xiaozhi.me agent created and the relay URL registered (智控台 or `data/.config.yaml`).
+- 📞 At least one xiaozhi device (any model, no firmware change) paired with the agent for Acts 1–3 over voice. Alternatively: text-input diagnostic mode on xiaozhi-server skips the audio loop entirely.
 
-**Known gaps to fold back when you run it:**
+**Known gaps to fold back when you run it**:
 
-- **Parent-control UI** (#111) is needed for Act 3's "parent revokes" gesture. Until #111 lands, simulate by calling `cap.revoke` via curl between the two prompts.
-- **Live broker `/v1/revoke/cap/:id`** lands in M4. Until then, `cap.revoke` is a local stub on the MCP server — Act 3 demonstrates the *flow*, not the *cryptographic immediacy*.
-- **Vendor token mint** is hand-edited into `MCP_VENDOR_TOKENS`. The vendor portal (#114, M2) replaces this with an issued + persisted token.
-- **A `--mcp` flag on `scripts/setup-broker-host.sh`** to fold the MCP server deploy into the existing idempotent host setup. Tracked as follow-up.
-
+- Parent-control UI (#111) — until it lands, simulate Act 3's revoke via a curl call through the relay between the two voice prompts.
+- Live broker `/v1/revoke/cap/:id` lands in M4 — until then, `cap.revoke` is the structured stub on the MCP server.
+- Vendor token mint is hand-edited into `MCP_VENDOR_TOKENS` for the HTTP transport. The mcp-endpoint transport bypasses vendor tokens (the relay URL token is the binding) so this isn't on the critical path for B.
+- `scripts/setup-broker-host.sh --with-mcp-endpoint` — fold both systemd units (relay + MCP server) into the existing idempotent host setup. Follow-up.
 ---
 
 ## Where to file demo-specific bugs

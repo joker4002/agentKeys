@@ -140,13 +140,23 @@ Full two-mode runbook in
   passes, the remaining failure modes are downstream of MCP: LLM
   tool-choice (model + prompt engineering) and MagicLick audio I/O
   (hardware).
-- **Mode B operator-driven residual.** What's left after modes A/B/C
-  is genuinely outside the MCP server boundary: live broker + workers
-  deploy (per `scripts/setup-broker-host.sh` + `scripts/setup-heima.sh`),
-  funded LLM account (Doubao / Qwen / local Ollama), and physical
-  MagicLick 2.5 hardware. The runbook §B lists every step; the three
-  pre-flight scripts catch everything that's catchable inside the
-  repo.
+- **Mode D — xiaozhi MCP-endpoint relay end-to-end.** `scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh`
+  stands up a tiny mock relay that mirrors `xinnan-tech/mcp-endpoint-server`'s
+  tool/client routing (`/mcp_endpoint/mcp/?token=…` for tool side,
+  `/mcp_endpoint/call/?token=…` for xiaozhi side). It then connects our
+  MCP server to the tool side via the new `--transport mcp-endpoint`
+  mode and drives the three acts from the client side. **This is the
+  hardware-free + LLM-key-free path to the full demo.** When mode D
+  passes, the only remaining production work is deploying the real
+  relay (systemd on EC2, not Docker) and registering the relay URL
+  with a xiaozhi.me agent. No MagicLick firmware flash needed — the
+  xiaozhi cloud talks to existing devices through the relay.
+- **Mode B operator-driven residual.** What's left after modes A/B/C/D
+  is a live broker + workers deploy (one command via
+  `scripts/setup-broker-host.sh` + `scripts/setup-heima.sh`), the
+  real `mcp-endpoint-server` running as systemd next to the broker,
+  and registration of the relay URL with a xiaozhi.me agent in 智控台.
+  No paid LLM account, no MagicLick toy, no Docker.
 
 ## 6. What did NOT land (deferred)
 

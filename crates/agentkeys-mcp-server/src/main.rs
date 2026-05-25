@@ -48,6 +48,14 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("agentkeys-mcp-server running (stdio)");
             transport::run_stdio(server).await?;
         }
+        Transport::McpEndpoint => {
+            let url = config
+                .mcp_endpoint
+                .clone()
+                .expect("mcp_endpoint required for McpEndpoint transport — validated in Config::from_cli");
+            tracing::info!(url = %url, "agentkeys-mcp-server running (mcp-endpoint)");
+            transport::run_mcp_endpoint(server, url).await?;
+        }
     }
 
     Ok(())

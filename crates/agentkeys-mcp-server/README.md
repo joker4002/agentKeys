@@ -54,6 +54,26 @@ cargo run -p agentkeys-mcp-server -- \
 cargo run -p agentkeys-mcp-server -- --transport stdio
 ```
 
+### xiaozhi MCP-endpoint relay (no firmware flash, no LLM key)
+
+Connect outward to a xiaozhi-style `mcp-endpoint-server` relay URL as a
+WebSocket client. The relay forwards MCP frames between this server (as
+the tool) and the xiaozhi cloud / xiaozhi-server (as the client). No
+HTTP listen socket; no per-vendor bearer (the relay URL's token is the
+binding).
+
+```bash
+cargo run -p agentkeys-mcp-server -- \
+  --transport mcp-endpoint \
+  --backend in-memory \
+  --mcp-endpoint 'ws://<relay-host>:8004/mcp_endpoint/mcp/?token=<your-tool-token>'
+```
+
+Test it locally without a real cloud account: `bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh`
+spins up a mock relay that mirrors `xinnan-tech/mcp-endpoint-server`'s
+routing exactly, then drives every act through it. Full runbook in
+[`docs/spec/plans/issue-107-mcp-demo-runbook.md`](../../docs/spec/plans/issue-107-mcp-demo-runbook.md) §B.
+
 ### Docker
 
 ```bash

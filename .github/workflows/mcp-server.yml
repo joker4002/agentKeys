@@ -6,6 +6,7 @@ on:
     paths:
       - "crates/agentkeys-mcp-server/**"
       - "scripts/mcp-demo-mode-a.sh"
+      - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
@@ -13,6 +14,7 @@ on:
     paths:
       - "crates/agentkeys-mcp-server/**"
       - "scripts/mcp-demo-mode-a.sh"
+      - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"

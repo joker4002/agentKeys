@@ -14,10 +14,19 @@ use std::net::SocketAddr;
     about = "AgentKeys MCP server — Phase 1 (issue #107)"
 )]
 pub struct Cli {
-    /// Transport mode: `http` (default, for vendor deploys) or `stdio`
-    /// (for local MCP hosts that spawn this as a subprocess).
+    /// Transport mode: `http` (default, for vendor deploys), `stdio`
+    /// (for local MCP hosts that spawn this as a subprocess), or
+    /// `mcp-endpoint` (connect outward to a xiaozhi-style relay URL).
     #[arg(long, env = "MCP_TRANSPORT", default_value = "http")]
     pub transport: String,
+
+    /// MCP endpoint relay URL (xiaozhi `mcp-endpoint-server` style).
+    /// Required when `--transport=mcp-endpoint`. Format:
+    /// `ws[s]://host:port/mcp_endpoint/mcp/?token=...`. The token comes
+    /// from your xiaozhi agent's MCP endpoint config (智控台 → 智能体
+    /// → 配置角色 → MCP接入点).
+    #[arg(long, env = "MCP_ENDPOINT")]
+    pub mcp_endpoint: Option<String>,
 
     /// Backend mode: `http` (default — talks to real broker + workers via
     /// `--broker-url` / `--memory-url` / `--audit-url`) or `in-memory`
@@ -61,6 +70,7 @@ pub struct Config {
     pub transport: Transport,
     pub backend: BackendKind,
     pub listen: SocketAddr,
+    pub mcp_endpoint: Option<String>,
     pub broker_url: Option<String>,
     pub memory_url: Option<String>,
     pub audit_url: Option<String>,
@@ -73,6 +83,11 @@ pub struct Config {
 pub enum Transport {
     Http,
     Stdio,
+    /// Connect outward to a xiaozhi MCP-endpoint relay URL as a WebSocket
+    /// client. The relay forwards messages between this server (as the
+    /// tool) and the xiaozhi-server/cloud (as the client). No HTTP listen
+    /// socket; no firmware on the xiaozhi device needs to change.
+    McpEndpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,8 +101,17 @@ impl Config {
         let transport = match cli.transport.as_str() {
             "http" => Transport::Http,
             "stdio" => Transport::Stdio,
-            other => anyhow::bail!("unknown transport `{other}` (expected http|stdio)"),
+            "mcp-endpoint" | "mcp_endpoint" => Transport::McpEndpoint,
+            other => anyhow::bail!(
+                "unknown transport `{other}` (expected http|stdio|mcp-endpoint)"
+            ),
         };
+
+        if transport == Transport::McpEndpoint && cli.mcp_endpoint.is_none() {
+            anyhow::bail!(
+                "--transport=mcp-endpoint requires --mcp-endpoint <ws[s]://...> (or env MCP_ENDPOINT)"
+            );
+        }
 
         let backend = match cli.backend.as_str() {
             "http" => BackendKind::Http,
@@ -113,6 +137,7 @@ impl Config {
             transport,
             backend,
             listen: cli.listen,
+            mcp_endpoint: cli.mcp_endpoint,
             broker_url: cli.broker_url,
             memory_url: cli.memory_url,
             audit_url: cli.audit_url,
@@ -127,6 +152,7 @@ impl Config {
             transport: Transport::Http,
             backend: BackendKind::Http,
             listen: "127.0.0.1:0".parse().unwrap(),
+            mcp_endpoint: None,
             broker_url: None,
             memory_url: None,
             audit_url: None,
