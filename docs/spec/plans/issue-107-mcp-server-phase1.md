@@ -124,10 +124,19 @@ Full two-mode runbook in
   Boots `--backend in-memory` and walks Acts 1/2/3 via `curl`. Asserted
   by `scripts/mcp-demo-mode-a.sh` (regression check for the runbook
   itself).
-- **Mode B — full xiaozhi-server + MagicLick.** Operator-driven; needs
-  live broker + workers (per `scripts/setup-broker-host.sh` +
-  `scripts/setup-heima.sh`), a Doubao or Qwen API key, and a MagicLick
-  2.5 toy. Stays a draft until verified on real hardware.
+- **Mode B protocol layer — verified.** `scripts/mcp-demo-mode-b-protocol.sh`
+  uses the same Anthropic Python `mcp` SDK that xiaozhi-server imports
+  (confirmed by reading `xinnan-tech/xiaozhi-esp32-server@7f73dae` —
+  file `main/xiaozhi-server/core/providers/tools/server_mcp/mcp_client.py`)
+  to drive `initialize` → `tools/list` → all three acts → schema-only
+  stubs end-to-end over Streamable HTTP. When this script passes, the
+  MCP wire boundary is proven; xiaozhi-server failures past this point
+  are LLM / hardware / deploy issues, not MCP server bugs.
+- **Mode B operator-driven steps.** LLM tool-choice (Doubao/Qwen),
+  MagicLick audio I/O, live broker + workers deploy, funded LLM
+  account. These need real hardware + an external account; the
+  runbook lists every step but cannot be smoke-tested from inside the
+  repo.
 
 ## 6. What did NOT land (deferred)
 

@@ -86,13 +86,17 @@ the vendor onboarding portal.
 
 ## xiaozhi-server integration
 
-Add to `mcp_server_settings.json` of xiaozhi-server:
+Write to `main/xiaozhi-server/data/.mcp_server_settings.json` (the leading
+dot + the `data/` prefix are required — verified against
+[`xinnan-tech/xiaozhi-esp32-server`](https://github.com/xinnan-tech/xiaozhi-esp32-server)
+commit `7f73dae`, file `main/xiaozhi-server/core/providers/tools/server_mcp/mcp_manager.py`).
 
 ```json
 {
   "mcpServers": {
     "agentkeys": {
       "url": "https://agentkeys-mcp.example.com/mcp",
+      "transport": "streamable-http",
       "headers": {
         "Authorization": "Bearer <vendor token>",
         "X-AgentKeys-Actor": "<actor omni>"
@@ -101,6 +105,10 @@ Add to `mcp_server_settings.json` of xiaozhi-server:
   }
 }
 ```
+
+The `"transport": "streamable-http"` line is **required** — without it,
+xiaozhi-server defaults to SSE (`mcp.client.sse.sse_client`) and our
+server's `/mcp` endpoint isn't an SSE endpoint.
 
 For local development with the stdio transport:
 
@@ -114,6 +122,12 @@ For local development with the stdio transport:
   }
 }
 ```
+
+**Protocol-level verification:** the official Anthropic `mcp` Python SDK
+(`mcp.client.streamable_http.streamablehttp_client`) — which xiaozhi-server
+imports directly — successfully drives this server through the full
+`initialize` → `tools/list` → `tools/call` lifecycle. Reproduce with
+`bash scripts/mcp-demo-mode-b-protocol.sh`.
 
 ## Three-act demo storyboard
 

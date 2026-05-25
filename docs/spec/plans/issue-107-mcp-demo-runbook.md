@@ -448,17 +448,31 @@ xiaozhi-server is at https://github.com/xinnan-tech/xiaozhi-esp32-server. The ve
 ```bash
 git clone https://github.com/xinnan-tech/xiaozhi-esp32-server.git ~/code/xiaozhi-server
 cd ~/code/xiaozhi-server
-# Tag pinning: TODO — confirm the minimum version that ships
-# mcp_server_settings.json honoring. Last verified against main on 2026-05.
+# Last verified against commit 7f73dae (2026-05); this is the commit
+# whose mcp_client.py we inspected when writing this runbook. Pin via
+# `git checkout 7f73dae` if you need byte-for-byte reproduction.
 ```
 
-Edit (or create) `mcp_server_settings.json`:
+**Critical config rules** (verified against the upstream `mcp_client.py` at
+commit `7f73dae` — `main/xiaozhi-server/core/providers/tools/server_mcp/mcp_client.py`):
+
+1. **File path**: the runtime file is `main/xiaozhi-server/data/.mcp_server_settings.json`
+   (note the leading `.` AND the `data/` prefix). The `mcp_server_settings.json`
+   at the repo root is a template only and is NOT read at runtime.
+2. **Transport**: include `"transport": "streamable-http"` explicitly. Default is `sse`;
+   our server only implements POST `/mcp` (Streamable HTTP), not SSE.
+3. **Headers**: every key under `headers` is forwarded by the client unchanged
+   (`mcp.client.streamable_http.streamablehttp_client`), so `X-AgentKeys-Actor`
+   and `X-AgentKeys-Session-Bearer` round-trip correctly.
+
+Write `main/xiaozhi-server/data/.mcp_server_settings.json`:
 
 ```json
 {
   "mcpServers": {
     "agentkeys": {
       "url": "https://mcp.litentry.org/mcp",
+      "transport": "streamable-http",
       "headers": {
         "Authorization": "Bearer ${AGENTKEYS_VENDOR_BEARER}",
         "X-AgentKeys-Actor": "${AGENTKEYS_ACTOR_OMNI}",
@@ -468,6 +482,25 @@ Edit (or create) `mcp_server_settings.json`:
   }
 }
 ```
+
+**Protocol-level pre-flight (no LLM, no hardware needed):** before
+booting the full xiaozhi-server, smoke the MCP wire with the same SDK
+xiaozhi-server uses. `scripts/mcp-demo-mode-b-protocol.sh` runs the
+official Anthropic `mcp` Python SDK (`streamablehttp_client`) against
+our server and asserts:
+
+- `initialize` handshake succeeds (server name + version)
+- `tools/list` returns all 10 expected tools
+- Acts 1/2/3 each return the storyboard-expected payload
+- Schema-only stubs surface as proper `McpError` exceptions
+
+```bash
+bash scripts/mcp-demo-mode-b-protocol.sh
+```
+
+When this passes, xiaozhi-server's MCP client will work too — they share
+the same SDK. The remaining failure modes are LLM tool-choice and
+hardware audio, neither of which can be diagnosed at the MCP boundary.
 
 The xiaozhi-server LLM provider config (Doubao or Qwen) goes in the server's main config — see xiaozhi-server's README for the exact path. For Doubao:
 
@@ -530,11 +563,25 @@ docker stop mcp && docker rm mcp
 # unless you're decommissioning the whole environment.
 ```
 
-### B.11 Known gaps in mode B (as of this PR)
+### B.11 What's verified vs what still needs hardware
 
-- **Parent-control UI** (#111) is needed for Act 3's "parent revokes" gesture. Until #111 lands, simulate by calling `cap.revoke` from `curl` between the two prompts.
+**Verified — automatable, no hardware:**
+
+- ✅ MCP wire protocol compliance (`initialize` / `tools/list` / `tools/call` / error envelope) — `scripts/mcp-demo-mode-b-protocol.sh` drives the server with the same Anthropic Python SDK xiaozhi-server uses, asserting every act.
+- ✅ xiaozhi-server's config file path + transport requirement — read from upstream source at commit `7f73dae`.
+- ✅ Header pass-through (`X-AgentKeys-Actor`, `X-AgentKeys-Session-Bearer`) — code-traced through `mcp_client.py`.
+
+**Operator-driven — needs hardware / external account / live deploy:**
+
+- 🔌 LLM tool-choice (Doubao or Qwen actually deciding to call `permission.check` for "order me hotpot"). Tune the system prompt per §B.6.
+- 🎤 MagicLick audio I/O (wake-word + STT + TTS round-trip). Test independently with xiaozhi-server's own diagnostic mode before adding AgentKeys.
+- ☁️ Live broker + workers deployed via `scripts/setup-broker-host.sh` + `scripts/setup-heima.sh`.
+- 💳 LLM provider account funded (Doubao/Qwen API key).
+
+**Known gaps to fold back when you run it:**
+
+- **Parent-control UI** (#111) is needed for Act 3's "parent revokes" gesture. Until #111 lands, simulate by calling `cap.revoke` via curl between the two prompts.
 - **Live broker `/v1/revoke/cap/:id`** lands in M4. Until then, `cap.revoke` is a local stub on the MCP server — Act 3 demonstrates the *flow*, not the *cryptographic immediacy*.
-- **xiaozhi-server's MCP config format** may drift; pin the exact commit you tested against once you do.
 - **Vendor token mint** is hand-edited into `MCP_VENDOR_TOKENS`. The vendor portal (#114, M2) replaces this with an issued + persisted token.
 - **A `--mcp` flag on `scripts/setup-broker-host.sh`** to fold the MCP server deploy into the existing idempotent host setup. Tracked as follow-up.
 
