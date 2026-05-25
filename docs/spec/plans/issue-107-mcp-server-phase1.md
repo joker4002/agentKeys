@@ -129,13 +129,23 @@ Full two-mode runbook in
   (confirmed by reading `xinnan-tech/xiaozhi-esp32-server@7f73dae` —
   file `main/xiaozhi-server/core/providers/tools/server_mcp/mcp_client.py`)
   to drive `initialize` → `tools/list` → all three acts → schema-only
-  stubs end-to-end over Streamable HTTP. When this script passes, the
-  MCP wire boundary is proven; xiaozhi-server failures past this point
-  are LLM / hardware / deploy issues, not MCP server bugs.
-- **Mode B operator-driven steps.** LLM tool-choice (Doubao/Qwen),
-  MagicLick audio I/O, live broker + workers deploy, funded LLM
-  account. These need real hardware + an external account; the
-  runbook lists every step but cannot be smoke-tested from inside the
+  stubs end-to-end over Streamable HTTP.
+- **Mode C xiaozhi-server integration code — verified.**
+  `scripts/mcp-demo-mode-c-xiaozhi-client.sh` loads xiaozhi-server's
+  **own** `ServerMCPClient` class from upstream source and instantiates
+  it against this MCP server. Same imports, same config-loading path,
+  same tool-name sanitization, same `call_tool` signature. Bundles a
+  deterministic fake-LLM so the full LLM → `ServerMCPClient` →
+  `/mcp` → tools loop is exercised without a real model. When this
+  passes, the remaining failure modes are downstream of MCP: LLM
+  tool-choice (model + prompt engineering) and MagicLick audio I/O
+  (hardware).
+- **Mode B operator-driven residual.** What's left after modes A/B/C
+  is genuinely outside the MCP server boundary: live broker + workers
+  deploy (per `scripts/setup-broker-host.sh` + `scripts/setup-heima.sh`),
+  funded LLM account (Doubao / Qwen / local Ollama), and physical
+  MagicLick 2.5 hardware. The runbook §B lists every step; the three
+  pre-flight scripts catch everything that's catchable inside the
   repo.
 
 ## 6. What did NOT land (deferred)

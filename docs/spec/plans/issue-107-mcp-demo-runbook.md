@@ -483,24 +483,28 @@ Write `main/xiaozhi-server/data/.mcp_server_settings.json`:
 }
 ```
 
-**Protocol-level pre-flight (no LLM, no hardware needed):** before
-booting the full xiaozhi-server, smoke the MCP wire with the same SDK
-xiaozhi-server uses. `scripts/mcp-demo-mode-b-protocol.sh` runs the
-official Anthropic `mcp` Python SDK (`streamablehttp_client`) against
-our server and asserts:
-
-- `initialize` handshake succeeds (server name + version)
-- `tools/list` returns all 10 expected tools
-- Acts 1/2/3 each return the storyboard-expected payload
-- Schema-only stubs surface as proper `McpError` exceptions
+**Two pre-flights — no LLM, no hardware needed** — let you catch
+integration bugs before paying for a Doubao key or sourcing a MagicLick:
 
 ```bash
+# 1. Raw protocol layer — drives via the Anthropic mcp SDK directly.
 bash scripts/mcp-demo-mode-b-protocol.sh
+
+# 2. xiaozhi-server's actual integration code — instantiates their
+#    ServerMCPClient class (the class their production code uses) and
+#    walks the three acts through it. Bundles a deterministic fake-LLM
+#    so the full LLM → ServerMCPClient → our /mcp loop is asserted
+#    without any real model or paid API key.
+bash scripts/mcp-demo-mode-c-xiaozhi-client.sh
 ```
 
-When this passes, xiaozhi-server's MCP client will work too — they share
-the same SDK. The remaining failure modes are LLM tool-choice and
-hardware audio, neither of which can be diagnosed at the MCP boundary.
+Mode C is the closest hardware-free approximation of the live demo:
+it loads `core.providers.tools.server_mcp.mcp_client.ServerMCPClient`
+from xiaozhi-server's actual source tree (commit `7f73dae`) and uses
+it to call every tool exactly as xiaozhi-server would at runtime. When
+this passes, the only remaining failure modes are LLM tool-choice
+(prompt engineering + model capability) and MagicLick audio I/O
+(physical hardware) — neither is reachable from inside this codebase.
 
 The xiaozhi-server LLM provider config (Doubao or Qwen) goes in the server's main config — see xiaozhi-server's README for the exact path. For Doubao:
 
