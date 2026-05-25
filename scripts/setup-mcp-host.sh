@@ -614,17 +614,36 @@ if [ "$WITH_NGINX" = "yes" ]; then
     skip "no nginx drift, no reload"
   fi
 
-  # Probe the local relay's /healthz via 127.0.0.1 so we don't depend on DNS
-  # being live yet during the first run.
-  if curl -sf "http://127.0.0.1:${RELAY_PORT}/mcp_endpoint/health?key=${HEALTH_KEY}" >/dev/null 2>&1; then
-    ok "local relay /mcp_endpoint/health reachable"
-  else
-    # Health endpoint may not be the relay's actual probe path; check raw upstream:
-    if curl -sf "http://127.0.0.1:${RELAY_PORT}/" >/dev/null 2>&1; then
-      skip "/mcp_endpoint/health did not match this version of mcp-endpoint-server; raw upstream IS reachable"
-    else
-      fail "relay not responding on 127.0.0.1:${RELAY_PORT} after restart"
+  # Probe the local relay via 127.0.0.1. Retry a few times — `systemctl
+  # restart` returns as soon as the process is forked; uvicorn + fastapi
+  # need ~1-3s to bind the port. We poll for up to 15s.
+  relay_ok="no"
+  relay_probe_path=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -sf "http://127.0.0.1:${RELAY_PORT}/mcp_endpoint/health?key=${HEALTH_KEY}" >/dev/null 2>&1; then
+      relay_ok="yes"; relay_probe_path="/mcp_endpoint/health"; break
+    elif curl -sf "http://127.0.0.1:${RELAY_PORT}/" >/dev/null 2>&1; then
+      relay_ok="yes"; relay_probe_path="/"; break
     fi
+    sleep 1.5
+  done
+
+  if [ "$relay_ok" = "yes" ]; then
+    ok "local relay reachable on 127.0.0.1:${RELAY_PORT} (probe ${relay_probe_path})"
+  else
+    echo >&2
+    echo "    --- diagnostics: mcp-endpoint-server didn't bind 127.0.0.1:${RELAY_PORT} in 15s ---" >&2
+    echo "    systemctl status:" >&2
+    sudo systemctl status mcp-endpoint-server.service --no-pager --lines=0 2>&1 | sed 's/^/      /' >&2 || true
+    echo "    last 30 journal lines:" >&2
+    sudo journalctl -u mcp-endpoint-server.service -n 30 --no-pager 2>&1 | sed 's/^/      /' >&2 || true
+    echo "    listening tcp sockets:" >&2
+    (sudo ss -tlnp 2>/dev/null || sudo netstat -tlnp 2>/dev/null || true) | sed 's/^/      /' >&2
+    echo "    config file (${INSTALL_DIR}/src/mcp-endpoint-server.cfg):" >&2
+    sudo cat "$INSTALL_DIR/src/mcp-endpoint-server.cfg" 2>&1 | sed 's/^/      /' >&2 || true
+    echo "    --- end diagnostics ---" >&2
+    echo >&2
+    fail "relay not responding on 127.0.0.1:${RELAY_PORT} after 15s (see diagnostics above)"
   fi
 
   # Don't require external DNS in the post-check — the operator may have
