@@ -25,24 +25,34 @@
 # Standalone for now; CLAUDE.md follow-up: fold into setup-broker-host.sh
 # as `--with-mcp` once this stabilises.
 #
-# Usage:
-#   bash scripts/setup-mcp-host.sh              # prod  → mcp.litentry.org
-#   bash scripts/setup-mcp-host.sh --test       # test  → test-mcp.litentry.org
-#   bash scripts/setup-mcp-host.sh --without-nginx --without-certbot   # skip TLS
-#   bash scripts/setup-mcp-host.sh --domain custom.example.com         # override
+# Usage (xiaozhi-hosted mode — DEFAULT, simpler):
+#   bash scripts/setup-mcp-host.sh --xiaozhi-endpoint 'wss://api.xiaozhi.me/mcp/?token=…'
+#   bash scripts/setup-mcp-host.sh                       # re-run (URL persisted on disk)
 #
-# Domain resolution (highest to lowest precedence):
-#   1. --domain X                       explicit
-#   2. --test                           → test-mcp.litentry.org
-#   3. $MCP_HOST from environment       (operator-workstation.env|.test.env)
-#   4. fallback                         → mcp.litentry.org
+# Usage (self-hosted relay mode — for custom endpoint deployments):
+#   bash scripts/setup-mcp-host.sh --self-hosted-relay              # prod → mcp.litentry.org
+#   bash scripts/setup-mcp-host.sh --self-hosted-relay --test       # test → test-mcp.litentry.org
+#   bash scripts/setup-mcp-host.sh --self-hosted-relay --domain custom.example.com
 #
-# DNS prerequisite: the A record for the chosen domain is provisioned by
-# scripts/setup-cloud.sh step 6 alongside the broker / signer / worker A
-# records — one batched Route53 UPSERT keeps every subdomain at the same
-# EIP. Run it once at account bootstrap; setup-mcp-host.sh is downstream.
-# When the A record isn't live yet, step 8 skips the cert and points the
-# operator at setup-cloud.sh (services stay up; re-run after DNS).
+# Two deployment modes:
+#
+# MODE = "xiaozhi" (default) — xiaozhi.me hosts the MCP-endpoint relay.
+#   • No mcp-endpoint-server clone, no nginx, no certbot, no DNS A record needed.
+#   • Operator pastes the wss://api.xiaozhi.me/mcp/?token=… URL from
+#     智控台 → 智能体 → MCP接入点 → 接入点地址 into --xiaozhi-endpoint once;
+#     it's persisted at /etc/agentkeys/mcp-xiaozhi-endpoint for re-runs.
+#   • Only agentkeys-mcp-server runs on the broker host (one systemd unit).
+#   • The mcp-endpoint-server systemd unit + nginx vhost are stopped if they
+#     were left over from a prior self-hosted run.
+#
+# MODE = "self-hosted" — operator runs their own mcp-endpoint-server.
+#   • Full stack: clone + venv, nginx wss→ws upgrade, certbot, DNS.
+#   • Domain resolution:
+#       1. --domain X                       explicit
+#       2. --test                           → test-mcp.litentry.org
+#       3. $MCP_HOST from environment       (operator-workstation.env|.test.env)
+#       4. fallback                         → mcp.litentry.org
+#   • DNS A record is provisioned by scripts/setup-cloud.sh step 6.
 #
 set -euo pipefail
 export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
@@ -57,6 +67,7 @@ ENV_FILE_DIR="/etc/agentkeys"
 ENV_FILE="${ENV_FILE_DIR}/mcp.env"
 TOKEN_FILE="${ENV_FILE_DIR}/mcp-tool-token"
 HEALTH_KEY_FILE="${ENV_FILE_DIR}/mcp-health-key"
+XIAOZHI_ENDPOINT_FILE="${ENV_FILE_DIR}/mcp-xiaozhi-endpoint"
 MCP_BIN_DST="/usr/local/bin/agentkeys-mcp-server"
 MCP_BIN_SRC="${REPO_ROOT}/target/release/agentkeys-mcp-server"
 WITH_NGINX="yes"
@@ -65,23 +76,30 @@ WITH_BUILD="yes"
 CERTBOT_EMAIL=""
 TEST_MODE="no"
 DOMAIN_OVERRIDE=""
+MODE="xiaozhi"                # default; flipped to "self-hosted" by --self-hosted-relay
+XIAOZHI_ENDPOINT=""           # set by --xiaozhi-endpoint or loaded from $XIAOZHI_ENDPOINT_FILE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --test)            TEST_MODE="yes"; shift ;;
-    --domain)          DOMAIN_OVERRIDE="$2"; shift 2 ;;
-    --certbot-email)   CERTBOT_EMAIL="$2"; shift 2 ;;
-    --without-nginx)   WITH_NGINX="no"; shift ;;
-    --without-certbot) WITH_CERTBOT="no"; shift ;;
-    --without-build)   WITH_BUILD="no"; shift ;;
-    --relay-port)      RELAY_PORT="$2"; shift 2 ;;
-    --relay-ref)       RELAY_PIN_REF="$2"; shift 2 ;;
-    --help|-h)         sed -n '2,42p' "$0"; exit 0 ;;
+    --xiaozhi-endpoint)   XIAOZHI_ENDPOINT="$2"; MODE="xiaozhi"; shift 2 ;;
+    --self-hosted-relay)  MODE="self-hosted"; shift ;;
+    --test)               TEST_MODE="yes"; shift ;;
+    --domain)             DOMAIN_OVERRIDE="$2"; shift 2 ;;
+    --certbot-email)      CERTBOT_EMAIL="$2"; shift 2 ;;
+    --without-nginx)      WITH_NGINX="no"; shift ;;
+    --without-certbot)    WITH_CERTBOT="no"; shift ;;
+    --without-build)      WITH_BUILD="no"; shift ;;
+    --relay-port)         RELAY_PORT="$2"; shift 2 ;;
+    --relay-ref)          RELAY_PIN_REF="$2"; shift 2 ;;
+    --help|-h)            sed -n '2,50p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
 
 # Resolve DOMAIN per the precedence rules in the header comment.
+# Self-hosted mode: needed for nginx vhost + cert.
+# Xiaozhi mode: not used (xiaozhi.me handles routing), but we still
+# resolve it so log messages / diagnostics name the right thing.
 if [ -n "$DOMAIN_OVERRIDE" ]; then
   DOMAIN="$DOMAIN_OVERRIDE"
 elif [ "$TEST_MODE" = "yes" ]; then
@@ -93,6 +111,12 @@ else
 fi
 NGINX_SITE="/etc/nginx/sites-available/${DOMAIN}"
 NGINX_SITE_LINK="/etc/nginx/sites-enabled/${DOMAIN}"
+
+# Mode-specific overrides: xiaozhi mode has no nginx/certbot/relay needs.
+if [ "$MODE" = "xiaozhi" ]; then
+  WITH_NGINX="no"
+  WITH_CERTBOT="no"
+fi
 
 if [ -t 2 ]; then
   C_HEAD=$'\033[1;36m'; C_OK=$'\033[1;32m'; C_SKIP=$'\033[0;33m'; C_ERR=$'\033[1;31m'; C_RESET=$'\033[0m'
@@ -155,7 +179,8 @@ if ! id "$RUN_USER" >/dev/null 2>&1; then
 fi
 
 head "config"
-echo "    domain:            ${DOMAIN}  (test_mode=${TEST_MODE})" >&2
+echo "    mode:              ${MODE}" >&2
+echo "    domain:            ${DOMAIN}  (test_mode=${TEST_MODE}; only used in self-hosted mode)" >&2
 echo "    relay (local):     127.0.0.1:${RELAY_PORT}" >&2
 echo "    relay src:         ${RELAY_REPO}@${RELAY_PIN_REF}" >&2
 echo "    install dir:       ${INSTALL_DIR}" >&2
@@ -176,26 +201,59 @@ else
   ok "created $ENV_FILE_DIR (0750 ${RUN_USER}:${RUN_USER})"
 fi
 
-# ─── 2. Token + key — generate on first run only ─────────────────────
-head "2/9 tool token + 智控台 health key"
-gen_token() { command head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32; }
-for pair in "TOKEN_FILE:tool token" "HEALTH_KEY_FILE:health key"; do
-  var="${pair%%:*}"; desc="${pair##*:}"
-  path="${!var}"
-  if sudo test -s "$path"; then
-    skip "$desc already exists at $path (preserving so URLs stay stable)"
-  else
-    secret=$(gen_token)
-    printf '%s' "$secret" | sudo tee "$path" >/dev/null
-    sudo chown "$RUN_USER:$RUN_USER" "$path"
-    sudo chmod 0600 "$path"
-    ok "generated $desc at $path"
+# ─── 2. Endpoint config (mode-dependent) ─────────────────────────────
+# Xiaozhi mode    : persist the wss://api.xiaozhi.me/mcp/?token=… URL.
+# Self-hosted mode: generate the relay-token + 智控台 health-key.
+if [ "$MODE" = "xiaozhi" ]; then
+  head "2/9 xiaozhi MCP endpoint URL"
+  # Load persisted URL if no --xiaozhi-endpoint flag was passed.
+  if [ -z "$XIAOZHI_ENDPOINT" ] && sudo test -s "$XIAOZHI_ENDPOINT_FILE"; then
+    XIAOZHI_ENDPOINT=$(sudo cat "$XIAOZHI_ENDPOINT_FILE")
+    ok "loaded persisted endpoint from $XIAOZHI_ENDPOINT_FILE"
   fi
-done
-TOKEN=$(sudo cat "$TOKEN_FILE")
-HEALTH_KEY=$(sudo cat "$HEALTH_KEY_FILE")
+  if [ -z "$XIAOZHI_ENDPOINT" ]; then
+    echo "    No --xiaozhi-endpoint URL and no persisted endpoint." >&2
+    echo "    Get the URL from 智控台 → 智能体 → MCP接入点 → 接入点地址," >&2
+    echo "    then re-run with --xiaozhi-endpoint 'wss://api.xiaozhi.me/mcp/?token=…'." >&2
+    echo "    Or use --self-hosted-relay to set up your own mcp-endpoint-server." >&2
+    fail "xiaozhi mode requires an endpoint URL on first run"
+  fi
+  # Persist (idempotent diff-then-write).
+  EXISTING_URL=$(sudo cat "$XIAOZHI_ENDPOINT_FILE" 2>/dev/null || true)
+  if [ "$EXISTING_URL" = "$XIAOZHI_ENDPOINT" ]; then
+    skip "$XIAOZHI_ENDPOINT_FILE already matches"
+  else
+    printf '%s' "$XIAOZHI_ENDPOINT" | sudo tee "$XIAOZHI_ENDPOINT_FILE" >/dev/null
+    sudo chown "$RUN_USER:$RUN_USER" "$XIAOZHI_ENDPOINT_FILE"
+    sudo chmod 0600 "$XIAOZHI_ENDPOINT_FILE"
+    ok "wrote $XIAOZHI_ENDPOINT_FILE (0600 ${RUN_USER}:${RUN_USER})"
+    RESTART_MCP=1
+  fi
+else
+  head "2/9 tool token + 智控台 health key"
+  gen_token() { command head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32; }
+  for pair in "TOKEN_FILE:tool token" "HEALTH_KEY_FILE:health key"; do
+    var="${pair%%:*}"; desc="${pair##*:}"
+    path="${!var}"
+    if sudo test -s "$path"; then
+      skip "$desc already exists at $path (preserving so URLs stay stable)"
+    else
+      secret=$(gen_token)
+      printf '%s' "$secret" | sudo tee "$path" >/dev/null
+      sudo chown "$RUN_USER:$RUN_USER" "$path"
+      sudo chmod 0600 "$path"
+      ok "generated $desc at $path"
+    fi
+  done
+  TOKEN=$(sudo cat "$TOKEN_FILE")
+  HEALTH_KEY=$(sudo cat "$HEALTH_KEY_FILE")
+fi
 
-# ─── 3. mcp-endpoint-server clone + venv ─────────────────────────────
+# ─── 3. mcp-endpoint-server clone + venv (self-hosted only) ──────────
+if [ "$MODE" = "xiaozhi" ]; then
+  head "3/9 mcp-endpoint-server src + venv"
+  skip "xiaozhi mode — xiaozhi.me hosts the relay; no local mcp-endpoint-server needed"
+else
 head "3/9 mcp-endpoint-server src + venv"
 if sudo test -d "$INSTALL_DIR/src/.git"; then
   current_ref=$(sudo -u "$RUN_USER" git -C "$INSTALL_DIR/src" rev-parse HEAD)
@@ -265,6 +323,7 @@ else
   ok "created venv + installed requirements.txt + verified deps"
   RESTART_RELAY=1
 fi
+fi  # MODE == self-hosted (closes step 3 self-hosted branch)
 
 # ─── 4. Build + install agentkeys-mcp-server binary ──────────────────
 head "4/9 agentkeys-mcp-server binary"
@@ -293,9 +352,22 @@ fi
 
 # ─── 5. /etc/agentkeys/mcp.env ───────────────────────────────────────
 head "5/9 /etc/agentkeys/mcp.env"
-want_env=$(cat <<EOF
-# Generated by scripts/setup-mcp-host.sh — DO NOT HAND-EDIT
-# Re-run the script to regenerate. Backed by ${TOKEN_FILE} + ${HEALTH_KEY_FILE}.
+if [ "$MODE" = "xiaozhi" ]; then
+  want_env=$(cat <<EOF
+# Generated by scripts/setup-mcp-host.sh (mode=xiaozhi) — DO NOT HAND-EDIT.
+# Endpoint URL persisted at ${XIAOZHI_ENDPOINT_FILE}.
+MCP_TRANSPORT=mcp-endpoint
+MCP_BACKEND=http
+MCP_ENDPOINT=${XIAOZHI_ENDPOINT}
+AGENTKEYS_BROKER_URL=https://broker.litentry.org
+AGENTKEYS_MEMORY_URL=https://memory.litentry.org
+AGENTKEYS_AUDIT_URL=https://audit.litentry.org
+EOF
+)
+else
+  want_env=$(cat <<EOF
+# Generated by scripts/setup-mcp-host.sh (mode=self-hosted) — DO NOT HAND-EDIT.
+# Backed by ${TOKEN_FILE} + ${HEALTH_KEY_FILE}.
 MCP_TRANSPORT=mcp-endpoint
 MCP_BACKEND=http
 MCP_ENDPOINT=ws://127.0.0.1:${RELAY_PORT}/mcp_endpoint/mcp/?token=${TOKEN}
@@ -306,6 +378,7 @@ AGENTKEYS_MEMORY_URL=https://memory.litentry.org
 AGENTKEYS_AUDIT_URL=https://audit.litentry.org
 EOF
 )
+fi
 got_env=$(sudo cat "$ENV_FILE" 2>/dev/null || true)
 if [ "$want_env" = "$got_env" ]; then
   skip "$ENV_FILE already matches target"
@@ -318,9 +391,12 @@ else
 fi
 
 # ─── 6. systemd units ────────────────────────────────────────────────
-head "6/9 systemd units (mcp-endpoint-server + agentkeys-mcp-server)"
+RELAY_UNIT_PATH=/etc/systemd/system/mcp-endpoint-server.service
+MCP_UNIT_PATH=/etc/systemd/system/agentkeys-mcp-server.service
 
-want_relay_unit=$(cat <<EOF
+if [ "$MODE" = "self-hosted" ]; then
+  head "6/9 systemd units (mcp-endpoint-server + agentkeys-mcp-server)"
+  want_relay_unit=$(cat <<EOF
 [Unit]
 Description=MCP endpoint relay (xiaozhi tool registration)
 After=network-online.target
@@ -339,22 +415,40 @@ Environment=PORT=${RELAY_PORT}
 WantedBy=multi-user.target
 EOF
 )
-RELAY_UNIT_PATH=/etc/systemd/system/mcp-endpoint-server.service
-got=$(sudo cat "$RELAY_UNIT_PATH" 2>/dev/null || true)
-if [ "$want_relay_unit" = "$got" ]; then
-  skip "${RELAY_UNIT_PATH##*/} already up to date"
+  got=$(sudo cat "$RELAY_UNIT_PATH" 2>/dev/null || true)
+  if [ "$want_relay_unit" = "$got" ]; then
+    skip "${RELAY_UNIT_PATH##*/} already up to date"
+  else
+    printf '%s\n' "$want_relay_unit" | sudo tee "$RELAY_UNIT_PATH" >/dev/null
+    ok "wrote ${RELAY_UNIT_PATH##*/}"
+    DAEMON_RELOAD=1
+    RESTART_RELAY=1
+  fi
+  MCP_UNIT_AFTER="network-online.target mcp-endpoint-server.service"
+  MCP_UNIT_WANTS="network-online.target mcp-endpoint-server.service"
 else
-  printf '%s\n' "$want_relay_unit" | sudo tee "$RELAY_UNIT_PATH" >/dev/null
-  ok "wrote ${RELAY_UNIT_PATH##*/}"
-  DAEMON_RELOAD=1
-  RESTART_RELAY=1
+  head "6/9 systemd unit (agentkeys-mcp-server only — xiaozhi mode)"
+  # Stop + disable any leftover self-hosted relay unit so we don't waste
+  # resources or expose a half-configured port.
+  if sudo test -f "$RELAY_UNIT_PATH"; then
+    if sudo systemctl is-active --quiet mcp-endpoint-server.service 2>/dev/null; then
+      sudo systemctl stop mcp-endpoint-server.service
+      ok "stopped leftover mcp-endpoint-server.service (xiaozhi mode)"
+    fi
+    if sudo systemctl is-enabled --quiet mcp-endpoint-server.service 2>/dev/null; then
+      sudo systemctl disable mcp-endpoint-server.service >/dev/null 2>&1 || true
+      ok "disabled mcp-endpoint-server.service (xiaozhi mode)"
+    fi
+  fi
+  MCP_UNIT_AFTER="network-online.target"
+  MCP_UNIT_WANTS="network-online.target"
 fi
 
 want_mcp_unit=$(cat <<EOF
 [Unit]
 Description=AgentKeys MCP server (xiaozhi MCP-endpoint tool)
-After=network-online.target mcp-endpoint-server.service
-Wants=network-online.target mcp-endpoint-server.service
+After=${MCP_UNIT_AFTER}
+Wants=${MCP_UNIT_WANTS}
 
 [Service]
 Type=simple
@@ -369,7 +463,6 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 )
-MCP_UNIT_PATH=/etc/systemd/system/agentkeys-mcp-server.service
 got=$(sudo cat "$MCP_UNIT_PATH" 2>/dev/null || true)
 if [ "$want_mcp_unit" = "$got" ]; then
   skip "${MCP_UNIT_PATH##*/} already up to date"
@@ -382,14 +475,18 @@ fi
 
 [ "${DAEMON_RELOAD:-0}" = "1" ] && sudo systemctl daemon-reload
 
-sudo systemctl enable mcp-endpoint-server.service >/dev/null 2>&1 || true
+if [ "$MODE" = "self-hosted" ]; then
+  sudo systemctl enable mcp-endpoint-server.service >/dev/null 2>&1 || true
+fi
 sudo systemctl enable agentkeys-mcp-server.service >/dev/null 2>&1 || true
 
-if [ "${RESTART_RELAY:-0}" = "1" ]; then
-  sudo systemctl restart mcp-endpoint-server.service
-  ok "restarted mcp-endpoint-server.service"
-else
-  sudo systemctl start mcp-endpoint-server.service 2>/dev/null || true
+if [ "$MODE" = "self-hosted" ]; then
+  if [ "${RESTART_RELAY:-0}" = "1" ]; then
+    sudo systemctl restart mcp-endpoint-server.service
+    ok "restarted mcp-endpoint-server.service"
+  else
+    sudo systemctl start mcp-endpoint-server.service 2>/dev/null || true
+  fi
 fi
 if [ "${RESTART_MCP:-0}" = "1" ]; then
   sudo systemctl restart agentkeys-mcp-server.service
@@ -640,7 +737,7 @@ EOF
 fi      # WITH_NGINX && WITH_CERTBOT
 
 # ─── 9. nginx reload (only if drift) + post-checks ───────────────────
-if [ "$WITH_NGINX" = "yes" ]; then
+if [ "$MODE" = "self-hosted" ]; then
   head "9/9 nginx reload + post-checks"
   if [ "${RELOAD_NGINX:-0}" = "1" ]; then
     sudo nginx -t
@@ -686,17 +783,62 @@ if [ "$WITH_NGINX" = "yes" ]; then
   # only just pointed mcp.litentry.org at this host.
   echo "    nginx vhost wired for ${DOMAIN}. Verify externally once DNS A record is live:" >&2
   echo "      curl -sf https://${DOMAIN}/mcp_endpoint/health?key=${HEALTH_KEY}" >&2
+else
+  # Xiaozhi mode — no nginx, no local relay. Check that agentkeys-mcp-server
+  # is up and connecting to the cloud endpoint. The journal log will show
+  # `mcp-endpoint: connected; awaiting MCP frames` once paired.
+  head "9/9 agentkeys-mcp-server post-check (xiaozhi mode)"
+  mcp_ok="no"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if sudo systemctl is-active --quiet agentkeys-mcp-server.service; then
+      mcp_ok="yes"; break
+    fi
+    sleep 1.5
+  done
+
+  if [ "$mcp_ok" = "yes" ]; then
+    ok "agentkeys-mcp-server.service is active"
+    # Surface a few recent log lines so the operator sees the outbound
+    # connect attempt (or any error) without having to journalctl by hand.
+    echo "    recent log lines:" >&2
+    sudo journalctl -u agentkeys-mcp-server.service -n 8 --no-pager 2>&1 | sed 's/^/      /' >&2 || true
+  else
+    echo >&2
+    echo "    --- diagnostics: agentkeys-mcp-server.service didn't become active in 15s ---" >&2
+    echo "    systemctl status:" >&2
+    sudo systemctl status agentkeys-mcp-server.service --no-pager --lines=0 2>&1 | sed 's/^/      /' >&2 || true
+    echo "    last 30 journal lines:" >&2
+    sudo journalctl -u agentkeys-mcp-server.service -n 30 --no-pager 2>&1 | sed 's/^/      /' >&2 || true
+    echo "    env file (${ENV_FILE}):" >&2
+    sudo cat "$ENV_FILE" 2>&1 | sed 's/^/      /' >&2 || true
+    echo "    --- end diagnostics ---" >&2
+    echo >&2
+    fail "agentkeys-mcp-server didn't start (see diagnostics above)"
+  fi
 fi
 
 echo
 head "ready"
-echo "    Tool URL  (this MCP server connects here):"  >&2
-echo "      wss://${DOMAIN}/mcp_endpoint/mcp/?token=${TOKEN}" >&2
-echo "    Client URL (xiaozhi cloud / xiaozhi-server connects here):" >&2
-echo "      wss://${DOMAIN}/mcp_endpoint/call/?token=${TOKEN}" >&2
-echo "    Health URL (智控台 health probe):" >&2
-echo "      https://${DOMAIN}/mcp_endpoint/health?key=${HEALTH_KEY}" >&2
-echo >&2
-echo "    Token + key persisted under ${ENV_FILE_DIR}/ (0600). Re-running this" >&2
-echo "    script never regenerates them — URLs stay stable across deploys." >&2
-echo "    Paste the client URL into 智控台 → 智能体 → MCP接入点." >&2
+if [ "$MODE" = "xiaozhi" ]; then
+  echo "    MODE: xiaozhi (xiaozhi.me hosts the MCP-endpoint relay)" >&2
+  echo "    Endpoint (this MCP server connects out to):" >&2
+  echo "      ${XIAOZHI_ENDPOINT}" >&2
+  echo >&2
+  echo "    Endpoint persisted at ${XIAOZHI_ENDPOINT_FILE} (0600)." >&2
+  echo "    Re-runs preserve it; pass --xiaozhi-endpoint <URL> to update." >&2
+  echo >&2
+  echo "    Refresh 智控台 → 智能体 → MCP接入点 — status should flip from" >&2
+  echo "    '未连接' to '已连接' within ~5 seconds." >&2
+else
+  echo "    MODE: self-hosted (mcp-endpoint-server running locally)" >&2
+  echo "    Tool URL  (this MCP server connects here):"  >&2
+  echo "      wss://${DOMAIN}/mcp_endpoint/mcp/?token=${TOKEN}" >&2
+  echo "    Client URL (xiaozhi cloud / xiaozhi-server connects here):" >&2
+  echo "      wss://${DOMAIN}/mcp_endpoint/call/?token=${TOKEN}" >&2
+  echo "    Health URL (智控台 health probe):" >&2
+  echo "      https://${DOMAIN}/mcp_endpoint/health?key=${HEALTH_KEY}" >&2
+  echo >&2
+  echo "    Token + key persisted under ${ENV_FILE_DIR}/ (0600). Re-running this" >&2
+  echo "    script never regenerates them — URLs stay stable across deploys." >&2
+  echo "    Paste the client URL into 智控台 → 智能体 → MCP接入点." >&2
+fi

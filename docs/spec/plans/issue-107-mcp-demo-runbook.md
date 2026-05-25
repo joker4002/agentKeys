@@ -425,12 +425,24 @@ Capture for the next step:
 
 The whole §B.5–§B.6 install (mcp-endpoint-server clone + venv, agentkeys-mcp-server build + install, systemd units, nginx vhost with wss → ws upgrade, certbot cert, env file with auto-generated token + health-key) is one script. Per CLAUDE.md's "Idempotent remote-setup rule" — every step pre-checks state and exits 0 on a clean second run.
 
-Run it on the broker host (same host setup-broker-host.sh ran on):
+Run it on the broker host (same host setup-broker-host.sh ran on). The script has two modes:
+
+**Mode A — xiaozhi-hosted (DEFAULT, recommended).** Xiaozhi.me hosts the MCP-endpoint relay; the script just runs `agentkeys-mcp-server` and points it at xiaozhi's WS URL. No nginx, no certbot, no `mcp.litentry.org` DNS needed.
 
 ```bash
-# Bring-up / upgrade — same command for first run and every re-run.
-bash scripts/setup-mcp-host.sh             # prod  → mcp.litentry.org
-bash scripts/setup-mcp-host.sh --test      # test  → test-mcp.litentry.org
+# 1. Get the endpoint URL: 智控台 → 智能体 → MCP接入点 → 接入点地址
+# 2. Paste it once — persisted at /etc/agentkeys/mcp-xiaozhi-endpoint
+bash scripts/setup-mcp-host.sh --xiaozhi-endpoint 'wss://api.xiaozhi.me/mcp/?token=…'
+
+# Re-runs (upgrades, env changes) — URL loaded from disk
+bash scripts/setup-mcp-host.sh
+```
+
+**Mode B — self-hosted relay (legacy / custom endpoints).** Operator runs their own `mcp-endpoint-server` behind nginx with a real cert. Needs the `mcp.litentry.org` DNS A record from `setup-cloud.sh` step 6.
+
+```bash
+bash scripts/setup-mcp-host.sh --self-hosted-relay              # prod → mcp.litentry.org
+bash scripts/setup-mcp-host.sh --self-hosted-relay --test       # test → test-mcp.litentry.org
 ```
 
 > **ACME account email** — Let's Encrypt records one email per ACME account; used for cert-expiry / renewal-failure notifications. The script picks one of three behaviors:
