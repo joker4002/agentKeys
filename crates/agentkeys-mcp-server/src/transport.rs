@@ -178,9 +178,12 @@ pub async fn run_mcp_endpoint(server: std::sync::Arc<Server>, url: String) -> an
                 _ => continue,
             };
 
+            tracing::debug!(frame = %truncate(&text, 400), "mcp-endpoint: recv");
+
             let req: crate::mcp::Request = match serde_json::from_str(&text) {
                 Ok(r) => r,
                 Err(e) => {
+                    tracing::warn!(error = %e, frame = %truncate(&text, 200), "mcp-endpoint: parse error");
                     let resp = crate::mcp::Response::error(
                         None,
                         crate::mcp::codes::PARSE_ERROR,
@@ -193,15 +196,40 @@ pub async fn run_mcp_endpoint(server: std::sync::Arc<Server>, url: String) -> an
                 }
             };
 
+            // Tool calls are interesting enough to log at info; everything
+            // else (initialize, tools/list, notifications/initialized,
+            // ping) is debug-level noise.
+            if req.method == "tools/call" {
+                let tool_name = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                tracing::info!(
+                    id = ?req.id, tool = %tool_name,
+                    "mcp-endpoint: tool call"
+                );
+            } else {
+                tracing::debug!(method = %req.method, id = ?req.id, "mcp-endpoint: request");
+            }
+
             // MCP `notifications/initialized` has no `id` and expects no
             // response — match xiaozhi's mcp_endpoint_handler.py.
             let is_notification = req.id.is_none();
+            let method_for_log = req.method.clone();
             let resp = server.dispatch(&caller, "", req).await;
             if !is_notification {
-                if let Err(e) = write
-                    .send(Message::Text(serde_json::to_string(&resp).unwrap()))
-                    .await
-                {
+                if resp.error.is_some() {
+                    tracing::warn!(
+                        method = %method_for_log,
+                        error = ?resp.error,
+                        "mcp-endpoint: dispatch error"
+                    );
+                }
+                let out = serde_json::to_string(&resp).unwrap();
+                tracing::debug!(frame = %truncate(&out, 400), "mcp-endpoint: send");
+                if let Err(e) = write.send(Message::Text(out)).await {
                     tracing::warn!(error = %e, "mcp-endpoint: write error; will reconnect");
                     break;
                 }
@@ -211,5 +239,15 @@ pub async fn run_mcp_endpoint(server: std::sync::Arc<Server>, url: String) -> an
         tracing::info!(backoff_secs, "mcp-endpoint: disconnected; reconnecting");
         tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
         backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+    }
+}
+
+/// Truncate a string to `n` chars for log output, appending an ellipsis
+/// when truncation happens. Used to keep frame logs readable.
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…<{} bytes total>", &s[..n], s.len())
     }
 }
