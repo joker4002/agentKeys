@@ -139,9 +139,10 @@ pub async fn run_mcp_endpoint(server: std::sync::Arc<Server>, url: String) -> an
     let caller = CallerContext::local_stdio();
     let mut backoff_secs: u64 = 1;
     const MAX_BACKOFF_SECS: u64 = 600;
+    let redacted = redact_url(&url);
 
     loop {
-        tracing::info!(url = %url, "mcp-endpoint: connecting");
+        tracing::info!(url = %redacted, "mcp-endpoint: connecting");
         let conn = match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _resp)) => ws,
             Err(e) => {
@@ -249,5 +250,47 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…<{} bytes total>", &s[..n], s.len())
+    }
+}
+
+/// Replace the `token=…` query value with `<JWT>` so journalctl /
+/// stdout don't leak the cap token. The token is a Bearer secret —
+/// anyone holding it can impersonate this MCP server to the relay.
+fn redact_url(url: &str) -> String {
+    if let Some(idx) = url.find("token=") {
+        let prefix_end = idx + "token=".len();
+        let suffix_start = url[prefix_end..]
+            .find('&')
+            .map(|off| prefix_end + off)
+            .unwrap_or(url.len());
+        format!("{}<JWT>{}", &url[..prefix_end], &url[suffix_start..])
+    } else {
+        url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url;
+
+    #[test]
+    fn redact_url_strips_jwt() {
+        assert_eq!(
+            redact_url("wss://api.xiaozhi.me/mcp/?token=eyJhbGc.somepayload.sig"),
+            "wss://api.xiaozhi.me/mcp/?token=<JWT>"
+        );
+    }
+
+    #[test]
+    fn redact_url_preserves_trailing_params() {
+        assert_eq!(
+            redact_url("wss://x.example/?token=secret&user=bob"),
+            "wss://x.example/?token=<JWT>&user=bob"
+        );
+    }
+
+    #[test]
+    fn redact_url_passthrough_when_no_token() {
+        assert_eq!(redact_url("ws://127.0.0.1:8004/"), "ws://127.0.0.1:8004/");
     }
 }

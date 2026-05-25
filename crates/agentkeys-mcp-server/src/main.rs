@@ -57,7 +57,14 @@ async fn main() -> anyhow::Result<()> {
             let url = config.mcp_endpoint.clone().expect(
                 "mcp_endpoint required for McpEndpoint transport — validated in Config::from_cli",
             );
-            tracing::info!(url = %url, "agentkeys-mcp-server running (mcp-endpoint)");
+            // Don't log the raw URL — it carries the bearer JWT.
+            // run_mcp_endpoint redacts internally.
+            let host = url
+                .split("://")
+                .nth(1)
+                .and_then(|rest| rest.split(['/', '?']).next())
+                .unwrap_or("?");
+            tracing::info!(host, "agentkeys-mcp-server running (mcp-endpoint)");
             transport::run_mcp_endpoint(server, url).await?;
         }
     }
