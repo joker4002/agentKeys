@@ -80,11 +80,24 @@ impl Server {
         }
     }
 
-    fn handle_initialize(&self, id: Option<Value>, _params: Option<Value>) -> Response {
+    fn handle_initialize(&self, id: Option<Value>, params: Option<Value>) -> Response {
+        // Negotiate protocol version: echo the client's `protocolVersion`
+        // when present and recognizable, fall back to our own. Xiaozhi's
+        // hosted relay sends "2024-11-05"; if we respond with a different
+        // (newer) string, it closes the WS immediately as an unsupported-
+        // version signal.
+        const KNOWN_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26"];
+        let negotiated_version = params
+            .as_ref()
+            .and_then(|p| p.get("protocolVersion"))
+            .and_then(|v| v.as_str())
+            .filter(|v| KNOWN_VERSIONS.contains(v))
+            .unwrap_or(MCP_PROTOCOL_VERSION);
+
         Response::success(
             id,
             json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": negotiated_version,
                 "capabilities": {
                     "tools": {"listChanged": false}
                 },

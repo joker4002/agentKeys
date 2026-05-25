@@ -12,6 +12,11 @@ use agentkeys_mcp_server::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rustls 0.23 requires a process-level CryptoProvider. tokio-tungstenite
+    // pulls rustls in with no provider feature; without this install_default
+    // the McpEndpoint transport panics on the first wss:// connect.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
