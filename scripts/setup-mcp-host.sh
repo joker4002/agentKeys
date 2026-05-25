@@ -29,6 +29,17 @@
 #   bash scripts/setup-mcp-host.sh                          # bring up / upgrade
 #   bash scripts/setup-mcp-host.sh --domain mcp.litentry.org --certbot-email …
 #   bash scripts/setup-mcp-host.sh --without-nginx --without-certbot   # skip the TLS layer
+#   bash scripts/setup-mcp-host.sh --without-route53        # don't touch Route53 (use existing DNS)
+#   bash scripts/setup-mcp-host.sh --hosted-zone-id Z…      # skip zone autodetect (faster)
+#   bash scripts/setup-mcp-host.sh --host-ip 1.2.3.4        # override IMDS / checkip detection
+#
+# Route53 management: when WITH_ROUTE53=yes (the default) AND the AWS CLI
+# is on PATH AND the host's credentials can reach Route53, the script
+# UPSERTs an A record DOMAIN → this host's public IP before running
+# certbot. The UPSERT is idempotent (skip when record already correct,
+# refuse to clobber a record pointing elsewhere). If AWS CLI or Route53
+# perms aren't present, the script falls through to a DNS-poll-wait and
+# tells the operator what record to create.
 #
 set -euo pipefail
 export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
@@ -51,7 +62,10 @@ NGINX_SITE_LINK="/etc/nginx/sites-enabled/${DOMAIN}"
 WITH_NGINX="yes"
 WITH_CERTBOT="yes"
 WITH_BUILD="yes"
+WITH_ROUTE53="yes"            # auto-manage the A record via Route53 when AWS CLI + perms are present
 CERTBOT_EMAIL=""
+HOSTED_ZONE_ID=""             # override Route53 zone autodetect (e.g. Z09723983CFJOHAE3VC65)
+HOST_IP_OVERRIDE=""           # override IMDS / checkip detection of this host's public IP
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,9 +74,12 @@ while [[ $# -gt 0 ]]; do
     --without-nginx)   WITH_NGINX="no"; shift ;;
     --without-certbot) WITH_CERTBOT="no"; shift ;;
     --without-build)   WITH_BUILD="no"; shift ;;
+    --without-route53) WITH_ROUTE53="no"; shift ;;
+    --hosted-zone-id)  HOSTED_ZONE_ID="$2"; shift 2 ;;
+    --host-ip)         HOST_IP_OVERRIDE="$2"; shift 2 ;;
     --relay-port)      RELAY_PORT="$2"; shift 2 ;;
     --relay-ref)       RELAY_PIN_REF="$2"; shift 2 ;;
-    --help|-h)         sed -n '2,40p' "$0"; exit 0 ;;
+    --help|-h)         sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
@@ -139,6 +156,8 @@ echo "    mcp binary dst:    ${MCP_BIN_DST}" >&2
 echo "    with nginx:        ${WITH_NGINX}" >&2
 echo "    with certbot:      ${WITH_CERTBOT}" >&2
 echo "    with build:        ${WITH_BUILD}" >&2
+echo "    with route53:      ${WITH_ROUTE53} (hosted_zone=${HOSTED_ZONE_ID:-auto-detect})" >&2
+echo "    host-ip override:  ${HOST_IP_OVERRIDE:-<IMDS / checkip>}" >&2
 
 # ─── 1. /etc/agentkeys exists with the right perms ───────────────────
 head "1/9 /etc/agentkeys layout"
@@ -472,9 +491,16 @@ else
   skip "--without-nginx; skipping vhost"
 fi
 
-# ─── 8. certbot cert (idempotent: reuses existing) ───────────────────
+# ─── 8. DNS A record + certbot cert (idempotent) ─────────────────────
+# Sub-steps:
+#   8a. Detect this host's public IP (IMDS first, then external service).
+#   8b. Route53: UPSERT A record → host IP if WITH_ROUTE53=yes and creds
+#       are reachable. Refuses to overwrite a record pointing elsewhere.
+#   8c. Poll until the public resolver sees the record.
+#   8d. certbot certonly --webroot (issues only when DNS is live).
+#   8e. Flip nginx vhost phase A → B (TLS on).
 if [ "$WITH_NGINX" = "yes" ] && [ "$WITH_CERTBOT" = "yes" ]; then
-  head "8/9 certbot certificate for ${DOMAIN}"
+  head "8/9 DNS A record + certbot certificate for ${DOMAIN}"
   if sudo test -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"; then
     skip "cert already issued at /etc/letsencrypt/live/${DOMAIN}/ (certbot will auto-renew)"
   else
@@ -499,37 +525,120 @@ if [ "$WITH_NGINX" = "yes" ] && [ "$WITH_CERTBOT" = "yes" ]; then
       echo "     --certbot-email <addr> later to attach a recovery address.)" >&2
     fi
 
-    # DNS pre-flight: certbot fails with NXDOMAIN if the A record isn't
-    # live yet. Check before attempting — a clear skip with an action
-    # item is much more useful than a cryptic certbot error.
-    MY_IP=$(curl -sf --max-time 5 http://checkip.amazonaws.com 2>/dev/null \
-              || curl -sf --max-time 5 https://api.ipify.org 2>/dev/null \
-              || echo "")
-    DNS_IP=$(dig +short A "$DOMAIN" 2>/dev/null | head -1 \
-               || getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -1 \
-               || echo "")
+    # 8a. Detect public IP. IMDSv2 (EC2 metadata) first; fall back to
+    # external lookup. Operator can override with --host-ip.
+    HOST_IP="$HOST_IP_OVERRIDE"
+    if [ -z "$HOST_IP" ]; then
+      IMDS_TOKEN=$(curl -sf -X PUT --max-time 3 \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+        http://169.254.169.254/latest/api/token 2>/dev/null || true)
+      if [ -n "$IMDS_TOKEN" ]; then
+        HOST_IP=$(curl -sf --max-time 3 \
+          -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+          http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+      fi
+    fi
+    if [ -z "$HOST_IP" ]; then
+      HOST_IP=$(curl -sf --max-time 5 http://checkip.amazonaws.com 2>/dev/null \
+                  || curl -sf --max-time 5 https://api.ipify.org 2>/dev/null \
+                  || echo "")
+    fi
+    if [ -z "$HOST_IP" ]; then
+      fail "could not detect this host's public IP (no IMDS, no external lookup)"
+    fi
+    ok "this host's public IP: ${HOST_IP}"
+
+    # 8b. Route53 UPSERT (idempotent — skip when record already correct).
+    if [ "$WITH_ROUTE53" = "yes" ] && command -v aws >/dev/null 2>&1; then
+      if [ -z "$HOSTED_ZONE_ID" ]; then
+        # Parse "litentry.org" from "mcp.litentry.org" (last two labels).
+        ZONE_NAME=$(echo "$DOMAIN" | awk -F. '{n=NF; print $(n-1)"."$n}')
+        HOSTED_ZONE_ID=$(aws route53 list-hosted-zones \
+          --query "HostedZones[?Name=='${ZONE_NAME}.'].Id | [0]" \
+          --output text 2>/dev/null | sed 's|/hostedzone/||' || true)
+      fi
+
+      if [ -n "$HOSTED_ZONE_ID" ] && [ "$HOSTED_ZONE_ID" != "None" ]; then
+        EXISTING_IP=$(aws route53 list-resource-record-sets \
+          --hosted-zone-id "$HOSTED_ZONE_ID" \
+          --query "ResourceRecordSets[?Name=='${DOMAIN}.' && Type=='A'].ResourceRecords[0].Value | [0]" \
+          --output text 2>/dev/null || echo "")
+        if [ "$EXISTING_IP" = "$HOST_IP" ]; then
+          skip "route53: A record ${DOMAIN} → ${HOST_IP} already correct (zone ${HOSTED_ZONE_ID})"
+        elif [ -n "$EXISTING_IP" ] && [ "$EXISTING_IP" != "None" ]; then
+          echo "    route53: A record ${DOMAIN} → ${EXISTING_IP}, but this host is ${HOST_IP}." >&2
+          echo "    Refusing to auto-overwrite an existing record pointing elsewhere." >&2
+          echo "    Either update the record manually, point this host at the recorded IP," >&2
+          echo "    or re-run with --host-ip ${EXISTING_IP} once you've confirmed it's this host." >&2
+          fail "route53: A record conflict for ${DOMAIN}"
+        else
+          CHANGE_BATCH=$(jq -n --arg dom "${DOMAIN}." --arg ip "$HOST_IP" '{
+            Comment: "agentkeys-mcp-server: setup-mcp-host.sh UPSERT",
+            Changes: [{
+              Action: "UPSERT",
+              ResourceRecordSet: {
+                Name: $dom, Type: "A", TTL: 300,
+                ResourceRecords: [{ Value: $ip }]
+              }
+            }]
+          }')
+          CHANGE_ID=$(aws route53 change-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --change-batch "$CHANGE_BATCH" \
+            --query "ChangeInfo.Id" --output text 2>/dev/null || echo "")
+          if [ -n "$CHANGE_ID" ] && [ "$CHANGE_ID" != "None" ]; then
+            ok "route53: UPSERT'd ${DOMAIN} → ${HOST_IP} (change ${CHANGE_ID##*/}, zone ${HOSTED_ZONE_ID})"
+            # Wait for Route53 to propagate the change (INSYNC).
+            for _ in $(seq 1 24); do  # 24 × 5s = up to 2 min
+              R53_STATUS=$(aws route53 get-change --id "$CHANGE_ID" \
+                --query "ChangeInfo.Status" --output text 2>/dev/null || echo "")
+              [ "$R53_STATUS" = "INSYNC" ] && break
+              sleep 5
+            done
+            if [ "$R53_STATUS" = "INSYNC" ]; then
+              ok "route53: change INSYNC (Route53 → all NS)"
+            else
+              skip "route53: still PENDING after 2 min (resolvers may still see it)"
+            fi
+          else
+            skip "route53: change-resource-record-sets call failed (likely IAM perm); falling through to DNS poll"
+          fi
+        fi
+      else
+        skip "route53: no hosted zone found for ${ZONE_NAME:-$DOMAIN} (pass --hosted-zone-id or grant route53:List perm)"
+      fi
+    elif [ "$WITH_ROUTE53" = "yes" ]; then
+      skip "route53: aws CLI not on PATH; cannot auto-create A record"
+    else
+      skip "route53: disabled via --without-route53"
+    fi
+
+    # 8c. Poll public resolver until the A record is visible. The
+    # Route53 INSYNC above only means "all NS know the record" — local
+    # resolvers cache and may take longer. We tolerate up to ~3 min.
+    DNS_IP=""
+    for i in $(seq 1 36); do  # 36 × 5s = 3 min
+      DNS_IP=$(dig +short A "$DOMAIN" @1.1.1.1 2>/dev/null | head -1 || true)
+      [ -z "$DNS_IP" ] && DNS_IP=$(dig +short A "$DOMAIN" 2>/dev/null | head -1 || true)
+      [ -z "$DNS_IP" ] && DNS_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -1 || true)
+      if [ -n "$DNS_IP" ]; then break; fi
+      [ "$i" -eq 1 ] && echo "    waiting up to 3 min for ${DOMAIN} to resolve via public DNS..." >&2
+      sleep 5
+    done
 
     DNS_OK="yes"
     if [ -z "$DNS_IP" ]; then
       DNS_OK="no"
-      echo "    DNS A record for ${DOMAIN} is not yet visible (NXDOMAIN)." >&2
-      echo "    Certbot's http-01 challenge will fail until DNS resolves." >&2
-      echo >&2
-      echo "    ACTION REQUIRED — create an A record in your DNS provider:" >&2
-      echo "      Name:  ${DOMAIN}" >&2
-      echo "      Type:  A" >&2
-      echo "      Value: ${MY_IP:-<PUBLIC_IP_OF_THIS_HOST>}" >&2
-      echo "      TTL:   300 (5 min)" >&2
-      echo >&2
-      echo "    Wait for TTL propagation, then re-run this script." >&2
-      echo "    The relay + MCP services are already running on port ${RELAY_PORT}." >&2
-      echo "    TLS and the wss:// URLs activate on the next run." >&2
+      echo "    DNS A record for ${DOMAIN} still not visible after 3 min." >&2
+      echo "    ACTION: create / verify an A record ${DOMAIN} → ${HOST_IP}, TTL 300, then re-run." >&2
       skip "cert deferred — DNS A record for ${DOMAIN} not yet live"
-    elif [ -n "$MY_IP" ] && [ "$DNS_IP" != "$MY_IP" ]; then
+    elif [ "$DNS_IP" != "$HOST_IP" ]; then
       DNS_OK="no"
-      echo "    DNS A for ${DOMAIN} resolves to ${DNS_IP}, but this host is ${MY_IP}." >&2
-      echo "    Update the A record to point at ${MY_IP} and re-run." >&2
-      skip "cert deferred — DNS A for ${DOMAIN} → ${DNS_IP} (expected ${MY_IP})"
+      echo "    DNS A for ${DOMAIN} resolves to ${DNS_IP}, but this host is ${HOST_IP}." >&2
+      echo "    Update the A record (or pass --host-ip ${DNS_IP} if this IS the right host) and re-run." >&2
+      skip "cert deferred — DNS A → ${DNS_IP} (expected ${HOST_IP})"
+    else
+      ok "DNS resolved: ${DOMAIN} → ${DNS_IP}"
     fi
 
     if [ "$DNS_OK" = "yes" ]; then

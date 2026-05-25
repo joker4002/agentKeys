@@ -432,6 +432,10 @@ bash scripts/setup-mcp-host.sh --domain mcp.litentry.org
 > 2. If you pass `--certbot-email <addr>`, that address is used. Pick any mailbox you actually monitor — a team alias if Litentry has one (`agentkeys@litentry.org` / `infra@litentry.org`), or your personal address.
 > 3. If neither applies, the script falls through to `--register-unsafely-without-email` — cert still issues; no expiry notifications. You can re-run later with `--certbot-email` to attach a recovery address.
 
+> **DNS A record (Route53)** — the script auto-manages the A record for `${DOMAIN}` when AWS CLI is present and the host's credentials can reach Route53 (`route53:ListHostedZones` + `route53:ChangeResourceRecordSets` + `route53:GetChange` + `route53:ListResourceRecordSets`). It detects this host's public IP via IMDSv2 (or `checkip.amazonaws.com` as fallback), UPSERTs the record, and polls until the change is INSYNC + visible via `1.1.1.1`. Idempotent: skips when the record already points at this host, refuses to clobber a record pointing elsewhere. Override with `--hosted-zone-id Z…` (skip zone autodetect), `--host-ip 1.2.3.4` (skip IMDS detection), or `--without-route53` (don't touch DNS at all — useful when DNS is managed by a different provider).
+>
+> If AWS CLI isn't installed or Route53 perms aren't granted, the script falls through to a 3-minute DNS poll-wait and prints the exact A record to create.
+
 What the script lands:
 
 - `/opt/agentkeys/mcp-endpoint/src/` — pinned clone of `xinnan-tech/mcp-endpoint-server` (default ref: `main`; override with `--relay-ref <sha>`).
