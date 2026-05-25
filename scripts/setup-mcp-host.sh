@@ -26,27 +26,28 @@
 # as `--with-mcp` once this stabilises.
 #
 # Usage:
-#   bash scripts/setup-mcp-host.sh                          # bring up / upgrade
-#   bash scripts/setup-mcp-host.sh --domain mcp.litentry.org --certbot-email …
-#   bash scripts/setup-mcp-host.sh --without-nginx --without-certbot   # skip the TLS layer
+#   bash scripts/setup-mcp-host.sh              # prod  → mcp.litentry.org
+#   bash scripts/setup-mcp-host.sh --test       # test  → test-mcp.litentry.org
+#   bash scripts/setup-mcp-host.sh --without-nginx --without-certbot   # skip TLS
+#   bash scripts/setup-mcp-host.sh --domain custom.example.com         # override
 #
-# DNS prerequisite: the A record for $DOMAIN (default $MCP_HOST or
-# mcp.litentry.org) is provisioned by scripts/setup-cloud.sh step 6
-# alongside the broker / signer / worker A records — one batched
-# Route53 UPSERT keeps every subdomain at the same EIP. Run it once
-# at account bootstrap; setup-mcp-host.sh is downstream of it.
-# When this script runs before the A record exists, step 8 polls for
-# up to 3 min, then skips the cert (services stay up; re-run after DNS).
+# Domain resolution (highest to lowest precedence):
+#   1. --domain X                       explicit
+#   2. --test                           → test-mcp.litentry.org
+#   3. $MCP_HOST from environment       (operator-workstation.env|.test.env)
+#   4. fallback                         → mcp.litentry.org
+#
+# DNS prerequisite: the A record for the chosen domain is provisioned by
+# scripts/setup-cloud.sh step 6 alongside the broker / signer / worker A
+# records — one batched Route53 UPSERT keeps every subdomain at the same
+# EIP. Run it once at account bootstrap; setup-mcp-host.sh is downstream.
+# When the A record isn't live yet, step 8 skips the cert and points the
+# operator at setup-cloud.sh (services stay up; re-run after DNS).
 #
 set -euo pipefail
 export HOME="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-# DOMAIN — honors $MCP_HOST from operator-workstation.env / .test.env when
-# pre-sourced; defaults to the prod hostname. --domain overrides everything.
-# DNS records are provisioned by scripts/setup-cloud.sh step 6 — this
-# script just consumes them.
-DOMAIN="${MCP_HOST:-mcp.litentry.org}"
 RELAY_PORT="8004"
 INSTALL_DIR="/opt/agentkeys/mcp-endpoint"
 RELAY_REPO="https://github.com/xinnan-tech/mcp-endpoint-server.git"
@@ -58,16 +59,17 @@ TOKEN_FILE="${ENV_FILE_DIR}/mcp-tool-token"
 HEALTH_KEY_FILE="${ENV_FILE_DIR}/mcp-health-key"
 MCP_BIN_DST="/usr/local/bin/agentkeys-mcp-server"
 MCP_BIN_SRC="${REPO_ROOT}/target/release/agentkeys-mcp-server"
-NGINX_SITE="/etc/nginx/sites-available/${DOMAIN}"
-NGINX_SITE_LINK="/etc/nginx/sites-enabled/${DOMAIN}"
 WITH_NGINX="yes"
 WITH_CERTBOT="yes"
 WITH_BUILD="yes"
 CERTBOT_EMAIL=""
+TEST_MODE="no"
+DOMAIN_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --domain)          DOMAIN="$2"; shift 2 ;;
+    --test)            TEST_MODE="yes"; shift ;;
+    --domain)          DOMAIN_OVERRIDE="$2"; shift 2 ;;
     --certbot-email)   CERTBOT_EMAIL="$2"; shift 2 ;;
     --without-nginx)   WITH_NGINX="no"; shift ;;
     --without-certbot) WITH_CERTBOT="no"; shift ;;
@@ -78,6 +80,19 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
+
+# Resolve DOMAIN per the precedence rules in the header comment.
+if [ -n "$DOMAIN_OVERRIDE" ]; then
+  DOMAIN="$DOMAIN_OVERRIDE"
+elif [ "$TEST_MODE" = "yes" ]; then
+  DOMAIN="test-mcp.litentry.org"
+elif [ -n "${MCP_HOST:-}" ]; then
+  DOMAIN="$MCP_HOST"
+else
+  DOMAIN="mcp.litentry.org"
+fi
+NGINX_SITE="/etc/nginx/sites-available/${DOMAIN}"
+NGINX_SITE_LINK="/etc/nginx/sites-enabled/${DOMAIN}"
 
 if [ -t 2 ]; then
   C_HEAD=$'\033[1;36m'; C_OK=$'\033[1;32m'; C_SKIP=$'\033[0;33m'; C_ERR=$'\033[1;31m'; C_RESET=$'\033[0m'
@@ -140,7 +155,7 @@ if ! id "$RUN_USER" >/dev/null 2>&1; then
 fi
 
 head "config"
-echo "    domain:            ${DOMAIN}" >&2
+echo "    domain:            ${DOMAIN}  (test_mode=${TEST_MODE})" >&2
 echo "    relay (local):     127.0.0.1:${RELAY_PORT}" >&2
 echo "    relay src:         ${RELAY_REPO}@${RELAY_PIN_REF}" >&2
 echo "    install dir:       ${INSTALL_DIR}" >&2

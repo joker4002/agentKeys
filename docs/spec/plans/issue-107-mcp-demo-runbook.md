@@ -429,7 +429,8 @@ Run it on the broker host (same host setup-broker-host.sh ran on):
 
 ```bash
 # Bring-up / upgrade — same command for first run and every re-run.
-bash scripts/setup-mcp-host.sh --domain mcp.litentry.org
+bash scripts/setup-mcp-host.sh             # prod  → mcp.litentry.org
+bash scripts/setup-mcp-host.sh --test      # test  → test-mcp.litentry.org
 ```
 
 > **ACME account email** — Let's Encrypt records one email per ACME account; used for cert-expiry / renewal-failure notifications. The script picks one of three behaviors:
