@@ -6,6 +6,8 @@ on:
     paths:
       - "crates/agentkeys-mcp-server/**"
       - "scripts/mcp-demo-mode-a.sh"
+      - "scripts/mcp-demo-mode-b-protocol.sh"
+      - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
       - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -14,6 +16,8 @@ on:
     paths:
       - "crates/agentkeys-mcp-server/**"
       - "scripts/mcp-demo-mode-a.sh"
+      - "scripts/mcp-demo-mode-b-protocol.sh"
+      - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
       - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -44,6 +48,20 @@ jobs:
       # between code and runbook §A in `docs/spec/plans/issue-107-mcp-demo-runbook.md`.
       - name: mcp demo (mode A — dev smoke)
         run: bash scripts/mcp-demo-mode-a.sh
+
+      # Phase B testing ladder (runbook §B.0). Modes B/C/D need `uv` to manage
+      # a Python venv on the fly so the official Anthropic mcp SDK + xiaozhi-
+      # server's own integration class can drive our server. These tiers catch
+      # bugs at the MCP wire layer, the xiaozhi integration layer, and the
+      # relay-topology layer respectively. No live broker or xiaozhi account.
+      - name: install uv (for modes B/C/D)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: mcp demo (mode B — Anthropic mcp SDK protocol smoke)
+        run: bash scripts/mcp-demo-mode-b-protocol.sh
+      - name: mcp demo (mode C — xiaozhi ServerMCPClient integration)
+        run: bash scripts/mcp-demo-mode-c-xiaozhi-client.sh
+      - name: mcp demo (mode D — xiaozhi MCP-endpoint relay topology)
+        run: bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh
 
   image:
     name: build + publish image

@@ -13,10 +13,27 @@ Run mode A first to validate the MCP server + the three-act storyboard. Run mode
 
 ## A. Dev / fresh-laptop demo
 
+### TL;DR — one line, end to end
+
+```bash
+bash scripts/mcp-demo-mode-a.sh
+```
+
+That's it. The script builds the binary, allocates an ephemeral port, boots
+the server with `--backend in-memory`, walks all three acts of the storyboard
+with JSON-RPC assertions, exercises the auth negative paths, and cleans up.
+Expected output ends with `ALL ASSERTIONS PASSED.` (19 checks). This is the
+same one-liner the CI workflow runs (see [`.github/workflows/mcp-server.yml`](../../../.github/workflows/mcp-server.yml)) — copy-paste-equivalent in CI and on
+your laptop.
+
+If you want to walk the demo manually instead of running the script, the
+sections below show every step + every assertion line by line.
+
 ### Prerequisites
 
 - Rust toolchain (`stable`, matches `rust-toolchain.toml`).
-- macOS or Linux. `curl` + a JSON pretty-printer (`jq`, `python3`, or `mcp-inspector`).
+- macOS or Linux. `curl` + a JSON pretty-printer (`jq` preferred, `python3`
+  as a fallback; the smoke script auto-detects).
 - Nothing else. No broker, no workers, no Docker, no LLM key.
 
 ### 1. Build + run the server
@@ -279,6 +296,24 @@ For those, see mode **B** below.
 ## B. Full xiaozhi demo via the MCP-endpoint relay (no firmware flash, no LLM key)
 
 > **Hardware-free, account-light.** The xiaozhi cloud already runs the LLM and already talks to xiaozhi devices in the wild. We register our MCP server as a tool with that cloud — no firmware to flash, no Doubao/Qwen key to provision. The only thing you need from xiaozhi's side is **a xiaozhi.me account with one agent (智能体)** so they hand us a relay URL to connect to. Mode D in the repo verifies this whole loop against a local mock relay, so every layer is exercised before you ever touch a real device.
+
+### B.0 How to test §B — four tiers from no resources to live cloud
+
+§B has resource requirements that can't be satisfied from a fresh laptop alone (live broker, xiaozhi.me agent, paired device). The correct way to test it is a **ladder of verification** — each tier catches a class of bugs the next-cheaper tier can't. Run them top-down and only move on when the current tier is green.
+
+| Tier | What it proves | What you need | One-line command |
+|---|---|---|---|
+| 1 | Server boots; in-memory backend three-act flow works; auth scoping works | Rust toolchain + curl + jq/python3 | `bash scripts/mcp-demo-mode-a.sh` |
+| 2 | MCP wire protocol is spec-compliant (Anthropic SDK can drive us) | `uv` (Python launcher) | `bash scripts/mcp-demo-mode-b-protocol.sh` |
+| 3 | xiaozhi-server's actual production integration class (`ServerMCPClient`) can call every tool, with sanitized names + deterministic fake-LLM tool choice | `uv` + git (clones xiaozhi-server) | `bash scripts/mcp-demo-mode-c-xiaozhi-client.sh` |
+| 4 | xiaozhi-style relay topology — two ws paths, token pairing, frame forwarding — end-to-end through `--transport mcp-endpoint` | `uv` (mock relay is Python) | `bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh` |
+| 5 | Live broker + workers + real `mcp-endpoint-server` on EC2 + a xiaozhi.me agent + a paired device | All of the above + AWS access + xiaozhi.me account + voice device | §B.4–§B.10 below |
+
+Tiers 1–4 are **CI-able**. They run in `.github/workflows/mcp-server.yml` and assert every claim in this section. **When all four pass, the only remaining failure modes are operator deploy errors and cloud-side config** — neither is a bug in our code.
+
+Tier 5 is operator-driven. There is no software substitute for "did the chain actually mint the cap with the right device binding" — that's why tier 5 is on hardware + live infrastructure.
+
+The fastest way to validate a §B change end-to-end without live resources: re-run **tier 4** (`mode-d`). It's the closest hardware-free approximation of production. The relay routing, the WebSocket frame protocol, the `--transport mcp-endpoint` reconnect logic, the three-act tool wiring — all exercised exactly as they will be in production. Tier 5 only adds: real `mcp-endpoint-server` binary instead of the mock, the xiaozhi cloud talking instead of a fake client, a real voice device instead of a script.
 
 ### B.1 Topology
 
