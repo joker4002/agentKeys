@@ -391,6 +391,11 @@ Mode D is the closest hardware-free approximation of B: it spins up a tiny mock 
 One-command idempotent bring-up of the existing AgentKeys infra per CLAUDE.md's "single entry point" rules:
 
 ```bash
+# If the AWS account hasn't been bootstrapped yet, this provisions
+# all DNS A records — including mcp.litentry.org / test-mcp.litentry.org
+# — alongside DKIM/SPF/DMARC/MX. Idempotent; safe to re-run.
+bash scripts/setup-cloud.sh --env-file scripts/operator-workstation.env
+
 AGENTKEYS_CHAIN=heima bash scripts/setup-heima.sh
 bash scripts/setup-broker-host.sh --upgrade
 AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh
@@ -432,9 +437,14 @@ bash scripts/setup-mcp-host.sh --domain mcp.litentry.org
 > 2. If you pass `--certbot-email <addr>`, that address is used. Pick any mailbox you actually monitor — a team alias if Litentry has one (`agentkeys@litentry.org` / `infra@litentry.org`), or your personal address.
 > 3. If neither applies, the script falls through to `--register-unsafely-without-email` — cert still issues; no expiry notifications. You can re-run later with `--certbot-email` to attach a recovery address.
 
-> **DNS A record (Route53)** — the script auto-manages the A record for `${DOMAIN}` when AWS CLI is present and the host's credentials can reach Route53 (`route53:ListHostedZones` + `route53:ChangeResourceRecordSets` + `route53:GetChange` + `route53:ListResourceRecordSets`). It detects this host's public IP via IMDSv2 (or `checkip.amazonaws.com` as fallback), UPSERTs the record, and polls until the change is INSYNC + visible via `1.1.1.1`. Idempotent: skips when the record already points at this host, refuses to clobber a record pointing elsewhere. Override with `--hosted-zone-id Z…` (skip zone autodetect), `--host-ip 1.2.3.4` (skip IMDS detection), or `--without-route53` (don't touch DNS at all — useful when DNS is managed by a different provider).
+> **DNS A record** — the A record for `$MCP_HOST` (prod `mcp.litentry.org`, test `test-mcp.litentry.org`) is provisioned by `scripts/setup-cloud.sh` step 6 alongside the broker + signer + worker subdomains — one batched Route53 UPSERT, all 7 A records point at the same EIP. Run it once at account bootstrap:
 >
-> If AWS CLI isn't installed or Route53 perms aren't granted, the script falls through to a 3-minute DNS poll-wait and prints the exact A record to create.
+> ```bash
+> set -a && source scripts/operator-workstation.env && set +a    # or .test.env + --test
+> bash scripts/setup-cloud.sh --env-file scripts/operator-workstation.env --only-step 6
+> ```
+>
+> If you run `setup-mcp-host.sh` before that, step 8 polls public DNS for 3 min, then skips the cert and prints the exact command to fix it. Services (relay + MCP server) stay up — TLS activates on the re-run after DNS is live.
 
 What the script lands:
 

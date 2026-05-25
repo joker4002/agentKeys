@@ -342,7 +342,7 @@ do_step_5() {
 }
 
 do_step_6() {
-  CUR_STEP=6; step "DNS records (DKIM + SPF + DMARC + MX + 6 A records to $EIP)"
+  CUR_STEP=6; step "DNS records (DKIM + SPF + DMARC + MX + 7 A records to $EIP)"
   : "${EIP:?EIP missing — re-run step 4 first}"
 
   local tokens t1 t2 t3
@@ -362,6 +362,7 @@ do_step_6() {
   : "${WORKER_EMAIL_HOST:?WORKER_EMAIL_HOST missing — must be set in $ENV_FILE}"
   : "${WORKER_CRED_HOST:?WORKER_CRED_HOST missing — must be set in $ENV_FILE}"
   : "${WORKER_MEMORY_HOST:?WORKER_MEMORY_HOST missing — must be set in $ENV_FILE}"
+  : "${MCP_HOST:?MCP_HOST missing — must be set in $ENV_FILE}"
 
   local change_batch
   change_batch=$(jq -n \
@@ -369,7 +370,7 @@ do_step_6() {
     --arg eip "$EIP" --arg broker "$BROKER_HOST" \
     --arg signer "$SIGNER_HOST" --arg audit "$WORKER_AUDIT_HOST" \
     --arg email "$WORKER_EMAIL_HOST" --arg cred "$WORKER_CRED_HOST" \
-    --arg memory "$WORKER_MEMORY_HOST" \
+    --arg memory "$WORKER_MEMORY_HOST" --arg mcp "$MCP_HOST" \
     --arg t1 "$t1" --arg t2 "$t2" --arg t3 "$t3" '{
       Comment: "AgentKeys cloud bootstrap (DKIM/SPF/DMARC/MX + broker subdomains)",
       Changes: [
@@ -384,16 +385,17 @@ do_step_6() {
         {Action:"UPSERT", ResourceRecordSet:{Name:$audit,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$email,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$cred,   Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:$memory, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}}
+        {Action:"UPSERT", ResourceRecordSet:{Name:$memory, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$mcp,    Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}}
       ]
     }')
 
-  [ "$DRY_RUN" = "1" ] && { warn "DRY: would change-resource-record-sets (12 UPSERTs)"; return; }
+  [ "$DRY_RUN" = "1" ] && { warn "DRY: would change-resource-record-sets (13 UPSERTs)"; return; }
 
   aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
     --change-batch "$change_batch" >/dev/null \
     || die "route53 change-resource-record-sets failed"
-  ok "DNS records UPSERTed (12 records; ~5min for DKIM verification)"
+  ok "DNS records UPSERTed (13 records; ~5min for DKIM verification)"
 }
 
 do_step_7() {
