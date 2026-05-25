@@ -134,10 +134,7 @@ pub enum BackendError {
     NotConfigured(&'static str),
 
     #[error("backend HTTP error ({status}): {body}")]
-    Http {
-        status: u16,
-        body: String,
-    },
+    Http { status: u16, body: String },
 
     #[error("backend transport error: {0}")]
     Transport(String),

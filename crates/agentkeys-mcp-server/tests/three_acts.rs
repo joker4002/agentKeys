@@ -10,12 +10,7 @@ mod common;
 
 use std::sync::Arc;
 
-use agentkeys_mcp_server::{
-    auth::CallerContext,
-    config::Config,
-    mcp::Request,
-    server::Server,
-};
+use agentkeys_mcp_server::{auth::CallerContext, config::Config, mcp::Request, server::Server};
 use common::MockBackend;
 use serde_json::json;
 
@@ -48,7 +43,11 @@ fn call_tool(name: &str, args: serde_json::Value) -> Request {
 #[tokio::test]
 async fn act_1_permissioned_memory_returns_travel_namespace_only() {
     let backend = Arc::new(MockBackend::new());
-    backend.seed_memory(ACTOR, "travel", "Chengdu trip — Apr 12 to 16, hotpot at Yulin.");
+    backend.seed_memory(
+        ACTOR,
+        "travel",
+        "Chengdu trip — Apr 12 to 16, hotpot at Yulin.",
+    );
     backend.seed_memory(ACTOR, "family", "Wife's bday Aug 3");
     backend.seed_memory(ACTOR, "profile", "Allergic to shellfish");
 
@@ -70,7 +69,11 @@ async fn act_1_permissioned_memory_returns_travel_namespace_only() {
         )
         .await;
 
-    assert!(resp.error.is_none(), "act 1 unexpected error: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "act 1 unexpected error: {:?}",
+        resp.error
+    );
     let result = resp.result.expect("result");
     let content = result["structuredContent"]["content"]
         .as_str()
@@ -105,10 +108,9 @@ async fn act_1_permissioned_memory_returns_travel_namespace_only() {
 
     let mints = backend.cap_mints();
     assert!(
-        mints.iter().any(|(op, _)| matches!(
-            op,
-            agentkeys_mcp_server::backend::CapMintOp::MemoryGet
-        )),
+        mints
+            .iter()
+            .any(|(op, _)| matches!(op, agentkeys_mcp_server::backend::CapMintOp::MemoryGet)),
         "expected MemoryGet cap mint"
     );
 }
@@ -133,7 +135,11 @@ async fn act_2_payment_over_cap_returns_deterministic_deny() {
         )
         .await;
 
-    assert!(resp.error.is_none(), "act 2 unexpected error: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "act 2 unexpected error: {:?}",
+        resp.error
+    );
     let result = resp.result.expect("result");
     let inner = &result["structuredContent"];
     assert_eq!(inner["verdict"], "deny");
@@ -179,7 +185,11 @@ async fn act_3_revoke_then_audit_append_records_event() {
             ),
         )
         .await;
-    assert!(resp.error.is_none(), "audit append failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "audit append failed: {:?}",
+        resp.error
+    );
     assert_eq!(backend.audit_count(), 1);
 
     let result = resp.result.expect("result");

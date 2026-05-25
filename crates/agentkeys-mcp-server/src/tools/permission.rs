@@ -59,12 +59,7 @@ mod tests {
     #[test]
     fn missing_scope_invalid_params() {
         let engine = PolicyEngine::new(500);
-        let err = call(
-            &caller(),
-            &engine,
-            &json!({"actor": "O_kevin_001"}),
-        )
-        .unwrap_err();
+        let err = call(&caller(), &engine, &json!({"actor": "O_kevin_001"})).unwrap_err();
         assert!(matches!(err, McpError::InvalidParams(_)));
     }
 }

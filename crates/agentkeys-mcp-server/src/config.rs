@@ -102,9 +102,9 @@ impl Config {
             "http" => Transport::Http,
             "stdio" => Transport::Stdio,
             "mcp-endpoint" | "mcp_endpoint" => Transport::McpEndpoint,
-            other => anyhow::bail!(
-                "unknown transport `{other}` (expected http|stdio|mcp-endpoint)"
-            ),
+            other => {
+                anyhow::bail!("unknown transport `{other}` (expected http|stdio|mcp-endpoint)")
+            }
         };
 
         if transport == Transport::McpEndpoint && cli.mcp_endpoint.is_none() {
@@ -120,7 +120,11 @@ impl Config {
         };
 
         let mut vendor_tokens = HashMap::new();
-        for pair in cli.vendor_tokens.split(',').filter(|s| !s.trim().is_empty()) {
+        for pair in cli
+            .vendor_tokens
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+        {
             let (vendor, token) = pair
                 .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("malformed vendor_token entry: {pair}"))?;

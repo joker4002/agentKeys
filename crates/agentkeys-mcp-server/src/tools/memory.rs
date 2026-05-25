@@ -10,9 +10,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::auth::CallerContext;
-use crate::backend::{
-    Backend, CapMintOp, CapMintRequest, MemoryGetInput, MemoryPutInput,
-};
+use crate::backend::{Backend, CapMintOp, CapMintRequest, MemoryGetInput, MemoryPutInput};
 use crate::errors::{McpError, McpResult};
 
 const DEFAULT_TTL_SECONDS: u64 = 300;

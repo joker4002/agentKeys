@@ -42,9 +42,7 @@ async fn handle_mcp(
 ) -> impl IntoResponse {
     let req_id = req.id.clone();
 
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
     let vendor_id = match check_bearer(&server.config, auth_header) {
         Ok(v) => v,
         Err(e) => {
@@ -62,11 +60,7 @@ async fn handle_mcp(
     let actor_omni = match check_actor_header(actor_header) {
         Ok(a) => a,
         Err(e) => {
-            return (
-                StatusCode::FORBIDDEN,
-                axum::Json(e.into_response(req_id)),
-            )
-                .into_response();
+            return (StatusCode::FORBIDDEN, axum::Json(e.into_response(req_id))).into_response();
         }
     };
 
@@ -103,7 +97,9 @@ pub async fn run_stdio(server: Arc<Server>) -> anyhow::Result<()> {
                     crate::mcp::codes::PARSE_ERROR,
                     format!("parse error: {e}"),
                 );
-                stdout.write_all(serde_json::to_string(&resp)?.as_bytes()).await?;
+                stdout
+                    .write_all(serde_json::to_string(&resp)?.as_bytes())
+                    .await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
                 continue;
@@ -111,7 +107,9 @@ pub async fn run_stdio(server: Arc<Server>) -> anyhow::Result<()> {
         };
 
         let resp = server.dispatch(&caller, "", req).await;
-        stdout.write_all(serde_json::to_string(&resp)?.as_bytes()).await?;
+        stdout
+            .write_all(serde_json::to_string(&resp)?.as_bytes())
+            .await?;
         stdout.write_all(b"\n").await?;
         stdout.flush().await?;
     }

@@ -35,8 +35,10 @@ impl MockBackend {
 
     pub fn seed_memory(&self, actor: &str, namespace: &str, content: &str) {
         let mut g = self.inner.lock().unwrap();
-        g.memory
-            .insert((actor.to_string(), namespace.to_string()), content.to_string());
+        g.memory.insert(
+            (actor.to_string(), namespace.to_string()),
+            content.to_string(),
+        );
     }
 
     pub fn cap_mints(&self) -> Vec<(CapMintOp, CapMintRequest)> {
@@ -154,8 +156,38 @@ impl Backend for MockBackend {
         let hash = format!(
             "0x{}",
             hex::encode([
-                g.audit.len() as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                g.audit.len() as u8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
             ])
         );
         Ok(AuditAppendResult {

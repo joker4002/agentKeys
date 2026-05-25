@@ -43,13 +43,16 @@ impl CallerContext {
 /// Validate `Authorization: Bearer <token>` against the configured vendor map.
 /// Returns the matched `vendor_id` on success.
 pub fn check_bearer(config: &Config, header_value: Option<&str>) -> McpResult<String> {
-    let header = header_value.ok_or_else(|| {
-        McpError::Unauthorized("missing Authorization header".to_string())
-    })?;
+    let header = header_value
+        .ok_or_else(|| McpError::Unauthorized("missing Authorization header".to_string()))?;
 
     let token = header
         .strip_prefix("Bearer ")
-        .ok_or_else(|| McpError::Unauthorized("malformed Authorization header (expected `Bearer <token>`)".to_string()))?
+        .ok_or_else(|| {
+            McpError::Unauthorized(
+                "malformed Authorization header (expected `Bearer <token>`)".to_string(),
+            )
+        })?
         .trim();
 
     if token.is_empty() {
@@ -62,7 +65,9 @@ pub fn check_bearer(config: &Config, header_value: Option<&str>) -> McpResult<St
         }
     }
 
-    Err(McpError::Unauthorized("bearer token not recognized".to_string()))
+    Err(McpError::Unauthorized(
+        "bearer token not recognized".to_string(),
+    ))
 }
 
 /// Validate `X-AgentKeys-Actor: <omni>` header. Returns the actor omni.
@@ -73,7 +78,9 @@ pub fn check_actor_header(header_value: Option<&str>) -> McpResult<String> {
         .ok_or_else(|| McpError::Forbidden("missing X-AgentKeys-Actor header".to_string()))?
         .trim();
     if actor.is_empty() {
-        return Err(McpError::Forbidden("empty X-AgentKeys-Actor header".to_string()));
+        return Err(McpError::Forbidden(
+            "empty X-AgentKeys-Actor header".to_string(),
+        ));
     }
     Ok(actor.to_string())
 }

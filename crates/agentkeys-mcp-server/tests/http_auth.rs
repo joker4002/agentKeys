@@ -92,7 +92,10 @@ async fn cross_actor_param_is_403_in_json_rpc_error() {
     // The transport layer accepts the request (auth headers parsed),
     // but the tool handler returns FORBIDDEN as a JSON-RPC error.
     assert_eq!(status, StatusCode::OK);
-    assert!(body["error"].is_object(), "expected json-rpc error: {body:?}");
+    assert!(
+        body["error"].is_object(),
+        "expected json-rpc error: {body:?}"
+    );
     assert_eq!(body["error"]["code"], -32003); // FORBIDDEN
 }
 
@@ -107,7 +110,10 @@ async fn happy_path_returns_jsonrpc_result() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["result"].is_object(), "expected jsonrpc result: {body:?}");
+    assert!(
+        body["result"].is_object(),
+        "expected jsonrpc result: {body:?}"
+    );
 }
 
 #[tokio::test]

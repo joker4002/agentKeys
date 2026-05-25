@@ -66,7 +66,9 @@ impl PolicyEngine {
                 verdict: Verdict::Deny,
                 scope: scope.to_string(),
                 reason: "scope_not_in_policy_table".into(),
-                explanation: format!("scope `{scope}` is not in the policy table (closed-world default deny)"),
+                explanation: format!(
+                    "scope `{scope}` is not in the policy table (closed-world default deny)"
+                ),
             },
         }
     }
@@ -104,10 +106,7 @@ impl PolicyEngine {
             verdict: Verdict::Accept,
             scope: scope.to_string(),
             reason: "within_daily_cap".into(),
-            explanation: format!(
-                "amount {amount} ≤ daily cap {}",
-                self.daily_spend_cap_rmb
-            ),
+            explanation: format!("amount {amount} ≤ daily cap {}", self.daily_spend_cap_rmb),
         }
     }
 }

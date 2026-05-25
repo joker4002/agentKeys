@@ -30,8 +30,7 @@ use super::{
 /// Demo fixture identities — all real hex32 (`0x` + 64 hex chars) so the
 /// MCP server forwards them to a real broker/worker without re-validation
 /// failures.
-pub const DEMO_ACTOR: &str =
-    "0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7";
+pub const DEMO_ACTOR: &str = "0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7";
 pub const DEMO_OPERATOR: &str =
     "0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8";
 pub const DEMO_DEVICE_KEY_HASH: &str =
@@ -69,9 +68,21 @@ impl InMemoryBackend {
 
     pub fn new_with_demo_fixture() -> Self {
         let backend = Self::new_empty();
-        backend.seed(DEMO_ACTOR, "travel", "Chengdu trip — Apr 12 to 16, hotpot at Yulin.");
-        backend.seed(DEMO_ACTOR, "family", "Wife's bday Aug 3 (gift idea: hiking boots).");
-        backend.seed(DEMO_ACTOR, "profile", "Allergic to shellfish. Prefers windowed flights.");
+        backend.seed(
+            DEMO_ACTOR,
+            "travel",
+            "Chengdu trip — Apr 12 to 16, hotpot at Yulin.",
+        );
+        backend.seed(
+            DEMO_ACTOR,
+            "family",
+            "Wife's bday Aug 3 (gift idea: hiking boots).",
+        );
+        backend.seed(
+            DEMO_ACTOR,
+            "profile",
+            "Allergic to shellfish. Prefers windowed flights.",
+        );
         backend
     }
 

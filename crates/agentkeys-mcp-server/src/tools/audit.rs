@@ -40,10 +40,7 @@ pub async fn call(
         .and_then(|v| v.as_u64())
         .ok_or_else(|| McpError::InvalidParams("missing `event.result`".into()))?
         as u8;
-    let op_body = event
-        .get("op_body")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let op_body = event.get("op_body").cloned().unwrap_or_else(|| json!({}));
     let intent_text = event
         .get("intent_text")
         .and_then(|v| v.as_str())

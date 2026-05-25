@@ -5,9 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
-use agentkeys_mcp_server::{
-    auth::CallerContext, config::Config, mcp::Request, server::Server,
-};
+use agentkeys_mcp_server::{auth::CallerContext, config::Config, mcp::Request, server::Server};
 use common::MockBackend;
 use serde_json::json;
 
@@ -38,7 +36,10 @@ async fn delegation_grant_is_not_implemented_v1() {
     let data = err.data.expect("data field");
     assert_eq!(data["error"], "not_implemented_in_v1");
     assert_eq!(data["scheduled_for"], "M4");
-    assert!(data["spec_url"].as_str().unwrap().contains("milestones-roadmap.md"));
+    assert!(data["spec_url"]
+        .as_str()
+        .unwrap()
+        .contains("milestones-roadmap.md"));
 }
 
 #[tokio::test]
