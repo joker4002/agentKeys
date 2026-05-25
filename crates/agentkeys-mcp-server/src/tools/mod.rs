@@ -26,71 +26,79 @@ pub const TOOL_DELEGATION_REVOKE: &str = "agentkeys.delegation.revoke";
 pub const TOOL_APPROVAL_REQUEST: &str = "agentkeys.approval.request";
 
 pub fn all_descriptors() -> Vec<ToolDescriptor> {
+    // NOTE on schemas: `actor`, `operator_omni`, `device_key_hash` are
+    // ambient identity fields the LLM has no way to fabricate. They're
+    // resolved server-side from MCP_DEFAULT_* env vars (auto-set to the
+    // demo fixture in --backend=in-memory mode). LLM-callable params
+    // (`namespace`, `content`, `scope`, etc.) stay in `required`.
     vec![
         ToolDescriptor {
             name: TOOL_IDENTITY_WHOAMI.into(),
-            description: "Return identity facts (omni, display_name, vendor, scopes) for the calling actor.".into(),
+            description: "Return basic identity info for the current user — their account id, display name, and which permissions they have. Call this when the user asks 'who am I', 'what's my account', or you need to know who you're talking to before another action.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "actor": {"type": "string", "description": "Actor omni (32-byte hex)."}
-                },
-                "required": ["actor"]
+                    "actor": {"type": "string", "description": "Optional. The server uses its configured actor by default."}
+                }
             }),
         },
         ToolDescriptor {
             name: TOOL_MEMORY_GET.into(),
-            description: "Cap-token-verified read of the calling actor's memory, filtered by namespace.".into(),
+            description: "Recall what the user has previously saved or told you to remember about a topic. Use this when the user references their past or current state: 'where am I going', 'where did I go', 'what do I like', 'who is my [family member]', 'do I have any allergies', 'remember when I…'. Returns the saved note as a string.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "actor": {"type": "string"},
-                    "namespace": {"type": "string", "description": "Memory namespace, e.g. `travel`, `family`, `profile`."},
-                    "operator_omni": {"type": "string"},
-                    "service": {"type": "string", "default": "memory"},
-                    "device_key_hash": {"type": "string"},
-                    "ttl_seconds": {"type": "integer", "default": 300}
+                    "namespace": {
+                        "type": "string",
+                        "description": "Topic. Use 'travel' for trips/destinations/plans, 'family' for relatives/birthdays/relationships, 'profile' for preferences/allergies/dietary needs.",
+                        "enum": ["travel", "family", "profile"]
+                    }
                 },
-                "required": ["actor", "namespace", "operator_omni", "device_key_hash"]
+                "required": ["namespace"]
             }),
         },
         ToolDescriptor {
             name: TOOL_MEMORY_PUT.into(),
-            description: "Cap-token-verified write of memory content under a given namespace.".into(),
+            description: "Save something the user wants you to remember. Use when the user says 'remember that…', 'note that…', 'save this'. Group memories by topic via the namespace.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "actor": {"type": "string"},
-                    "namespace": {"type": "string"},
-                    "content": {"type": "string", "description": "Raw plaintext to store; base64 encoded by the server."},
-                    "operator_omni": {"type": "string"},
-                    "service": {"type": "string", "default": "memory"},
-                    "device_key_hash": {"type": "string"},
-                    "ttl_seconds": {"type": "integer", "default": 300}
+                    "namespace": {
+                        "type": "string",
+                        "description": "Topic. Use 'travel' for trips, 'family' for relatives, 'profile' for preferences.",
+                        "enum": ["travel", "family", "profile"]
+                    },
+                    "content": {"type": "string", "description": "What to remember, in natural language."}
                 },
-                "required": ["actor", "namespace", "content", "operator_omni", "device_key_hash"]
+                "required": ["namespace", "content"]
             }),
         },
         ToolDescriptor {
             name: TOOL_PERMISSION_CHECK.into(),
-            description: "Deterministic policy engine — returns accept|deny|ask_parent for (actor, scope, params).".into(),
+            description: "Check whether the user is allowed to perform an action. ALWAYS call this BEFORE any monetary action (payment, order, purchase) to verify the amount is within the user's daily spend cap. Returns verdict=accept (proceed), deny (refuse politely with the reason), or ask_parent (escalate).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "actor": {"type": "string"},
-                    "scope": {"type": "string"},
-                    "params": {"type": "object", "additionalProperties": true}
+                    "scope": {
+                        "type": "string",
+                        "description": "Action category. Use 'payment.spend' for any money-spending action (orders, purchases, payments).",
+                        "enum": ["payment.spend"]
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Action-specific params. For payment.spend: {amount_rmb: <integer>}.",
+                        "additionalProperties": true
+                    }
                 },
-                "required": ["actor", "scope"]
+                "required": ["scope", "params"]
             }),
         },
         ToolDescriptor {
             name: TOOL_CAP_MINT.into(),
-            description: "Mint a bounded-TTL capability token for one of cred_store|cred_fetch|memory_put|memory_get.".into(),
+            description: "Internal: mint a short-lived capability token. The LLM rarely needs this directly — memory.get/put and permission.check do it internally. Only call explicitly when you need a raw token for a custom flow.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "actor": {"type": "string"},
                     "op": {
                         "type": "string",
                         "enum": ["cred_store", "cred_fetch", "memory_put", "memory_get"]
@@ -98,15 +106,12 @@ pub fn all_descriptors() -> Vec<ToolDescriptor> {
                     "params": {
                         "type": "object",
                         "properties": {
-                            "operator_omni": {"type": "string"},
-                            "service": {"type": "string"},
-                            "device_key_hash": {"type": "string"}
-                        },
-                        "required": ["operator_omni", "service", "device_key_hash"]
+                            "service": {"type": "string"}
+                        }
                     },
                     "ttl": {"type": "integer", "default": 300}
                 },
-                "required": ["actor", "op", "params"]
+                "required": ["op"]
             }),
         },
         ToolDescriptor {

@@ -142,16 +142,39 @@ impl Server {
 
         let result: McpResult<Value> = match name.as_str() {
             tools::TOOL_IDENTITY_WHOAMI => tools::identity::call(caller, &args),
-            tools::TOOL_PERMISSION_CHECK => tools::permission::call(caller, &self.policy, &args),
+            tools::TOOL_PERMISSION_CHECK => {
+                tools::permission::call(caller, &self.policy, &self.config, &args)
+            }
             tools::TOOL_CAP_MINT => {
-                tools::cap::mint(caller, self.backend.clone(), session_bearer, &args).await
+                tools::cap::mint(
+                    caller,
+                    self.backend.clone(),
+                    &self.config,
+                    session_bearer,
+                    &args,
+                )
+                .await
             }
             tools::TOOL_CAP_REVOKE => tools::cap::revoke(self.backend.clone(), &args).await,
             tools::TOOL_MEMORY_PUT => {
-                tools::memory::put(caller, self.backend.clone(), session_bearer, &args).await
+                tools::memory::put(
+                    caller,
+                    self.backend.clone(),
+                    &self.config,
+                    session_bearer,
+                    &args,
+                )
+                .await
             }
             tools::TOOL_MEMORY_GET => {
-                tools::memory::get(caller, self.backend.clone(), session_bearer, &args).await
+                tools::memory::get(
+                    caller,
+                    self.backend.clone(),
+                    &self.config,
+                    session_bearer,
+                    &args,
+                )
+                .await
             }
             tools::TOOL_AUDIT_APPEND => {
                 tools::audit::call(caller, self.backend.clone(), &args).await

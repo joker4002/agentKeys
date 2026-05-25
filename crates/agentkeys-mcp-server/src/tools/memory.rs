@@ -11,20 +11,40 @@ use std::sync::Arc;
 
 use crate::auth::CallerContext;
 use crate::backend::{Backend, CapMintOp, CapMintRequest, MemoryGetInput, MemoryPutInput};
+use crate::config::Config;
 use crate::errors::{McpError, McpResult};
 
 const DEFAULT_TTL_SECONDS: u64 = 300;
 
+/// Resolve an identity field — LLM-supplied param wins, else config default,
+/// else a precise error so the operator can fix the env.
+fn resolve_ident<'a>(
+    params: &'a Value,
+    key: &str,
+    fallback: Option<&'a str>,
+) -> McpResult<&'a str> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .or(fallback)
+        .ok_or_else(|| {
+            McpError::InvalidParams(format!(
+                "missing `{key}` and no MCP_DEFAULT_{} configured \
+                 — set it in /etc/agentkeys/mcp.env or pass via --{}",
+                key.to_uppercase(),
+                key.replace('_', "-")
+            ))
+        })
+}
+
 pub async fn put(
     caller: &CallerContext,
     backend: Arc<dyn Backend>,
+    config: &Config,
     session_bearer: &str,
     params: &Value,
 ) -> McpResult<Value> {
-    let actor = params
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `actor`".into()))?;
+    let actor = resolve_ident(params, "actor", config.default_actor.as_deref())?;
     let namespace = params
         .get("namespace")
         .and_then(|v| v.as_str())
@@ -33,14 +53,16 @@ pub async fn put(
         .get("content")
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::InvalidParams("missing `content`".into()))?;
-    let operator_omni = params
-        .get("operator_omni")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `operator_omni`".into()))?;
-    let device_key_hash = params
-        .get("device_key_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `device_key_hash`".into()))?;
+    let operator_omni = resolve_ident(
+        params,
+        "operator_omni",
+        config.default_operator_omni.as_deref(),
+    )?;
+    let device_key_hash = resolve_ident(
+        params,
+        "device_key_hash",
+        config.default_device_key_hash.as_deref(),
+    )?;
     let service = params
         .get("service")
         .and_then(|v| v.as_str())
@@ -89,25 +111,25 @@ pub async fn put(
 pub async fn get(
     caller: &CallerContext,
     backend: Arc<dyn Backend>,
+    config: &Config,
     session_bearer: &str,
     params: &Value,
 ) -> McpResult<Value> {
-    let actor = params
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `actor`".into()))?;
+    let actor = resolve_ident(params, "actor", config.default_actor.as_deref())?;
     let namespace = params
         .get("namespace")
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::InvalidParams("missing `namespace`".into()))?;
-    let operator_omni = params
-        .get("operator_omni")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `operator_omni`".into()))?;
-    let device_key_hash = params
-        .get("device_key_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `device_key_hash`".into()))?;
+    let operator_omni = resolve_ident(
+        params,
+        "operator_omni",
+        config.default_operator_omni.as_deref(),
+    )?;
+    let device_key_hash = resolve_ident(
+        params,
+        "device_key_hash",
+        config.default_device_key_hash.as_deref(),
+    )?;
     let service = params
         .get("service")
         .and_then(|v| v.as_str())

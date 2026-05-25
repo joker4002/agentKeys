@@ -63,6 +63,22 @@ pub struct Cli {
     /// three-act demo storyboard in `agent-iam-strategy.md` §4.3.
     #[arg(long, env = "MCP_DEFAULT_DAILY_SPEND_CAP_RMB", default_value_t = 500)]
     pub default_daily_spend_cap_rmb: u64,
+
+    /// Ambient actor omni — used when the LLM-side `tools/call` doesn't
+    /// supply an `actor`. In xiaozhi-hosted mode there's one agent per
+    /// MCP server, so the LLM shouldn't need to know its own actor id.
+    /// Defaults to the demo actor when --backend=in-memory.
+    #[arg(long, env = "MCP_DEFAULT_ACTOR")]
+    pub default_actor: Option<String>,
+
+    /// Ambient operator omni — same rationale as default_actor.
+    #[arg(long, env = "MCP_DEFAULT_OPERATOR_OMNI")]
+    pub default_operator_omni: Option<String>,
+
+    /// Ambient device-key hash — same rationale. Identifies the device the
+    /// agent runs on for cap-mint binding.
+    #[arg(long, env = "MCP_DEFAULT_DEVICE_KEY_HASH")]
+    pub default_device_key_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +93,12 @@ pub struct Config {
     /// vendor_id → bearer_token
     pub vendor_tokens: HashMap<String, String>,
     pub default_daily_spend_cap_rmb: u64,
+    /// Ambient identity used when the LLM doesn't pass actor / operator /
+    /// device. Populated to demo fixture in InMemory mode; left None for
+    /// HTTP mode unless explicitly set via CLI/env.
+    pub default_actor: Option<String>,
+    pub default_operator_omni: Option<String>,
+    pub default_device_key_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +159,32 @@ impl Config {
             vendor_tokens.insert("magiclick".into(), "demo-tok".into());
         }
 
+        // In-memory dev mode also auto-seeds the demo identity so the
+        // LLM can call memory.get with just {"namespace": "travel"}.
+        // The DEMO_* constants come from backend/in_memory.rs and match
+        // what the three-act fixture seeds.
+        let (default_actor, default_operator_omni, default_device_key_hash) =
+            if backend == BackendKind::InMemory {
+                use crate::backend::in_memory::{DEMO_ACTOR, DEMO_DEVICE_KEY_HASH, DEMO_OPERATOR};
+                (
+                    Some(cli.default_actor.unwrap_or_else(|| DEMO_ACTOR.into())),
+                    Some(
+                        cli.default_operator_omni
+                            .unwrap_or_else(|| DEMO_OPERATOR.into()),
+                    ),
+                    Some(
+                        cli.default_device_key_hash
+                            .unwrap_or_else(|| DEMO_DEVICE_KEY_HASH.into()),
+                    ),
+                )
+            } else {
+                (
+                    cli.default_actor,
+                    cli.default_operator_omni,
+                    cli.default_device_key_hash,
+                )
+            };
+
         Ok(Self {
             transport,
             backend,
@@ -147,6 +195,9 @@ impl Config {
             audit_url: cli.audit_url,
             vendor_tokens,
             default_daily_spend_cap_rmb: cli.default_daily_spend_cap_rmb,
+            default_actor,
+            default_operator_omni,
+            default_device_key_hash,
         })
     }
 
@@ -162,6 +213,9 @@ impl Config {
             audit_url: None,
             vendor_tokens: HashMap::new(),
             default_daily_spend_cap_rmb: 500,
+            default_actor: None,
+            default_operator_omni: None,
+            default_device_key_hash: None,
         }
     }
 

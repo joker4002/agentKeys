@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::auth::CallerContext;
 use crate::backend::{Backend, CapMintOp, CapMintRequest};
+use crate::config::Config;
 use crate::errors::{McpError, McpResult};
 
 const DEFAULT_TTL_SECONDS: u64 = 300;
@@ -12,13 +13,17 @@ const DEFAULT_TTL_SECONDS: u64 = 300;
 pub async fn mint(
     caller: &CallerContext,
     backend: Arc<dyn Backend>,
+    config: &Config,
     session_bearer: &str,
     params: &Value,
 ) -> McpResult<Value> {
     let actor = params
         .get("actor")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `actor`".into()))?;
+        .or(config.default_actor.as_deref())
+        .ok_or_else(|| {
+            McpError::InvalidParams("missing `actor` and no MCP_DEFAULT_ACTOR set".into())
+        })?;
 
     let op_str = params
         .get("op")
@@ -27,24 +32,33 @@ pub async fn mint(
     let op = CapMintOp::parse(op_str)
         .ok_or_else(|| McpError::InvalidParams(format!("unknown op `{op_str}`")))?;
 
-    let inner = params
-        .get("params")
-        .ok_or_else(|| McpError::InvalidParams("missing `params` object".into()))?;
+    let empty = json!({});
+    let inner = params.get("params").unwrap_or(&empty);
 
     let operator_omni = inner
         .get("operator_omni")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `params.operator_omni`".into()))?
+        .or(config.default_operator_omni.as_deref())
+        .ok_or_else(|| {
+            McpError::InvalidParams(
+                "missing `params.operator_omni` and no MCP_DEFAULT_OPERATOR_OMNI set".into(),
+            )
+        })?
         .to_string();
     let service = inner
         .get("service")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `params.service`".into()))?
+        .unwrap_or(op.data_class())
         .to_string();
     let device_key_hash = inner
         .get("device_key_hash")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `params.device_key_hash`".into()))?
+        .or(config.default_device_key_hash.as_deref())
+        .ok_or_else(|| {
+            McpError::InvalidParams(
+                "missing `params.device_key_hash` and no MCP_DEFAULT_DEVICE_KEY_HASH set".into(),
+            )
+        })?
         .to_string();
 
     let ttl_seconds = params

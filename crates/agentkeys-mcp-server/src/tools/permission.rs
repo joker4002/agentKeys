@@ -7,14 +7,23 @@
 use serde_json::{json, Value};
 
 use crate::auth::CallerContext;
+use crate::config::Config;
 use crate::errors::{McpError, McpResult};
 use crate::policy::PolicyEngine;
 
-pub fn call(caller: &CallerContext, engine: &PolicyEngine, params: &Value) -> McpResult<Value> {
+pub fn call(
+    caller: &CallerContext,
+    engine: &PolicyEngine,
+    config: &Config,
+    params: &Value,
+) -> McpResult<Value> {
     let actor = params
         .get("actor")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("missing `actor`".into()))?;
+        .or(config.default_actor.as_deref())
+        .ok_or_else(|| {
+            McpError::InvalidParams("missing `actor` and no MCP_DEFAULT_ACTOR set".into())
+        })?;
 
     let scope = params
         .get("scope")
@@ -39,12 +48,17 @@ mod tests {
         CallerContext::new("vendor-a", "O_kevin_001")
     }
 
+    fn cfg() -> Config {
+        Config::for_tests()
+    }
+
     #[test]
     fn act2_payment_over_cap_denied() {
         let engine = PolicyEngine::new(500);
         let v = call(
             &caller(),
             &engine,
+            &cfg(),
             &json!({
                 "actor": "O_kevin_001",
                 "scope": "payment.spend",
@@ -59,7 +73,13 @@ mod tests {
     #[test]
     fn missing_scope_invalid_params() {
         let engine = PolicyEngine::new(500);
-        let err = call(&caller(), &engine, &json!({"actor": "O_kevin_001"})).unwrap_err();
+        let err = call(
+            &caller(),
+            &engine,
+            &cfg(),
+            &json!({"actor": "O_kevin_001"}),
+        )
+        .unwrap_err();
         assert!(matches!(err, McpError::InvalidParams(_)));
     }
 }
