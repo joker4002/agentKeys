@@ -106,7 +106,15 @@ pub async fn run_stdio(server: Arc<Server>) -> anyhow::Result<()> {
             }
         };
 
+        // MCP notifications (no `id`) get no response — same rule as the
+        // mcp-endpoint transport. Without this, Claude Desktop /
+        // Claude Code's stdio MCP client sees an unexpected response
+        // to `notifications/initialized` and disconnects.
+        let is_notification = req.id.is_none();
         let resp = server.dispatch(&caller, "", req).await;
+        if is_notification {
+            continue;
+        }
         stdout
             .write_all(serde_json::to_string(&resp)?.as_bytes())
             .await?;
