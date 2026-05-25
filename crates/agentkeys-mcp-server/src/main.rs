@@ -1,0 +1,46 @@
+//! Entry point — parse CLI, build a `Server`, run the chosen transport.
+
+use clap::Parser;
+use std::sync::Arc;
+
+use agentkeys_mcp_server::{
+    backend::HttpBackend,
+    config::{Cli, Config, Transport},
+    server::Server,
+    transport,
+};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    let config = Config::from_cli(cli)?;
+
+    let backend = HttpBackend::new(
+        config.broker_url.clone(),
+        config.memory_url.clone(),
+        config.audit_url.clone(),
+    );
+    let server = Arc::new(Server::new(config.clone(), Arc::new(backend)));
+
+    match config.transport {
+        Transport::Http => {
+            let app = transport::http_router(server);
+            let listener = tokio::net::TcpListener::bind(&config.listen).await?;
+            tracing::info!(addr = %config.listen, "agentkeys-mcp-server listening (HTTP)");
+            axum::serve(listener, app).await?;
+        }
+        Transport::Stdio => {
+            tracing::info!("agentkeys-mcp-server running (stdio)");
+            transport::run_stdio(server).await?;
+        }
+    }
+
+    Ok(())
+}
