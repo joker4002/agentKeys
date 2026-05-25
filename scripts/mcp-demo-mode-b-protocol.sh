@@ -51,11 +51,17 @@ from mcp import ClientSession
 
 URL = sys.argv[1]
 
+# Active tools advertised via tools/list. The 3 M4 stubs
+# (delegation.grant, delegation.revoke, approval.request) remain
+# dispatchable via tools/call (test farther down) but were dropped from
+# tools/list to shrink the LLM tool budget — see tools/mod.rs.
 EXPECTED_TOOLS = {
     'agentkeys.identity.whoami', 'agentkeys.memory.get', 'agentkeys.memory.put',
     'agentkeys.permission.check', 'agentkeys.cap.mint', 'agentkeys.cap.revoke',
-    'agentkeys.audit.append', 'agentkeys.delegation.grant',
-    'agentkeys.delegation.revoke', 'agentkeys.approval.request',
+    'agentkeys.audit.append',
+}
+M4_STUB_TOOLS = {
+    'agentkeys.delegation.grant', 'agentkeys.delegation.revoke', 'agentkeys.approval.request',
 }
 
 async def main():
@@ -70,9 +76,12 @@ async def main():
             names = {t.name for t in tools.tools}
             missing = EXPECTED_TOOLS - names
             extra = names - EXPECTED_TOOLS
-            assert not missing, f'missing: {missing}'
-            assert not extra, f'extra: {extra}'
-            print(f'  ✓ tools/list → all 10 expected tools')
+            assert not missing, f'missing active tools: {missing}'
+            assert not extra, f'unexpected tools: {extra}'
+            # M4 stubs MUST NOT be in tools/list (still callable via tools/call below).
+            stubs_in_list = M4_STUB_TOOLS & names
+            assert not stubs_in_list, f'M4 stubs should not appear in tools/list: {stubs_in_list}'
+            print(f'  ✓ tools/list → {len(EXPECTED_TOOLS)} active tools, 0 M4 stubs')
 
             act2 = await session.call_tool('agentkeys.permission.check',
                 {'actor':'0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7','scope':'payment.spend','params':{'amount_rmb':600}})

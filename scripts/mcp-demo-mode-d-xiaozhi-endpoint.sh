@@ -140,11 +140,17 @@ import asyncio, json, os, sys, websockets
 
 URL = os.environ['CLIENT_URL']
 
+# M4 stubs (delegation.grant, delegation.revoke, approval.request) are
+# dispatchable via tools/call but no longer advertised in tools/list —
+# they ate the LLM tool-list budget without being useful. See
+# tools/mod.rs for the rationale.
 EXPECTED_TOOLS = {
     'agentkeys.identity.whoami', 'agentkeys.memory.get', 'agentkeys.memory.put',
     'agentkeys.permission.check', 'agentkeys.cap.mint', 'agentkeys.cap.revoke',
-    'agentkeys.audit.append', 'agentkeys.delegation.grant',
-    'agentkeys.delegation.revoke', 'agentkeys.approval.request',
+    'agentkeys.audit.append',
+}
+M4_STUB_TOOLS = {
+    'agentkeys.delegation.grant', 'agentkeys.delegation.revoke', 'agentkeys.approval.request',
 }
 
 async def main():
@@ -176,8 +182,10 @@ async def main():
         tools = await recv_match(2)
         names = {t['name'] for t in tools['result']['tools']}
         missing = EXPECTED_TOOLS - names
-        assert not missing, f'missing tools: {missing}'
-        print(f'  ✓ tools/list returned all 10 expected tools through the relay')
+        assert not missing, f'missing active tools: {missing}'
+        stubs_in_list = M4_STUB_TOOLS & names
+        assert not stubs_in_list, f'M4 stubs should not appear in tools/list: {stubs_in_list}'
+        print(f'  ✓ tools/list → {len(EXPECTED_TOOLS)} active tools through the relay (0 M4 stubs)')
 
         # Act 2: deterministic deny (no LLM)
         await send({"jsonrpc":"2.0","id":3,"method":"tools/call",
