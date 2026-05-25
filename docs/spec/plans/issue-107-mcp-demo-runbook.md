@@ -416,116 +416,57 @@ Capture for the next step:
 - A real actor omni from `heima-agent-register.sh` (32-byte hex).
 - A device key hash from `heima-device-register.sh` (32-byte hex).
 
-### B.5 Deploy `mcp-endpoint-server` on the EC2 broker host (systemd, not Docker)
+### B.5 Deploy relay + MCP server on the broker host — one idempotent command
 
-The relay is a small Python service. Run it native; do NOT pull in Docker — the existing host already has nginx + TLS + systemd via `setup-broker-host.sh`, and a Docker daemon would be new operational surface for no benefit.
+The whole §B.5–§B.6 install (mcp-endpoint-server clone + venv, agentkeys-mcp-server build + install, systemd units, nginx vhost with wss → ws upgrade, certbot cert, env file with auto-generated token + health-key) is one script. Per CLAUDE.md's "Idempotent remote-setup rule" — every step pre-checks state and exits 0 on a clean second run.
 
-On the broker host:
-
-```bash
-# As the agentkeys user. Install once into a venv.
-sudo -u agentkeys -i bash <<'EOF'
-mkdir -p /opt/agentkeys/mcp-endpoint && cd /opt/agentkeys/mcp-endpoint
-git clone --depth 1 https://github.com/xinnan-tech/mcp-endpoint-server.git src
-cd src
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-EOF
-
-# systemd unit
-sudo tee /etc/systemd/system/mcp-endpoint-server.service >/dev/null <<'EOF'
-[Unit]
-Description=MCP endpoint relay (xiaozhi tool registration)
-After=network-online.target
-
-[Service]
-Type=simple
-User=agentkeys
-WorkingDirectory=/opt/agentkeys/mcp-endpoint/src
-ExecStart=/opt/agentkeys/mcp-endpoint/src/.venv/bin/python main.py
-Restart=on-failure
-RestartSec=5
-Environment=PORT=8004
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now mcp-endpoint-server
-journalctl -u mcp-endpoint-server -n 50 --no-pager
-```
-
-The startup log prints two URLs (see [`docs/mcp-endpoint-enable.md`](https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/docs/mcp-endpoint-enable.md)):
-
-```
-智控台MCP参数配置:    http://<host-or-eip>:8004/mcp_endpoint/health?key=…
-单模块部署MCP接入点:  ws://<host-or-eip>:8004/mcp_endpoint/mcp/?token=…
-```
-
-Save both. The first goes into the xiaozhi-server `server.mcp_endpoint` config (or 智控台 → 参数管理 → `server.mcp_endpoint` for the cloud path). The second is the `MCP_ENDPOINT` env var the MCP server connects to.
-
-Follow-up to land later — fold this step into `scripts/setup-broker-host.sh --with-mcp-endpoint` so the relay becomes one-command idempotent like everything else on the host.
-
-### B.6 Deploy `agentkeys-mcp-server` on EC2 with `--transport mcp-endpoint`
-
-Native systemd, no Docker. Two units side by side on the same host: `mcp-endpoint-server` (relay) and `agentkeys-mcp-server` (tool).
+Run it on the broker host (same host setup-broker-host.sh ran on):
 
 ```bash
-# Build the binary on the host (or ship a pre-built static binary via release tooling later).
-sudo -u agentkeys -i bash <<EOF
-cd /opt/agentkeys
-git clone --depth 1 -b main https://github.com/litentry/agentKeys.git src
-cd src
-cargo build --release -p agentkeys-mcp-server
-EOF
+# First-time run — needs an email for the certbot cert issuance.
+bash scripts/setup-mcp-host.sh \
+  --domain mcp.litentry.org \
+  --certbot-email ops@litentry.org
 
-# systemd unit
-sudo tee /etc/systemd/system/agentkeys-mcp-server.service >/dev/null <<'EOF'
-[Unit]
-Description=AgentKeys MCP server (xiaozhi MCP-endpoint tool)
-After=network-online.target mcp-endpoint-server.service
-Wants=mcp-endpoint-server.service
-
-[Service]
-Type=simple
-User=agentkeys
-WorkingDirectory=/opt/agentkeys/src
-ExecStart=/opt/agentkeys/src/target/release/agentkeys-mcp-server \
-  --transport mcp-endpoint \
-  --backend http \
-  --mcp-endpoint ${MCP_ENDPOINT}
-Restart=on-failure
-RestartSec=5
-EnvironmentFile=/etc/agentkeys/mcp.env
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Operator-set env file (chmod 600). Holds the relay URL + the backend URLs.
-sudo install -d -m 0750 -o agentkeys -g agentkeys /etc/agentkeys
-sudo tee /etc/agentkeys/mcp.env >/dev/null <<'EOF'
-MCP_ENDPOINT=ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=<tool-token-from-relay-startup>
-AGENTKEYS_BROKER_URL=https://broker.litentry.org
-AGENTKEYS_MEMORY_URL=https://memory.litentry.org
-AGENTKEYS_AUDIT_URL=https://audit.litentry.org
-EOF
-sudo chmod 0600 /etc/agentkeys/mcp.env
-sudo chown agentkeys:agentkeys /etc/agentkeys/mcp.env
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now agentkeys-mcp-server
-journalctl -u agentkeys-mcp-server -n 50 --no-pager
+# Subsequent re-runs — same command, cert is reused, only drifted files are
+# rewritten. Safe to run after every `git pull`.
+bash scripts/setup-mcp-host.sh --domain mcp.litentry.org
 ```
 
-Expected log line on first connect:
+What the script lands:
 
-```
-INFO agentkeys_mcp_server: mcp-endpoint: connected; awaiting MCP frames
+- `/opt/agentkeys/mcp-endpoint/src/` — pinned clone of `xinnan-tech/mcp-endpoint-server` (default ref: `main`; override with `--relay-ref <sha>`).
+- `/opt/agentkeys/mcp-endpoint/src/.venv/` — Python venv with the relay's requirements.
+- `/usr/local/bin/agentkeys-mcp-server` — release binary (built locally via `cargo build --release -p agentkeys-mcp-server` and `install`ed only when its sha256 drifts).
+- `/etc/agentkeys/mcp.env` — `MCP_ENDPOINT=ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=<auto-generated>` + the broker/memory/audit URLs (0600, owned by the run user).
+- `/etc/agentkeys/mcp-tool-token` + `/etc/agentkeys/mcp-health-key` — the persistent secrets the URL tokens are derived from. Generated on first run only; subsequent runs preserve them so the relay URLs stay stable across deploys.
+- `/etc/systemd/system/mcp-endpoint-server.service` + `/etc/systemd/system/agentkeys-mcp-server.service` — diff-then-write; daemon-reload + restart only when content changed.
+- `/etc/nginx/sites-available/mcp.litentry.org` — vhost terminating TLS for `mcp.litentry.org`, upgrading `wss://` to `ws://127.0.0.1:8004/`, with HTTP→HTTPS redirect and the `Upgrade`/`Connection` headers required for WebSocket. Reload only when content changed.
+- Let's Encrypt cert via `certbot --nginx -d mcp.litentry.org` — reused on subsequent runs.
+
+Outputs at the end of each run — capture for §B.7:
+
+```text
+Tool URL  (this MCP server connects here):
+  wss://mcp.litentry.org/mcp_endpoint/mcp/?token=<TOKEN>
+Client URL (xiaozhi cloud / xiaozhi-server connects here):
+  wss://mcp.litentry.org/mcp_endpoint/call/?token=<TOKEN>
+Health URL (智控台 health probe):
+  https://mcp.litentry.org/mcp_endpoint/health?key=<KEY>
 ```
 
-If the connection fails, the binary backs off and retries every 1–600s with exponential backoff (matches `mcp_pipe.py`'s reconnection policy). Watch `journalctl -u agentkeys-mcp-server -f`.
+Verify both services are alive:
+
+```bash
+sudo journalctl -u mcp-endpoint-server -n 30 --no-pager
+sudo journalctl -u agentkeys-mcp-server -n 30 --no-pager
+# Expected log line on the MCP server after the relay accepts it:
+#   INFO agentkeys_mcp_server: mcp-endpoint: connected; awaiting MCP frames
+```
+
+If the MCP server fails to connect, the binary backs off and retries 1–600s exponentially (mirrors `mcp_pipe.py`). It will pick up automatically once the relay is healthy.
+
+> **Why wss + domain name** — the xiaozhi cloud's 智控台 won't accept a plain `http://<eip>:8004/...` URL in production. TLS termination at nginx for `mcp.litentry.org` lets you paste a `wss://` URL into 智控台 and have it round-trip through the same vhost that fronts the broker.
 
 ### B.7 Register the relay URL on your xiaozhi.me agent (智控台)
 
@@ -534,7 +475,8 @@ There are two registration paths depending on how you deploy xiaozhi-server. The
 **Full-module (智控台) deploy:**
 
 1. 智控台 → 参数字典 → 系统功能配置 → enable `MCP接入点` and save.
-2. 智控台 → 参数字典 → 参数管理 → search `server.mcp_endpoint` and set its value to the `智控台MCP参数配置` URL from §B.5 (`http://<host>:8004/mcp_endpoint/health?key=...`).
+2. 智控台 → 参数字典 → 参数管理 → search `server.mcp_endpoint` and paste the **Health URL** printed at the end of `setup-mcp-host.sh`:
+   `https://mcp.litentry.org/mcp_endpoint/health?key=<KEY>`.
 3. 智控台 → 智能体管理 → 配置角色 → 编辑功能 → MCP接入点 → save.
 
 **Single-module deploy:**
@@ -546,7 +488,7 @@ server:
   websocket: ws://<host>:<port>/xiaozhi/v1/
   http_port: 8002
 
-mcp_endpoint: ws://<host>:8004/mcp_endpoint/mcp/?token=<tool-token>
+mcp_endpoint: wss://mcp.litentry.org/mcp_endpoint/mcp/?token=<TOKEN-from-setup-mcp-host.sh>
 ```
 
 Restart xiaozhi-server. The startup log should now print `mcp接入点是 ws://...`. When your agent connects, look for: `当前支持的函数列表: [..., 'agentkeys_permission_check', 'agentkeys_memory_get', 'agentkeys_cap_mint', ...]`.
