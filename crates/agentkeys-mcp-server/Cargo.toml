@@ -22,7 +22,7 @@ anyhow = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tower = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
-tokio-tungstenite = "0.23"
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

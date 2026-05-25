@@ -326,14 +326,15 @@ fi
 fi  # MODE == self-hosted (closes step 3 self-hosted branch)
 
 # ─── 4. Build + install agentkeys-mcp-server binary ──────────────────
+# Always invoke `cargo build` when WITH_BUILD=yes — cargo's own
+# incremental compilation decides what's stale. Skipping based on
+# "$MCP_BIN_SRC exists" misses Cargo.toml / src changes since the last
+# script run.
 head "4/9 agentkeys-mcp-server binary"
 if [ "$WITH_BUILD" = "yes" ]; then
-  if [ -x "$MCP_BIN_SRC" ]; then
-    skip "release binary already built at $MCP_BIN_SRC (use --without-build=no to force)"
-  else
-    ( cd "$REPO_ROOT" && cargo build --release -p agentkeys-mcp-server )
-    ok "cargo build --release -p agentkeys-mcp-server"
-  fi
+  ( cd "$REPO_ROOT" && cargo build --release -p agentkeys-mcp-server ) \
+    || fail "cargo build --release -p agentkeys-mcp-server failed"
+  ok "cargo build --release -p agentkeys-mcp-server"
 fi
 
 if [ ! -x "$MCP_BIN_SRC" ]; then
