@@ -396,6 +396,18 @@ bash scripts/setup-broker-host.sh --upgrade
 AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh
 ```
 
+> **Chain targeting** — the `verify-heima-contracts.sh` invocation above
+> reads contract addresses from `scripts/operator-workstation.env` (the
+> default `$ENV_FILE`). With `AGENTKEYS_CHAIN=heima` it verifies the
+> **live v2 stage-1 contracts on Heima mainnet** (the addresses in
+> [`docs/spec/deployed-contracts.md`](deployed-contracts.md)) — there is no
+> separate "test" set of contracts. Demo isolation is per-actor (fresh
+> `operator_omni` / `actor_omni` / `device_key_hash` per run, cap-mint
+> enforces device binding on chain). For an off-prod env file (e.g. a
+> staging operator-workstation file), set `ENV_FILE=/path/to/x.env`
+> ahead of the command — `setup-heima.sh --test` already does this for
+> its own test path.
+
 Capture for the next step:
 
 - `BROKER_URL=https://broker.litentry.org`
