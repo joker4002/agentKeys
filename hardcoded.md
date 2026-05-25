@@ -19,6 +19,23 @@ parameterization.
 
 ---
 
+## M1 — MCP server vendor auth (issues #107, #111)
+
+The M1 MCP server ships with a single static vendor token for the
+duration of the Phase-1 demo loop. Multi-tenant token issuance + rotation
+is the M2 #114 vendor-onboarding-portal scope and is explicitly out of M1
+per [`docs/spec/plans/m1-mcp-server-phase1.md` §1.1](docs/spec/plans/m1-mcp-server-phase1.md).
+
+### `harness/mcp/claude-config.json` + MCP-server runtime
+
+| What | Value | Why hardcoded | Unblock |
+|---|---|---|---|
+| `AGENTKEYS_MCP_VENDOR_TOKEN` | `m1-harness-stopgap` (default; overridable via env) | The M1 host is the Claude Code harness — single tenant. Per-vendor multi-tenant Bearer issuance is an M2 design (#114) that requires the vendor onboarding portal. Until then, one tenant = one static token = zero rotation surface. | Ship M2 #114 vendor onboarding portal. At that point `AGENTKEYS_MCP_VENDOR_TOKEN` becomes per-vendor JWTs minted by the broker; rotation is part of the issuance flow. |
+| `protocolVersion: "2024-11-05"` in [`crates/agentkeys-mcp/src/lib.rs`](crates/agentkeys-mcp/src/lib.rs) | Pinned MCP wire-format version | Anthropic ships MCP-protocol updates; pinning avoids silent wire drift between client (Claude Code) and server. | Deliberate version bump + layer-2 protocol regression test in CI when a new MCP spec version is required by the host ecosystem. |
+| `AGENTKEYS_AUDIT_BATCH_SECONDS` default `120` in [`crates/agentkeys-worker-audit/src/main.rs`](crates/agentkeys-worker-audit/src/main.rs) | Tier-A Merkle-batched on-chain anchor cadence | Matches the [#109](https://github.com/litentry/agentKeys/issues/109) ≤2-min SLA. The cadence is a PRODUCT decision (parent UX); not an engineering tunable that should drift silently. | Already an env override at the default value documented; operators tuning to a different cadence must update the parent-UI promise simultaneously. |
+
+---
+
 ## Operator-deployment-pinned values (litentry-account-specific)
 
 These pin the canonical demo/prod deployment to litentry's AWS account

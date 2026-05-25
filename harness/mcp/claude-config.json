@@ -1,0 +1,26 @@
+{
+  "_comment": "Claude Code MCP config for M1 harness. Register with: claude mcp add-from-config harness/mcp/claude-config.json -- OR -- paste this server block into ~/.claude.json under mcpServers. Prereqs: cargo build -p agentkeys-daemon; live session at ~/.agentkeys/$SESSION_ID/session.json; AGENTKEYS_BROKER_URL reachable. See harness/mcp/README.md.",
+  "mcpServers": {
+    "agentkeys-mcp": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "-p",
+        "agentkeys-daemon",
+        "--",
+        "--stdio",
+        "--session-id",
+        "${SESSION_ID:-alice}",
+        "--broker-url",
+        "${AGENTKEYS_BROKER_URL:-https://broker.heima.network}"
+      ],
+      "env": {
+        "AGENTKEYS_MCP_VENDOR_TOKEN": "${AGENTKEYS_MCP_VENDOR_TOKEN:-m1-harness-stopgap}",
+        "AGENTKEYS_REPO_ROOT": "${AGENTKEYS_REPO_ROOT}",
+        "AWS_REGION": "${AWS_REGION:-us-east-1}",
+        "RUST_LOG": "${RUST_LOG:-agentkeys_mcp=info,agentkeys_daemon=info}"
+      }
+    }
+  }
+}

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod m1_tools;
 pub mod server;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -56,8 +57,9 @@ impl JsonRpcResponse {
 }
 
 fn tool_definitions() -> Value {
-    json!([
-        {
+    // Legacy stage-7 tools — preserved additively per M1 plan §3 step 5.
+    let mut all = vec![
+        json!({
             "name": "agentkeys.get_credential",
             "description": "Fetch a stored credential for the given service. Returns the credential string.",
             "inputSchema": {
@@ -70,16 +72,16 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["service"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "agentkeys.list_credentials",
             "description": "List service names available to this agent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
             }
-        },
-        {
+        }),
+        json!({
             "name": "agentkeys.provision",
             "description": "Provision (sign up and store) a new API key for a service. Runs the provisioner script and stores the result.",
             "inputSchema": {
@@ -96,8 +98,11 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["service"]
             }
-        }
-    ])
+        }),
+    ];
+    // M1 tools (issues #107, #108, #109, #111) — appended additively.
+    all.extend(crate::m1_tools::tool_definitions());
+    Value::Array(all)
 }
 
 pub struct McpHandler {
@@ -224,7 +229,31 @@ impl McpHandler {
             "agentkeys.get_credential" => self.get_credential(id, arguments).await,
             "agentkeys.list_credentials" => self.list_credentials(id).await,
             "agentkeys.provision" => self.provision_tool(id, arguments).await,
-            _ => JsonRpcResponse::error(id, -32601, format!("unknown tool: {tool_name}")),
+            other => self.handle_m1_tool(id, other, arguments).await,
+        }
+    }
+
+    /// Route the M1 tools (issues #107, #108, #109, #111) through
+    /// `m1_tools::dispatch`. Returns "unknown tool" only if the dispatcher
+    /// also doesn't recognize it.
+    async fn handle_m1_tool(
+        &self,
+        id: Option<Value>,
+        tool_name: &str,
+        arguments: Value,
+    ) -> JsonRpcResponse {
+        let cfg = crate::m1_tools::M1Config::from_env();
+        let http = reqwest::Client::new();
+        // Stdio transport has no HTTP-style headers; header_actor=None for M1.
+        // When the MCP host gains a header-passing path, plumb it through here.
+        let header_actor: Option<&str> = None;
+        match crate::m1_tools::dispatch(tool_name, &arguments, header_actor, &self.session, &cfg, &http).await {
+            Ok(Some(value)) => JsonRpcResponse::success(id, value),
+            Ok(None) => JsonRpcResponse::error(id, -32601, format!("unknown tool: {tool_name}")),
+            Err(e) => {
+                let (code, msg) = e.to_jsonrpc();
+                JsonRpcResponse::error(id, code, msg)
+            }
         }
     }
 

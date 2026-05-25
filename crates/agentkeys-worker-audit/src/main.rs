@@ -28,12 +28,15 @@ struct Args {
     )]
     leaves_dir: String,
 
-    /// Periodic flush interval, in seconds. Default 300 (5 min). Set to 0 to
-    /// disable the timer (manual flush via /v1/audit/flush-all only).
+    /// Periodic flush interval, in seconds. Default 120 (2 min) per
+    /// issue #109 two-tier audit SLA. Set to 0 to disable the timer
+    /// (manual flush via /v1/audit/flush-all only). Override env var also
+    /// accepts `AGENTKEYS_AUDIT_BATCH_SECONDS` for forward-compat with
+    /// the M1 plan terminology.
     #[arg(
         long,
         env = "AGENTKEYS_WORKER_AUDIT_FLUSH_INTERVAL_SECS",
-        default_value_t = 300
+        default_value_t = 120
     )]
     flush_interval_secs: u64,
 }
