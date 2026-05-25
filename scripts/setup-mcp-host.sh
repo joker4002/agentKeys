@@ -614,7 +614,11 @@ EOF
   fi
 else
   head "7/9 nginx vhost"
-  skip "--without-nginx; skipping vhost"
+  if [ "$MODE" = "xiaozhi" ]; then
+    skip "xiaozhi mode — xiaozhi.me terminates TLS, no local nginx needed"
+  else
+    skip "--without-nginx; skipping vhost"
+  fi
 fi
 
 # ─── 8. certbot cert (idempotent: reuses existing) ───────────────────
@@ -734,6 +738,13 @@ EOF
     RELOAD_NGINX=1
     fi  # DNS_OK
   fi    # cert not yet present
+else
+  head "8/9 certbot certificate"
+  if [ "$MODE" = "xiaozhi" ]; then
+    skip "xiaozhi mode — xiaozhi.me's cert covers api.xiaozhi.me; no local cert needed"
+  else
+    skip "--without-nginx or --without-certbot; no cert"
+  fi
 fi      # WITH_NGINX && WITH_CERTBOT
 
 # ─── 9. nginx reload (only if drift) + post-checks ───────────────────
