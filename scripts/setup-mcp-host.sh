@@ -79,8 +79,42 @@ fail() { printf "    ${C_ERR}fail${C_RESET}          — %s\n" "$*" >&2; exit 1;
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing prerequisite: $1"; }
 
 need sudo
-[[ "$WITH_NGINX" == "yes"   ]] && need nginx || true
-[[ "$WITH_CERTBOT" == "yes" ]] && need certbot || true
+
+# ─── 0. Distro-package prerequisites ─────────────────────────────────
+# Idempotent: pkg checks first, only `apt install` what's missing. Output
+# follows the script's ok/skip/fail convention so a clean re-run shows
+# all skips.
+head "0/9 distro packages (python3-venv, python3-pip, git, nginx, certbot)"
+if command -v apt-get >/dev/null 2>&1; then
+  PKGS=(python3-venv python3-pip git)
+  [[ "$WITH_NGINX"   == "yes" ]] && PKGS+=(nginx)
+  [[ "$WITH_CERTBOT" == "yes" ]] && PKGS+=(certbot python3-certbot-nginx)
+
+  MISSING=()
+  for pkg in "${PKGS[@]}"; do
+    if dpkg -s "$pkg" >/dev/null 2>&1; then
+      skip "$pkg already installed"
+    else
+      MISSING+=("$pkg")
+    fi
+  done
+
+  if [ ${#MISSING[@]} -gt 0 ]; then
+    sudo apt-get update -qq
+    sudo apt-get install -y "${MISSING[@]}"
+    ok "installed: ${MISSING[*]}"
+  fi
+elif command -v dnf >/dev/null 2>&1; then
+  PKGS=(python3 python3-pip git)
+  [[ "$WITH_NGINX"   == "yes" ]] && PKGS+=(nginx)
+  [[ "$WITH_CERTBOT" == "yes" ]] && PKGS+=(certbot python3-certbot-nginx)
+  sudo dnf install -y -q "${PKGS[@]}" >/dev/null
+  ok "ensured: ${PKGS[*]} (dnf is idempotent)"
+else
+  skip "no apt-get or dnf; assuming prerequisites are present"
+  [[ "$WITH_NGINX"   == "yes" ]] && need nginx || true
+  [[ "$WITH_CERTBOT" == "yes" ]] && need certbot || true
+fi
 
 # Resolve the run-user, falling back to ubuntu on hosts where the
 # setup-broker-host.sh hasn't created `agentkey` yet.
@@ -155,14 +189,29 @@ else
   DEPS_DIRTY=1
 fi
 
-if sudo test -d "$INSTALL_DIR/src/.venv"; then
+# Healthy venv = .venv/bin/python3 exists AND runs. A failed first attempt
+# (e.g. python3-venv missing) can leave a half-built .venv directory; we
+# treat that as broken and recreate.
+VENV_HEALTHY="no"
+if sudo test -x "$INSTALL_DIR/src/.venv/bin/python3"; then
+  if sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/python3" -c "pass" 2>/dev/null; then
+    VENV_HEALTHY="yes"
+  fi
+fi
+
+if [ "$VENV_HEALTHY" = "yes" ]; then
   if [ "${DEPS_DIRTY:-0}" = "1" ]; then
     sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet -r "$INSTALL_DIR/src/requirements.txt"
     ok "venv: pip install -r requirements.txt (src moved)"
   else
-    skip "venv already exists and src unchanged"
+    skip "venv already exists + healthy + src unchanged"
   fi
 else
+  # Wipe a half-built venv from a prior failed run, if any.
+  if sudo test -d "$INSTALL_DIR/src/.venv"; then
+    sudo rm -rf "$INSTALL_DIR/src/.venv"
+    ok "removed broken half-built venv from a prior failed run"
+  fi
   sudo -u "$RUN_USER" python3 -m venv "$INSTALL_DIR/src/.venv"
   sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet --upgrade pip
   sudo -u "$RUN_USER" "$INSTALL_DIR/src/.venv/bin/pip" install --quiet -r "$INSTALL_DIR/src/requirements.txt"
