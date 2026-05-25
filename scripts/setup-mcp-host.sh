@@ -163,7 +163,7 @@ fi
 
 # ─── 2. Token + key — generate on first run only ─────────────────────
 head "2/9 tool token + 智控台 health key"
-gen_token() { head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32; }
+gen_token() { command head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32; }
 for pair in "TOKEN_FILE:tool token" "HEALTH_KEY_FILE:health key"; do
   var="${pair%%:*}"; desc="${pair##*:}"
   path="${!var}"
@@ -515,28 +515,23 @@ if [ "$WITH_NGINX" = "yes" ] && [ "$WITH_CERTBOT" = "yes" ]; then
       echo "     --certbot-email <addr> later to attach a recovery address.)" >&2
     fi
 
-    # Poll the public resolver (1.1.1.1) until the A record is visible.
-    # If setup-cloud.sh step 6 was just run, propagation is usually well
-    # under the TTL. Time out at 3 min and tell the operator what to fix.
-    DNS_IP=""
-    for i in $(seq 1 36); do  # 36 × 5s = 3 min
-      DNS_IP=$(dig +short A "$DOMAIN" @1.1.1.1 2>/dev/null | head -1 || true)
-      [ -z "$DNS_IP" ] && DNS_IP=$(dig +short A "$DOMAIN" 2>/dev/null | head -1 || true)
-      [ -z "$DNS_IP" ] && DNS_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -1 || true)
-      if [ -n "$DNS_IP" ]; then break; fi
-      [ "$i" -eq 1 ] && echo "    waiting up to 3 min for ${DOMAIN} to resolve via public DNS..." >&2
-      sleep 5
-    done
+    # Single-shot DNS check (no wait). Use `command head` to bypass the
+    # head() function we define for ==> step headers — without that the
+    # pipeline reads `head -1` as a function call with arg "-1" and
+    # prints garbage like `==> -1`.
+    DNS_IP=$(dig +short A "$DOMAIN" @1.1.1.1 2>/dev/null | command head -n 1)
+    [ -z "$DNS_IP" ] && DNS_IP=$(dig +short A "$DOMAIN" 2>/dev/null | command head -n 1)
+    [ -z "$DNS_IP" ] && DNS_IP=$(getent hosts "$DOMAIN" 2>/dev/null | awk 'NR==1 {print $1}')
 
     DNS_OK="yes"
     if [ -z "$DNS_IP" ]; then
       DNS_OK="no"
-      echo "    DNS A record for ${DOMAIN} not visible after 3 min." >&2
+      echo "    DNS A record for ${DOMAIN} not visible right now." >&2
       echo "    ACTION: provision DNS by running on the operator workstation:" >&2
       echo "      set -a && source scripts/operator-workstation.env && set +a" >&2
       echo "      bash scripts/setup-cloud.sh --env-file scripts/operator-workstation.env --only-step 6" >&2
       echo "    For the test env, use scripts/operator-workstation.test.env + --test." >&2
-      echo "    Then wait for TTL propagation (TTL 300 = ~5 min) and re-run this script." >&2
+      echo "    Then re-run this script (TTL 300 → ~5 min for resolvers to refresh)." >&2
       skip "cert deferred — DNS A record for ${DOMAIN} not yet live"
     else
       ok "DNS resolved: ${DOMAIN} → ${DNS_IP}"
