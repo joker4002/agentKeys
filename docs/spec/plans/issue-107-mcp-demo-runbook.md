@@ -423,15 +423,14 @@ The whole §B.5–§B.6 install (mcp-endpoint-server clone + venv, agentkeys-mcp
 Run it on the broker host (same host setup-broker-host.sh ran on):
 
 ```bash
-# First-time run — needs an email for the certbot cert issuance.
-bash scripts/setup-mcp-host.sh \
-  --domain mcp.litentry.org \
-  --certbot-email ops@litentry.org
-
-# Subsequent re-runs — same command, cert is reused, only drifted files are
-# rewritten. Safe to run after every `git pull`.
+# Bring-up / upgrade — same command for first run and every re-run.
 bash scripts/setup-mcp-host.sh --domain mcp.litentry.org
 ```
+
+> **ACME account email** — Let's Encrypt records one email per ACME account; used for cert-expiry / renewal-failure notifications. The script picks one of three behaviors:
+> 1. If `/etc/letsencrypt/accounts/` already has a registered ACME account (very common — `setup-broker-host.sh` will have registered one for the broker host), the new cert is issued against that account. **No email flag needed.** This is the normal path.
+> 2. If you pass `--certbot-email <addr>`, that address is used. Pick any mailbox you actually monitor — a team alias if Litentry has one (`agentkeys@litentry.org` / `infra@litentry.org`), or your personal address.
+> 3. If neither applies, the script falls through to `--register-unsafely-without-email` — cert still issues; no expiry notifications. You can re-run later with `--certbot-email` to attach a recovery address.
 
 What the script lands:
 

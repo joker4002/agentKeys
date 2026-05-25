@@ -389,10 +389,25 @@ if [ "$WITH_NGINX" = "yes" ] && [ "$WITH_CERTBOT" = "yes" ]; then
   if sudo test -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"; then
     skip "cert already issued at /etc/letsencrypt/live/${DOMAIN}/ (certbot will auto-renew)"
   else
-    if [ -z "$CERTBOT_EMAIL" ]; then
-      fail "first-time cert issuance needs --certbot-email <addr>"
+    # ACME account email: used by Let's Encrypt for cert-expiry +
+    # renewal-failure notifications and account recovery. Pick any
+    # address the operator actually monitors. Three accepted forms:
+    #   --certbot-email <addr>           explicit; this script
+    #   prior `certbot register` on host  reuses the existing ACME acct
+    #   --register-unsafely-without-email  no notifications, no recovery
+    if sudo test -d /etc/letsencrypt/accounts && \
+       [ "$(sudo find /etc/letsencrypt/accounts -name 'regr.json' | wc -l)" -gt 0 ]; then
+      EMAIL_ARG=""
+      ok "reusing existing ACME account on host (no --certbot-email needed)"
+    elif [ -n "$CERTBOT_EMAIL" ]; then
+      EMAIL_ARG="-m $CERTBOT_EMAIL"
+    else
+      EMAIL_ARG="--register-unsafely-without-email"
+      ok "no --certbot-email + no existing ACME account; using --register-unsafely-without-email"
+      echo "    (Let's Encrypt will not send expiry notifications. Re-run with" >&2
+      echo "     --certbot-email <addr> later to attach a recovery address.)" >&2
     fi
-    sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$CERTBOT_EMAIL"
+    sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos $EMAIL_ARG
     ok "issued cert for $DOMAIN"
     RELOAD_NGINX=1
   fi
