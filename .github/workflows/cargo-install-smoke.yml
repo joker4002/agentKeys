@@ -47,33 +47,18 @@ jobs:
           ls -la "$HOME/.cargo/bin/agentkeys-mcp-server"
           agentkeys-mcp-server --help 2>&1 | head -10 || true
 
-      - name: stdio handshake smoke test
+      - name: install uv (for mode-e functional E2E)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: functional E2E — three-act storyboard over stdio (mode E)
+        # Same gate as release.yml: full three-act storyboard via Anthropic's
+        # mcp Python SDK stdio_client against the binary `cargo install`
+        # just placed in ~/.cargo/bin. Catches any case where the publish
+        # path produces a working-but-broken binary (compiles, but tools
+        # don't behave like devs expect).
         run: |
-          set -euo pipefail
-          printf '%s\n' \
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"0"}}}' \
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agentkeys.memory.get","arguments":{"namespace":"travel"}}}' \
-          | env MCP_TRANSPORT=stdio MCP_BACKEND=in-memory \
-              "$HOME/.cargo/bin/agentkeys-mcp-server" 2>/dev/null \
-          | python3 -c "
-          import sys, json
-          got_init = got_list = got_call = False
-          for line in sys.stdin:
-              if not line.strip(): continue
-              msg = json.loads(line)
-              if msg.get('id') == 1 and 'result' in msg:
-                  got_init = True; print('  ✓ initialize')
-              elif msg.get('id') == 2 and 'result' in msg:
-                  assert len(msg['result']['tools']) == 7
-                  got_list = True; print(f'  ✓ tools/list (7 tools)')
-              elif msg.get('id') == 3 and 'result' in msg:
-                  assert 'Chengdu' in msg['result']['structuredContent']['content']
-                  got_call = True; print('  ✓ memory.get(travel)')
-          assert got_init and got_list and got_call
-          print('  ✓ cargo-install E2E PASS')
-          "
+          AGENTKEYS_MCP_BIN="$HOME/.cargo/bin/agentkeys-mcp-server" \
+            bash scripts/mcp-demo-mode-e-stdio.sh
 
       - name: notify on failure
         if: failure()

@@ -141,7 +141,7 @@ impl Server {
         let args = params.get("arguments").unwrap_or(&empty).clone();
 
         let result: McpResult<Value> = match name.as_str() {
-            tools::TOOL_IDENTITY_WHOAMI => tools::identity::call(caller, &args),
+            tools::TOOL_IDENTITY_WHOAMI => tools::identity::call(caller, &self.config, &args),
             tools::TOOL_PERMISSION_CHECK => {
                 tools::permission::call(caller, &self.policy, &self.config, &args)
             }

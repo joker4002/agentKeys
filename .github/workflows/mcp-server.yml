@@ -9,6 +9,7 @@ on:
       - "scripts/mcp-demo-mode-b-protocol.sh"
       - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
       - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
+      - "scripts/mcp-demo-mode-e-stdio.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
@@ -19,6 +20,7 @@ on:
       - "scripts/mcp-demo-mode-b-protocol.sh"
       - "scripts/mcp-demo-mode-c-xiaozhi-client.sh"
       - "scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh"
+      - "scripts/mcp-demo-mode-e-stdio.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/mcp-server.yml"
@@ -54,14 +56,25 @@ jobs:
       # server's own integration class can drive our server. These tiers catch
       # bugs at the MCP wire layer, the xiaozhi integration layer, and the
       # relay-topology layer respectively. No live broker or xiaozhi account.
-      - name: install uv (for modes B/C/D)
+      - name: install uv (for modes B/C/D/E)
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - name: mcp demo (mode B — Anthropic mcp SDK protocol smoke)
+      - name: mcp demo (mode B — Anthropic mcp SDK protocol smoke, HTTP)
         run: bash scripts/mcp-demo-mode-b-protocol.sh
-      - name: mcp demo (mode C — xiaozhi ServerMCPClient integration)
+      - name: mcp demo (mode C — xiaozhi ServerMCPClient integration, HTTP)
         run: bash scripts/mcp-demo-mode-c-xiaozhi-client.sh
-      - name: mcp demo (mode D — xiaozhi MCP-endpoint relay topology)
+      - name: mcp demo (mode D — xiaozhi MCP-endpoint relay topology, WS)
         run: bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh
+      # Mode E covers the stdio transport gap — the actual path Claude Code,
+      # Codex CLI, Claude Desktop, Cursor, Cline, Roo, Windsurf, Gemini CLI
+      # use. Modes B-D are all over HTTP/WS; without this we could ship a
+      # binary that initializes cleanly via curl but corrupts the stdout
+      # JSON-RPC stream with tracing logs (we already hit this once).
+      - name: build release binary (for mode E)
+        run: cargo build --release -p agentkeys-mcp-server
+      - name: mcp demo (mode E — stdio_client functional E2E)
+        run: |
+          AGENTKEYS_MCP_BIN="$(pwd)/target/release/agentkeys-mcp-server" \
+            bash scripts/mcp-demo-mode-e-stdio.sh
 
   image:
     name: build + publish image
