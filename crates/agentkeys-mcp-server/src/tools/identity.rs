@@ -63,7 +63,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_config_default_when_actor_omitted() {
-        let caller = CallerContext::new("vendor-a", "0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7");
+        let caller = CallerContext::new(
+            "vendor-a",
+            "0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7",
+        );
         let v = call(
             &caller,
             &cfg_with_default("0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7"),
