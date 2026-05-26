@@ -94,4 +94,5 @@ export type Route =
   | { page: 'workers'; actorId: null }
   | { page: 'onboarding'; actorId: null }
   | { page: 'onboarding-mobile'; actorId: null }
+  | { page: 'harness'; actorId: null }
   | { page: 'logo'; actorId: null };

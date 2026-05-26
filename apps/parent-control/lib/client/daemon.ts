@@ -10,30 +10,43 @@ import type {
   Result,
   RevokeIntent,
 } from './types';
-import type { Actor, AuditEvent, Namespace, ScopeBits, Worker } from '@/app/_components/types';
+import type {
+  Actor,
+  AuditEvent,
+  ChipKind,
+  Namespace,
+  ScopeBits,
+  StatusKind,
+  Worker,
+} from '@/app/_components/types';
 
 /**
  * DaemonBackend — talks to a running agentkeys-daemon over HTTP.
  *
- * PR-B wires K11 enrollment (POST /v1/k11/enroll/begin + .../finish).
- * Every other method still returns the disconnected variant until
- * PR-C lands the read endpoints (/v1/actors, /v1/audit/stream, etc.).
+ * Every method here maps 1:1 to a daemon HTTP endpoint:
+ *
+ *   GET  /healthz                       → status()
+ *   GET  /v1/actors                     → listActors
+ *   GET  /v1/actors/:id                 → getActor
+ *   GET  /v1/actors/:id/caps            → listCapTokens
+ *   GET  /v1/audit/recent               → listRecentAuditEvents
+ *   GET  /v1/audit/stream  (SSE)        → streamAudit
+ *   GET  /v1/anchor/status              → getAnchorStatus
+ *   GET  /v1/workers                    → listWorkers
+ *   GET  /v1/workers/:id                → getWorker
+ *   POST /v1/actors/:id/scope           → updateScope
+ *   POST /v1/actors/:id/payment-cap     → updatePaymentCap
+ *   POST /v1/actors/:id/revoke          → revokeDevice
+ *   POST /v1/actors/:id/caps/revoke     → revokeCap
+ *   POST /v1/k11/enroll/begin           → enrollK11Begin
+ *   POST /v1/k11/enroll/finish          → enrollK11Finish
  */
-const NOT_YET_WIRED: DisconnectedStatus = {
-  kind: 'disconnected',
-  reason: 'no-backend-configured',
-  detail: 'Endpoint not yet implemented in DaemonBackend (lands in PR-C).',
-};
 
-function notWired<T>(): Result<T> {
-  return { ok: false, status: NOT_YET_WIRED };
-}
+const DEFAULT_BASE_URL = 'http://localhost:3114';
 
 function unreachable(detail: string): DisconnectedStatus {
   return { kind: 'disconnected', reason: 'unreachable', detail };
 }
-
-const DEFAULT_BASE_URL = 'http://localhost:3114';
 
 export class DaemonBackend implements AgentKeysClient {
   private baseUrl: string;
@@ -42,12 +55,40 @@ export class DaemonBackend implements AgentKeysClient {
     this.baseUrl = (baseUrl ?? process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
   }
 
+  private async getJson<T>(path: string): Promise<Result<T>> {
+    try {
+      const resp = await fetch(`${this.baseUrl}${path}`, { method: 'GET', cache: 'no-store' });
+      if (!resp.ok) {
+        const text = await resp.text();
+        return { ok: false, status: unreachable(`GET ${path} → ${resp.status}: ${text}`) };
+      }
+      return { ok: true, data: (await resp.json()) as T };
+    } catch (e) {
+      return { ok: false, status: unreachable(`GET ${path}: ${(e as Error).message}`) };
+    }
+  }
+
+  private async postJson<T>(path: string, body: unknown): Promise<Result<T>> {
+    try {
+      const resp = await fetch(`${this.baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        return { ok: false, status: unreachable(`POST ${path} → ${resp.status}: ${text}`) };
+      }
+      return { ok: true, data: (await resp.json()) as T };
+    } catch (e) {
+      return { ok: false, status: unreachable(`POST ${path}: ${(e as Error).message}`) };
+    }
+  }
+
   async status(): Promise<ConnectionStatus> {
     try {
       const resp = await fetch(`${this.baseUrl}/healthz`, { method: 'GET', cache: 'no-store' });
-      if (!resp.ok) {
-        return unreachable(`/healthz returned ${resp.status}`);
-      }
+      if (!resp.ok) return unreachable(`/healthz returned ${resp.status}`);
       return { kind: 'connected', via: 'daemon', endpoint: this.baseUrl };
     } catch (e) {
       return unreachable(`fetch ${this.baseUrl}/healthz failed: ${(e as Error).message}`);
@@ -55,55 +96,125 @@ export class DaemonBackend implements AgentKeysClient {
   }
 
   async listActors(): Promise<Result<Actor[]>> {
-    return notWired();
+    const r = await this.getJson<{ actors: ApiActor[] }>('/v1/actors');
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.actors.map(apiToActor) };
   }
 
-  async getActor(): Promise<Result<Actor | null>> {
-    return notWired();
+  async getActor(id: string): Promise<Result<Actor | null>> {
+    const r = await this.getJson<ApiActor>(`/v1/actors/${encodeURIComponent(id)}`);
+    if (!r.ok) {
+      if (r.status.detail?.includes('→ 404')) return { ok: true, data: null };
+      return r;
+    }
+    return { ok: true, data: apiToActor(r.data) };
   }
 
-  async listCapTokens(_actorId: string): Promise<Result<CapToken[]>> {
-    return notWired();
+  async listCapTokens(actorId: string): Promise<Result<CapToken[]>> {
+    const r = await this.getJson<{ caps: CapToken[] }>(
+      `/v1/actors/${encodeURIComponent(actorId)}/caps`,
+    );
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.caps };
   }
 
-  async listRecentAuditEvents(): Promise<Result<AuditEvent[]>> {
-    return notWired();
+  async listRecentAuditEvents(opts?: { actorId?: string; limit?: number }): Promise<Result<AuditEvent[]>> {
+    const params = new URLSearchParams();
+    if (opts?.actorId) params.set('actor_id', opts.actorId);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    const r = await this.getJson<{ events: ApiAuditEvent[] }>(
+      `/v1/audit/recent${qs ? `?${qs}` : ''}`,
+    );
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.events.map(apiToAuditEvent) };
   }
 
   streamAudit(
-    _onEvent: (e: AuditEvent) => void,
+    onEvent: (e: AuditEvent) => void,
     onStatusChange: (s: ConnectionStatus) => void,
   ): () => void {
-    onStatusChange(NOT_YET_WIRED);
-    return () => {};
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+      onStatusChange(unreachable('EventSource not available in this environment'));
+      return () => {};
+    }
+    const es = new EventSource(`${this.baseUrl}/v1/audit/stream`);
+    es.addEventListener('audit', (msg) => {
+      try {
+        const apiEvent: ApiAuditEvent = JSON.parse((msg as MessageEvent).data);
+        onEvent(apiToAuditEvent(apiEvent));
+      } catch {
+        // ignore malformed event
+      }
+    });
+    es.onopen = () => onStatusChange({ kind: 'connected', via: 'daemon', endpoint: this.baseUrl });
+    es.onerror = () => onStatusChange(unreachable('/v1/audit/stream errored'));
+    return () => es.close();
   }
 
   async listWorkers(): Promise<Result<Worker[]>> {
-    return notWired();
+    const r = await this.getJson<{ workers: ApiWorker[] }>('/v1/workers');
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.workers.map(apiToWorker) };
   }
 
-  async getWorker(): Promise<Result<Worker | null>> {
-    return notWired();
+  async getWorker(id: Worker['id']): Promise<Result<Worker | null>> {
+    const r = await this.getJson<ApiWorker>(`/v1/workers/${encodeURIComponent(id)}`);
+    if (!r.ok) {
+      if (r.status.detail?.includes('→ 404')) return { ok: true, data: null };
+      return r;
+    }
+    return { ok: true, data: apiToWorker(r.data) };
   }
 
   async getAnchorStatus(): Promise<Result<AnchorStatus>> {
-    return notWired();
+    const r = await this.getJson<{
+      last_anchor_at: number;
+      next_anchor_in: number;
+      recent: { ts: string; root: string; count: number; txn: string; conf: number }[];
+    }>('/v1/anchor/status');
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: {
+        lastAnchorAt: r.data.last_anchor_at,
+        nextAnchorIn: r.data.next_anchor_in,
+        recent: r.data.recent,
+      },
+    };
   }
 
-  async updateScope(_actorId: string, _ns: Namespace, _value: ScopeBits): Promise<Result<void>> {
-    return notWired();
+  async updateScope(actorId: string, ns: Namespace, value: ScopeBits): Promise<Result<void>> {
+    const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/scope`, {
+      namespace: ns,
+      read: value.read,
+      write: value.write,
+    });
+    return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  async updatePaymentCap(_actorId: string, _perTx: number, _daily: number): Promise<Result<void>> {
-    return notWired();
+  async updatePaymentCap(actorId: string, perTx: number, daily: number): Promise<Result<void>> {
+    const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/payment-cap`, {
+      per_tx: perTx,
+      daily,
+    });
+    return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  async revokeDevice(_actorId: string, _intent: RevokeIntent): Promise<Result<void>> {
-    return notWired();
+  async revokeDevice(actorId: string, intent: RevokeIntent): Promise<Result<void>> {
+    const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/revoke`, {
+      intent_text: intent.text,
+      intent_fields: intent.fields,
+    });
+    return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  async revokeCap(_actorId: string, _capName: string, _intent: RevokeIntent): Promise<Result<void>> {
-    return notWired();
+  async revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>> {
+    const r = await this.postJson<unknown>(
+      `/v1/actors/${encodeURIComponent(actorId)}/caps/revoke`,
+      { cap: capName, intent_text: intent.text },
+    );
+    return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
   async enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>> {
@@ -176,4 +287,124 @@ export class DaemonBackend implements AgentKeysClient {
       return { ok: false, status: unreachable(`enroll/finish fetch failed: ${(e as Error).message}`) };
     }
   }
+}
+
+// ─── API wire types (snake_case, mirror ui_bridge.rs ApiActor etc.) ────
+
+interface ApiActor {
+  id: string;
+  omni: string;
+  omni_hex: string;
+  label: string;
+  role: string;
+  parent: string | null;
+  derivation: string;
+  device: string;
+  device_pubkey: string;
+  last_active: string;
+  status: string;
+  vendor: string;
+  k11: boolean;
+  scope?: Record<string, { read: boolean; write: boolean }>;
+  payment_cap?: { per_tx: number; daily: number; currency: string };
+  time_window?: { start: string; end: string; tz: string };
+  services?: string[];
+}
+
+interface ApiAuditEvent {
+  id: string;
+  ts: string;
+  actor_id: string;
+  actor: string;
+  kind: string;
+  detail: string;
+  chip: string;
+  sev: string;
+}
+
+interface ApiWorker {
+  id: string;
+  title: string;
+  host: string;
+  desc: string;
+  calls_today: number;
+  calls_hour: number;
+  p50: number;
+  p95: number;
+  cap: string;
+  by_actor: { actor: string; count: number; share: number }[];
+}
+
+function apiToActor(a: ApiActor): Actor {
+  return {
+    id: a.id,
+    omni: a.omni,
+    omniHex: a.omni_hex,
+    label: a.label,
+    role: a.role === 'master' ? 'master' : 'agent',
+    parent: a.parent,
+    derivation: a.derivation,
+    device: a.device,
+    devicePubkey: a.device_pubkey,
+    lastActive: a.last_active,
+    status: normalizeStatus(a.status),
+    vendor: a.vendor,
+    k11: a.k11,
+    scope: a.scope as Actor['scope'],
+    paymentCap: a.payment_cap
+      ? { perTx: a.payment_cap.per_tx, daily: a.payment_cap.daily, currency: a.payment_cap.currency }
+      : undefined,
+    timeWindow: a.time_window,
+    services: a.services,
+  };
+}
+
+function apiToAuditEvent(e: ApiAuditEvent): AuditEvent {
+  return {
+    id: e.id,
+    ts: e.ts,
+    actorId: e.actor_id,
+    actor: e.actor,
+    kind: e.kind,
+    detail: e.detail,
+    chip: normalizeChip(e.chip),
+    sev: normalizeStatus(e.sev),
+  };
+}
+
+function apiToWorker(w: ApiWorker): Worker {
+  return {
+    id: w.id as Worker['id'],
+    title: w.title,
+    host: w.host,
+    desc: w.desc,
+    callsToday: w.calls_today,
+    callsHour: w.calls_hour,
+    p50: w.p50,
+    p95: w.p95,
+    cap: w.cap,
+    byActor: w.by_actor,
+  };
+}
+
+function normalizeStatus(s: string): StatusKind {
+  if (s === 'ok' || s === 'warn' || s === 'bad' || s === 'muted') return s;
+  return 'muted';
+}
+
+function normalizeChip(c: string): ChipKind {
+  const allowed: ChipKind[] = [
+    'default',
+    'ok',
+    'warn',
+    'bad',
+    'memory',
+    'creds',
+    'audit',
+    'broker',
+    'chain',
+    'payment',
+    'revoke',
+  ];
+  return (allowed as string[]).includes(c) ? (c as ChipKind) : 'default';
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import type { CapToken } from '@/lib/client/types';
+import { HarnessPage } from './harness';
 import { LogoPage } from './logos';
 import { OnboardingPage } from './onboarding';
 import { ActorDetailPage, ActorsPage, AnchorPage, AuditPage } from './pages';
@@ -235,7 +236,7 @@ export function App() {
   };
 
   const currentActor = route.actorId ? actors.find((a) => a.id === route.actorId) : null;
-  const sectionAttr = (['audit', 'anchor', 'workers', 'logo', 'onboarding'] as const).includes(
+  const sectionAttr = (['audit', 'anchor', 'workers', 'logo', 'onboarding', 'harness'] as const).includes(
     route.page as never,
   )
     ? route.page
@@ -309,6 +310,12 @@ export function App() {
           onClick={() => go('onboarding')}
         >
           <span className="marker">[+]</span> add device
+        </button>
+        <button
+          className={`nav-item ${route.page === 'harness' ? 'active' : ''}`}
+          onClick={() => go('harness')}
+        >
+          <span className="marker">[v2]</span> stage 2 + 3
         </button>
 
         <div className="nav-section">brand</div>
@@ -401,6 +408,7 @@ export function App() {
           <OnboardingPage onClose={() => go('actors')} />
         )}
         {route.page === 'onboarding-mobile' && <MobileStub onBack={() => go('onboarding')} />}
+        {route.page === 'harness' && <HarnessPage onClose={() => go('actors')} />}
         {route.page === 'logo' && <LogoPage />}
       </main>
 

@@ -41,6 +41,10 @@ tower-service = "0.3"
 # See src/ui_bridge.rs.
 webauthn-rs = "0.5"
 url = "2"
+# SSE audit-feed broadcast (PR-C) — futures-util drives the axum
+# Sse stream; tokio-stream wraps the broadcast::Receiver as a Stream.
+futures-util = { version = "0.3", default-features = false }
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

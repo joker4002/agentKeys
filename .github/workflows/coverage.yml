@@ -2,10 +2,15 @@ name: coverage
 
 # Rust test coverage via cargo-llvm-cov.
 #
-# Currently non-blocking (`continue-on-error: true` on the cargo step + this
-# whole job is not a required check). The goal is to first surface coverage
-# numbers as a PR-attached artifact + summary, then in PR-C land a blocking
-# threshold once we know what's realistic per crate.
+# Blocking on the new UI-bridge endpoints (PR-C). The threshold is
+# per-file via cargo-llvm-cov's --fail-under-lines:
+#   --fail-under-lines 60   workspace-wide minimum
+# The ui_bridge.rs module specifically is expected to stay >80%
+# (drift triggers a follow-up to add the missing test).
+#
+# To inspect locally:
+#   cargo install cargo-llvm-cov
+#   cargo llvm-cov --workspace --html  # opens target/llvm-cov/html/index.html
 #
 # Generates:
 #   - lcov.info        — for codecov / coveralls (uploaded as artifact today)
@@ -65,15 +70,18 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Generate lcov + html
+      - name: Generate lcov + html (blocking; --fail-under-lines 60)
         id: cov
-        continue-on-error: true
         run: |
           set -euo pipefail
           cargo llvm-cov --workspace --lcov --output-path lcov.info -- --test-threads=1
           cargo llvm-cov --workspace --html         -- --test-threads=1
           cargo llvm-cov report --workspace --summary-only -- --test-threads=1 \
             | tee coverage-summary.txt
+          # Workspace-wide floor. Set conservatively (60%); per-file
+          # discipline lives in the test list in each module under
+          # `mod tests`. Bump in follow-up PRs as tests catch up.
+          cargo llvm-cov report --workspace --fail-under-lines 60 -- --test-threads=1
 
       - name: Upload lcov artifact
         if: always()
@@ -99,7 +107,7 @@ jobs:
           {
             echo "## Coverage (cargo-llvm-cov)"
             echo
-            echo "Non-blocking. Threshold gating arrives in PR-C."
+            echo "Workspace floor: 60% lines. Failing this gate blocks merge."
             echo
             echo '```'
             cat coverage-summary.txt 2>/dev/null || echo "(coverage-summary.txt not produced — see job logs)"
