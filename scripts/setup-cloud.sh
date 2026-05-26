@@ -76,7 +76,7 @@ YES=0
 DRY_RUN=0
 FROM_STEP=1
 TO_STEP=15
-STEP_TOTAL=15
+STEP_TOTAL=16
 
 # Colors only when stderr is a TTY.
 if [ -t 2 ]; then
@@ -342,7 +342,7 @@ do_step_5() {
 }
 
 do_step_6() {
-  CUR_STEP=6; step "DNS records (DKIM + SPF + DMARC + MX + 6 A records to $EIP)"
+  CUR_STEP=6; step "DNS records (DKIM + SPF + DMARC + MX + 7 A records to $EIP)"
   : "${EIP:?EIP missing — re-run step 4 first}"
 
   local tokens t1 t2 t3
@@ -362,6 +362,7 @@ do_step_6() {
   : "${WORKER_EMAIL_HOST:?WORKER_EMAIL_HOST missing — must be set in $ENV_FILE}"
   : "${WORKER_CRED_HOST:?WORKER_CRED_HOST missing — must be set in $ENV_FILE}"
   : "${WORKER_MEMORY_HOST:?WORKER_MEMORY_HOST missing — must be set in $ENV_FILE}"
+  : "${MCP_HOST:?MCP_HOST missing — must be set in $ENV_FILE}"
 
   local change_batch
   change_batch=$(jq -n \
@@ -369,7 +370,7 @@ do_step_6() {
     --arg eip "$EIP" --arg broker "$BROKER_HOST" \
     --arg signer "$SIGNER_HOST" --arg audit "$WORKER_AUDIT_HOST" \
     --arg email "$WORKER_EMAIL_HOST" --arg cred "$WORKER_CRED_HOST" \
-    --arg memory "$WORKER_MEMORY_HOST" \
+    --arg memory "$WORKER_MEMORY_HOST" --arg mcp "$MCP_HOST" \
     --arg t1 "$t1" --arg t2 "$t2" --arg t3 "$t3" '{
       Comment: "AgentKeys cloud bootstrap (DKIM/SPF/DMARC/MX + broker subdomains)",
       Changes: [
@@ -384,16 +385,17 @@ do_step_6() {
         {Action:"UPSERT", ResourceRecordSet:{Name:$audit,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$email,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$cred,   Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:$memory, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}}
+        {Action:"UPSERT", ResourceRecordSet:{Name:$memory, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
+        {Action:"UPSERT", ResourceRecordSet:{Name:$mcp,    Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}}
       ]
     }')
 
-  [ "$DRY_RUN" = "1" ] && { warn "DRY: would change-resource-record-sets (12 UPSERTs)"; return; }
+  [ "$DRY_RUN" = "1" ] && { warn "DRY: would change-resource-record-sets (13 UPSERTs)"; return; }
 
   aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
     --change-batch "$change_batch" >/dev/null \
     || die "route53 change-resource-record-sets failed"
-  ok "DNS records UPSERTed (12 records; ~5min for DKIM verification)"
+  ok "DNS records UPSERTed (13 records; ~5min for DKIM verification)"
 }
 
 do_step_7() {
@@ -696,7 +698,96 @@ do_step_14() {
 }
 
 do_step_15() {
-  CUR_STEP=15; step "Summary + next steps"
+  CUR_STEP=15; step "Bring up agentkeys-mcp-server on broker (via SSM)"
+  : "${INSTANCE_ID:?INSTANCE_ID missing — broker EC2 needs to exist (re-run step 4 first)}"
+
+  REPO_URL_FOR_MCP="${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git}"
+  REV_FOR_MCP="${AGENTKEYS_REV:-main}"
+  MCP_HOST_FLAGS=""
+  if [ "$TEST_MODE" = "1" ]; then
+    MCP_HOST_FLAGS="--test"
+  fi
+
+  if [ "$DRY_RUN" = "1" ]; then
+    warn "DRY: would SSM-run setup-mcp-host.sh on $INSTANCE_ID ($([ "$TEST_MODE" = "1" ] && echo test-mcp || echo mcp).${ZONE})"
+    return
+  fi
+
+  # The script body that runs on the broker. Idempotent — setup-mcp-host.sh
+  # short-circuits when state is already correct. Steps:
+  #   1. Ensure cargo (install rustup-minimal if missing — common on fresh EC2)
+  #   2. Clone or update the repo at /opt/agentkeys-src
+  #   3. Run scripts/setup-mcp-host.sh (which itself does `cargo install --git`)
+  local mcp_bring_up_script
+  mcp_bring_up_script=$(cat <<EOSH
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="\$HOME/.cargo/bin:\$PATH"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+  source "\$HOME/.cargo/env"
+fi
+
+REPO_DIR=/opt/agentkeys-src
+if [ ! -d "\$REPO_DIR/.git" ]; then
+  sudo install -d -m 0755 -o ubuntu -g ubuntu "\$REPO_DIR"
+  sudo -u ubuntu git clone --depth 1 -b ${REV_FOR_MCP} ${REPO_URL_FOR_MCP} "\$REPO_DIR"
+else
+  sudo -u ubuntu git -C "\$REPO_DIR" fetch --depth 1 origin ${REV_FOR_MCP}
+  sudo -u ubuntu git -C "\$REPO_DIR" reset --hard FETCH_HEAD
+fi
+
+cd "\$REPO_DIR"
+sudo -E AGENTKEYS_REPO_URL=${REPO_URL_FOR_MCP} AGENTKEYS_REV=${REV_FOR_MCP} \\
+  bash scripts/setup-mcp-host.sh ${MCP_HOST_FLAGS}
+EOSH
+)
+
+  local cmd_id
+  cmd_id=$(aws ssm send-command \
+    --region "$REGION" \
+    --instance-ids "$INSTANCE_ID" \
+    --document-name "AWS-RunShellScript" \
+    --comment "agentkeys-mcp-server bring-up ($([ "$TEST_MODE" = "1" ] && echo test || echo prod))" \
+    --parameters "{\"commands\": $(jq -Rs . <<<"$mcp_bring_up_script" | jq -s .)}" \
+    --query "Command.CommandId" --output text) \
+    || die "aws ssm send-command failed — does $INSTANCE_ID have amazon-ssm-agent + the SSM instance profile?"
+  ok "SSM command $cmd_id queued on $INSTANCE_ID; polling for completion (max 10 min)"
+
+  # Poll every 10s for up to 10 min. setup-mcp-host.sh is normally <3 min;
+  # first-time runs with cargo install may take longer.
+  local status="Pending"
+  for i in $(seq 1 60); do
+    sleep 10
+    status=$(aws ssm get-command-invocation \
+      --region "$REGION" \
+      --command-id "$cmd_id" \
+      --instance-id "$INSTANCE_ID" \
+      --query "Status" --output text 2>/dev/null || echo "Pending")
+    case "$status" in
+      Success)
+        ok "MCP server brought up on $INSTANCE_ID"
+        # Tail the last 30 lines of stdout for a quick sanity check
+        aws ssm get-command-invocation \
+          --region "$REGION" --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text 2>/dev/null \
+          | tail -30 | sed 's/^/      /' >&2 || true
+        return ;;
+      Failed|Cancelled|TimedOut)
+        warn "SSM command status: $status"
+        aws ssm get-command-invocation \
+          --region "$REGION" --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+          --query "StandardErrorContent" --output text 2>/dev/null \
+          | tail -50 | sed 's/^/      /' >&2 || true
+        die "MCP bring-up failed; see SSM command $cmd_id in CloudWatch" ;;
+    esac
+  done
+  die "MCP bring-up timed out after 10 min (status=$status); check SSM command $cmd_id"
+}
+
+do_step_16() {
+  CUR_STEP=16; step "Summary + next steps"
   printf "\n${COLOR_OK}═══ Cloud bootstrap complete ═══${COLOR_RESET}\n\n" >&2
   printf "  Operator env file : %s\n" "$ENV_FILE" >&2
   printf "  Broker env file   : %s\n" "$BROKER_ENV_FILE" >&2
@@ -729,7 +820,9 @@ do_step_15() {
   printf "  Re-run any step surgically (idempotent):\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 6   # re-UPSERT DNS\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 12  # re-create SSH user (e.g. after EC2 replace)\n" >&2
-  printf "    bash scripts/setup-cloud.sh --only-step 13  # re-run per-data-class provisioning\n\n" >&2
+  printf "    bash scripts/setup-cloud.sh --only-step 13  # re-run per-data-class provisioning\n" >&2
+  printf "    bash scripts/setup-cloud.sh --only-step 15  # re-deploy agentkeys-mcp-server on broker (cargo install --git)\n" >&2
+  printf "    bash scripts/setup-cloud.sh --only-step 15 --test  # same for test-mcp.\${ZONE}\n\n" >&2
 }
 
 main() {
@@ -748,6 +841,7 @@ main() {
   in_scope 13 && do_step_13
   in_scope 14 && do_step_14
   in_scope 15 && do_step_15
+  in_scope 16 && do_step_16
 }
 
 main "$@"
