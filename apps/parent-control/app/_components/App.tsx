@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { INITIAL_ACTORS, INITIAL_EVENTS, SIM_EVENTS } from './data';
+import { useCallback, useEffect, useState } from 'react';
+import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
+import type { CapToken } from '@/lib/client/types';
 import { LogoPage } from './logos';
 import { ActorDetailPage, ActorsPage, AnchorPage, AuditPage } from './pages';
-import { Modal, WebAuthnModal } from './shared';
+import { Modal, PageHead, Panel, WebAuthnModal } from './shared';
 import type { Actor, AuditEvent, PendingAction, Route } from './types';
 import { WorkersPage } from './workers';
 
@@ -13,8 +14,12 @@ function nowTs(d: Date = new Date()) {
 }
 
 export function App() {
-  const [actors, setActors] = useState<Actor[]>(INITIAL_ACTORS);
-  const [events, setEvents] = useState<AuditEvent[]>(() => INITIAL_EVENTS.map((e) => ({ ...e })));
+  const client = useClient();
+  const status = useConnectionStatus();
+
+  const [actors, setActors] = useState<Actor[]>([]);
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [capTokens, setCapTokens] = useState<Record<string, CapToken[]>>({});
   const [route, setRoute] = useState<Route>({ page: 'actors', actorId: null });
   const [sideOpen, setSideOpen] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -22,37 +27,101 @@ export function App() {
   const [eventDetail, setEventDetail] = useState<AuditEvent | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // ─── Sim: incoming SSE events ──────────────────────────────────
-  const simIdx = useRef(0);
+  // ─── Initial fetch ─────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [actorsResult, eventsResult] = await Promise.all([
+        client.listActors(),
+        client.listRecentAuditEvents({ limit: 50 }),
+      ]);
+      if (cancelled) return;
+      if (actorsResult.ok) setActors(actorsResult.data);
+      if (eventsResult.ok) setEvents(eventsResult.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  // ─── Cap-token fetch on actor detail ───────────────────────────
+  useEffect(() => {
+    if (route.page !== 'detail' || !route.actorId) return;
+    const actorId = route.actorId;
+    if (capTokens[actorId]) return;
+    let cancelled = false;
+    (async () => {
+      const r = await client.listCapTokens(actorId);
+      if (cancelled || !r.ok) return;
+      setCapTokens((prev) => ({ ...prev, [actorId]: r.data }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [route, client, capTokens]);
+
+  // ─── SSE subscription ──────────────────────────────────────────
   useEffect(() => {
     if (paused) return;
-    const tick = () => {
-      simIdx.current = (simIdx.current + 1) % SIM_EVENTS.length;
-      const template = SIM_EVENTS[simIdx.current];
-      const newEvent: AuditEvent = {
-        ...template,
-        id: `e-live-${Date.now()}`,
-        ts: nowTs(),
-        _isNew: true,
-      };
-      setEvents((prev) => [newEvent, ...prev].slice(0, 80));
-      setTimeout(() => {
-        setEvents((prev) => prev.map((e) => (e.id === newEvent.id ? { ...e, _isNew: false } : e)));
-      }, 1500);
-    };
-    const intv = setInterval(tick, 4200);
-    return () => clearInterval(intv);
-  }, [paused]);
+    const unsub = client.streamAudit(
+      (incoming) => {
+        const tagged: AuditEvent = { ...incoming, _isNew: true };
+        setEvents((prev) => [tagged, ...prev].slice(0, 80));
+        setTimeout(() => {
+          setEvents((prev) =>
+            prev.map((e) => (e.id === tagged.id ? { ...e, _isNew: false } : e)),
+          );
+        }, 1500);
+      },
+      () => {
+        /* status changes propagate via context; no-op here */
+      },
+    );
+    return unsub;
+  }, [client, paused]);
 
-  const updateActor = (id: string, patch: Partial<Actor>) => {
-    setActors((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
-    showToast('scope updated · K11 assertion queued for next save');
-  };
-
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2600);
-  };
+  }, []);
+
+  const updateActor = useCallback(
+    async (id: string, patch: Partial<Actor>) => {
+      const previous = actors.find((a) => a.id === id);
+      if (!previous) return;
+      setActors((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+      if (patch.scope) {
+        const changedNs = Object.keys(patch.scope).find(
+          (k) => previous.scope?.[k as keyof typeof previous.scope] !== patch.scope![k as keyof typeof patch.scope],
+        );
+        if (changedNs) {
+          const ns = changedNs as keyof typeof patch.scope;
+          const r = await client.updateScope(id, ns, patch.scope[ns]);
+          if (!r.ok) {
+            showToast(`scope update rejected · ${r.status.reason}`);
+            setActors((prev) => prev.map((a) => (a.id === id ? previous : a)));
+            return;
+          }
+          showToast('scope updated · K11 assertion queued for next save');
+          return;
+        }
+      }
+      if (patch.paymentCap) {
+        const r = await client.updatePaymentCap(
+          id,
+          patch.paymentCap.perTx,
+          patch.paymentCap.daily,
+        );
+        if (!r.ok) {
+          showToast(`payment cap rejected · ${r.status.reason}`);
+          setActors((prev) => prev.map((a) => (a.id === id ? previous : a)));
+          return;
+        }
+        showToast('payment cap updated · K11 assertion queued for next save');
+      }
+    },
+    [actors, client, showToast],
+  );
 
   const handleRevokeDevice = (actor: Actor) => {
     setPendingAction({
@@ -89,7 +158,7 @@ export function App() {
     });
   };
 
-  const confirmAction = () => {
+  const confirmAction = useCallback(async () => {
     const action = pendingAction;
     setPendingAction(null);
     if (!action) return;
@@ -97,6 +166,11 @@ export function App() {
     const ts = nowTs();
 
     if (action.kind === 'revoke-device') {
+      const r = await client.revokeDevice(action.actor.id, action.intent);
+      if (!r.ok) {
+        showToast(`revoke rejected · ${r.status.reason}`);
+        return;
+      }
       setActors((prev) =>
         prev.map((a) =>
           a.id === action.actor.id
@@ -120,9 +194,15 @@ export function App() {
       ]);
       showToast(`${action.actor.label} revoked. SSE drop event broadcast.`);
       setRoute({ page: 'audit', actorId: null });
+      return;
     }
 
     if (action.kind === 'revoke-scope') {
+      const r = await client.revokeCap(action.actor.id, action.capName, action.intent);
+      if (!r.ok) {
+        showToast(`revoke rejected · ${r.status.reason}`);
+        return;
+      }
       setEvents((prev) => [
         {
           id: `e-live-${Date.now()}`,
@@ -139,7 +219,7 @@ export function App() {
       ]);
       showToast(`${action.capName} revoked for ${action.actor.label}.`);
     }
-  };
+  }, [client, pendingAction, showToast]);
 
   const go = (page: Route['page'], actorId: string | null = null) => {
     if (page === 'detail' && actorId) {
@@ -154,10 +234,20 @@ export function App() {
   };
 
   const currentActor = route.actorId ? actors.find((a) => a.id === route.actorId) : null;
-
-  const sectionAttr = (['audit', 'anchor', 'workers', 'logo'] as const).includes(route.page as never)
+  const sectionAttr = (['audit', 'anchor', 'workers', 'logo', 'onboarding'] as const).includes(
+    route.page as never,
+  )
     ? route.page
     : undefined;
+
+  const connectionLabel =
+    status.kind === 'connected'
+      ? `${status.via} · ${status.endpoint}`
+      : status.reason === 'no-backend-configured'
+        ? 'backend not configured'
+        : status.reason === 'unauthorized'
+          ? 'unauthorized'
+          : 'unreachable';
 
   return (
     <div className="app">
@@ -173,10 +263,12 @@ export function App() {
         </div>
         <div className="head-right">
           <span style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-            chain · litentry-parachain · block 4 821 022
+            {connectionLabel}
           </span>
           <span className="who">
-            <span className="who-text">Sara · O_master · iPhone 17 Pro</span>
+            <span className="who-text">
+              {actors.find((a) => a.role === 'master')?.label ?? 'no master enrolled'}
+            </span>
           </span>
         </div>
       </header>
@@ -208,7 +300,14 @@ export function App() {
           onClick={() => go('workers')}
         >
           <span className="marker">[#]</span> workers
-          <span className="count">5</span>
+        </button>
+
+        <div className="nav-section">onboarding</div>
+        <button
+          className={`nav-item ${route.page === 'onboarding' ? 'active' : ''}`}
+          onClick={() => go('onboarding')}
+        >
+          <span className="marker">[+]</span> add device
         </button>
 
         <div className="nav-section">brand</div>
@@ -219,32 +318,36 @@ export function App() {
           <span className="marker">[◐]</span> logo
         </button>
 
-        <div className="nav-section">actor tree</div>
-        {actors.map((a) => (
-          <button
-            key={a.id}
-            className={`nav-item ${route.page === 'detail' && route.actorId === a.id ? 'active' : ''}`}
-            onClick={() => go('detail', a.id)}
-            style={{ paddingLeft: a.role === 'agent' ? 36 : 22 }}
-          >
-            <span className="marker" style={{ fontSize: 10 }}>
-              {a.role === 'master' ? '/' : '└'}
-            </span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {a.label.replace(' (revoked)', '')}
-            </span>
-            {a.status === 'bad' && (
-              <span className="count" style={{ color: 'var(--danger)' }}>
-                rvk
-              </span>
-            )}
-            {a.status === 'warn' && (
-              <span className="count" style={{ color: 'var(--accent)' }}>
-                !
-              </span>
-            )}
-          </button>
-        ))}
+        {actors.length > 0 && (
+          <>
+            <div className="nav-section">actor tree</div>
+            {actors.map((a) => (
+              <button
+                key={a.id}
+                className={`nav-item ${route.page === 'detail' && route.actorId === a.id ? 'active' : ''}`}
+                onClick={() => go('detail', a.id)}
+                style={{ paddingLeft: a.role === 'agent' ? 36 : 22 }}
+              >
+                <span className="marker" style={{ fontSize: 10 }}>
+                  {a.role === 'master' ? '/' : '└'}
+                </span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {a.label.replace(' (revoked)', '')}
+                </span>
+                {a.status === 'bad' && (
+                  <span className="count" style={{ color: 'var(--danger)' }}>
+                    rvk
+                  </span>
+                )}
+                {a.status === 'warn' && (
+                  <span className="count" style={{ color: 'var(--accent)' }}>
+                    !
+                  </span>
+                )}
+              </button>
+            ))}
+          </>
+        )}
 
         <div className="nav-section">session</div>
         <div
@@ -255,18 +358,20 @@ export function App() {
             lineHeight: 1.7,
           }}
         >
-          K6 · session JWT
-          <br />
-          ttl 04h 47m
-          <br />
-          K11 · iOS SE · ok
+          {status.kind === 'connected' ? (
+            <>
+              K6 · session JWT
+              <br />
+              via {status.via}
+            </>
+          ) : (
+            <>no session · daemon offline</>
+          )}
         </div>
       </aside>
 
       <main className="app-main" data-section={sectionAttr}>
-        {route.page === 'actors' && (
-          <ActorsPage actors={actors} onPick={(id) => go('detail', id)} />
-        )}
+        {route.page === 'actors' && <ActorsPage actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {route.page === 'detail' && currentActor && (
           <ActorDetailPage
             actor={currentActor}
@@ -275,11 +380,13 @@ export function App() {
             onRevoke={handleRevokeDevice}
             onRevokeScope={handleRevokeScope}
             recentEvents={events}
+            capTokens={capTokens[currentActor.id] ?? []}
           />
         )}
         {route.page === 'audit' && (
           <AuditPage
             events={events}
+            status={status}
             onPick={setEventDetail}
             paused={paused}
             onPause={() => setPaused((p) => !p)}
@@ -287,8 +394,10 @@ export function App() {
         )}
         {route.page === 'anchor' && <AnchorPage />}
         {route.page === 'workers' && (
-          <WorkersPage actors={actors} onPickActor={(id) => go('detail', id)} />
+          <WorkersPage status={status} onPickActor={(id) => go('detail', id)} />
         )}
+        {route.page === 'onboarding' && <OnboardingStub onMobile={() => go('onboarding-mobile')} />}
+        {route.page === 'onboarding-mobile' && <MobileStub onBack={() => go('onboarding')} />}
         {route.page === 'logo' && <LogoPage />}
       </main>
 
@@ -337,15 +446,6 @@ export function App() {
             <dd>tier-1 (sse) · pending tier-2 anchor</dd>
             <dt>event id</dt>
             <dd className="mono">{eventDetail.id}</dd>
-            <dt>cap-token</dt>
-            <dd className="mono">cap_{eventDetail.id.slice(-6)}…3f01</dd>
-            <dt>K10 signer</dt>
-            <dd className="mono">
-              {eventDetail.actor === 'Sara (master)'
-                ? 'D_pub_master_iphone'
-                : 'D_pub_' + eventDetail.actor.toLowerCase().replace(/[^a-z]/g, '')}
-              …
-            </dd>
           </dl>
         </Modal>
       )}
@@ -370,5 +470,145 @@ export function App() {
         </div>
       )}
     </div>
+  );
+}
+
+function OnboardingStub({ onMobile }: { onMobile: () => void }) {
+  return (
+    <>
+      <PageHead
+        crumb="onboarding · stage-1 mirror"
+        title={
+          <>
+            <span className="muted serif">/</span> add device
+          </>
+        }
+        desc="The full enrollment wizard arrives in PR-B (issue #110 follow-up). Today this page is a placeholder that lists the harness v2-stage1 steps and lets you launch the mobile-second-master stub."
+      />
+      <Panel title="── v2-stage1 step preview">
+        <ol style={{ paddingLeft: 18, lineHeight: 1.9, fontSize: 12.5 }}>
+          <li>email-link identity ceremony → broker `binding_nonce`</li>
+          <li>generate K10 device key in Secure Enclave</li>
+          <li>K11 WebAuthn enrollment (PR-B: real navigator.credentials.create)</li>
+          <li>SIWE → broker session JWT (K6)</li>
+          <li>STS assume-role-with-web-identity → S3 isolation proof</li>
+          <li>provision vault + memory buckets (one-shot, idempotent)</li>
+          <li>chain bring-up: SidecarRegistry + AgentKeysScope + K3EpochCounter + CredentialAudit</li>
+          <li>register master device on-chain</li>
+        </ol>
+      </Panel>
+      <Panel title="── second master device" right={<button className="btn sm" onClick={onMobile}>open mobile stub →</button>}>
+        <div className="muted" style={{ fontSize: 12 }}>
+          arch.md §10.5 calls for 1-of-2 recovery with iPad as the second master. The mobile pairing surface is stubbed
+          today (no real ceremony yet) — open it to preview what the QR-pair screen will look like.
+        </div>
+      </Panel>
+    </>
+  );
+}
+
+function MobileStub({ onBack }: { onBack: () => void }) {
+  const fakeQR = Array.from({ length: 21 * 21 }, (_, i) => {
+    const x = i % 21;
+    const y = Math.floor(i / 21);
+    const corner =
+      (x < 7 && y < 7) || (x >= 14 && y < 7) || (x < 7 && y >= 14);
+    const cornerInner =
+      ((x >= 2 && x < 5 && y >= 2 && y < 5)) ||
+      ((x >= 16 && x < 19 && y >= 2 && y < 5)) ||
+      ((x >= 2 && x < 5 && y >= 16 && y < 19));
+    const cornerFrame =
+      (x === 0 || x === 6 || y === 0 || y === 6) && x < 7 && y < 7;
+    const cornerFrameTR =
+      (x === 14 || x === 20 || y === 0 || y === 6) && x >= 14 && y < 7;
+    const cornerFrameBL =
+      (x === 0 || x === 6 || y === 14 || y === 20) && x < 7 && y >= 14;
+    if (corner) return cornerInner || cornerFrame || cornerFrameTR || cornerFrameBL ? 1 : 0;
+    return Math.abs(((x * 31) ^ (y * 17)) % 2);
+  });
+
+  return (
+    <>
+      <PageHead
+        crumb={
+          <>
+            <a onClick={onBack} style={{ cursor: 'pointer' }}>
+              onboarding
+            </a>{' '}
+            <span className="muted">/</span> mobile
+          </>
+        }
+        title={
+          <>
+            <span className="muted serif">/</span> mobile · second master
+          </>
+        }
+        desc="Stub. Real cross-device WebAuthn (FIDO CTAP 2.2 hybrid transport) ships in M5 after the vendor pilot signs. This page exists to show what the operator will see, not to perform the ceremony."
+        actions={
+          <button className="btn" onClick={onBack}>
+            ← back
+          </button>
+        }
+      />
+
+      <div className="banner warn">
+        <span className="lbl">stub</span>
+        <span>
+          arch.md §10.5 1-of-2 recovery is a real architectural commitment. This page is a stub today — no QR
+          scanning, no companion-daemon negotiation. Tracked for M5 (issue TBD).
+        </span>
+      </div>
+
+      <Panel title="── pair a second master device">
+        <div style={{ display: 'flex', gap: 28, alignItems: 'center', padding: '12px 0' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(21, 8px)',
+              gridTemplateRows: 'repeat(21, 8px)',
+              padding: 8,
+              background: 'var(--bg)',
+              border: '1px solid var(--rule)',
+            }}
+            aria-label="QR code preview (stub)"
+          >
+            {fakeQR.map((bit, i) => (
+              <div
+                key={i}
+                style={{ background: bit ? 'var(--ink)' : 'var(--bg)' }}
+              />
+            ))}
+          </div>
+          <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+            <div className="serif" style={{ fontSize: 18, fontStyle: 'italic', marginBottom: 4 }}>
+              scan with iPad or Android
+            </div>
+            <div className="muted" style={{ marginBottom: 12 }}>
+              When the real flow ships, this QR encodes the cross-device WebAuthn hybrid-transport
+              challenge. The phone&apos;s platform authenticator generates K11, signs the master-binding
+              ceremony, and registers as the second device on SidecarRegistry.
+            </div>
+            <div className="muted" style={{ fontSize: 11 }}>
+              role on chain · <span className="mono">CAP_MINT | RECOVERY</span> (no SCOPE_MGMT)
+              <br />
+              quorum · 1-of-2 (operator-configurable per arch.md §10.6)
+              <br />
+              ceremony · v2-stage2-demo.sh steps 4-6
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="── what the companion daemon does (preview)">
+        <ol style={{ paddingLeft: 18, lineHeight: 1.9, fontSize: 12.5 }}>
+          <li>operator scans QR on second device → cross-device WebAuthn opens</li>
+          <li>phone generates its own K10 in the device&apos;s Secure Enclave / StrongBox</li>
+          <li>phone runs WebAuthn ceremony → produces local K11 (sealed in TEE)</li>
+          <li>existing master signs `register_companion_master(D_pub_phone, K11_credId_phone)` on-chain</li>
+          <li>SidecarRegistry adds the phone as a second master with `CAP_MINT | RECOVERY` roles</li>
+          <li>recoveryThreshold automatically bumps to 2 once two K11s are registered</li>
+        </ol>
+      </Panel>
+    </>
   );
 }

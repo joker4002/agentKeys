@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
-import { CHIP_STYLES } from './data';
+import { CHIP_STYLES } from '@/lib/constants';
+import type { ConnectionStatus } from '@/lib/client/types';
 import type { Actor, ChipKind, ScopeBits, StatusKind } from './types';
 
 export function Chip({ children, kind = 'default' }: { children: ReactNode; kind?: ChipKind }) {
@@ -224,6 +225,53 @@ export function WebAuthnModal({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+export function EmptyState({
+  status,
+  title = 'backend not connected',
+  hint,
+}: {
+  status: ConnectionStatus;
+  title?: string;
+  hint?: ReactNode;
+}) {
+  if (status.kind === 'connected') return null;
+  const reasonText =
+    status.reason === 'no-backend-configured'
+      ? 'No daemon backend configured.'
+      : status.reason === 'unauthorized'
+        ? 'Daemon rejected the session JWT (expired or revoked).'
+        : 'Daemon unreachable. Is it running?';
+  return (
+    <div
+      style={{
+        padding: '40px 20px',
+        textAlign: 'center',
+        border: '1px dashed var(--rule-soft)',
+        background: 'var(--bg-elev)',
+        fontSize: 12,
+      }}
+    >
+      <div
+        className="serif"
+        style={{ fontSize: 18, fontStyle: 'italic', marginBottom: 8 }}
+      >
+        {title}
+      </div>
+      <div className="muted" style={{ marginBottom: 6 }}>
+        {reasonText}
+      </div>
+      {status.detail && (
+        <div className="muted" style={{ fontSize: 11, marginTop: 6, maxWidth: 520, marginInline: 'auto' }}>
+          {status.detail}
+        </div>
+      )}
+      {hint && (
+        <div style={{ fontSize: 11, marginTop: 14, color: 'var(--ink-dim)' }}>{hint}</div>
+      )}
     </div>
   );
 }

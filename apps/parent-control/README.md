@@ -8,10 +8,23 @@ Design handoff source: Claude Design — iii.dev-inspired aesthetic (IBM Plex Mo
 
 - **actors** — HDKD tree + devices/agents table with stats strip
 - **actor detail** — per-namespace scope toggles (deny / read / read+write), payment-cap inputs, live cap-tokens table with per-cap revoke
-- **audit feed** — live SSE-simulated stream filterable by worker, click any row for full event detail
+- **audit feed** — live SSE stream filterable by worker, click any row for full event detail
 - **anchor status** — countdown to next tier-2 batch + recent Merkle roots with explorer links
 - **workers** — five worker cards (memory, credentials, audit, email, payment) with per-actor usage share; click a card to see trust profile
+- **onboarding** — first-run wizard mirroring [`harness/v2-stage1-demo.sh`](../../harness/v2-stage1-demo.sh) steps (real WebAuthn lands in PR-B)
+- **onboarding/mobile** — stub for adding a second master device via QR pairing (real cross-device WebAuthn lands in M5)
 - **logo** — six Bedlington Terrier variants (profile, front-cute, cloud, monogram, seal, icon) for brand exploration
+
+## Data layer
+
+All reads + writes flow through a single [`AgentKeysClient`](lib/client/types.ts) interface implemented under [`lib/client/`](lib/client/). The default implementation is `EmptyBackend` — every call returns a `{ ok: false, status: { kind: 'disconnected', reason: 'no-backend-configured' } }` discriminant, and the UI renders explicit empty states with copy explaining what's missing.
+
+| Backend | When | Status |
+|---|---|---|
+| `EmptyBackend`  | `NEXT_PUBLIC_AGENTKEYS_BACKEND=empty` (default) | shipped |
+| `DaemonBackend` | `NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon`          | PR-C (calls agentkeys-daemon HTTP surface) |
+
+No mock data lives anywhere in the codebase. To see populated views, run a real daemon and switch the backend env var.
 
 ## Demo Act 3 (revocation)
 

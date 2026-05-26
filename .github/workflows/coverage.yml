@@ -1,0 +1,107 @@
+name: coverage
+
+# Rust test coverage via cargo-llvm-cov.
+#
+# Currently non-blocking (`continue-on-error: true` on the cargo step + this
+# whole job is not a required check). The goal is to first surface coverage
+# numbers as a PR-attached artifact + summary, then in PR-C land a blocking
+# threshold once we know what's realistic per crate.
+#
+# Generates:
+#   - lcov.info        — for codecov / coveralls (uploaded as artifact today)
+#   - cobertura.xml    — for GitHub PR coverage diff (future)
+#   - html/index.html  — human-readable browseable report (artifact)
+#
+# Local equivalent:
+#   cargo install cargo-llvm-cov
+#   cargo llvm-cov --workspace --lcov --output-path lcov.info
+#   cargo llvm-cov --workspace --html  # opens target/llvm-cov/html/index.html
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/coverage.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  llvm-cov:
+    name: cargo-llvm-cov (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-llvm-cov-
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate lcov + html
+        id: cov
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --workspace --lcov --output-path lcov.info -- --test-threads=1
+          cargo llvm-cov --workspace --html         -- --test-threads=1
+          cargo llvm-cov report --workspace --summary-only -- --test-threads=1 \
+            | tee coverage-summary.txt
+
+      - name: Upload lcov artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload html artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Post coverage summary to job summary
+        if: always()
+        run: |
+          {
+            echo "## Coverage (cargo-llvm-cov)"
+            echo
+            echo "Non-blocking. Threshold gating arrives in PR-C."
+            echo
+            echo '```'
+            cat coverage-summary.txt 2>/dev/null || echo "(coverage-summary.txt not produced — see job logs)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -92,4 +92,6 @@ export type Route =
   | { page: 'audit'; actorId: null }
   | { page: 'anchor'; actorId: null }
   | { page: 'workers'; actorId: null }
+  | { page: 'onboarding'; actorId: null }
+  | { page: 'onboarding-mobile'; actorId: null }
   | { page: 'logo'; actorId: null };

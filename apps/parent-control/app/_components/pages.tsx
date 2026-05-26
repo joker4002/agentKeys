@@ -1,15 +1,25 @@
 'use client';
 
-import { useEffect, useState, type ReactNode } from 'react';
-import { NAMESPACES } from './data';
-import { ActorTree, Chip, Dot, Panel, PageHead, TripleToggle } from './shared';
+import { useEffect, useState } from 'react';
+import { NAMESPACES } from '@/lib/constants';
+import type { CapToken, ConnectionStatus } from '@/lib/client/types';
+import { ActorTree, Chip, Dot, EmptyState, Panel, PageHead, TripleToggle } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
 
 // ─── Page: Actors list ───────────────────────────────────────────
-export function ActorsPage({ actors, onPick }: { actors: Actor[]; onPick: (id: string) => void }) {
-  const master = actors.find((a) => a.role === 'master')!;
+export function ActorsPage({
+  actors,
+  status,
+  onPick,
+}: {
+  actors: Actor[];
+  status: ConnectionStatus;
+  onPick: (id: string) => void;
+}) {
+  const master = actors.find((a) => a.role === 'master');
   const agents = actors.filter((a) => a.role === 'agent');
   const active = agents.filter((a) => a.lastActive === 'now' || a.lastActive.endsWith('m ago')).length;
+  const isEmpty = actors.length === 0;
 
   return (
     <>
@@ -23,106 +33,123 @@ export function ActorsPage({ actors, onPick }: { actors: Actor[]; onPick: (id: s
         desc="Devices and agents bound to your actor tree. Each row is an HDKD child of your master — its own omni, its own scope, its own wallet."
       />
 
-      <div className="stats">
-        <div className="stat">
-          <div className="v">{agents.length}</div>
-          <div className="k">agents bound</div>
-          <div className="delta">+1 this week (FoloToy bear)</div>
-        </div>
-        <div className="stat">
-          <div className="v">{active}</div>
-          <div className="k">active now</div>
-          <div className="delta">SSE feed live · tier-1</div>
-        </div>
-        <div className="stat">
-          <div className="v">128</div>
-          <div className="k">events / 2-min batch</div>
-          <div className="delta">last anchor 14:23:11</div>
-        </div>
-        <div className="stat">
-          <div className="v">0</div>
-          <div className="k">pending approvals</div>
-          <div className="delta">no high-risk caps queued</div>
-        </div>
-      </div>
+      {isEmpty ? (
+        <EmptyState
+          status={status}
+          title="no actors enrolled"
+          hint={
+            <>
+              Once a master device runs the v2-stage1 onboarding (identity + K11 + on-chain
+              device-register), it appears here. See <span className="mono">harness/v2-stage1-demo.sh</span>.
+            </>
+          }
+        />
+      ) : (
+        <>
+          <div className="stats">
+            <div className="stat">
+              <div className="v">{agents.length}</div>
+              <div className="k">agents bound</div>
+              <div className="delta">live from daemon /v1/actors</div>
+            </div>
+            <div className="stat">
+              <div className="v">{active}</div>
+              <div className="k">active now</div>
+              <div className="delta">SSE feed live · tier-1</div>
+            </div>
+            <div className="stat">
+              <div className="v">—</div>
+              <div className="k">events / 2-min batch</div>
+              <div className="delta">populated by /v1/anchor/status</div>
+            </div>
+            <div className="stat">
+              <div className="v">0</div>
+              <div className="k">pending approvals</div>
+              <div className="delta">no high-risk caps queued</div>
+            </div>
+          </div>
 
-      <Panel title="── actor tree" flush>
-        <div style={{ padding: '18px 22px' }}>
-          <ActorTree actors={actors} onPick={onPick} />
-        </div>
-      </Panel>
+          <Panel title="── actor tree" flush>
+            <div style={{ padding: '18px 22px' }}>
+              <ActorTree actors={actors} onPick={onPick} />
+            </div>
+          </Panel>
 
-      <Panel title="── devices · agents" flush>
-        <table className="tab">
-          <thead>
-            <tr>
-              <th style={{ width: 32 }}></th>
-              <th>actor</th>
-              <th>derivation</th>
-              <th>vendor</th>
-              <th>device</th>
-              <th>last active</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="clickable" onClick={() => onPick(master.id)}>
-              <td>
-                <Dot status="ok" />
-              </td>
-              <td>
-                <span className="serif" style={{ fontStyle: 'italic', fontSize: 14 }}>
-                  {master.label}
-                </span>
-                <div className="secondary">
-                  {master.omni} · {master.omniHex}
-                </div>
-              </td>
-              <td className="mono muted">/ (root)</td>
-              <td className="muted">self</td>
-              <td>{master.device}</td>
-              <td className="muted">now</td>
-              <td>
-                <Chip kind="default">master</Chip>
-              </td>
-            </tr>
-            {agents.map((a) => (
-              <tr key={a.id} className="clickable" onClick={() => onPick(a.id)}>
-                <td>
-                  <Dot status={a.status} pulse={a.lastActive.endsWith('m ago')} />
-                </td>
-                <td>
-                  <span style={{ fontWeight: 500 }}>{a.label}</span>
-                  <div className="secondary">{a.omni}</div>
-                </td>
-                <td className="mono">{a.derivation}</td>
-                <td>{a.vendor}</td>
-                <td>{a.device}</td>
-                <td className="muted">{a.lastActive}</td>
-                <td>
-                  <button
-                    className="btn sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onPick(a.id);
-                    }}
-                  >
-                    manage →
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Panel>
+          <Panel title="── devices · agents" flush>
+            <table className="tab">
+              <thead>
+                <tr>
+                  <th style={{ width: 32 }}></th>
+                  <th>actor</th>
+                  <th>derivation</th>
+                  <th>vendor</th>
+                  <th>device</th>
+                  <th>last active</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {master && (
+                  <tr className="clickable" onClick={() => onPick(master.id)}>
+                    <td>
+                      <Dot status="ok" />
+                    </td>
+                    <td>
+                      <span className="serif" style={{ fontStyle: 'italic', fontSize: 14 }}>
+                        {master.label}
+                      </span>
+                      <div className="secondary">
+                        {master.omni} · {master.omniHex}
+                      </div>
+                    </td>
+                    <td className="mono muted">/ (root)</td>
+                    <td className="muted">self</td>
+                    <td>{master.device}</td>
+                    <td className="muted">now</td>
+                    <td>
+                      <Chip kind="default">master</Chip>
+                    </td>
+                  </tr>
+                )}
+                {agents.map((a) => (
+                  <tr key={a.id} className="clickable" onClick={() => onPick(a.id)}>
+                    <td>
+                      <Dot status={a.status} pulse={a.lastActive.endsWith('m ago')} />
+                    </td>
+                    <td>
+                      <span style={{ fontWeight: 500 }}>{a.label}</span>
+                      <div className="secondary">{a.omni}</div>
+                    </td>
+                    <td className="mono">{a.derivation}</td>
+                    <td>{a.vendor}</td>
+                    <td>{a.device}</td>
+                    <td className="muted">{a.lastActive}</td>
+                    <td>
+                      <button
+                        className="btn sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onPick(a.id);
+                        }}
+                      >
+                        manage →
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Panel>
 
-      <div className="banner">
-        <span className="lbl">tip</span>
-        <span>
-          One-tap revoke surfaces inside any actor row. Sensitive mutations (revoke, scope grant, payment cap) require K11
-          biometric re-auth on this device.
-        </span>
-      </div>
+          <div className="banner">
+            <span className="lbl">tip</span>
+            <span>
+              One-tap revoke surfaces inside any actor row. Sensitive mutations (revoke, scope grant, payment cap) require K11
+              biometric re-auth on this device.
+            </span>
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -135,6 +162,7 @@ export function ActorDetailPage({
   onRevoke,
   onRevokeScope,
   recentEvents,
+  capTokens,
 }: {
   actor: Actor;
   onUpdate: (id: string, patch: Partial<Actor>) => void;
@@ -142,6 +170,7 @@ export function ActorDetailPage({
   onRevoke: (a: Actor) => void;
   onRevokeScope: (a: Actor, cap: string) => void;
   recentEvents: AuditEvent[];
+  capTokens: CapToken[];
 }) {
   if (actor.role === 'master') {
     return <MasterDetail actor={actor} onBack={onBack} />;
@@ -247,7 +276,10 @@ export function ActorDetailPage({
                 {ns === 'travel' && 'travel context — locations, bookings, itineraries'}
               </div>
             </div>
-            <TripleToggle value={actor.scope![ns]} onChange={(v) => setScope(ns, v)} />
+            <TripleToggle
+              value={actor.scope?.[ns] ?? { read: false, write: false }}
+              onChange={(v) => setScope(ns, v)}
+            />
           </div>
         ))}
       </Panel>
@@ -264,7 +296,7 @@ export function ActorDetailPage({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="number"
-              value={actor.paymentCap!.perTx}
+              value={actor.paymentCap?.perTx ?? 0}
               onChange={(e) => setPaymentCap('perTx', Number(e.target.value))}
               style={{
                 width: 70,
@@ -277,7 +309,7 @@ export function ActorDetailPage({
                 textAlign: 'right',
               }}
             />
-            <span className="muted">{actor.paymentCap!.currency}</span>
+            <span className="muted">{actor.paymentCap?.currency ?? 'USDC'}</span>
           </div>
         </div>
         <div className="toggle-row">
@@ -288,7 +320,7 @@ export function ActorDetailPage({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="number"
-              value={actor.paymentCap!.daily}
+              value={actor.paymentCap?.daily ?? 0}
               onChange={(e) => setPaymentCap('daily', Number(e.target.value))}
               style={{
                 width: 70,
@@ -301,65 +333,61 @@ export function ActorDetailPage({
                 textAlign: 'right',
               }}
             />
-            <span className="muted">{actor.paymentCap!.currency}</span>
+            <span className="muted">{actor.paymentCap?.currency ?? 'USDC'}</span>
           </div>
         </div>
-        <div className="toggle-row">
-          <div>
-            <div className="lbl">time window</div>
-            <div className="desc">payments outside this window are rejected at broker</div>
+        {actor.timeWindow && (
+          <div className="toggle-row">
+            <div>
+              <div className="lbl">time window</div>
+              <div className="desc">payments outside this window are rejected at broker</div>
+            </div>
+            <div className="mono">
+              {actor.timeWindow.start} <span className="muted">→</span> {actor.timeWindow.end}
+            </div>
           </div>
-          <div className="mono">
-            {actor.timeWindow!.start} <span className="muted">→</span> {actor.timeWindow!.end}
-          </div>
-        </div>
+        )}
       </Panel>
 
       <Panel title="── cap-tokens · live · per-actor revoke" flush>
-        <table className="tab">
-          <thead>
-            <tr>
-              <th>cap</th>
-              <th>scope</th>
-              <th>ttl</th>
-              <th>minted</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <CapRow
-              cap="memory:read"
-              scope="family · personal"
-              ttl="900s"
-              minted="14:32"
-              onRevoke={() => onRevokeScope(actor, 'memory:read')}
-            />
-            <CapRow
-              cap="memory:write"
-              scope="family"
-              ttl="600s"
-              minted="14:31"
-              onRevoke={() => onRevokeScope(actor, 'memory:write')}
-            />
-            {actor.paymentCap!.perTx > 0 && (
-              <CapRow
-                cap="payment:execute"
-                scope={`p-tx ≤ ${actor.paymentCap!.perTx} USDC`}
-                ttl="60s"
-                minted="14:31"
-                onRevoke={() => onRevokeScope(actor, 'payment:execute')}
-                danger
-              />
-            )}
-            <CapRow
-              cap="audit:append"
-              scope="own log"
-              ttl="3600s"
-              minted="14:28"
-              onRevoke={() => onRevokeScope(actor, 'audit:append')}
-            />
-          </tbody>
-        </table>
+        {capTokens.length === 0 ? (
+          <div style={{ padding: 20 }} className="muted">
+            no caps minted in this window. Daemon endpoint <span className="mono">GET /v1/actors/{actor.id}/caps</span>{' '}
+            populates this table.
+          </div>
+        ) : (
+          <table className="tab">
+            <thead>
+              <tr>
+                <th>cap</th>
+                <th>scope</th>
+                <th>ttl</th>
+                <th>minted</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {capTokens.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <span className="mono">{c.cap}</span>
+                  </td>
+                  <td className="muted">{c.scope}</td>
+                  <td className="mono">{c.ttl}</td>
+                  <td className="muted">{c.minted}</td>
+                  <td className="right">
+                    <button
+                      className={`btn sm ${c.danger ? 'danger' : ''}`}
+                      onClick={() => onRevokeScope(actor, c.cap)}
+                    >
+                      revoke
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </Panel>
 
       <Panel title={`── recent activity · ${actor.label}`} flush>
@@ -382,38 +410,6 @@ export function ActorDetailPage({
         )}
       </Panel>
     </>
-  );
-}
-
-function CapRow({
-  cap,
-  scope,
-  ttl,
-  minted,
-  onRevoke,
-  danger,
-}: {
-  cap: string;
-  scope: string;
-  ttl: string;
-  minted: string;
-  onRevoke: () => void;
-  danger?: boolean;
-}) {
-  return (
-    <tr>
-      <td>
-        <span className="mono">{cap}</span>
-      </td>
-      <td className="muted">{scope}</td>
-      <td className="mono">{ttl}</td>
-      <td className="muted">{minted}</td>
-      <td className="right">
-        <button className={`btn sm ${danger ? 'danger' : ''}`} onClick={onRevoke}>
-          revoke
-        </button>
-      </td>
-    </tr>
   );
 }
 
@@ -448,60 +444,20 @@ function MasterDetail({ actor, onBack }: { actor: Actor; onBack: () => void }) {
           <dd className="mono">
             {actor.omni} <span className="muted">({actor.omniHex})</span>
           </dd>
-          <dt>current wallet</dt>
-          <dd className="mono">
-            0xf3a8…b1d2 <span className="muted">· K3 epoch v1</span>
-          </dd>
           <dt>device pubkey</dt>
           <dd className="mono">
             {actor.devicePubkey} <span className="muted">· K10 secp256k1 · SE</span>
           </dd>
           <dt>K11 (WebAuthn)</dt>
-          <dd>enrolled · platform authenticator · iOS Secure Enclave</dd>
-          <dt>roles on chain</dt>
-          <dd>CAP_MINT · RECOVERY · SCOPE_MGMT</dd>
-          <dt>recovery threshold</dt>
           <dd>
-            1-of-2 <span className="muted">· iPad (laptop offline)</span>
+            {actor.k11 ? 'enrolled · platform authenticator' : 'not enrolled · run onboarding to enroll K11'}
           </dd>
+          <dt>device</dt>
+          <dd>{actor.device}</dd>
+          <dt>last active</dt>
+          <dd>{actor.lastActive}</dd>
         </dl>
       </Panel>
-
-      <Panel title="── master devices · multi-device quorum" flush>
-        <table className="tab">
-          <thead>
-            <tr>
-              <th></th>
-              <th>device</th>
-              <th>roles</th>
-              <th>last K11 assertion</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>
-                <Dot status="ok" />
-              </td>
-              <td>iPhone 17 Pro · this device</td>
-              <td className="mono">CAP_MINT | RECOVERY | SCOPE_MGMT</td>
-              <td className="muted">14:32 just now</td>
-            </tr>
-            <tr>
-              <td>
-                <Dot status="muted" />
-              </td>
-              <td>iPad Pro · home</td>
-              <td className="mono">CAP_MINT | RECOVERY</td>
-              <td className="muted">yesterday 21:08</td>
-            </tr>
-          </tbody>
-        </table>
-      </Panel>
-
-      <div className="banner">
-        <span className="lbl">recovery</span>
-        <span>If this device is lost, your iPad alone can revoke + rotate within ~60s. No anchor wallet, no seed phrase.</span>
-      </div>
     </>
   );
 }
@@ -509,11 +465,13 @@ function MasterDetail({ actor, onBack }: { actor: Actor; onBack: () => void }) {
 // ─── Page: Audit feed ────────────────────────────────────────────
 export function AuditPage({
   events,
+  status,
   onPick,
   paused,
   onPause,
 }: {
   events: AuditEvent[];
+  status: ConnectionStatus;
   onPick: (e: AuditEvent) => void;
   paused: boolean;
   onPause: () => void;
@@ -521,6 +479,7 @@ export function AuditPage({
   const [filter, setFilter] = useState<ChipKind | 'all'>('all');
   const filtered = filter === 'all' ? events : events.filter((e) => e.chip === filter);
   const filters: (ChipKind | 'all')[] = ['all', 'memory', 'creds', 'payment', 'audit', 'chain'];
+  const isEmpty = events.length === 0;
 
   return (
     <>
@@ -541,14 +500,15 @@ export function AuditPage({
 
       <div className="banner">
         <span className="lbl">
-          <Dot status="ok" pulse={!paused} />
-          {paused ? 'paused' : 'live'}
+          <Dot status={status.kind === 'connected' ? 'ok' : 'muted'} pulse={status.kind === 'connected' && !paused} />
+          {status.kind === 'connected' ? (paused ? 'paused' : 'live') : 'offline'}
         </span>
         <span>
-          {paused
-            ? 'feed paused — incoming events queue at the broker SSE buffer.'
-            : 'streaming from /v1/audit/stream · 1 connection · auto-reconnect on drop.'}{' '}
-          <span className="muted">last 2-min batch: 128 events · root 0x7e3f…b8a1 anchored ✓</span>
+          {status.kind === 'connected'
+            ? paused
+              ? 'feed paused — incoming events queue at the broker SSE buffer.'
+              : 'streaming from /v1/audit/stream · 1 connection · auto-reconnect on drop.'
+            : 'daemon offline — no events to display.'}
         </span>
       </div>
 
@@ -569,28 +529,44 @@ export function AuditPage({
         }
         flush
       >
-        <div className="feed">
-          {filtered.map((e) => (
-            <div
-              key={e.id}
-              className={`feed-row ${e._isNew ? 'new' : ''}`}
-              onClick={() => onPick(e)}
-            >
-              <span className="ts">{e.ts}</span>
-              <span className="actor">{e.actor}</span>
-              <span className="msg">
-                <span style={{ fontWeight: 500 }}>{e.kind}</span>
-                <span className="arg"> · {e.detail}</span>
-              </span>
-              <Chip kind={e.chip}>{e.chip}</Chip>
-            </div>
-          ))}
-          {filtered.length === 0 && (
-            <div style={{ padding: 40, textAlign: 'center' }} className="muted">
-              no events match this filter.
-            </div>
-          )}
-        </div>
+        {isEmpty ? (
+          <div style={{ padding: 20 }}>
+            <EmptyState
+              status={status}
+              title="no events"
+              hint={
+                <>
+                  Once an agent runs <span className="mono">memory.read</span>,{' '}
+                  <span className="mono">cred.fetch</span>, or <span className="mono">audit.append</span>, events stream
+                  in here within ~200 ms.
+                </>
+              }
+            />
+          </div>
+        ) : (
+          <div className="feed">
+            {filtered.map((e) => (
+              <div
+                key={e.id}
+                className={`feed-row ${e._isNew ? 'new' : ''}`}
+                onClick={() => onPick(e)}
+              >
+                <span className="ts">{e.ts}</span>
+                <span className="actor">{e.actor}</span>
+                <span className="msg">
+                  <span style={{ fontWeight: 500 }}>{e.kind}</span>
+                  <span className="arg"> · {e.detail}</span>
+                </span>
+                <Chip kind={e.chip}>{e.chip}</Chip>
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: 40, textAlign: 'center' }} className="muted">
+                no events match this filter.
+              </div>
+            )}
+          </div>
+        )}
       </Panel>
     </>
   );
@@ -609,20 +585,10 @@ export function AnchorPage() {
   let next = 120;
   let pct = 0;
   if (now !== null) {
-    const lastAnchor = new Date(now);
-    lastAnchor.setHours(14, 23, 11, 0);
-    elapsed = Math.max(0, Math.floor((now - lastAnchor.getTime()) / 1000) % 120);
+    elapsed = Math.floor((now / 1000) % 120);
     next = 120 - elapsed;
     pct = (elapsed / 120) * 100;
   }
-
-  const batches = [
-    { ts: '14:23:11', root: '0x7e3f9c1a…b8a1', count: 128, txn: '0x4d2a…3f01', conf: 12 },
-    { ts: '14:21:09', root: '0x3a1bc402…7d92', count: 142, txn: '0x9c8f…8a23', conf: 73 },
-    { ts: '14:19:08', root: '0x91f2ec84…2055', count: 119, txn: '0x1b5e…ff10', conf: 134 },
-    { ts: '14:17:07', root: '0xc4d870e1…013a', count: 156, txn: '0x77ae…5d8c', conf: 195 },
-    { ts: '14:15:06', root: '0x0a92fb5d…e8c3', count: 134, txn: '0x2f01…b9d4', conf: 256 },
-  ];
 
   return (
     <>
@@ -670,7 +636,7 @@ export function AnchorPage() {
               className="serif"
               style={{ fontSize: 36, fontStyle: 'italic', letterSpacing: '-0.02em', lineHeight: 1 }}
             >
-              {Math.round(34 + elapsed * 0.6)}
+              —
             </div>
           </div>
         </div>
@@ -693,49 +659,17 @@ export function AnchorPage() {
             justifyContent: 'space-between',
           }}
         >
-          <span>building Merkle tree …</span>
+          <span>countdown is local · live data lands in PR-C (GET /v1/anchor/status)</span>
           <span>tier-1 ↦ tier-2 commit</span>
         </div>
       </Panel>
 
       <Panel title="── recent anchors" flush>
-        <table className="tab">
-          <thead>
-            <tr>
-              <th>time</th>
-              <th>Merkle root</th>
-              <th className="right">events</th>
-              <th>extrinsic</th>
-              <th className="right">confirmations</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {batches.map((b) => (
-              <tr key={b.ts}>
-                <td className="mono">{b.ts}</td>
-                <td className="mono">{b.root}</td>
-                <td className="right mono">{b.count}</td>
-                <td className="mono">{b.txn}</td>
-                <td className="right mono">{b.conf}</td>
-                <td className="right">
-                  <a href="#" onClick={(e) => e.preventDefault()} style={{ fontSize: 11 }}>
-                    explorer ↗
-                  </a>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div style={{ padding: 20 }} className="muted">
+          recent anchors will populate once the daemon exposes <span className="mono">GET /v1/anchor/status</span>{' '}
+          (tracked for PR-C).
+        </div>
       </Panel>
-
-      <div className="banner">
-        <span className="lbl">why</span>
-        <span>
-          Tier-1 SSE gives you sub-200ms reaction time. Tier-2 anchor on chain is the tamper-proof base of trust — any
-          tier-1 event can be checked against its Merkle root on the public Litentry block explorer.
-        </span>
-      </div>
     </>
   );
 }
