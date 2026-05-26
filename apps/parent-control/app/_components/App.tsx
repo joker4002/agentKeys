@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import type { CapToken } from '@/lib/client/types';
 import { LogoPage } from './logos';
+import { OnboardingPage } from './onboarding';
 import { ActorDetailPage, ActorsPage, AnchorPage, AuditPage } from './pages';
 import { Modal, PageHead, Panel, WebAuthnModal } from './shared';
 import type { Actor, AuditEvent, PendingAction, Route } from './types';
@@ -396,7 +397,9 @@ export function App() {
         {route.page === 'workers' && (
           <WorkersPage status={status} onPickActor={(id) => go('detail', id)} />
         )}
-        {route.page === 'onboarding' && <OnboardingStub onMobile={() => go('onboarding-mobile')} />}
+        {route.page === 'onboarding' && (
+          <OnboardingPage onClose={() => go('actors')} />
+        )}
         {route.page === 'onboarding-mobile' && <MobileStub onBack={() => go('onboarding')} />}
         {route.page === 'logo' && <LogoPage />}
       </main>
@@ -470,40 +473,6 @@ export function App() {
         </div>
       )}
     </div>
-  );
-}
-
-function OnboardingStub({ onMobile }: { onMobile: () => void }) {
-  return (
-    <>
-      <PageHead
-        crumb="onboarding · stage-1 mirror"
-        title={
-          <>
-            <span className="muted serif">/</span> add device
-          </>
-        }
-        desc="The full enrollment wizard arrives in PR-B (issue #110 follow-up). Today this page is a placeholder that lists the harness v2-stage1 steps and lets you launch the mobile-second-master stub."
-      />
-      <Panel title="── v2-stage1 step preview">
-        <ol style={{ paddingLeft: 18, lineHeight: 1.9, fontSize: 12.5 }}>
-          <li>email-link identity ceremony → broker `binding_nonce`</li>
-          <li>generate K10 device key in Secure Enclave</li>
-          <li>K11 WebAuthn enrollment (PR-B: real navigator.credentials.create)</li>
-          <li>SIWE → broker session JWT (K6)</li>
-          <li>STS assume-role-with-web-identity → S3 isolation proof</li>
-          <li>provision vault + memory buckets (one-shot, idempotent)</li>
-          <li>chain bring-up: SidecarRegistry + AgentKeysScope + K3EpochCounter + CredentialAudit</li>
-          <li>register master device on-chain</li>
-        </ol>
-      </Panel>
-      <Panel title="── second master device" right={<button className="btn sm" onClick={onMobile}>open mobile stub →</button>}>
-        <div className="muted" style={{ fontSize: 12 }}>
-          arch.md §10.5 calls for 1-of-2 recovery with iPad as the second master. The mobile pairing surface is stubbed
-          today (no real ceremony yet) — open it to preview what the QR-pair screen will look like.
-        </div>
-      </Panel>
-    </>
   );
 }
 

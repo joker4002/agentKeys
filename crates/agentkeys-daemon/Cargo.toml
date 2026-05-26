@@ -30,9 +30,17 @@ reqwest = { version = "0.12", features = ["json"] }
 # AGENTKEYS_DAEMON_TCP=1) and serves cap-token mint + cache requests.
 axum = { version = "0.7", features = ["json"] }
 tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
 tower-service = "0.3"
+# v2 stage-1 K11 WebAuthn enrollment surface for the parent-control web
+# UI. webauthn-rs is the standard Rust server-side WebAuthn library; the
+# daemon's ui-bridge mode uses it to construct registration challenges +
+# verify attestations from the browser's navigator.credentials.create().
+# See src/ui_bridge.rs.
+webauthn-rs = "0.5"
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
