@@ -1,0 +1,220 @@
+name: release-mcp-server
+
+# Releases the agentkeys-mcp-server binary for Linux + macOS, runs an
+# end-to-end install + smoke test on each platform, then publishes the
+# vetted artifacts to the GitHub Release.
+#
+# Trigger paths:
+#   - `release: created`              real release published manually
+#   - `workflow_dispatch`             on-demand test against PR HEAD
+#                                     (set `dry_run: true` to skip uploads)
+#
+# Outputs (release events only):
+#   - agentkeys-mcp-server-x86_64-unknown-linux-gnu.tar.gz
+#   - agentkeys-mcp-server-aarch64-unknown-linux-gnu.tar.gz
+#   - agentkeys-mcp-server-aarch64-apple-darwin.tar.gz
+#   - agentkeys-mcp-server-x86_64-apple-darwin.tar.gz
+#   - checksums.txt
+#   - install.sh                      (copied from scripts/install-mcp-server.sh)
+#
+# E2E gate: every job in `e2e-install` must pass before any asset is uploaded.
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip release upload (test only)"
+        required: false
+        default: "true"
+        type: string
+
+permissions:
+  contents: write     # needed to upload release assets
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-apple-darwin
+            os: macos-13            # last GA Intel runner
+            cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: ${{ matrix.target }}
+
+      - name: install cross (linux-aarch64 only)
+        if: matrix.cross
+        run: cargo install --locked cross || true
+
+      - name: build release binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p agentkeys-mcp-server
+          else
+            cargo build --release --target ${{ matrix.target }} -p agentkeys-mcp-server
+          fi
+
+      - name: package tarball
+        run: |
+          set -euo pipefail
+          asset="agentkeys-mcp-server-${{ matrix.target }}.tar.gz"
+          cd target/${{ matrix.target }}/release
+          tar -czf "../../../${asset}" agentkeys-mcp-server
+          cd - >/dev/null
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${asset}" | tee "${asset}.sha256"
+          else
+            shasum -a 256 "${asset}" | tee "${asset}.sha256"
+          fi
+          ls -la "${asset}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            agentkeys-mcp-server-${{ matrix.target }}.tar.gz
+            agentkeys-mcp-server-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  e2e-install:
+    name: e2e install (${{ matrix.runner }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+          - runner: macos-latest
+            triple: aarch64-apple-darwin
+          - runner: macos-13
+            triple: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.triple }}
+          path: artifacts/
+
+      - name: simulate install.sh against artifact
+        env:
+          PREFIX: ${{ github.workspace }}/install-test
+        run: |
+          set -euo pipefail
+          # Mirror install.sh's extract + install step without hitting the
+          # release URL (CI is testing the artifact BEFORE upload).
+          mkdir -p "${PREFIX}/bin"
+          tar -xzf artifacts/agentkeys-mcp-server-${{ matrix.triple }}.tar.gz \
+              -C "${PREFIX}/bin"
+          chmod +x "${PREFIX}/bin/agentkeys-mcp-server"
+          ls -la "${PREFIX}/bin"
+          "${PREFIX}/bin/agentkeys-mcp-server" --help 2>&1 | head -10 || true
+
+      - name: stdio handshake smoke test
+        env:
+          PREFIX: ${{ github.workspace }}/install-test
+        run: |
+          set -euo pipefail
+          # Drive the binary over stdio: initialize → tools/list → tools/call
+          # → assert all three legs respond.
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agentkeys.memory.get","arguments":{"namespace":"travel"}}}' \
+          | env MCP_TRANSPORT=stdio MCP_BACKEND=in-memory \
+              "${PREFIX}/bin/agentkeys-mcp-server" 2>/dev/null \
+          | python3 -c "
+          import sys, json
+          got_init = got_list = got_call = False
+          for line in sys.stdin:
+              if not line.strip(): continue
+              msg = json.loads(line)
+              if msg.get('id') == 1 and 'result' in msg:
+                  assert msg['result']['serverInfo']['name'] == 'agentkeys-mcp-server'
+                  got_init = True
+                  print('  ✓ initialize handshake')
+              elif msg.get('id') == 2 and 'result' in msg:
+                  assert len(msg['result']['tools']) == 7, msg['result']['tools']
+                  got_list = True
+                  print(f'  ✓ tools/list — 7 active tools')
+              elif msg.get('id') == 3 and 'result' in msg:
+                  assert 'Chengdu' in msg['result']['structuredContent']['content']
+                  got_call = True
+                  print('  ✓ memory.get(travel) returned demo fixture')
+          assert got_init and got_list and got_call, f'missing: init={got_init} list={got_list} call={got_call}'
+          print('  ✓ stdio E2E PASS')
+          "
+
+      # Drift check: install.sh in source must equal what the release ships.
+      # Catches the "I updated the source but forgot to re-cut a release" trap.
+      - name: install.sh source/release drift check
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/release-install.sh \
+            "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh"
+          if ! diff -q scripts/install-mcp-server.sh /tmp/release-install.sh; then
+            echo "::error::install.sh source ≠ release artifact"
+            diff -u scripts/install-mcp-server.sh /tmp/release-install.sh || true
+            exit 1
+          fi
+
+  upload-release:
+    name: upload to GitHub Release
+    needs: [build, e2e-install]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: build-*
+          merge-multiple: true
+
+      - name: build aggregated checksums.txt
+        run: |
+          set -euo pipefail
+          cd artifacts
+          cat *.sha256 | awk '{print $1 "  " $2}' > checksums.txt
+          cat checksums.txt
+          ls -la
+
+      - name: upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name }}"
+          cd artifacts
+          gh release upload "$tag" \
+            agentkeys-mcp-server-*.tar.gz \
+            checksums.txt \
+            --repo "${{ github.repository }}" --clobber
+          gh release upload "$tag" ../scripts/install-mcp-server.sh \
+            --repo "${{ github.repository }}" --clobber

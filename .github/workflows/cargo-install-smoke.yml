@@ -1,0 +1,82 @@
+name: cargo-install-smoke
+
+# Canary for the `cargo install --git` distribution path.
+#
+# Why: Option B in #107 — Rust devs can `cargo install --git
+# https://github.com/litentry/agentKeys agentkeys-mcp-server` to get
+# the binary without an OS-specific release. This workflow proves that
+# path keeps working as the workspace + Cargo.toml evolve. Catches:
+#   - Cargo.toml drift (missing [[bin]] declaration, version conflicts)
+#   - Lockfile incompatibility with a fresh `cargo install`
+#   - dep features not propagating outside the workspace context
+#
+# Runs weekly so we hear about drift BEFORE a user reports it. Also
+# wired to workflow_dispatch for on-demand runs.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"   # Mondays 09:00 UTC — staff just opening laptops
+  workflow_dispatch:
+
+jobs:
+  cargo-install-from-git:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Branch defaults to `main`. PR canary: set `branch` via dispatch
+      # input if you want to test the publish path of an open PR.
+      - name: cargo install from git
+        run: |
+          set -euo pipefail
+          cargo install \
+            --git "https://github.com/${{ github.repository }}.git" \
+            --branch "${{ github.ref_name == 'main' && 'main' || github.ref_name }}" \
+            --locked \
+            --force \
+            agentkeys-mcp-server
+
+      - name: verify install
+        run: |
+          set -euo pipefail
+          which agentkeys-mcp-server
+          ls -la "$HOME/.cargo/bin/agentkeys-mcp-server"
+          agentkeys-mcp-server --help 2>&1 | head -10 || true
+
+      - name: stdio handshake smoke test
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agentkeys.memory.get","arguments":{"namespace":"travel"}}}' \
+          | env MCP_TRANSPORT=stdio MCP_BACKEND=in-memory \
+              "$HOME/.cargo/bin/agentkeys-mcp-server" 2>/dev/null \
+          | python3 -c "
+          import sys, json
+          got_init = got_list = got_call = False
+          for line in sys.stdin:
+              if not line.strip(): continue
+              msg = json.loads(line)
+              if msg.get('id') == 1 and 'result' in msg:
+                  got_init = True; print('  ✓ initialize')
+              elif msg.get('id') == 2 and 'result' in msg:
+                  assert len(msg['result']['tools']) == 7
+                  got_list = True; print(f'  ✓ tools/list (7 tools)')
+              elif msg.get('id') == 3 and 'result' in msg:
+                  assert 'Chengdu' in msg['result']['structuredContent']['content']
+                  got_call = True; print('  ✓ memory.get(travel)')
+          assert got_init and got_list and got_call
+          print('  ✓ cargo-install E2E PASS')
+          "
+
+      - name: notify on failure
+        if: failure()
+        run: |
+          echo "::warning::cargo install --git path is broken on ${{ matrix.os }}. \
+          Operators trying Option B will fail. Check Cargo.toml + Cargo.lock."
