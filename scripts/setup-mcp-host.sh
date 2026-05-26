@@ -69,7 +69,6 @@ TOKEN_FILE="${ENV_FILE_DIR}/mcp-tool-token"
 HEALTH_KEY_FILE="${ENV_FILE_DIR}/mcp-health-key"
 XIAOZHI_ENDPOINT_FILE="${ENV_FILE_DIR}/mcp-xiaozhi-endpoint"
 MCP_BIN_DST="/usr/local/bin/agentkeys-mcp-server"
-MCP_BIN_SRC="${REPO_ROOT}/target/release/agentkeys-mcp-server"
 WITH_NGINX="yes"
 WITH_CERTBOT="yes"
 WITH_BUILD="yes"
@@ -186,8 +185,8 @@ echo "    relay src:         ${RELAY_REPO}@${RELAY_PIN_REF}" >&2
 echo "    install dir:       ${INSTALL_DIR}" >&2
 echo "    run user:          ${RUN_USER}" >&2
 echo "    env file:          ${ENV_FILE}" >&2
-echo "    mcp binary src:    ${MCP_BIN_SRC}" >&2
 echo "    mcp binary dst:    ${MCP_BIN_DST}" >&2
+echo "    mcp install:       cargo install --git ${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git} --branch ${AGENTKEYS_REV:-main}" >&2
 echo "    with nginx:        ${WITH_NGINX}" >&2
 echo "    with certbot:      ${WITH_CERTBOT}" >&2
 echo "    with build:        ${WITH_BUILD}" >&2
@@ -325,28 +324,47 @@ else
 fi
 fi  # MODE == self-hosted (closes step 3 self-hosted branch)
 
-# ─── 4. Build + install agentkeys-mcp-server binary ──────────────────
-# Always invoke `cargo build` when WITH_BUILD=yes — cargo's own
-# incremental compilation decides what's stale. Skipping based on
-# "$MCP_BIN_SRC exists" misses Cargo.toml / src changes since the last
-# script run.
-head "4/9 agentkeys-mcp-server binary"
+# ─── 4. Install agentkeys-mcp-server via `cargo install --git` ───────
+# Canonical install path (per #134 — until M6 ships GH Releases + a
+# native installer). Pulls from public GitHub, builds, places binary at
+# a user-writable cache, then sudo-installs to /usr/local/bin/.
+#
+# Override repo/rev for development (e.g. testing a PR branch):
+#   AGENTKEYS_REPO_URL=https://github.com/me/agentKeys.git \
+#   AGENTKEYS_REV=my-pr-branch bash scripts/setup-mcp-host.sh
+head "4/9 install agentkeys-mcp-server (cargo install --git)"
+REPO_URL="${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git}"
+REV="${AGENTKEYS_REV:-main}"
+INSTALL_CACHE="${HOME}/.cache/agentkeys-mcp-install"
+
 if [ "$WITH_BUILD" = "yes" ]; then
-  ( cd "$REPO_ROOT" && cargo build --release -p agentkeys-mcp-server ) \
-    || fail "cargo build --release -p agentkeys-mcp-server failed"
-  ok "cargo build --release -p agentkeys-mcp-server"
+  command -v cargo >/dev/null 2>&1 \
+    || fail "cargo not found — install Rust toolchain (curl https://sh.rustup.rs | sh) or pass --without-build if binary already at $MCP_BIN_DST"
+  mkdir -p "$INSTALL_CACHE"
+  ok "cargo install --git $REPO_URL --branch $REV → $INSTALL_CACHE/bin/"
+  # --force: cargo install won't overwrite "the same version" without it.
+  # With --git there's no semver to compare against, so --force is the
+  # right call. cargo's incremental compile + on-disk cache keep re-runs
+  # fast (~5s when nothing changed; ~2 min on a fresh build).
+  cargo install --quiet --force \
+    --git "$REPO_URL" --branch "$REV" \
+    --bin agentkeys-mcp-server \
+    --root "$INSTALL_CACHE" \
+    agentkeys-mcp-server \
+    || fail "cargo install --git $REPO_URL@$REV failed"
 fi
 
-if [ ! -x "$MCP_BIN_SRC" ]; then
-  fail "$MCP_BIN_SRC not built; re-run without --without-build or build it yourself"
+CACHED_BIN="$INSTALL_CACHE/bin/agentkeys-mcp-server"
+if [ ! -x "$CACHED_BIN" ]; then
+  fail "$CACHED_BIN not installed; drop --without-build or place the binary at $MCP_BIN_DST yourself"
 fi
 
-src_sha=$(sha256sum "$MCP_BIN_SRC" | awk '{print $1}')
+src_sha=$(sha256sum "$CACHED_BIN" | awk '{print $1}')
 dst_sha=$(sudo sha256sum "$MCP_BIN_DST" 2>/dev/null | awk '{print $1}' || echo "missing")
 if [ "$src_sha" = "$dst_sha" ]; then
   skip "$MCP_BIN_DST already up to date (sha256 $src_sha)"
 else
-  sudo install -m 0755 "$MCP_BIN_SRC" "$MCP_BIN_DST"
+  sudo install -m 0755 "$CACHED_BIN" "$MCP_BIN_DST"
   ok "installed $MCP_BIN_DST (sha256 $src_sha)"
   RESTART_MCP=1
 fi
@@ -454,7 +472,7 @@ Wants=${MCP_UNIT_WANTS}
 [Service]
 Type=simple
 User=${RUN_USER}
-WorkingDirectory=${REPO_ROOT}
+WorkingDirectory=${ENV_FILE_DIR}
 EnvironmentFile=${ENV_FILE}
 ExecStart=${MCP_BIN_DST}
 Restart=on-failure

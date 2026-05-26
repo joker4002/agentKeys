@@ -421,29 +421,65 @@ Capture for the next step:
 - A real actor omni from `heima-agent-register.sh` (32-byte hex).
 - A device key hash from `heima-device-register.sh` (32-byte hex).
 
-### B.5 Deploy relay + MCP server on the broker host — one idempotent command
+### B.5 Deploy the MCP server on the broker
 
-The whole §B.5–§B.6 install (mcp-endpoint-server clone + venv, agentkeys-mcp-server build + install, systemd units, nginx vhost with wss → ws upgrade, certbot cert, env file with auto-generated token + health-key) is one script. Per CLAUDE.md's "Idempotent remote-setup rule" — every step pre-checks state and exits 0 on a clean second run.
-
-Run it on the broker host (same host setup-broker-host.sh ran on). The script has two modes:
-
-**Mode A — xiaozhi-hosted (DEFAULT, recommended).** Xiaozhi.me hosts the MCP-endpoint relay; the script just runs `agentkeys-mcp-server` and points it at xiaozhi's WS URL. No nginx, no certbot, no `mcp.litentry.org` DNS needed.
+**Production / test (one command from the operator workstation):** [`scripts/setup-cloud.sh`](../../../scripts/setup-cloud.sh) step 15 SSMs the broker EC2 and runs [`scripts/setup-mcp-host.sh`](../../../scripts/setup-mcp-host.sh) there. Same step handles prod (`mcp.${ZONE}`) and test (`test-mcp.${ZONE}`).
 
 ```bash
-# 1. Get the endpoint URL: 智控台 → 智能体 → MCP接入点 → 接入点地址
-# 2. Paste it once — persisted at /etc/agentkeys/mcp-xiaozhi-endpoint
-bash scripts/setup-mcp-host.sh --xiaozhi-endpoint 'wss://api.xiaozhi.me/mcp/?token=…'
+# Bring up prod MCP on the broker (cargo installs from github.com/litentry/agentKeys main)
+bash scripts/setup-cloud.sh --env-file scripts/operator-workstation.env --only-step 15
 
-# Re-runs (upgrades, env changes) — URL loaded from disk
-bash scripts/setup-mcp-host.sh
+# Bring up test MCP on the same broker (test-mcp.litentry.org)
+bash scripts/setup-cloud.sh --env-file scripts/operator-workstation.test.env --test --only-step 15
+
+# Pin to a PR branch / fork while developing
+AGENTKEYS_REPO_URL=https://github.com/me/agentKeys.git AGENTKEYS_REV=my-feature-branch \
+  bash scripts/setup-cloud.sh --only-step 15
 ```
 
-**Mode B — self-hosted relay (legacy / custom endpoints).** Operator runs their own `mcp-endpoint-server` behind nginx with a real cert. Needs the `mcp.litentry.org` DNS A record from `setup-cloud.sh` step 6.
+The step polls the SSM command for up to 10 min and tails the last 30 lines of stdout when it completes (or stderr on failure). Idempotent — re-runs short-circuit when state is already correct.
+
+**Local development install (laptop / Claude Code / Codex CLI / Claude Desktop):**
 
 ```bash
-bash scripts/setup-mcp-host.sh --self-hosted-relay              # prod → mcp.litentry.org
-bash scripts/setup-mcp-host.sh --self-hosted-relay --test       # test → test-mcp.litentry.org
+cargo install --git https://github.com/litentry/agentKeys agentkeys-mcp-server
 ```
+
+This is the canonical install path until M6 ships GH Releases + a native installer ([#134](https://github.com/litentry/agentKeys/issues/134)). Binary lands at `~/.cargo/bin/agentkeys-mcp-server`. Then wire it into your LLM host:
+
+```bash
+# Claude Code — user scope, available in every project
+claude mcp add --scope user agentkeys \
+  -e MCP_TRANSPORT=stdio -e MCP_BACKEND=in-memory \
+  -- ~/.cargo/bin/agentkeys-mcp-server
+
+# Codex CLI — append to ~/.codex/config.toml:
+#   [mcp_servers.agentkeys]
+#   command = "~/.cargo/bin/agentkeys-mcp-server"
+#   env = { MCP_TRANSPORT = "stdio", MCP_BACKEND = "in-memory" }
+
+# Claude Desktop (macOS) — merge into ~/Library/Application Support/Claude/claude_desktop_config.json:
+#   { "mcpServers": { "agentkeys": { "command": "~/.cargo/bin/agentkeys-mcp-server",
+#       "env": { "MCP_TRANSPORT": "stdio", "MCP_BACKEND": "in-memory" } } } }
+```
+
+Switch `MCP_BACKEND=in-memory` → `MCP_BACKEND=http` and set `AGENTKEYS_BROKER_URL` / `AGENTKEYS_MEMORY_URL` / `AGENTKEYS_AUDIT_URL` to point at a real broker.
+
+**setup-mcp-host.sh modes (when running on broker directly).** The script has two relay modes; setup-cloud.sh step 15 defaults to mode A (recommended).
+
+- **Mode A — xiaozhi-hosted (DEFAULT).** Xiaozhi.me hosts the relay; the script just runs `agentkeys-mcp-server` pointing at xiaozhi's WS URL. No nginx, no certbot, no `mcp.litentry.org` DNS needed.
+
+  ```bash
+  bash scripts/setup-mcp-host.sh --xiaozhi-endpoint 'wss://api.xiaozhi.me/mcp/?token=…'
+  bash scripts/setup-mcp-host.sh                                   # re-run; URL loaded from disk
+  ```
+
+- **Mode B — self-hosted relay (custom endpoints).** Operator runs their own `mcp-endpoint-server` behind nginx with a real cert. Needs the `mcp.litentry.org` DNS A record from `setup-cloud.sh` step 6.
+
+  ```bash
+  bash scripts/setup-mcp-host.sh --self-hosted-relay              # prod → mcp.litentry.org
+  bash scripts/setup-mcp-host.sh --self-hosted-relay --test       # test → test-mcp.litentry.org
+  ```
 
 > **ACME account email** — Let's Encrypt records one email per ACME account; used for cert-expiry / renewal-failure notifications. The script picks one of three behaviors:
 > 1. If `/etc/letsencrypt/accounts/` already has a registered ACME account (very common — `setup-broker-host.sh` will have registered one for the broker host), the new cert is issued against that account. **No email flag needed.** This is the normal path.
@@ -463,7 +499,7 @@ What the script lands:
 
 - `/opt/agentkeys/mcp-endpoint/src/` — pinned clone of `xinnan-tech/mcp-endpoint-server` (default ref: `main`; override with `--relay-ref <sha>`).
 - `/opt/agentkeys/mcp-endpoint/src/.venv/` — Python venv with the relay's requirements.
-- `/usr/local/bin/agentkeys-mcp-server` — release binary (built locally via `cargo build --release -p agentkeys-mcp-server` and `install`ed only when its sha256 drifts).
+- `/usr/local/bin/agentkeys-mcp-server` — release binary, installed via `cargo install --git $AGENTKEYS_REPO_URL --branch $AGENTKEYS_REV` (defaults `litentry/agentKeys` + `main`). Cached at `~/.cache/agentkeys-mcp-install/` and `install`ed to `/usr/local/bin/` only when its sha256 drifts.
 - `/etc/agentkeys/mcp.env` — `MCP_ENDPOINT=ws://127.0.0.1:8004/mcp_endpoint/mcp/?token=<auto-generated>` + the broker/memory/audit URLs (0600, owned by the run user).
 - `/etc/agentkeys/mcp-tool-token` + `/etc/agentkeys/mcp-health-key` — the persistent secrets the URL tokens are derived from. Generated on first run only; subsequent runs preserve them so the relay URLs stay stable across deploys.
 - `/etc/systemd/system/mcp-endpoint-server.service` + `/etc/systemd/system/agentkeys-mcp-server.service` — diff-then-write; daemon-reload + restart only when content changed.
