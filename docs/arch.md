@@ -1988,6 +1988,12 @@ Likewise the web UI is **not a trust plane** — per the #107 PR thread, the tru
 - [#133](https://github.com/litentry/agentKeys/issues/133) — Phase 3 hooks that fire when tools are invoked through any of these surfaces
 - [#134](https://github.com/litentry/agentKeys/issues/134) — M6 distribution: GH Releases + Homebrew + `curl | sh` installer
 
+### 22c.7 Prior art
+
+- **[`rohitg00/agentmemory`](https://github.com/rohitg00/agentmemory)** — the closest-in-spirit single-operator app: CLI + persistent daemon + web viewer + plugin-marketplace `connect <host>` model. The shape we mirror in §22c.1; differences are the multi-user / multi-device / trust-core requirements AgentKeys carries that agentmemory doesn't.
+- **[`iii-hq/iii`](https://github.com/iii-hq/iii)** — composable service runtime (Rust engine + Node/Python/Rust SDKs; sibling of Temporal / Inngest / Restate). We **borrow vocabulary only** — iii's Trigger taxonomy (`direct call` / `HTTP endpoint` / `cron schedule` / `queue subscription` / `state change` / `stream event`) is the internal dispatch model for [#133](https://github.com/litentry/agentKeys/issues/133)'s `agentkeys hook` subcommand. We do **NOT** adopt iii as a runtime — its live worker registry would break the per-data-class worker isolation in [§15](#15-workers-per-service) and the CLAUDE.md four-layer per-actor invariants. Engine is Elastic License 2.0; we avoid the legal entanglement by not importing it.
+- **[`huangjunsen0406/xiaozhi-mcphub`](https://github.com/huangjunsen0406/xiaozhi-mcphub)** — multi-MCP aggregator for xiaozhi vendors (Node/TS + React + Postgres+pgvector). Solves "compose N MCP servers behind one xiaozhi endpoint" — a real problem when an operator runs many MCPs, which we're not yet at. If we need this in M4+, the right move is an `AggregateBackend` variant in [`agentkeys-mcp-server`](../crates/agentkeys-mcp-server/) per the §22c.2 backend-wiring pattern, not adopting an external JS/TS stack into the trust path.
+
 ---
 
 ## 23. Cargo workspace
