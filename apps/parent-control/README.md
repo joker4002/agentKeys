@@ -47,10 +47,25 @@ Port `3113` matches the canonical web-UI port in [`docs/arch.md`](../../docs/arc
 ```sh
 cd apps/parent-control
 npm install
-npm run dev          # http://localhost:3113
+npm run dev          # http://localhost:3113 (UI only, EmptyBackend)
+npm run dev:stack    # UI + agentkeys-daemon --ui-bridge in one terminal
 npm run build        # production build
 npm run typecheck    # tsc --noEmit
 ```
+
+### `dev:stack` — single-terminal dev stack
+
+`scripts/dev.sh` starts the daemon on `127.0.0.1:3114` and the Next.js dev server on `localhost:3113`, multiplexing both stdouts into one terminal with per-process color prefixes:
+
+```
+[dev]    bold yellow   — the dev script's own status lines
+[daemon] magenta       — agentkeys-daemon --ui-bridge
+[ui]     cyan          — npx next dev
+```
+
+The script auto-rebuilds the daemon if any `.rs` source under `crates/agentkeys-daemon/` is newer than the existing binary, waits for `GET /healthz` before bringing up the UI, and pre-sets `NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon` + `NEXT_PUBLIC_AGENTKEYS_DAEMON_URL=http://127.0.0.1:3114` so the UI talks to the daemon by default. Ctrl-C cleans up both processes; stale processes on either port are killed before binding.
+
+Overrides via env: `UI_PORT`, `DAEMON_PORT`, `DAEMON_ORIGIN`, `DAEMON_RP_ID`, `DAEMON_RP_NAME` — see the comment block at the top of `scripts/dev.sh`.
 
 ## Deploy (M1)
 
