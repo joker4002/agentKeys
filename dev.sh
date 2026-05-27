@@ -33,6 +33,9 @@
 # macOS default /bin/bash).
 
 set -euo pipefail
+# Disable job-control monitor mode so bash doesn't print "Terminated: 15"
+# notifications for the background children we SIGTERM during cleanup.
+set +m
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$REPO_ROOT/apps/parent-control"
@@ -163,7 +166,10 @@ build_if_needed() {
     ( cd "$REPO_ROOT" && cargo build -p "$cargo_pkg" ) \
       || { err "cargo build -p $cargo_pkg failed"; exit 1; }
   else
-    printf "%b[dev]%b %s%s binary is current — skipping build%b\n" \
+    # NB: $C_DIM contains escape sequences in single-quoted form, so it
+    # MUST go through %b (not %s) to be interpreted. The literal label
+    # string after it goes through %s.
+    printf "%b[dev]%b %b%s binary is current — skipping build%b\n" \
       "$C_INFO" "$C_RESET" "$C_DIM" "$label" "$C_RESET"
   fi
 }
@@ -172,16 +178,63 @@ DAEMON_PID=""
 MCP_PID=""
 UI_PID=""
 
+# Per-run temp dir for the FIFOs that carry each process's stdout into
+# its prefix reader. Using FIFOs (not bash process substitution) so
+# that the script itself never holds an fd to the writer end — killing
+# the binary cleanly closes the FIFO, the prefix reader sees EOF, and
+# `wait` returns. Process substitution leaves the fd open in the
+# parent shell, which made Ctrl-C hang indefinitely.
+RUN_TMPDIR="${TMPDIR:-/tmp}/agentkeys-dev-stack-$$"
+mkdir -p "$RUN_TMPDIR"
+FIFO_DAEMON="$RUN_TMPDIR/daemon.fifo"
+FIFO_MCP="$RUN_TMPDIR/mcp.fifo"
+FIFO_UI="$RUN_TMPDIR/ui.fifo"
+mkfifo "$FIFO_DAEMON" "$FIFO_MCP" "$FIFO_UI"
+
+PREFIX_DAEMON_PID=""
+PREFIX_MCP_PID=""
+PREFIX_UI_PID=""
+
 cleanup() {
   trap - INT TERM EXIT
   printf "\n"
   say "shutting down…"
+  # SIGTERM the actual binaries first — their FIFO writes will close
+  # and the prefix readers see EOF naturally.
+  local p
   for p in "$UI_PID" "$MCP_PID" "$DAEMON_PID"; do
     [ -z "$p" ] && continue
-    kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null || true
+    if kill -0 "$p" 2>/dev/null; then
+      kill -TERM "$p" 2>/dev/null || true
+    fi
   done
-  wait 2>/dev/null || true
+  # Poll for all of them (including prefix readers) to actually exit.
+  # We use polling instead of `wait` so bash doesn't print "Terminated:
+  # 15" job-control notifications during shutdown — combined with the
+  # disowns after each spawn, the shutdown is now silent except for
+  # our own [dev] lines.
+  local waited=0
+  while [ "$waited" -lt 16 ]; do
+    sleep 0.25
+    waited=$((waited + 1))
+    local still=0
+    for p in "$UI_PID" "$MCP_PID" "$DAEMON_PID" "$PREFIX_UI_PID" "$PREFIX_MCP_PID" "$PREFIX_DAEMON_PID"; do
+      [ -z "$p" ] && continue
+      kill -0 "$p" 2>/dev/null && { still=1; break; }
+    done
+    [ "$still" = "0" ] && break
+  done
+  # SIGKILL anything still alive.
+  for p in "$UI_PID" "$MCP_PID" "$DAEMON_PID" "$PREFIX_UI_PID" "$PREFIX_MCP_PID" "$PREFIX_DAEMON_PID"; do
+    [ -z "$p" ] && continue
+    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+  done
+  rm -rf "$RUN_TMPDIR"
   say "stopped."
+  # Exit immediately so we don't fall through to the polling loop's
+  # post-loop "one of the children exited" warning, which would be
+  # misleading after a clean operator-initiated shutdown.
+  exit 0
 }
 trap cleanup INT TERM EXIT
 
@@ -195,14 +248,23 @@ build_if_needed "$MCP_BIN" "agentkeys-mcp-server" "agentkeys-mcp-server" \
   "$REPO_ROOT/crates/agentkeys-mcp" "$REPO_ROOT/crates/agentkeys-mcp-server"
 
 # ─── Start daemon ──────────────────────────────────────────────────
+#
+# Pattern for all three processes: spawn the prefix reader FIRST on
+# the FIFO (so it's blocking on read when the writer opens), then
+# spawn the binary with stdout/stderr redirected to the FIFO. $! is
+# now the real binary's pid — clean Ctrl-C kill semantics.
 say "starting daemon on http://${DAEMON_BIND} (rp_id=${DAEMON_RP_ID})"
+prefix "$C_DAEMON" "daemon" < "$FIFO_DAEMON" &
+PREFIX_DAEMON_PID=$!
+disown "$PREFIX_DAEMON_PID" 2>/dev/null || true
 "$DAEMON_BIN" --ui-bridge \
   --ui-bridge-bind   "$DAEMON_BIND" \
   --ui-bridge-origin "$DAEMON_ORIGIN" \
   --ui-bridge-rp-id  "$DAEMON_RP_ID" \
   --ui-bridge-rp-name "$DAEMON_RP_NAME" \
-  2>&1 | prefix "$C_DAEMON" "daemon" &
+  > "$FIFO_DAEMON" 2>&1 &
 DAEMON_PID=$!
+disown "$DAEMON_PID" 2>/dev/null || true
 
 say "waiting for daemon /healthz…"
 ready=0
@@ -221,9 +283,13 @@ say "daemon ready."
 
 # ─── Start MCP server ──────────────────────────────────────────────
 say "starting mcp-server on http://${MCP_BIND} (backend=${MCP_BACKEND})"
+prefix "$C_MCP" "mcp" < "$FIFO_MCP" &
+PREFIX_MCP_PID=$!
+disown "$PREFIX_MCP_PID" 2>/dev/null || true
 "$MCP_BIN" --backend "$MCP_BACKEND" --listen "$MCP_BIND" \
-  2>&1 | prefix "$C_MCP" "mcp" &
+  > "$FIFO_MCP" 2>&1 &
 MCP_PID=$!
+disown "$MCP_PID" 2>/dev/null || true
 
 # Wait for the MCP server's listener (no /healthz today — probe TCP).
 say "waiting for mcp-server tcp…"
@@ -242,18 +308,26 @@ done
 say "mcp-server ready."
 
 # ─── Start Next.js dev server ──────────────────────────────────────
+#
+# The subshell `exec`s into npx so $! points at the npx process itself
+# (not the subshell). Output flows through the FIFO into the prefix
+# reader spawned just above.
 say "starting Next.js dev server on http://localhost:${UI_PORT}"
 say "  NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon"
 say "  NEXT_PUBLIC_AGENTKEYS_DAEMON_URL=http://${DAEMON_BIND}"
 say "  NEXT_PUBLIC_AGENTKEYS_MCP_URL=http://${MCP_BIND}"
+prefix "$C_UI" "ui" < "$FIFO_UI" &
+PREFIX_UI_PID=$!
+disown "$PREFIX_UI_PID" 2>/dev/null || true
 (
-  cd "$APP_DIR"
+  cd "$APP_DIR" && \
   NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon \
   NEXT_PUBLIC_AGENTKEYS_DAEMON_URL="http://${DAEMON_BIND}" \
   NEXT_PUBLIC_AGENTKEYS_MCP_URL="http://${MCP_BIND}" \
-    npx next dev -p "$UI_PORT" 2>&1
-) | prefix "$C_UI" "ui" &
+    exec npx next dev -p "$UI_PORT"
+) > "$FIFO_UI" 2>&1 &
 UI_PID=$!
+disown "$UI_PID" 2>/dev/null || true
 
 say "all three processes running. Ctrl-C to stop."
 say "  UI:     http://localhost:${UI_PORT}"
