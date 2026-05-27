@@ -83,26 +83,56 @@ prefix() {
 
 # Kill any leftover process holding a port. Graceful first (SIGTERM,
 # 3 s wait), forceful if needed (SIGKILL), then verify the port is
-# actually free before returning. Aborts the script if the port can't
-# be freed — there's no point trying to bind on top of a zombie.
+# actually free before returning.
+#
+# `lsof -ti` can return MULTIPLE pids on separate lines for a single
+# port — e.g. when a process listens on both IPv4 and IPv6, or when a
+# parent has a child sharing the socket. The body iterates over each
+# pid individually; a single bare `kill "$pid"` with a multiline
+# variable would fail silently and leave the port occupied (exactly
+# the bug the operator hit).
+#
+# Idempotent: re-running dev.sh after a hard kill / lost terminal
+# cleans up the previous run's stragglers and starts fresh.
 free_port() {
   local port="$1"
-  local pid
-  pid=$(lsof -ti tcp:"$port" 2>/dev/null || true)
-  if [ -z "$pid" ]; then return 0; fi
-  warn "port :$port held by pid $pid — sending SIGTERM"
-  kill "$pid" 2>/dev/null || true
-  local waited=0
-  while [ "$waited" -lt 6 ]; do
+  local pass
+  for pass in 1 2; do
+    local pids
+    pids=$(lsof -ti tcp:"$port" 2>/dev/null || true)
+    if [ -z "$pids" ]; then return 0; fi
+
+    local pid
+    for pid in $pids; do
+      warn "port :$port held by pid $pid — sending SIGTERM (pass $pass)"
+      kill "$pid" 2>/dev/null || true
+    done
+
+    # Wait up to 3 s for all of them to exit.
+    local waited=0
+    while [ "$waited" -lt 6 ]; do
+      sleep 0.5
+      waited=$((waited + 1))
+      local still=0
+      for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then still=1; break; fi
+      done
+      [ "$still" = "0" ] && break
+    done
+
+    # SIGKILL anything still alive.
+    for pid in $pids; do
+      if kill -0 "$pid" 2>/dev/null; then
+        warn "pid $pid still alive after 3 s — sending SIGKILL"
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    done
     sleep 0.5
-    waited=$((waited + 1))
-    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+
+    # Loop will re-check on next pass. Stops once lsof returns nothing
+    # at the top of the loop.
   done
-  if kill -0 "$pid" 2>/dev/null; then
-    warn "pid $pid still alive after 3 s — sending SIGKILL"
-    kill -9 "$pid" 2>/dev/null || true
-    sleep 0.5
-  fi
+
   if lsof -ti tcp:"$port" >/dev/null 2>&1; then
     err "port :$port is still occupied after SIGKILL — investigate manually"
     err "  lsof -i tcp:$port"
