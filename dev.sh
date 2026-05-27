@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# apps/parent-control/scripts/dev.sh — single-terminal dev stack.
+# dev.sh — single-terminal dev stack for the parent-control web UI.
+#
+# Lives at the agentkeys repo root so the entry point is one path away
+# from the operator on a fresh clone:
+#
+#   bash dev.sh                          # from the repo root
+#   ./dev.sh                             # same
+#   cd apps/parent-control && npm run dev:stack   # equivalent via npm
 #
 # Starts the agentkeys-daemon in --ui-bridge mode and the Next.js dev
 # server, multiplexes their stdouts into this terminal with colored
@@ -9,29 +16,29 @@
 #   [ui]      cyan     — npx next dev
 #   [dev]     yellow   — this script's own status lines
 #
-# Ctrl-C cleans up both children. If port 3113 (UI) or 3114 (daemon) is
-# held by a stale process from a previous crash, this script kills the
-# squatter before binding.
+# Ctrl-C cleans up both children. If UI_PORT (3113) or DAEMON_PORT
+# (3114) is held by a stale process from a previous crash, this script
+# kills the squatter before binding.
 #
-# Usage:
-#   bash apps/parent-control/scripts/dev.sh        # default ports
-#   UI_PORT=3115 DAEMON_PORT=3116 bash ...        # override ports
-#   npm run dev:stack                              # from apps/parent-control
-#
-# Environment:
+# Environment overrides:
 #   UI_PORT           default 3113
 #   DAEMON_PORT       default 3114
 #   DAEMON_ORIGIN     default http://localhost:${UI_PORT}
 #   DAEMON_RP_ID      default localhost
 #   DAEMON_RP_NAME    default AgentKeys
 #
-# Requirements: cargo, npx (node), lsof, curl.
+# Requirements: cargo, npx (node), lsof, curl. Bash 3.2+ (works with
+# macOS default /bin/bash).
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
-APP_DIR="$(pwd)"
-REPO_ROOT="$(cd "$APP_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+APP_DIR="$REPO_ROOT/apps/parent-control"
+
+if [ ! -d "$APP_DIR" ]; then
+  echo "[dev] expected $APP_DIR — is dev.sh at the agentkeys repo root?" >&2
+  exit 1
+fi
 
 # ─── Colors ────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -85,7 +92,6 @@ build_daemon_if_needed() {
   if [ ! -x "$DAEMON_BIN" ]; then
     need_build=1
   else
-    # If any .rs under crates/agentkeys-daemon is newer than the binary, rebuild.
     if [ -n "$(find "$REPO_ROOT/crates/agentkeys-daemon" -name '*.rs' -newer "$DAEMON_BIN" -print -quit 2>/dev/null)" ]; then
       need_build=1
     fi
@@ -169,7 +175,7 @@ say "  UI:     http://localhost:${UI_PORT}"
 say "  daemon: http://${DAEMON_BIND}"
 
 # Wait until either child exits, then cleanup() trap handles the rest.
-# `wait -n` is bash 4.3+; macOS default `/bin/bash` is 3.2. Poll instead.
+# `wait -n` is bash 4.3+; macOS default /bin/bash is 3.2. Poll instead.
 while kill -0 "$DAEMON_PID" 2>/dev/null && kill -0 "$UI_PID" 2>/dev/null; do
   sleep 1
 done
