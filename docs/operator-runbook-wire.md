@@ -45,7 +45,7 @@ harness is idempotent — re-running is safe.
   docker run --security-opt seccomp=unconfined -d -p 8080:8080 ghcr.io/agent-infra/sandbox:latest
   ```
   The `--security-opt seccomp=unconfined` flag is required (Docker's default seccomp blocks syscalls the sandbox needs; without it the container exits silently). Re-run after every Docker Desktop upgrade.
-- A **reachable rust image** for the aarch64-linux cross-build (the sandbox is aarch64 Linux; the harness cross-builds the agent binary in an `arm64` rust container). If Docker Hub is unreachable, pre-pull or point at a mirror: `RUST_BUILD_IMAGE=<local-or-mirror-rust-image>`.
+- A **reachable rust image** for the aarch64-linux cross-build (the sandbox is aarch64 Linux; the harness cross-builds the agent binary in an `arm64` rust container). The **first** build is slow; after that re-runs are **incremental** — the harness persists cargo's registry + compiled artifacts in docker volumes and bakes the OpenSSL build deps into a cached `agentkeys-sandbox-builder` image, recompiling only when a tracked source file changed (and restarting the sandbox MCP server when the binary changed). If Docker Hub is unreachable, pre-pull or point at a mirror: `RUST_BUILD_IMAGE=<local-or-mirror-rust-image>`.
 - **Hermes** in the sandbox — the harness installs it (guarded `curl|bash`) if absent; needs GitHub reachable.
 
 **Real mode only:**
@@ -55,7 +55,7 @@ harness is idempotent — re-running is safe.
 
 ## The manual gates (the "test through" essence)
 
-- **LLM key** — auto from `OPENROUTER_API_KEY` (or `LLM_API_KEY`); only prompts if absent. Used to configure the sandbox Hermes for the surprise.
+- **LLM key** — auto from `OPENROUTER_API_KEY` (or `LLM_API_KEY`); only prompts if absent. Phase 4.0 writes it to the sandbox `~/.hermes/.env` and sets `provider: openrouter` + `model.default` (default `deepseek/deepseek-v4-flash`; override `LLM_MODEL`). A non-fatal `4.1 model smoke` confirms the model is live before the surprise.
 - **Real Touch ID** — only at scope grant in real mode, and only if the reused account isn't already scoped (`--webauthn`).
 - **The Hermes surprise** — open Hermes in the sandbox, send "where am I going this weekend?", and judge the memory-aware reply (`[y/N]`).
 
@@ -84,7 +84,9 @@ Pass `--yes` to auto-confirm the non-secret prompts.
 
 Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `AGENT_LABEL` (default `demo-agent`), `MEMORY_NS` (default `travel`),
-`OPENROUTER_API_KEY` / `LLM_API_KEY`, `RUST_BUILD_IMAGE`,
+`OPENROUTER_API_KEY` / `LLM_API_KEY`, `LLM_MODEL` (default `deepseek/deepseek-v4-flash`) /
+`LLM_BASE_URL`, `RUST_BUILD_IMAGE` (base image) ·
+`BUILDER_IMAGE` / `CARGO_REGISTRY_VOL` / `CARGO_GIT_VOL` (build cache),
 `AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER`.
 
 ## Drift detection
@@ -99,7 +101,8 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | Symptom | Cause | Fix |
 |---|---|---|
 | Phase 0 `0.7 session bearer` warns "looks expired" then cap-mint 401s | the `alice` session JWT expired (TTL ≤ 5h) | `agentkeys init --session-id alice …` to refresh |
-| Phase 1 `1.3 linux build` → "cannot pull" | Docker Hub unreachable for the cross-build | `RUST_BUILD_IMAGE=<local/mirror rust image>` or pre-pull `rust:1.83-slim-bookworm` |
+| Phase 1 `1.3 linux build` → "cannot pull" | Docker Hub unreachable for the base image | `RUST_BUILD_IMAGE=<local/mirror rust image>` or pre-pull `rust:1.83-slim-bookworm` |
+| `1.3 linux build` won't pick up a Rust edit | gate compares source mtime vs binary; re-runs rebuild automatically on a real edit | to force a from-scratch rebuild: `rm -rf target/sandbox-linux && docker volume rm agentkeys-sandbox-cargo-registry agentkeys-sandbox-cargo-git`; to rebuild the deps image: `docker rmi agentkeys-sandbox-builder:1.83-bookworm` |
 | `wire` step 0 → `fail hermes not installed` | Hermes not on the sandbox PATH | the harness installs it; or run the guarded install (Appendix) — needs GitHub reachable |
 | `wire` step 3 → `fail … already has a top-level hooks:` | hand-authored `hooks:` in `~/.hermes/config.yaml` | merge manually or remove it, then re-run |
 | `hook check` blocks with `agentkeys_unreachable` | MCP server down | start it (the harness does in Phase 1); check `AGENTKEYS_MCP_URL` |
@@ -107,6 +110,11 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | MCP call → 401 | wrong vendor token | match `AGENTKEYS_MCP_VENDOR_TOKEN` to the server's `--vendor-tokens` (in-memory seeds `demo-tok`) |
 | MCP call → 403 | actor header mismatch | `AGENTKEYS_ACTOR_OMNI` must match the server's actor |
 | Memory swap not reflected | hooks fetch per-call but Hermes caches the LLM context | start a fresh Hermes session |
+| Phase 1 `1.3 … upload failed` | sandbox upload API runs non-root → can't write `/usr/local/bin` (`Errno 13`) | fixed: binaries now upload to the writable `~/.local/bin` (on PATH); just re-run |
+| Phase 4 surprise → "No inference provider configured" | key not in `~/.hermes/.env`, or wrong provider | 4.0 writes `OPENROUTER_API_KEY` to `~/.hermes/.env` + sets `provider: openrouter`; confirm `0.6 LLM key` shows `ok` |
+| Phase 4 `4.1 model smoke` / surprise → HTTP 429 | OpenRouter throttling a `:free` model | retry, or use the paid default `LLM_MODEL=deepseek/deepseek-v4-flash` |
+| Surprise reply says "nothing in memory" | wire hooks/MCP missing → `pre_llm_call` never injected | 4.0 now prechecks + fails loud; ensure Phases 1+2 ran (no `--skip-1/--skip-2`): `~/.hermes/agent-hooks/` exists + `:18088/healthz` up; use a fresh Hermes session |
+| Phase 1 `1.4 mcp server … did not come up` → `Address already in use` | `MCP_PORT` collides with a sandbox service (8088 = built-in `gem-server`) | default is now `18088` (outside the sandbox's range); override `MCP_PORT` if it still clashes — check `ss -ltnp` in the sandbox |
 
 ## Appendix A — what `agentkeys wire` writes (reference)
 
@@ -139,7 +147,7 @@ The harness does these for you; run them manually only to understand the flow.
 ```bash
 # 1. Sandbox (see Prerequisites).
 # 2. MCP server (in-memory demo):
-./target/release/agentkeys-mcp-server --backend in-memory --transport http --listen 127.0.0.1:8088
+./target/release/agentkeys-mcp-server --backend in-memory --transport http --listen 127.0.0.1:18088
 # (real: --backend http --broker-url … --memory-url … --audit-url … --vendor-tokens you:tok)
 
 # 3. Install Hermes in the sandbox (idempotent):
@@ -150,11 +158,11 @@ curl -sS -X POST http://localhost:8080/v1/shell/exec -H 'content-type: applicati
 agentkeys wire hermes \
   --actor-omni 0x<64hex> --operator-omni 0x<64hex> \
   --namespaces travel --payment-scope payment.spend \
-  --mcp-url http://localhost:8088/mcp --vendor-token "$TOKEN" \
+  --mcp-url http://localhost:18088/mcp --vendor-token "$TOKEN" \
   --session-bearer "$SESSION_JWT"
 
 # 5. Exercise the acts directly (the wired scripts call these):
-export AGENTKEYS_MCP_URL=http://127.0.0.1:8088/mcp AGENTKEYS_MCP_VENDOR_TOKEN=demo-tok
+export AGENTKEYS_MCP_URL=http://127.0.0.1:18088/mcp AGENTKEYS_MCP_VENDOR_TOKEN=demo-tok
 export AGENTKEYS_ACTOR_OMNI=0xa0c701…a0c7 AGENTKEYS_OPERATOR_OMNI=0x07e8a1…07e8
 echo '{}'                                | agentkeys hook memory-inject --namespaces travel   # Act 1
 echo '{"tool_input":{"amount_rmb":600}}' | agentkeys hook check --scope payment.spend          # Act 2 (block)

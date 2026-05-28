@@ -34,7 +34,7 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # ─── config (env overridable) ──────────────────────────────────────────────
 MODE="real"
 SANDBOX_URL="${SANDBOX_URL:-http://localhost:8080}"
-MCP_PORT="${MCP_PORT:-8088}"
+MCP_PORT="${MCP_PORT:-18088}"   # 8088 collides with the aiosandbox built-in gem-server; 18088 is outside its range
 MCP_URL_IN_SANDBOX="http://localhost:${MCP_PORT}/mcp"
 SESSION_ID="${SESSION_ID:-alice}"            # master session label on the Mac
 AGENT_LABEL="${AGENT_LABEL:-demo-agent}"
@@ -44,14 +44,19 @@ SERVICE="${SERVICE:-openrouter}"             # LLM cred service name
 # sandbox Hermes model before the surprise chat.
 LLM_API_KEY="${LLM_API_KEY:-${OPENROUTER_API_KEY:-}}"
 LLM_BASE_URL="${LLM_BASE_URL:-https://openrouter.ai/api/v1}"
-LLM_MODEL="${LLM_MODEL:-openrouter/auto}"
+LLM_MODEL="${LLM_MODEL:-deepseek/deepseek-v4-flash}"   # OpenRouter slug; ':free' tier is 429-throttled
 MEMORY_NS="${MEMORY_NS:-travel}"
 PAYMENT_SCOPE="${PAYMENT_SCOPE:-payment.spend}"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 AGENT_FILE="${AGENT_FILE:-$HOME/.agentkeys/agents/${AGENT_LABEL}.json}"
 LINUX_TARGET_DIR="$REPO_ROOT/target/sandbox-linux"
-AGENT_BIN_DST="/usr/local/bin/agentkeys"
-MCP_BIN_DST="/usr/local/bin/agentkeys-mcp-server"
+# Binaries land in the sandbox user's ~/.local/bin — it's writable + already on
+# PATH (hermes lives there). The sandbox upload API runs as a NON-ROOT user, so
+# /usr/local/bin is NOT writable (upload → "Errno 13 Permission denied").
+# Resolved to absolute paths in Phase 1 via resolve_sbx_paths once $HOME is known.
+SBX_HOME=""
+AGENT_BIN_DST=""
+MCP_BIN_DST=""
 
 # Mode-L demo identity (must match crates/agentkeys-mcp-server/src/backend/in_memory.rs)
 DEMO_ACTOR="0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7"
@@ -112,6 +117,18 @@ sbx_put()   { curl -sS -X POST "$SANDBOX_URL/v1/file/upload" -F "file=@$1" -F "p
                 | jq -r '.data.file_path // "UPLOAD_FAILED"'; }
 # Run one of the wired hook scripts in the sandbox against a stdin payload.
 sbx_hook()  { sbx_exec "printf '%s' $(printf '%q' "$2") | bash \$HOME/.hermes/agent-hooks/$1"; }
+
+# Resolve the sandbox user's $HOME → binaries go in ~/.local/bin (writable + on
+# PATH; the upload API is non-root so /usr/local/bin gives Errno 13). Idempotent:
+# sets the absolute dsts once and mkdir -p's the target dir.
+resolve_sbx_paths() {
+  [[ -n "$AGENT_BIN_DST" ]] && return 0
+  SBX_HOME="$(sbx_exec 'printf %s "$HOME"')"
+  [[ -n "$SBX_HOME" ]] || { fail "1.0 sandbox home" "could not resolve \$HOME in the sandbox"; return 1; }
+  AGENT_BIN_DST="$SBX_HOME/.local/bin/agentkeys"
+  MCP_BIN_DST="$SBX_HOME/.local/bin/agentkeys-mcp-server"
+  sbx_exec "mkdir -p \"$SBX_HOME/.local/bin\"" >/dev/null
+}
 
 # ─── Phase 0 — prerequisites ─────────────────────────────────────────────────
 phase0_prereqs() {
@@ -211,6 +228,9 @@ phase1_sandbox() {
     return
   fi
 
+  # Resolve sandbox binary destinations (~/.local/bin) now that it's reachable.
+  resolve_sbx_paths || return
+
   # 1.2 hermes installed (idempotent guard)
   if [[ "$(sbx_rc 'command -v hermes')" == "0" ]]; then
     ok "1.2 hermes" "$(sbx_exec 'hermes --version 2>&1 | head -1')"
@@ -222,6 +242,7 @@ phase1_sandbox() {
 
   # 1.3 agentkeys + mcp-server binaries (aarch64-linux) into the sandbox via its file API
   build_linux_binaries || return
+  local mcp_bin_changed=false
   for pair in "$LINUX_TARGET_DIR/release/agentkeys:$AGENT_BIN_DST" \
               "$LINUX_TARGET_DIR/release/agentkeys-mcp-server:$MCP_BIN_DST"; do
     local src="${pair%%:*}" dst="${pair##*:}"
@@ -233,12 +254,18 @@ phase1_sandbox() {
     else
       [[ "$(sbx_put "$src" "$dst")" == "$dst" ]] || { fail "1.3 $name" "upload failed"; continue; }
       sbx_exec "chmod +x $dst" >/dev/null
-      [[ "$(sbx_rc "$dst --version")" == "0" ]] && ok "1.3 $name" "uploaded + executable" || fail "1.3 $name" "not runnable in sandbox"
+      [[ "$dst" == "$MCP_BIN_DST" ]] && mcp_bin_changed=true
+      # Probe with --help (both binaries support it; the server has no --version).
+      [[ "$(sbx_rc "$dst --help")" == "0" ]] && ok "1.3 $name" "uploaded + executable" || fail "1.3 $name" "not runnable in sandbox"
     fi
   done
 
-  # 1.4 MCP server in the sandbox (detached; idempotent on :8088)
-  if [[ "$(sbx_rc "curl -fsS $MCP_URL_IN_SANDBOX/../healthz")" == "0" ]]; then
+  # 1.4 MCP server in the sandbox (detached; idempotent on :MCP_PORT).
+  # If a fresh server binary was just uploaded, restart so re-runs serve new code.
+  if [[ "$mcp_bin_changed" == true ]]; then
+    sbx_exec "pkill -f agentkeys-mcp-server || true; sleep 1" >/dev/null
+  fi
+  if [[ "$mcp_bin_changed" != true && "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" ]]; then
     ok "1.4 mcp server" "already up on :$MCP_PORT"
   else
     local cmd
@@ -248,43 +275,92 @@ phase1_sandbox() {
       cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens harness:$VENDOR_TOKEN --broker-url ${BACKEND_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI"
     fi
     sbx_exec "nohup $cmd >/tmp/agentkeys-mcp.log 2>&1 & sleep 2; echo started" >/dev/null
+    local started_msg="started ($MODE backend)"
+    [[ "$mcp_bin_changed" == true ]] && started_msg="restarted with fresh binary ($MODE backend)"
     [[ "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" ]] \
-      && ok "1.4 mcp server" "started ($MODE backend)" \
+      && ok "1.4 mcp server" "$started_msg" \
       || fail "1.4 mcp server" "did not come up — see /tmp/agentkeys-mcp.log in the sandbox"
   fi
 }
 
-# Cross-build aarch64-linux binaries in an arm64 Linux rust container (cached).
+# Cross-build aarch64-linux binaries in an arm64 Linux rust container.
 # The sandbox is aarch64 Linux; the Mac is arm64 darwin — same CPU, different
-# OS — so the agent binary must be cross-built. RUST_BUILD_IMAGE lets you point
-# at a local/mirror image when Docker Hub is unreachable.
+# OS — so the agent binary must be cross-built.
+#
+# Caching (so re-runs are fast + idempotent, like a local `cargo build`):
+#   • TARGET dir        → target/sandbox-linux is bind-mounted to the host, so
+#                         compiled crates + deps persist across runs.
+#   • REGISTRY + git    → named docker volumes, so the crates.io index and the
+#                         downloaded .crate sources survive the --rm container
+#                         (no multi-minute re-fetch every run).
+#   • OpenSSL deps      → reqwest's default native-tls links libssl, so we bake
+#                         pkg-config + libssl-dev into a derived builder image
+#                         ONCE (docker caches it) instead of apt-getting per run.
+#   • source-aware gate → rebuild only when a tracked .rs / Cargo.toml /
+#                         Cargo.lock is newer than the built binary; else skip.
+# RUST_BUILD_IMAGE overrides the BASE image when Docker Hub is unreachable.
 RUST_BUILD_IMAGE="${RUST_BUILD_IMAGE:-rust:1.83-slim-bookworm}"
-build_linux_binaries() {
-  if [[ -x "$LINUX_TARGET_DIR/release/agentkeys" && -x "$LINUX_TARGET_DIR/release/agentkeys-mcp-server" ]]; then
-    ok "1.3 linux build" "cached ($LINUX_TARGET_DIR/release)"; return 0
-  fi
-  if ! command -v docker >/dev/null 2>&1; then
-    fail "1.3 linux build" "docker required to cross-build the aarch64-linux agent binary"; return 1
-  fi
-  # Ensure the rust image is available (use local if present; else pull).
-  # Wrap the pull in a fail-fast timeout so a flaky registry can't hang the
-  # harness (Docker Hub auth EOFs have been observed). `timeout`/`gtimeout`
-  # used when present; otherwise the pull runs unbounded.
+BUILDER_IMAGE="${BUILDER_IMAGE:-agentkeys-sandbox-builder:1.83-bookworm}"
+CARGO_REGISTRY_VOL="${CARGO_REGISTRY_VOL:-agentkeys-sandbox-cargo-registry}"
+CARGO_GIT_VOL="${CARGO_GIT_VOL:-agentkeys-sandbox-cargo-git}"
+
+# True (0) when any tracked source is newer than the reference binary ($1).
+sources_newer() {
+  local ref="$1"
+  [[ -n "$(find "$REPO_ROOT/crates" "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Cargo.lock" \
+        \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' \) \
+        -newer "$ref" -print -quit 2>/dev/null)" ]]
+}
+
+# Derived builder image = base rust + OpenSSL build deps, baked once so apt
+# never re-runs per build. Idempotent: docker image inspect short-circuits.
+# Returns non-zero if the base image can't be obtained.
+ensure_builder_image() {
+  docker image inspect "$BUILDER_IMAGE" >/dev/null 2>&1 && return 0
+  # Fail-fast timeout so a flaky registry can't hang the harness (Docker Hub
+  # auth EOFs have been observed). timeout/gtimeout used when present.
   local TO=""
   command -v timeout  >/dev/null 2>&1 && TO="timeout 180"
   command -v gtimeout >/dev/null 2>&1 && TO="gtimeout 180"
   if ! docker image inspect "$RUST_BUILD_IMAGE" >/dev/null 2>&1; then
-    log "  1.3 linux build: pulling $RUST_BUILD_IMAGE …"
+    log "  1.3 linux build: pulling base $RUST_BUILD_IMAGE …"
     if ! $TO docker pull --platform linux/arm64 "$RUST_BUILD_IMAGE" >/dev/null 2>&1; then
       fail "1.3 linux build" "cannot pull $RUST_BUILD_IMAGE (registry unreachable/timed out). Set RUST_BUILD_IMAGE to a local/mirror rust image, or pre-pull it, then re-run."
       return 1
     fi
   fi
-  log "  1.3 linux build: cross-compiling aarch64-linux binaries (first run is slow)…"
-  docker run --rm --platform linux/arm64 -v "$REPO_ROOT":/src -w /src \
-    -e CARGO_TARGET_DIR=/src/target/sandbox-linux "$RUST_BUILD_IMAGE" \
-    sh -c "apt-get update >/dev/null 2>&1 && apt-get install -y --no-install-recommends pkg-config libssl-dev >/dev/null 2>&1 && cargo build --release -p agentkeys-cli -p agentkeys-mcp-server"
-  if [[ -x "$LINUX_TARGET_DIR/release/agentkeys" ]]; then
+  log "  1.3 linux build: building cached builder image $BUILDER_IMAGE (one-time)…"
+  docker build --platform linux/arm64 -t "$BUILDER_IMAGE" - <<DOCKERFILE
+FROM ${RUST_BUILD_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+  if ! docker image inspect "$BUILDER_IMAGE" >/dev/null 2>&1; then
+    fail "1.3 linux build" "could not build builder image $BUILDER_IMAGE (see docker output above)"
+    return 1
+  fi
+}
+
+build_linux_binaries() {
+  local agent_bin="$LINUX_TARGET_DIR/release/agentkeys"
+  local mcp_bin="$LINUX_TARGET_DIR/release/agentkeys-mcp-server"
+  # Idempotent + source-aware: skip when both binaries exist and no tracked
+  # source is newer; otherwise (re)build incrementally (caches persist).
+  if [[ -x "$agent_bin" && -x "$mcp_bin" ]] && ! sources_newer "$agent_bin"; then
+    ok "1.3 linux build" "up-to-date (no source changes; cached)"; return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    fail "1.3 linux build" "docker required to cross-build the aarch64-linux agent binary"; return 1
+  fi
+  ensure_builder_image || return 1
+  log "  1.3 linux build: cross-compiling aarch64-linux binaries (incremental; first run is slow)…"
+  docker run --rm --platform linux/arm64 \
+    -v "$REPO_ROOT":/src -w /src \
+    -v "$CARGO_REGISTRY_VOL":/usr/local/cargo/registry \
+    -v "$CARGO_GIT_VOL":/usr/local/cargo/git \
+    -e CARGO_TARGET_DIR=/src/target/sandbox-linux \
+    "$BUILDER_IMAGE" \
+    cargo build --release -p agentkeys-cli -p agentkeys-mcp-server
+  if [[ -x "$agent_bin" ]]; then
     ok "1.3 linux build" "built aarch64-linux binaries"; return 0
   else
     fail "1.3 linux build" "cross-build produced no binary (see docker output above)"; return 1
@@ -295,6 +371,7 @@ build_linux_binaries() {
 phase2_wire() {
   skip_phase 2 && { log "Phase 2 — wire: skip (--skip-2)"; return; }
   log "Phase 2 — wire (#141 core)"
+  resolve_sbx_paths || return
   local wire_args="hermes --actor-omni $ACTOR_OMNI --operator-omni $OPERATOR_OMNI --namespaces $MEMORY_NS --payment-scope $PAYMENT_SCOPE --mcp-url $MCP_URL_IN_SANDBOX --vendor-token $VENDOR_TOKEN"
   [[ -n "$SESSION_BEARER" ]] && wire_args="$wire_args --session-bearer $SESSION_BEARER"
 
@@ -359,16 +436,44 @@ phase4_surprise() {
     skip "4.0 hermes llm" "no LLM key (export OPENROUTER_API_KEY) — skipping the surprise"
     return
   fi
-  # 4.0 — point the sandbox Hermes at the LLM (idempotent; persisted to
-  # ~/.hermes/config.yaml so the operator's interactive session inherits it).
-  # Config keys may need per-version tuning; best-effort, non-fatal.
-  sbx_exec "export PATH=\$HOME/.local/bin:\$PATH
-    hermes config set model.provider custom >/dev/null 2>&1 || true
-    hermes config set model.base_url $(printf '%q' "$LLM_BASE_URL") >/dev/null 2>&1 || true
-    hermes config set model.default  $(printf '%q' "$LLM_MODEL")    >/dev/null 2>&1 || true
-    hermes config set model.api_key  $(printf '%q' "$LLM_API_KEY")  >/dev/null 2>&1 || true
-    echo done" >/dev/null
-  ok "4.0 hermes llm" "configured ($LLM_MODEL via $LLM_BASE_URL)"
+  # 4.0a wiring precheck — the surprise is only memory-aware if the wire hooks
+  # + MCP server are live. Fail LOUD here instead of printing open-chat
+  # instructions for a chat that would silently NOT inject memory (the trap that
+  # masked this: the LLM answers, but with "nothing in memory").
+  if [[ "$(sbx_rc "test -f \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh")" != "0" ]]; then
+    fail "4.0 wiring precheck" "hook scripts missing — run Phases 1+2 first (no --skip-1/--skip-2); 'agentkeys wire' must complete before the surprise"
+    return
+  fi
+  if [[ "$(sbx_rc "curl -fsS -m 4 http://localhost:$MCP_PORT/healthz")" != "0" ]]; then
+    fail "4.0 wiring precheck" "MCP server not up on :$MCP_PORT — Phase 1.4 must run (the memory hook fails CLOSED without it)"
+    return
+  fi
+
+  # 4.0b configure the sandbox Hermes LLM. Hermes reads the provider key from
+  # ~/.hermes/.env (its documented mechanism — "all LLM calls go through
+  # OpenRouter") and the model from config.yaml (model.default). Commands MUST
+  # be single-line: the sandbox /v1/shell/exec rejects multi-line payloads with
+  # a silent ErrorObservation. Verified (not masked with || true).
+  local env_path='$HOME/.hermes/.env'
+  sbx_exec "ENV=$env_path; grep -v '^OPENROUTER_API_KEY=' \"\$ENV\" > \"\$ENV.tmp\" 2>/dev/null; printf 'OPENROUTER_API_KEY=%s\n' $(printf '%q' "$LLM_API_KEY") >> \"\$ENV.tmp\"; mv \"\$ENV.tmp\" \"\$ENV\"" >/dev/null
+  if [[ "$(sbx_rc "grep -q '^OPENROUTER_API_KEY=' $env_path")" != "0" ]]; then
+    fail "4.0 hermes llm" "could not write OPENROUTER_API_KEY to ~/.hermes/.env"; return
+  fi
+  sbx_exec "export PATH=\$HOME/.local/bin:\$PATH; hermes config set model.provider openrouter >/dev/null 2>&1; hermes config set model.base_url $(printf '%q' "$LLM_BASE_URL") >/dev/null 2>&1; hermes config set model.default $(printf '%q' "$LLM_MODEL") >/dev/null 2>&1" >/dev/null
+  ok "4.0 hermes llm" "provider=openrouter, model=$LLM_MODEL, key in ~/.hermes/.env"
+
+  # 4.1 model smoke (non-fatal) — surface throttling/credential errors BEFORE
+  # the manual surprise, so the operator isn't debugging during the chat.
+  local smoke; smoke="$(sbx_exec "export PATH=\$HOME/.local/bin:\$PATH; cd \$HOME; timeout 55 hermes -z 'Reply with exactly: OK' 2>&1 | tail -3")"
+  if echo "$smoke" | grep -q '429'; then
+    skip "4.1 model smoke" "$LLM_MODEL is HTTP 429 (rate-limited; common on ':free'). Retry, or set LLM_MODEL=deepseek/deepseek-v4-flash"
+  elif echo "$smoke" | grep -qiE 'no inference|not configured|unauthorized|invalid|error|failed'; then
+    skip "4.1 model smoke" "no clean response — $(echo "$smoke" | tr '\n' ' ' | cut -c1-80)"
+  elif [[ -n "$(echo "$smoke" | tr -d '[:space:]')" ]]; then
+    ok "4.1 model smoke" "$LLM_MODEL responded"
+  else
+    skip "4.1 model smoke" "empty response (check sandbox network egress)"
+  fi
 
   printf '    Open a Hermes session in the sandbox (v0.14.0, hooks active) and send:\n'
   printf '      "where am I going this weekend?"\n'
@@ -387,6 +492,7 @@ phase5_teardown() {
   sbx_exec "pkill -f 'agentkeys-mcp-server' 2>/dev/null; echo ok" >/dev/null
   ok "5.1 stop mcp" "sandbox MCP server stopped (container + Hermes + wiring kept)"
   if [[ "$UNWIRE" == true ]]; then
+    resolve_sbx_paths || true
     sbx_exec "$AGENT_BIN_DST wire hermes --unwire 2>/dev/null || true" >/dev/null
     ok "5.3 unwire" "managed block removed (--unwire)"
   fi
