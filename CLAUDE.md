@@ -91,6 +91,8 @@ All remote-host changes (binary upgrades, systemd edits, nginx/certbot, env twea
 ## Heima chain (single entry point)
 All chain bring-up + per-actor binding ceremonies (contract deploy, deployer funding, master device registration, agent creation, scope grants, K11 enrollment, audit-row append, worker smoke) MUST go through `bash scripts/setup-heima.sh` — it's idempotent and orchestrates the existing per-action `heima-*.sh` helpers in order. Same posture as `setup-broker-host.sh`: one command, every step pre-checks state + short-circuits when already done. The per-action helpers stay callable directly for surgical re-runs (`bash scripts/heima-scope-set.sh ...`); `setup-heima.sh` is the end-to-end orchestrator.
 
+**Harness / demo testing runs on Heima mainnet (`AGENTKEYS_CHAIN=heima`), not a testnet** — the operator deploy wallet has enough HEI to fund test agents, so use real mainnet (no gas-free shortcuts); the per-actor binding txs are funded from the deploy wallet automatically.
+
 ## Idempotent remote-setup rule (CLOUD / BLOCKCHAIN / CI / VM)
 **Every script that mutates remote state — AWS / Heima / CI runners / EC2 VMs / Cloudflare / Tencent / IAM / DNS — MUST be idempotent.** A second run with the same inputs MUST exit 0 without re-applying the mutation. This is non-negotiable because:
 

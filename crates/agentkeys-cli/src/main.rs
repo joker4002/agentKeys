@@ -342,6 +342,12 @@ enum Commands {
             default_value = "demo-tok"
         )]
         vendor_token: String,
+
+        /// Operator/agent session JWT baked into the hook scripts (forwarded
+        /// to the broker cap-mint via the MCP server, arch.md §22b.4). Leave
+        /// empty for the in-memory backend. JWTs expire — re-run wire to refresh.
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER", default_value = "")]
+        session_bearer: String,
     },
 
     #[command(
@@ -954,6 +960,7 @@ async fn main() {
             payment_scope,
             mcp_url,
             vendor_token,
+            session_bearer,
         } => agentkeys_cli::wire::cmd_wire(
             runtime,
             agentkeys_cli::wire::WireRequest {
@@ -963,6 +970,7 @@ async fn main() {
                 payment_scope: payment_scope.clone(),
                 mcp_url: mcp_url.clone(),
                 vendor_token: vendor_token.clone(),
+                session_bearer: session_bearer.clone(),
                 check_only: *check_only,
             },
         ),

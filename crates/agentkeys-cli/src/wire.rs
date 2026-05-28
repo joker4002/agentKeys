@@ -32,6 +32,12 @@ pub struct WireRequest {
     pub payment_scope: String,
     pub mcp_url: String,
     pub vendor_token: String,
+    /// Operator/agent session JWT baked into the hook scripts as
+    /// `AGENTKEYS_SESSION_BEARER` (the hook forwards it to the MCP server →
+    /// broker cap-mint). Empty for the in-memory backend. Note: JWTs expire
+    /// (TTL ≤ 5h) — re-run `agentkeys wire` to refresh, or point the demo at
+    /// a fresh session.
+    pub session_bearer: String,
     /// When true, report drift without writing (drift-check / dry-run).
     pub check_only: bool,
 }
@@ -108,11 +114,13 @@ impl HermesAdapter {
                  export AGENTKEYS_OPERATOR_OMNI={operator}\n\
                  export AGENTKEYS_MCP_URL={mcp_url}\n\
                  export AGENTKEYS_MCP_VENDOR_TOKEN={vendor_token}\n\
+                 export AGENTKEYS_SESSION_BEARER={session_bearer}\n\
                  {body}\n",
                 actor = shell_quote(&req.actor),
                 operator = shell_quote(&req.operator),
                 mcp_url = shell_quote(&req.mcp_url),
                 vendor_token = shell_quote(&req.vendor_token),
+                session_bearer = shell_quote(&req.session_bearer),
                 body = body,
             )
         };
@@ -425,6 +433,7 @@ mod tests {
             payment_scope: "payment.spend".into(),
             mcp_url: "http://localhost:8088/mcp".into(),
             vendor_token: "demo-tok".into(),
+            session_bearer: String::new(),
             check_only: false,
         }
     }

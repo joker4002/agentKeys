@@ -39,6 +39,13 @@ pub struct HookClient {
     vendor_token: String,
     actor: String,
     operator: String,
+    /// Operator/agent session JWT forwarded to the MCP server as
+    /// `X-AgentKeys-Session-Bearer`, which the http backend relays to the
+    /// broker's cap-mint as `Authorization: Bearer` (arch.md §22b.4 —
+    /// "cap-mint daemon→broker auth: session JWT only"). Empty in the
+    /// in-memory backend (ignored there). Env-only (`AGENTKEYS_SESSION_BEARER`)
+    /// — `agentkeys wire` bakes it into the generated hook scripts.
+    session_bearer: String,
     http: reqwest::Client,
 }
 
@@ -61,11 +68,13 @@ impl HookClient {
         let operator = operator
             .or_else(|| std::env::var("AGENTKEYS_OPERATOR_OMNI").ok())
             .unwrap_or_default();
+        let session_bearer = std::env::var("AGENTKEYS_SESSION_BEARER").unwrap_or_default();
         Self {
             mcp_url,
             vendor_token,
             actor,
             operator,
+            session_bearer,
             http: reqwest::Client::new(),
         }
     }
@@ -85,6 +94,9 @@ impl HookClient {
             .json(&body);
         if !self.actor.is_empty() {
             req = req.header("x-agentkeys-actor", &self.actor);
+        }
+        if !self.session_bearer.is_empty() {
+            req = req.header("x-agentkeys-session-bearer", &self.session_bearer);
         }
         let resp = req.send().await.context("POST /mcp")?;
         let status = resp.status();
