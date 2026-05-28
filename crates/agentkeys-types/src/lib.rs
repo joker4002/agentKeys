@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub mod provision;
 
@@ -18,13 +19,31 @@ impl fmt::Display for InboxAddress {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub type SecretBytes = Zeroizing<Vec<u8>>;
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct Session {
     pub token: String,
+    #[zeroize(skip)]
     pub wallet: WalletAddress,
+    #[zeroize(skip)]
     pub scope: Option<Scope>,
+    #[zeroize(skip)]
     pub created_at: u64,
+    #[zeroize(skip)]
     pub ttl_seconds: u64,
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("token", &"<redacted>")
+            .field("wallet", &self.wallet)
+            .field("scope", &self.scope)
+            .field("created_at", &self.created_at)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -210,6 +229,20 @@ mod tests {
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(session, back);
+    }
+
+    #[test]
+    fn session_debug_redacts_token() {
+        let session = Session {
+            token: "test-token".into(),
+            wallet: WalletAddress("0x1234".into()),
+            scope: None,
+            created_at: 1000,
+            ttl_seconds: 3600,
+        };
+        let debug = format!("{session:?}");
+        assert!(!debug.contains("test-token"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]

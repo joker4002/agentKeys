@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agentkeys_cli::{
-    cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_provision, cmd_read, cmd_revoke, cmd_run,
-    cmd_scope, cmd_store, cmd_teardown, CommandContext, InitMode,
+    cmd_inbox_list, cmd_inbox_provision, cmd_init, cmd_init_with_force, cmd_provision, cmd_read,
+    cmd_revoke, cmd_run, cmd_scope, cmd_store, cmd_teardown, CommandContext, InitMode,
 };
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::session_store::SessionStore;
@@ -91,6 +91,56 @@ async fn cli_init_creates_session() {
         wallet.starts_with("0x") || !wallet.is_empty(),
         "wallet: {wallet}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_init_is_idempotent_when_session_exists() {
+    let (store, _tmp) = test_store();
+    let backend = create_test_backend();
+    let ctx = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session_store(store);
+
+    let (_first_output, first_session) =
+        cmd_init(&ctx, InitMode::ImportLegacyMock("first-token".to_string()))
+            .await
+            .unwrap();
+
+    let (second_output, second_session) =
+        cmd_init(&ctx, InitMode::ImportLegacyMock("second-token".to_string()))
+            .await
+            .unwrap();
+
+    assert_eq!(second_session, first_session);
+    assert_eq!(
+        second_output,
+        format!("Already initialized as {}", first_session.wallet.0)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_init_force_reinitializes_existing_session() {
+    let (store, _tmp) = test_store();
+    let backend = create_test_backend();
+    let ctx = CommandContext::new("unused", false, false)
+        .with_backend(backend as Arc<dyn CredentialBackend>)
+        .with_session_store(store);
+
+    let (_first_output, first_session) =
+        cmd_init(&ctx, InitMode::ImportLegacyMock("first-token".to_string()))
+            .await
+            .unwrap();
+
+    let (_second_output, second_session) = cmd_init_with_force(
+        &ctx,
+        InitMode::ImportLegacyMock("second-token".to_string()),
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert_ne!(second_session.token, first_session.token);
+    assert_eq!(ctx.load_session().unwrap(), second_session);
 }
 
 // Test 2: store then read returns the same key
@@ -837,7 +887,7 @@ async fn start_scope_test_server() -> (String, String, String, SessionStore, tem
         .unwrap();
     let child_wallet = child_resp["wallet"].as_str().unwrap().to_string();
 
-    (base_url, _session.token, child_wallet, store, tmp)
+    (base_url, _session.token.clone(), child_wallet, store, tmp)
 }
 
 // Test 15: --add appends a service
@@ -1149,9 +1199,9 @@ impl CredentialBackend for ProvisionTestBackend {
         _: &Session,
         _: &agentkeys_types::WalletAddress,
         _: &agentkeys_types::ServiceName,
-    ) -> Result<Vec<u8>, agentkeys_core::backend::BackendError> {
+    ) -> Result<agentkeys_types::SecretBytes, agentkeys_core::backend::BackendError> {
         match &self.existing_credential {
-            Some(b) => Ok(b.clone()),
+            Some(b) => Ok(agentkeys_types::SecretBytes::new(b.clone())),
             None => Err(agentkeys_core::backend::BackendError::NotFound(
                 "none".into(),
             )),
