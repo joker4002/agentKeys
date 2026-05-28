@@ -16,10 +16,8 @@ reads only its permitted memory, is deterministically denied an over-cap action
 ## TL;DR — pick a mode and run one command
 
 ```bash
-# Fastest — seconds, host-only, proves the three-act logic. START HERE.
-bash harness/phase1-wire-demo.sh --fast
-
-# Full sandbox path — real Hermes + the wire flow, in-memory backend.
+# Lighter path — real Hermes + the full wire flow in the sandbox, in-memory
+# backend. No real account/broker/chain. START HERE.
 bash harness/phase1-wire-demo.sh --light
 
 # Real — reuses your heima account (master alice + agent demo-agent),
@@ -30,19 +28,16 @@ bash harness/phase1-wire-demo.sh
 Every step prints `ok proceeding` / `skip <reason>` / `fail <reason>`. The
 harness is idempotent — re-running is safe.
 
-## The three modes
+## The two modes
 
 | Mode | What it exercises | Needs | Time | Manual gates |
 |---|---|---|---|---|
-| **`--fast`** | In-memory MCP on the Mac + the three hook acts directly (Act 1 memory, Act 2 deny/allow, audit). No sandbox, no cross-build, no hermes, no account. | Rust + `jq` | seconds | none |
-| **`--light`** | In-memory MCP **in the sandbox** + real Hermes + the full `agentkeys wire` flow. No real account/broker/chain. | + Docker, aiosandbox, a reachable rust image | minutes (first cross-build) | the Hermes surprise + confirm |
+| **`--light`** | In-memory MCP **in the sandbox** + real Hermes + the full `agentkeys wire` flow. No real account/broker/chain. | Docker, aiosandbox, a reachable rust image | minutes (first cross-build) | the Hermes surprise + confirm |
 | **(default) real** | The real broker + workers + Heima **mainnet**, reusing the `setup-heima.sh` account (master `alice`, agent `demo-agent`). | + a live broker/account + a non-expired master session | minutes | LLM key (auto if `OPENROUTER_API_KEY` set), Touch ID at scope grant (only if not already scoped), the surprise + confirm |
 
 ## Prerequisites
 
 **Always:** Rust toolchain (`rustup default stable`) + `jq` (`brew install jq`).
-
-**`--fast`:** nothing else. The harness builds the host debug binaries on first run.
 
 **`--light` / real (sandbox path):**
 - **Docker** + the sandbox running:
@@ -64,7 +59,7 @@ harness is idempotent — re-running is safe.
 - **Real Touch ID** — only at scope grant in real mode, and only if the reused account isn't already scoped (`--webauthn`).
 - **The Hermes surprise** — open Hermes in the sandbox, send "where am I going this weekend?", and judge the memory-aware reply (`[y/N]`).
 
-`--fast` has zero gates. Pass `--yes` to auto-confirm the non-secret prompts.
+Pass `--yes` to auto-confirm the non-secret prompts.
 
 ## What you'll see (the three acts)
 
@@ -79,7 +74,6 @@ harness is idempotent — re-running is safe.
 ## Useful flags
 
 ```
---fast            host-only fast path (no sandbox)
 --light           sandbox path, in-memory backend
 --webauthn        real Touch ID at scope grant (real mode)
 --unwire          remove the managed hooks block at teardown
@@ -90,7 +84,7 @@ harness is idempotent — re-running is safe.
 
 Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `AGENT_LABEL` (default `demo-agent`), `MEMORY_NS` (default `travel`),
-`OPENROUTER_API_KEY` / `LLM_API_KEY`, `RUST_BUILD_IMAGE`, `FAST_PORT`,
+`OPENROUTER_API_KEY` / `LLM_API_KEY`, `RUST_BUILD_IMAGE`,
 `AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER`.
 
 ## Drift detection
