@@ -389,9 +389,19 @@ jobs:
           echo "tree is owned by \$REPO_OWNER"
           cd "\$REPO_DIR"
           sudo -u "\$REPO_OWNER" git fetch --prune origin
-          sudo -u "\$REPO_OWNER" git checkout "$DEPLOY_REF" || sudo -u "\$REPO_OWNER" git checkout "origin/$DEPLOY_REF"
-          sudo -u "\$REPO_OWNER" git pull --ff-only origin "$DEPLOY_REF" 2>/dev/null || true
+          # Idempotent checkout: force-discard any working-tree drift (e.g. a
+          # prior deploy's cargo-regenerated Cargo.lock) and mirror the remote
+          # ref EXACTLY. Without -f, a dirty tracked file aborts the switch with
+          # "local changes would be overwritten by checkout" -- the recurring
+          # failure when many PR branches deploy to one shared host. target/ is
+          # gitignored, so the compile cache survives the reset.
+          sudo -u "\$REPO_OWNER" git checkout -f -B "$DEPLOY_REF" "origin/$DEPLOY_REF" || sudo -u "\$REPO_OWNER" git checkout -f "$DEPLOY_REF"
+          # Route the build through sccache (content-addressed, shared across ALL
+          # PR branches) to kill cross-branch target/ churn. Sourced so its
+          # exports reach setup-broker-host.sh's cargo; best-effort inside.
+          source scripts/sccache-env.sh 2>/dev/null || true
           bash scripts/setup-broker-host.sh --test --yes --non-interactive
+          command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
           EOF
 
           # jq --arg passes the multi-line script outside of shell parameter
