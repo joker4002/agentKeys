@@ -6,24 +6,28 @@
 #
 # Spec: docs/spec/plans/phase1-wire-harness-test-plan.md
 #
-# Two modes:
-#   --light   Mode L — in-memory MCP backend, demo actor. No real account /
-#             broker / chain. Fully self-contained; the fast inner loop.
+# Three modes:
+#   --fast    Host-only, seconds. In-memory MCP on the Mac + the three hook
+#             acts directly. NO sandbox, NO aarch64 cross-build, NO hermes,
+#             NO account. The inner loop — start here.
+#   --light   In-memory MCP IN THE SANDBOX + real Hermes + the wire flow.
+#             No real account / broker / chain. Tests the full sandbox path.
 #   (default) Mode R — real broker + workers + Heima mainnet, REUSING the
 #             account `setup-heima.sh` created (master `alice`, agent
 #             `demo-agent`). Live-env steps fail-loud with guidance if a
 #             prerequisite is missing.
 #
-# The agent binary must be aarch64-linux (the sandbox is aarch64 Linux); the
-# harness cross-builds it in an arm64 Linux rust container and uploads it via
-# the sandbox's own file API (no scp).
+# For the sandbox modes (--light / default), the agent binary must be
+# aarch64-linux (the sandbox is aarch64 Linux); the harness cross-builds it in
+# an arm64 Linux rust container and uploads it via the sandbox file API (no scp).
 #
-# Manual gates (the "test through" essence): LLM key paste (Mode R), real
-# Touch ID at scope grant (Mode R, if not already scoped), the Hermes
-# surprise, and its confirmation. Everything else is automated.
+# Manual gates (the "test through" essence): the LLM key (auto from
+# $OPENROUTER_API_KEY, else paste), real Touch ID at scope grant (Mode R, only
+# if not already scoped), the Hermes surprise + its confirmation. --fast has
+# zero gates. Everything else is automated.
 #
 # Usage:
-#   bash harness/phase1-wire-demo.sh [--light] [--webauthn] [--unwire]
+#   bash harness/phase1-wire-demo.sh [--fast|--light] [--webauthn] [--unwire]
 #                                    [--yes] [--skip-N ...] [--help]
 
 set -uo pipefail
@@ -68,6 +72,7 @@ SESSION_BEARER="${AGENTKEYS_SESSION_BEARER:-}"
 # ─── flags ──────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --fast)      MODE="fast"; shift ;;
     --light)     MODE="light"; shift ;;
     --webauthn)  WEBAUTHN=true; shift ;;
     --unwire)    UNWIRE=true; shift ;;
@@ -392,9 +397,67 @@ phase5_teardown() {
   ok "5.2 account" "kept (no Act 3 → nothing to restore)"
 }
 
+# ─── FAST mode — host-only, in-memory MCP, the three acts (no sandbox) ────────
+# The seconds-long inner loop: builds the host debug binaries, runs an
+# in-memory MCP on the Mac, and exercises the three hook acts directly. No
+# Docker cross-build, no sandbox, no hermes, no real account/broker/chain.
+run_fast() {
+  local mcp="$REPO_ROOT/target/debug/agentkeys-mcp-server"
+  local cli="$REPO_ROOT/target/debug/agentkeys"
+  if [[ ! -x "$mcp" || ! -x "$cli" ]]; then
+    log "  building host binaries (cargo build -p agentkeys-cli -p agentkeys-mcp-server)…"
+    ( cd "$REPO_ROOT" && cargo build -p agentkeys-cli -p agentkeys-mcp-server ) >/dev/null 2>&1 \
+      || { fail "build" "cargo build failed"; return 1; }
+  fi
+  ok "binaries" "host debug binaries ready"
+
+  local port="${FAST_PORT:-18088}"
+  "$mcp" --backend in-memory --transport http --listen "127.0.0.1:$port" >/tmp/phase1-fast-mcp.log 2>&1 &
+  local mcp_pid=$!
+  local up=""; for _ in 1 2 3 4 5; do sleep 1; curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && { up=1; break; }; done
+  if [[ -z "$up" ]]; then fail "mcp" "in-memory MCP did not start (see /tmp/phase1-fast-mcp.log)"; kill "$mcp_pid" 2>/dev/null; return 1; fi
+  ok "mcp" "in-memory MCP on 127.0.0.1:$port"
+
+  export AGENTKEYS_MCP_URL="http://127.0.0.1:$port/mcp"
+  export AGENTKEYS_MCP_VENDOR_TOKEN="demo-tok"
+  export AGENTKEYS_ACTOR_OMNI="$DEMO_ACTOR"
+  export AGENTKEYS_OPERATOR_OMNI="$DEMO_OPERATOR"
+  export AGENTKEYS_SESSION_BEARER=""   # in-memory backend ignores it
+
+  local a1; a1="$(printf '%s' '{"hook_event_name":"pre_llm_call"}' | "$cli" hook memory-inject --namespaces "$MEMORY_NS")"
+  echo "$a1" | jq -e '.context' >/dev/null 2>&1 \
+    && ok "Act1 memory" "$(echo "$a1" | jq -r '.context' | tr '\n' ' ' | cut -c1-56)…" \
+    || fail "Act1 memory" "$a1"
+  local a2; a2="$(printf '%s' '{"tool_input":{"amount_rmb":600}}' | "$cli" hook check --scope "$PAYMENT_SCOPE")"
+  [[ "$(echo "$a2" | jq -r '.decision // empty')" == "block" ]] \
+    && ok "Act2 over-cap" "$(echo "$a2" | jq -r '.reason')" || fail "Act2 over-cap" "$a2"
+  local a2b; a2b="$(printf '%s' '{"tool_input":{"amount_rmb":200}}' | "$cli" hook check --scope "$PAYMENT_SCOPE")"
+  [[ "$a2b" == "{}" ]] && ok "Act2 under-cap" "allowed ({})" || fail "Act2 under-cap" "$a2b"
+  local au; au="$(printf '%s' '{"tool_name":"order_hotpot"}' | "$cli" hook audit)"
+  [[ "$au" == "{}" ]] && ok "auto-audit" "{}" || skip "auto-audit" "$au"
+
+  kill "$mcp_pid" 2>/dev/null; wait "$mcp_pid" 2>/dev/null
+  ok "cleanup" "stopped in-memory MCP"
+}
+
 # ─── main ────────────────────────────────────────────────────────────────────
 main() {
-  for t in curl jq docker; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 2; }; done
+  command -v curl >/dev/null 2>&1 || { echo "missing tool: curl" >&2; exit 2; }
+  command -v jq   >/dev/null 2>&1 || { echo "missing tool: jq" >&2; exit 2; }
+
+  if [[ "$MODE" == "fast" ]]; then
+    log "phase1-wire harness — FAST host mode (no sandbox/cross-build/hermes)"
+    run_fast
+    log "summary"
+    if [[ "$FAILED" -eq 0 ]]; then
+      printf '  ✅ fast check passed — wire/hook three-act logic verified on the host (in-memory).\n'
+    else
+      printf '  ⚠ %d step(s) failed — see FAIL lines above.\n' "$FAILED"; exit 1
+    fi
+    return
+  fi
+
+  command -v docker >/dev/null 2>&1 || { echo "missing tool: docker (needed for sandbox modes; use --fast for the host path)" >&2; exit 2; }
   log "phase1-wire harness — mode=$MODE webauthn=$WEBAUTHN"
   phase0_prereqs
   if [[ "$FAILED" -gt 0 && "$MODE" == "real" ]]; then
