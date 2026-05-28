@@ -8,7 +8,7 @@ Mode: Startup
 
 **Working title naming note**: This doc uses "aiosandbox" as the in-session working title. There is a separate open-source `aiosandbox` npm library from Ant International — name conflict resolution is required before any public launch (see §Dependencies trademark check). Treat the title as a placeholder, not a committed brand.
 
-> **Strategic update (2026-05-24)**: this brainstorm doc captured a wedge-discovery moment. The strategic direction has since sharpened into "Agent IAM for the AI device era" — see [`docs/research/agent-iam-strategy.md`](./agent-iam-strategy.md) for the source of truth on positioning, scope, and 12-month roadmap. Headline shifts that override sections below:
+> **Strategic update (2026-05-24)**: this brainstorm doc captured a wedge-discovery moment. The strategic direction has since sharpened into "Agent IAM for the AI device era" — see [`docs/agent-iam-strategy.md`](../agent-iam-strategy.md) for the source of truth on positioning, scope, and 12-month roadmap. Headline shifts that override sections below:
 >
 > - **Positioning**: three-layer (AI Device Account / Agent IAM / Trust Substrate) told to three audiences (consumer / B2B / regulator). Don't lead with "Agent IAM" in consumer contexts; don't lead with "memory portability" anywhere — authority is the category.
 > - **Phase 1 demo**: three acts (permissioned memory + deterministic denial + online revocation), not memory-only. Parent-control web UI is a Phase 1 deliverable; without it the IAM positioning is invisible to end-users.
