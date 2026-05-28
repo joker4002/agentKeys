@@ -1476,15 +1476,21 @@ if [[ "$WITH_NGINX" == "yes" ]]; then
     write_worker_nginx_site cred   "$CRED_HOST"   9094
     write_worker_nginx_site memory "$MEMORY_HOST" 9095
   fi
-  # Single point of enabling — one ln -sf per vhost (idempotent), default
+  # Single point of enabling — replace each vhost symlink idempotently, default
   # vhost out of the way. Done here (not inside write_nginx_site) so the
   # symlinks aren't sprinkled across HTTPS / HTTP-only branches.
   if [[ -d /etc/nginx/sites-enabled ]]; then
-    sudo ln -sf /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
-    sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
+    enable_nginx_site() {
+      local source_file="$1"
+      local target_file="/etc/nginx/sites-enabled/$(basename "$source_file")"
+      sudo rm -f "$target_file"
+      sudo ln -s "$source_file" "$target_file"
+    }
+    enable_nginx_site /etc/nginx/sites-available/agentkeys-broker
+    enable_nginx_site /etc/nginx/sites-available/agentkeys-signer
     if [[ "$WITH_WORKERS" == "yes" ]]; then
       for slug in audit email cred memory; do
-        sudo ln -sf "/etc/nginx/sites-available/agentkeys-worker-$slug" /etc/nginx/sites-enabled/
+        enable_nginx_site "/etc/nginx/sites-available/agentkeys-worker-$slug"
       done
     fi
     sudo rm -f /etc/nginx/sites-enabled/default
