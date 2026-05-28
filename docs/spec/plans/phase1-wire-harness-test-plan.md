@@ -58,7 +58,7 @@ Legend — **Host**: M = MacBook (master), S = sandbox (agent), H = human. **A/M
 | 0.3 | Operator master registered + K11 enrolled (real account; email login automated) | M | AUTO | `cast call SidecarRegistry isMaster(operator_omni)` == true | registered |
 | 0.4 | Agent `demo-agent` created + funded (mainnet HEI; operator has funds) | M | AUTO | agent wallet file exists (0600) + on-chain device row present | exists |
 | 0.5 | Scope operator→actor→`memory` granted | M | AUTO if already granted; else **MANUAL (real Touch ID)** | `cast call AgentKeysScope isServiceInScope(...)` == true | granted — skips silently if the reused account already has it; otherwise `heima-scope-set.sh --webauthn` prompts a real Touch ID |
-| 0.6 | LLM API key stored as agent cred | M | **MANUAL** | `agentkeys read --agent <actor> openrouter` returns a key | stored (paste once; harness skips if already present) |
+| 0.6 | LLM API key for the Phase 4 surprise | M | **AUTO** if `OPENROUTER_API_KEY` exported (e.g. `~/.zshenv`); else MANUAL paste | env `OPENROUTER_API_KEY` / `LLM_API_KEY` set | resolved from env (no prompt); if absent, paste once or skip Phase 4 |
 | 0.7 | Agent memory seeded — `travel` from `tests/fixtures/demo-profile.md` | M | AUTO | `agentkeys ... memory get travel` returns content | seeded |
 
 ### Phase 1 — Sandbox bring-up (agent host)
@@ -111,7 +111,7 @@ Legend — **Host**: M = MacBook (master), S = sandbox (agent), H = human. **A/M
 
 | Gate | Step | Why it stays manual |
 |---|---|---|
-| LLM key paste | 0.6 | A real secret; never scripted. Pasted once, then reused (harness skips). |
+| LLM key | 0.6 | **Auto when `OPENROUTER_API_KEY` is exported** (the harness inherits it from your shell, e.g. `~/.zshenv`). Only prompts when the env var is absent — never scripted into the repo. |
 | Real Touch ID K11 | 0.5 (scope grant) — only when the reused account doesn't already have the `memory` scope | Real biometric authority ceremony (`--webauthn`, Secure Enclave). The email login that establishes the master session is automated; the K11 signature is the genuine human gate. Skipped entirely when the account is already scoped. |
 | The Hermes surprise | 4.1 | Needs a real LLM call + the whole chain live. The payoff moment. |
 | Surprise confirmation | 4.2 | Human judgment that the response is genuinely memory-aware. |

@@ -38,6 +38,12 @@ MCP_URL_IN_SANDBOX="http://localhost:${MCP_PORT}/mcp"
 SESSION_ID="${SESSION_ID:-alice}"            # master session label on the Mac
 AGENT_LABEL="${AGENT_LABEL:-demo-agent}"
 SERVICE="${SERVICE:-openrouter}"             # LLM cred service name
+# LLM key for the Phase 4 Hermes "surprise". Falls back to OPENROUTER_API_KEY
+# (export it in ~/.zshenv) so 0.6 needs no manual paste. Used to configure the
+# sandbox Hermes model before the surprise chat.
+LLM_API_KEY="${LLM_API_KEY:-${OPENROUTER_API_KEY:-}}"
+LLM_BASE_URL="${LLM_BASE_URL:-https://openrouter.ai/api/v1}"
+LLM_MODEL="${LLM_MODEL:-openrouter/auto}"
 MEMORY_NS="${MEMORY_NS:-travel}"
 PAYMENT_SCOPE="${PAYMENT_SCOPE:-payment.spend}"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
@@ -161,10 +167,15 @@ phase0_prereqs() {
     ok "0.5 scope" "verify via heima-scope-set.sh; grant needs real Touch ID if absent"
   fi
 
-  # 0.6 LLM key (manual secret, once).
-  if sbx_exec "true" >/dev/null 2>&1; then :; fi
-  gate "0.6 LLM key" "store an LLM API key for the agent on the master (agentkeys store $SERVICE sk-...) if not already; press enter when done" secret || true
-  ok "0.6 LLM key" "operator-provided (or already stored)"
+  # 0.6 LLM key — env fallback (OPENROUTER_API_KEY / LLM_API_KEY) → manual paste.
+  if [[ -n "$LLM_API_KEY" ]]; then
+    ok "0.6 LLM key" "from OPENROUTER_API_KEY/LLM_API_KEY env (${#LLM_API_KEY} chars)"
+  else
+    gate "0.6 LLM key" "no OPENROUTER_API_KEY in env (export it in ~/.zshenv) — paste an LLM key now, or just press enter to skip the Phase 4 surprise" secret || true
+    [[ -n "${REPLY:-}" ]] && LLM_API_KEY="$REPLY"
+    if [[ -n "$LLM_API_KEY" ]]; then ok "0.6 LLM key" "operator-provided (${#LLM_API_KEY} chars)"
+    else skip "0.6 LLM key" "none provided — Phase 4 surprise will be skipped"; fi
+  fi
 
   # 0.7 session bearer — flag/env → master session file (.token) → guidance.
   # arch.md §22b.4: cap-mint to the broker authenticates with the session JWT.
@@ -342,9 +353,25 @@ phase3_acts() {
 phase4_surprise() {
   skip_phase 4 && { log "Phase 4 — surprise: skip (--skip-4)"; return; }
   log "Phase 4 — the surprise (real Hermes session in the sandbox)"
+
+  if [[ -z "$LLM_API_KEY" ]]; then
+    skip "4.0 hermes llm" "no LLM key (export OPENROUTER_API_KEY) — skipping the surprise"
+    return
+  fi
+  # 4.0 — point the sandbox Hermes at the LLM (idempotent; persisted to
+  # ~/.hermes/config.yaml so the operator's interactive session inherits it).
+  # Config keys may need per-version tuning; best-effort, non-fatal.
+  sbx_exec "export PATH=\$HOME/.local/bin:\$PATH
+    hermes config set model.provider custom >/dev/null 2>&1 || true
+    hermes config set model.base_url $(printf '%q' "$LLM_BASE_URL") >/dev/null 2>&1 || true
+    hermes config set model.default  $(printf '%q' "$LLM_MODEL")    >/dev/null 2>&1 || true
+    hermes config set model.api_key  $(printf '%q' "$LLM_API_KEY")  >/dev/null 2>&1 || true
+    echo done" >/dev/null
+  ok "4.0 hermes llm" "configured ($LLM_MODEL via $LLM_BASE_URL)"
+
   printf '    Open a Hermes session in the sandbox (v0.14.0, hooks active) and send:\n'
   printf '      "where am I going this weekend?"\n'
-  printf '    Terminal URL: %s/code-server/   (or: docker exec -it <sandbox> hermes chat)\n' "$SANDBOX_URL"
+  printf '    Terminal: %s/code-server/  (or: docker exec -it <sandbox> bash -lc "hermes chat")\n' "$SANDBOX_URL"
   if gate "4.2 confirm surprise" "did the reply reference the memory (Chengdu / travel)?" confirm; then
     ok "4.2 confirm surprise" "operator confirmed memory-aware response"
   else
