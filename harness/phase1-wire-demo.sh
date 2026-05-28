@@ -140,14 +140,18 @@ phase0_prereqs() {
     fail "0.2 broker healthz" "broker not reachable (BACKEND_URL=$broker) — run scripts/setup-broker-host.sh"
   fi
 
-  # Resolve the agent actor_omni (flag/env → agent file → guidance).
+  # Resolve actor_omni + operator_omni (flag/env → agent file → guidance).
+  # heima-agent-create.sh writes BOTH into the agent file.
   if [[ -z "$ACTOR_OMNI" && -f "$AGENT_FILE" ]]; then
     ACTOR_OMNI="$(jq -r '.actor_omni // empty' "$AGENT_FILE" 2>/dev/null)"
   fi
+  if [[ -z "$OPERATOR_OMNI" && -f "$AGENT_FILE" ]]; then
+    OPERATOR_OMNI="$(jq -r '.operator_omni // empty' "$AGENT_FILE" 2>/dev/null)"
+  fi
   if [[ -n "$ACTOR_OMNI" ]]; then ok "0.4 agent actor_omni" "${ACTOR_OMNI:0:14}…"
   else fail "0.4 agent actor_omni" "unknown — pass --actor-omni / AGENTKEYS_ACTOR_OMNI, or run heima-agent-create.sh (--agent-file $AGENT_FILE)"; fi
-  [[ -n "$OPERATOR_OMNI" ]] && ok "0.3 operator_omni" "${OPERATOR_OMNI:0:14}…" \
-    || fail "0.3 operator_omni" "unknown — pass --operator-omni / AGENTKEYS_OPERATOR_OMNI (agentkeys whoami)"
+  if [[ -n "$OPERATOR_OMNI" ]]; then ok "0.3 operator_omni" "${OPERATOR_OMNI:0:14}… (from agent file)"
+  else fail "0.3 operator_omni" "unknown — set .operator_omni in $AGENT_FILE, or pass --operator-omni / AGENTKEYS_OPERATOR_OMNI"; fi
 
   # 0.5 scope (verify; grant via real Touch ID only if missing).
   if [[ -n "${SCOPE_CONTRACT_ADDRESS_HEIMA:-}" && -n "$ACTOR_OMNI" ]]; then
@@ -162,11 +166,23 @@ phase0_prereqs() {
   gate "0.6 LLM key" "store an LLM API key for the agent on the master (agentkeys store $SERVICE sk-...) if not already; press enter when done" secret || true
   ok "0.6 LLM key" "operator-provided (or already stored)"
 
-  # 0.7 session bearer (the agent's JWT — required for real cap-mint).
-  if [[ -z "$SESSION_BEARER" ]]; then
-    fail "0.7 session bearer" "agent session JWT unknown — pass AGENTKEYS_SESSION_BEARER (the agent's session in the sandbox). Required for real-broker cap-mint."
+  # 0.7 session bearer — flag/env → master session file (.token) → guidance.
+  # arch.md §22b.4: cap-mint to the broker authenticates with the session JWT.
+  local sess_file="${MASTER_SESSION_FILE:-$HOME/.agentkeys/$SESSION_ID/session.json}"
+  if [[ -z "$SESSION_BEARER" && -f "$sess_file" ]]; then
+    SESSION_BEARER="$(jq -r '.token // empty' "$sess_file" 2>/dev/null)"
+    local ca tl now
+    ca="$(jq -r '.created_at // 0' "$sess_file" 2>/dev/null)"
+    tl="$(jq -r '.ttl_seconds // 0' "$sess_file" 2>/dev/null)"
+    now="$(date +%s)"
+    if [[ "$ca" =~ ^[0-9]+$ && "$tl" =~ ^[0-9]+$ && "$tl" -gt 0 && $((ca + tl)) -lt "$now" ]]; then
+      log "  0.7 session bearer: WARNING — the '$SESSION_ID' session looks expired (created+ttl < now). If cap-mint 401s, refresh with 'agentkeys init --session-id $SESSION_ID …'."
+    fi
+  fi
+  if [[ -n "$SESSION_BEARER" ]]; then
+    ok "0.7 session bearer" "from '$SESSION_ID' session (${#SESSION_BEARER} chars)"
   else
-    ok "0.7 session bearer" "provided (${#SESSION_BEARER} chars)"
+    fail "0.7 session bearer" "no session JWT — run 'agentkeys init --session-id $SESSION_ID …' (master), or pass AGENTKEYS_SESSION_BEARER. Required for real-broker cap-mint."
   fi
 }
 
