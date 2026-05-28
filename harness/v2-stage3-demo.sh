@@ -516,6 +516,10 @@ fi
 # never landed stage-1 step 13's setScopeWithWebauthn).
 SMOKE_SERVICE="${SMOKE_TEST_SERVICE:-openrouter}"
 SMOKE_PLAINTEXT="${SMOKE_TEST_SECRET:-stage3-roundtrip-secret-$(date +%s)}"
+# Memory worker requires a namespace (issue #108). Caps are minted granting
+# this namespace; the put/get bodies carry it. Cred caps ignore it (the
+# broker forces an empty list for data_class=Credentials).
+SMOKE_NAMESPACE="${SMOKE_TEST_NAMESPACE:-personal}"
 
 # Resolve the demo agent's actor_omni + device_key_hash. Prefer the
 # agent file (created by stage-1 step 12) so the cap binds to a real
@@ -629,16 +633,20 @@ cred_memory_roundtrip() {
     agent_dkh=$(cast keccak "$(printf '%s' "$agent_addr" | tr '[:upper:]' '[:lower:]')")
   fi
 
+  # namespaces_allowed grants the smoke namespace (issue #108). The broker
+  # signs it into memory caps and ignores it for cred caps (forces []).
   local cap_body
   cap_body=$(jq -n \
     --arg op "0x$OWN_ACTOR_OMNI" \
     --arg actor "$agent_actor" \
     --arg svc "$SMOKE_SERVICE" \
-    --arg dkh "$agent_dkh" '{
+    --arg dkh "$agent_dkh" \
+    --arg ns "$SMOKE_NAMESPACE" '{
       operator_omni: $op,
       actor_omni: $actor,
       service: $svc,
-      device_key_hash: $dkh
+      device_key_hash: $dkh,
+      namespaces_allowed: [$ns]
     }')
 
   # Mint Store cap
@@ -677,7 +685,8 @@ EOF
   plaintext_b64=$(printf '%s' "$SMOKE_PLAINTEXT" | base64 | tr -d '\n')
   local store_body
   store_body=$(jq -n --argjson cap "$store_cap" --arg pt "$plaintext_b64" \
-                 '{cap: $cap, plaintext_b64: $pt}')
+                 --arg ns "$SMOKE_NAMESPACE" \
+                 '{cap: $cap, plaintext_b64: $pt, namespace: $ns}')
   info "POST ${worker_url}${store_route}  (with agent-side X-Aws-* headers)"
   rc=$(curl -sS -o /tmp/store.$$.json -w '%{http_code}' \
     -X POST "${worker_url}${store_route}" \
@@ -704,7 +713,8 @@ EOF
 
   # GET plaintext back from worker (with the same agent-side STS creds)
   local fetch_body
-  fetch_body=$(jq -n --argjson cap "$fetch_cap" '{cap: $cap}')
+  fetch_body=$(jq -n --argjson cap "$fetch_cap" --arg ns "$SMOKE_NAMESPACE" \
+                 '{cap: $cap, namespace: $ns}')
   info "POST ${worker_url}${fetch_route}  (with agent-side X-Aws-* headers)"
   rc=$(curl -sS -o /tmp/fetch.$$.json -w '%{http_code}' \
     -X POST "${worker_url}${fetch_route}" \
@@ -725,6 +735,37 @@ EOF
     record_ok "$kind worker encrypt/decrypt byte-for-byte roundtrip"
   else
     die "$kind roundtrip FAILED: expected '$SMOKE_PLAINTEXT', got '$fetched'"
+  fi
+
+  # NEGATIVE (issue #108): the fetch cap grants only $SMOKE_NAMESPACE. A GET
+  # for a DIFFERENT namespace MUST return an empty result + namespace_violation
+  # (the worker filters by the cap's signed namespaces_allowed). Memory only —
+  # cred caps carry no namespaces.
+  if [ "$kind" = "memory" ]; then
+    local violation_ns="travel"
+    [ "$SMOKE_NAMESPACE" = "travel" ] && violation_ns="personal"
+    local neg_body neg_rc neg_resp
+    neg_body=$(jq -n --argjson cap "$fetch_cap" --arg ns "$violation_ns" \
+                 '{cap: $cap, namespace: $ns}')
+    info "POST ${worker_url}${fetch_route}  (cross-namespace probe: cap grants '$SMOKE_NAMESPACE', requesting '$violation_ns')"
+    neg_rc=$(curl -sS -o /tmp/negns.$$.json -w '%{http_code}' \
+      -X POST "${worker_url}${fetch_route}" \
+      -H 'content-type: application/json' \
+      -H "x-aws-access-key-id: $aki" \
+      -H "x-aws-secret-access-key: $sak" \
+      -H "x-aws-session-token: $sst" \
+      -d "$neg_body" 2>&1 || echo "000")
+    neg_resp=$(cat /tmp/negns.$$.json 2>/dev/null || true); rm -f /tmp/negns.$$.json
+    if [ "$neg_rc" != "200" ]; then
+      die "cross-namespace GET returned HTTP $neg_rc (expected 200 empty-violation) — body: $neg_resp"
+    fi
+    if [ "$(echo "$neg_resp" | jq -r '.namespace_violation // false')" = "true" ] \
+       && [ -z "$(echo "$neg_resp" | jq -r '.plaintext_b64 // empty')" ]; then
+      ok "namespace gate: '$violation_ns' read with a '$SMOKE_NAMESPACE'-only cap → empty + namespace_violation ✓"
+      record_ok "memory worker namespace gate denies cross-namespace read (issue #108)"
+    else
+      die "namespace gate FAILED: cross-namespace GET should be empty + namespace_violation, got: $neg_resp"
+    fi
   fi
 }
 
@@ -825,9 +866,12 @@ post_cross_class() {
   local aki="$4" sak="$5" sst="$6"
   local plaintext_b64
   plaintext_b64=$(printf 'cross-class probe' | base64 | tr -d '\n')
+  # Include a valid namespace so the memory worker reaches the data_class
+  # guard (issue #108: missing namespace would 400 at deserialization,
+  # before verify_cap fires). Harmless for the cred worker (ignored).
   local body
   body=$(jq -n --argjson cap "$cap_blob" --arg pt "$plaintext_b64" \
-            '{cap: $cap, plaintext_b64: $pt}')
+            '{cap: $cap, plaintext_b64: $pt, namespace: "personal"}')
   rc=$(curl -sS -o "$out_file" -w '%{http_code}' \
     -X POST "$worker_route" \
     -H 'content-type: application/json' \

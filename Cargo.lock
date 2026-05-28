@@ -358,6 +358,7 @@ dependencies = [
 name = "agentkeys-worker-memory"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-types",
  "agentkeys-worker-creds",
  "anyhow",
  "aws-config",

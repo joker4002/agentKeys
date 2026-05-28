@@ -7,7 +7,7 @@
 //! Byte ranges with reserved slots:
 //!
 //! - 0-9   creds family (CredStore=0, CredFetch=1, CredTeardown=2; 3-9 reserved)
-//! - 10-19 memory family (MemoryPut=10, MemoryGet=11, MemoryTeardown=12; 13-19 reserved)
+//! - 10-19 memory family (MemoryPut=10, MemoryGet=11, MemoryTeardown=12, MemoryNamespaceViolation=13; 14-19 reserved)
 //! - 20-29 signs family (SignEip191=20, SignEip712=21; 22-29 reserved)
 //! - 30-39 payments family (PaymentEscrowRedeem=30, PaymentDirect=31; 32-39 reserved)
 //! - 40-49 scope family (ScopeGrant=40, ScopeRevoke=41; 42-49 reserved)
@@ -31,6 +31,11 @@ pub enum AuditOpKind {
     MemoryPut = 10,
     MemoryGet = 11,
     MemoryTeardown = 12,
+    /// A cap-token tried to read/write a memory namespace not in its
+    /// `namespaces_allowed` claim (issue #108). The worker denies and the
+    /// MCP server records this audit row so a parent/operator can see the
+    /// over-reach attempt.
+    MemoryNamespaceViolation = 13,
     SignEip191 = 20,
     SignEip712 = 21,
     PaymentEscrowRedeem = 30,
@@ -56,6 +61,7 @@ impl AuditOpKind {
             10 => Self::MemoryPut,
             11 => Self::MemoryGet,
             12 => Self::MemoryTeardown,
+            13 => Self::MemoryNamespaceViolation,
             20 => Self::SignEip191,
             21 => Self::SignEip712,
             30 => Self::PaymentEscrowRedeem,
@@ -83,6 +89,7 @@ impl AuditOpKind {
             Self::MemoryPut => "memory.put",
             Self::MemoryGet => "memory.get",
             Self::MemoryTeardown => "memory.teardown",
+            Self::MemoryNamespaceViolation => "memory.namespace_violation",
             Self::SignEip191 => "sign.eip191",
             Self::SignEip712 => "sign.eip712",
             Self::PaymentEscrowRedeem => "payment.escrow_redeem",
@@ -115,6 +122,7 @@ mod tests {
             AuditOpKind::MemoryPut,
             AuditOpKind::MemoryGet,
             AuditOpKind::MemoryTeardown,
+            AuditOpKind::MemoryNamespaceViolation,
             AuditOpKind::SignEip191,
             AuditOpKind::SignEip712,
             AuditOpKind::PaymentEscrowRedeem,
@@ -142,7 +150,7 @@ mod tests {
     /// invariant #1 (open enum). 250 is the reserved-future canary.
     #[test]
     fn unknown_bytes_return_none() {
-        for byte in [3u8, 9, 13, 19, 22, 32, 42, 53, 62, 71, 80, 200, 250, 255] {
+        for byte in [3u8, 9, 14, 19, 22, 32, 42, 53, 62, 71, 80, 200, 250, 255] {
             assert_eq!(
                 AuditOpKind::from_u8(byte),
                 None,
@@ -163,6 +171,7 @@ mod tests {
             AuditOpKind::MemoryPut as u8,
             AuditOpKind::MemoryGet as u8,
             AuditOpKind::MemoryTeardown as u8,
+            AuditOpKind::MemoryNamespaceViolation as u8,
             AuditOpKind::SignEip191 as u8,
             AuditOpKind::SignEip712 as u8,
             AuditOpKind::PaymentEscrowRedeem as u8,

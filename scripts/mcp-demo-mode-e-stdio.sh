@@ -110,10 +110,12 @@ async def main():
 
             # — Memory round-trip with unicode (regression test for the
             #   '有痛风' test the user ran live during issue #107) —
+            #   Uses the `personal` namespace (a v0 namespace per issue
+            #   #108; `profile` is a memory TYPE, not a namespace).
             await session.call_tool("agentkeys.memory.put", {
-                "namespace": "profile", "content": "有痛风 — gout, no shellfish"
+                "namespace": "personal", "content": "有痛风 — gout, no shellfish"
             })
-            res = await session.call_tool("agentkeys.memory.get", {"namespace": "profile"})
+            res = await session.call_tool("agentkeys.memory.get", {"namespace": "personal"})
             assert "有痛风" in res.content[0].text, res.content[0].text
             assert "gout" in res.content[0].text
             print("  ✓ Memory round-trip — Chinese + English unicode preserved through put→get")

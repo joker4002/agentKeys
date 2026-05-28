@@ -979,6 +979,7 @@ and never reordered**. Grouped by 10s leaves room for related ops.
 | `MemoryPut` | 10 | `{key: string, payload_hash: [u8;32]}` | memory-service |
 | `MemoryGet` | 11 | `{key: string, cap_hash: [u8;32]}` | memory-service |
 | `MemoryTeardown` | 12 | `{actor_target: [u8;32]}` | memory-service |
+| `MemoryNamespaceViolation` | 13 | `{namespace: string, op: string}` | MCP server (off the worker's `namespace_violation` flag, issue #108) |
 | `SignEip191` | 20 | `{message_digest: [u8;32], wallet: [u8;20]}` | signer (via daemon callback) |
 | `SignEip712` | 21 | `{chain_id: u64, verifying_contract: [u8;20], primary_type: string, type_hash: [u8;32], domain_separator: [u8;32], digest: [u8;32]}` | signer (via daemon callback) |
 | `PaymentEscrowRedeem` | 30 | `{escrow_addr: [u8;20], amount: U256, recipient: [u8;20], chain_id: u64}` | payment-service (P-2 mode) |
@@ -992,7 +993,7 @@ and never reordered**. Grouped by 10s leaves room for related ops.
 | `EmailReceive` | 61 | `{from_hash: [u8;32], message_id: string, payload_hash: [u8;32]}` | email-service |
 | `K3EpochAdvance` | 70 | `{old_epoch: u64, new_epoch: u64, gov_tx: [u8;32]}` | K3EpochCounter hook |
 
-Byte ranges `8-9`, `13-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `80-255` are reserved for future extensions in the same family.
+Byte ranges `8-9`, `14-19`, `22-29`, `32-39`, `42-49`, `53-59`, `62-69`, `71-79`, `80-255` are reserved for future extensions in the same family.
 
 #### Forward-compat / non-break design
 
@@ -1383,7 +1384,7 @@ Separate buckets → separate roles → independent policy surfaces. `agentkeys-
 
 ```
 $VAULT_BUCKET           bots/<actor_omni_hex>/credentials/<service>.enc
-$MEMORY_BUCKET          bots/<actor_omni_hex>/memory/<key>
+$MEMORY_BUCKET          bots/<actor_omni_hex>/memory/<namespace>/<service>.enc   (legacy blob primitive, §17.6)
 $AUDIT_BUCKET           bots/<actor_omni_hex>/audit/<batch>
 $EMAIL_BUCKET           bots/<actor_omni_hex>/inbound/<msg_id>
                         bots/<actor_omni_hex>/sent/<yyyymm>/<msg_id>
@@ -1408,6 +1409,22 @@ The cap-token carries a signed `data_class: Credentials | Memory` field. The bro
 | `POST /v1/cap/memory-get` | `op: Fetch, data_class: Memory` |
 
 Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 403 `cap_data_class_mismatch`. This is the cap-layer isolation gate — symmetric with the AWS IAM cross-bucket gate (§17.2) but enforced at the broker-signed capability layer, **before** the worker touches AWS at all.
+
+### 17.6 Memory namespaces (issue #108)
+
+Inside the `memory` data class, the cap-token carries a second signed claim — `namespaces_allowed: ["travel", ...]` — orthogonal to `data_class`. Namespaces are the semantic dimension that makes scoped memory legible: a device's cap can read/write the `travel` namespace but see *nothing* in `personal`, `family`, or `work` for the same actor. The v0 set is fixed at four (`personal`, `family`, `work`, `travel`); the enum lives in [`agentkeys-types`](../crates/agentkeys-types/src/lib.rs) (`Namespace`). Strategic rationale: [`agent-iam-strategy.md` §3.5](agent-iam-strategy.md).
+
+Enforcement is a chain of three gates, all on the deterministic membership test `requested_namespace ∈ cap.namespaces_allowed` (no LLM, no fuzzy match):
+
+| Where | What |
+|---|---|
+| **Broker mint** | The memory cap-mint endpoints (`/v1/cap/memory-*`) validate each requested namespace against the v0 set (unknown → 400) and **sign** `namespaces_allowed` into the payload. Credential caps always get `[]`. ([`handlers/cap.rs`](../crates/agentkeys-broker-server/src/handlers/cap.rs)) |
+| **Worker filter** | The memory worker re-verifies the broker signature, then refuses any read/write whose `namespace` is outside the claim. A refused **read returns an empty result** (never the data — the device can't even tell the memory exists); a refused **write returns `ok:false`**. Unknown namespace name → 400. ([`agentkeys-worker-memory`](../crates/agentkeys-worker-memory/src/handlers.rs) via [`verify::check_namespace_allowed`](../crates/agentkeys-worker-creds/src/verify.rs)) |
+| **Audit** | On a violation the MCP server emits a `memory.namespace_violation` audit row (op_kind 13, §15.3a) so a parent/operator sees the over-reach attempt. |
+
+**The namespace allowlist is operator-sourced, not agent-sourced.** The MCP server threads its configured `MCP_DEFAULT_NAMESPACES_ALLOWED` into every memory cap-mint — the agent cannot widen its own scope by asking. (M1 trust model: the operator configures the server correctly. On-chain per-namespace scope is a later-phase hardening so even a compromised MCP server can't exceed an on-chain grant.)
+
+**Storage layout — M1 path component, NOT metadata-only.** The legacy memory blob is keyed `bots/<actor>/memory/<namespace>/<service>.enc` (§17.3). The agent-facing `memory.get/put` tools don't expose `service` (it defaults to `memory`), so without the `<namespace>/` path component the four namespaces would collide on one S3 key. This is the `bots/<actor>/memory/<namespace>/…` migration target sketched in [`agent-iam-strategy.md` §3.5](agent-iam-strategy.md); M1 ships it now because §3.5's metadata-only filter presupposes the 4-type LIST-and-filter retrieval (`/v1/memory/append` + per-line namespace metadata), which isn't built yet. The AES-GCM AAD is unchanged (namespace is **not** part of the keying material — K3 rotation is unaffected). Per-actor PrincipalTag scoping (§17.5) and per-data-class bucket separation are unchanged: namespaces live *inside* the actor's memory prefix.
 
 **Four-layer defense in depth:**
 

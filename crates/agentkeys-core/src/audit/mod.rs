@@ -55,8 +55,8 @@ use thiserror::Error;
 pub use bodies::{
     CredFetchBody, CredStoreBody, CredTeardownBody, DeviceAddBody, DeviceRevokeBody,
     EmailReceiveBody, EmailSendBody, K10RotateBody, K3EpochAdvanceBody, MemoryGetBody,
-    MemoryPutBody, MemoryTeardownBody, PaymentDirectBody, PaymentEscrowRedeemBody, ScopeGrantBody,
-    ScopeRevokeBody, SignEip191Body, SignEip712Body,
+    MemoryNamespaceViolationBody, MemoryPutBody, MemoryTeardownBody, PaymentDirectBody,
+    PaymentEscrowRedeemBody, ScopeGrantBody, ScopeRevokeBody, SignEip191Body, SignEip712Body,
 };
 pub use op_kind::AuditOpKind;
 
@@ -180,6 +180,7 @@ pub enum TypedAuditBody {
     MemoryPut(MemoryPutBody),
     MemoryGet(MemoryGetBody),
     MemoryTeardown(MemoryTeardownBody),
+    MemoryNamespaceViolation(MemoryNamespaceViolationBody),
     SignEip191(SignEip191Body),
     SignEip712(SignEip712Body),
     PaymentEscrowRedeem(PaymentEscrowRedeemBody),
@@ -209,6 +210,9 @@ impl TypedAuditBody {
             AuditOpKind::MemoryGet => Self::MemoryGet(serde_json::from_value(value).ok()?),
             AuditOpKind::MemoryTeardown => {
                 Self::MemoryTeardown(serde_json::from_value(value).ok()?)
+            }
+            AuditOpKind::MemoryNamespaceViolation => {
+                Self::MemoryNamespaceViolation(serde_json::from_value(value).ok()?)
             }
             AuditOpKind::SignEip191 => Self::SignEip191(serde_json::from_value(value).ok()?),
             AuditOpKind::SignEip712 => Self::SignEip712(serde_json::from_value(value).ok()?),

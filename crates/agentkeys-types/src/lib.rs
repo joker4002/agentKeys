@@ -191,6 +191,61 @@ pub struct SpendEvent {
     pub timestamp: u64,
 }
 
+/// v0 memory namespace (issue #108, `docs/agent-iam-strategy.md` §3.5).
+///
+/// Namespaces are the ORTHOGONAL semantic dimension layered over the
+/// 4 structural memory types — they scope which life-context a memory
+/// item belongs to. A cap-token carries a `namespaces_allowed` claim;
+/// the memory worker filters reads/writes by deterministic string-set
+/// membership (no LLM, no fuzzy matching). The list is intentionally
+/// small in v0 (4 fixed); user-defined namespaces land in a later phase
+/// with the delegation/ACL work.
+///
+/// The serde rename keeps the wire form a lowercase string so the cap
+/// payload's `namespaces_allowed: ["travel"]` and the put/get envelope's
+/// `namespace: "travel"` are plain strings, not tagged enums.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Namespace {
+    Personal,
+    Family,
+    Work,
+    Travel,
+}
+
+impl Namespace {
+    /// The fixed v0 set, in canonical order.
+    pub const ALL: [Namespace; 4] = [
+        Namespace::Personal,
+        Namespace::Family,
+        Namespace::Work,
+        Namespace::Travel,
+    ];
+
+    /// Lowercase wire spelling — matches the serde rename so callers can
+    /// build the cap claim / envelope field without serializing.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Namespace::Personal => "personal",
+            Namespace::Family => "family",
+            Namespace::Work => "work",
+            Namespace::Travel => "travel",
+        }
+    }
+
+    /// Parse a wire string into a known namespace. Returns `None` for any
+    /// name outside the v0 set so callers can reject typos with a 400
+    /// (a typo'd namespace must NOT silently filter everything).
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|ns| ns.as_str() == name)
+    }
+
+    /// True when `name` is one of the v0 namespaces.
+    pub fn is_valid(name: &str) -> bool {
+        Self::parse(name).is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +292,29 @@ mod tests {
             let back: AgentIdentity = serde_json::from_str(&json).unwrap();
             assert_eq!(variant, &back);
         }
+    }
+
+    #[test]
+    fn namespace_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Namespace::Personal).unwrap(),
+            "\"personal\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Namespace::Travel).unwrap(),
+            "\"travel\""
+        );
+    }
+
+    #[test]
+    fn namespace_parse_accepts_v0_set_rejects_typos() {
+        for ns in Namespace::ALL {
+            assert_eq!(Namespace::parse(ns.as_str()), Some(ns));
+            assert!(Namespace::is_valid(ns.as_str()));
+        }
+        // `profile` is a memory TYPE, not a namespace — must be rejected.
+        assert_eq!(Namespace::parse("profile"), None);
+        assert!(!Namespace::is_valid("Travel")); // case-sensitive
+        assert!(!Namespace::is_valid(""));
     }
 }

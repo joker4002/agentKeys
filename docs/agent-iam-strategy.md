@@ -211,6 +211,8 @@ A device's cap-token scopes which namespaces it can read AND write. The MagicLic
 - ✅ K3 epoch rotation ([arch.md §16](./arch.md), memory-design §8.3) unchanged — namespaces are envelope metadata, not part of the keying material
 - ✅ Architecture-as-source-of-truth (CLAUDE.md policy) — once v0 namespaces ship, arch.md §17 gets an additive paragraph + memory-design §3 adds the namespace field to the wire format. No conflicting canonical names introduced.
 
+**Implementation status (M1, issue #108): SHIPPED.** Cap-token `namespaces_allowed` is a signed claim ([`handlers/cap.rs`](../crates/agentkeys-broker-server/src/handlers/cap.rs)); the memory worker filters by string-set membership and a cross-namespace attempt emits a `memory.namespace_violation` audit row (op_kind 13). As-built details + one deliberate divergence from this section are in **[`arch.md` §17.6](./arch.md)**: M1 keys the legacy memory blob at `bots/<actor>/memory/<namespace>/<service>.enc` — a path component, NOT the metadata-only layout sketched above. Reason: the metadata-only filter presupposes the 4-type LIST-and-filter retrieval (`/v1/memory/append` + per-line namespace metadata), which isn't built yet, and the agent-facing `memory.get/put` tools don't expose `service` (so all namespaces would otherwise collide on one key). The AAD / keying material is unchanged; this is the §3.5 "Future evolution" migration target brought forward.
+
 ### 3.6 IAM tool vs IAM guarantee — and how AgentKeys delivers each
 
 Added 2026-05-28 to crystallize the distinction that drives the Phase 3 architecture choice.

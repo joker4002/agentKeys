@@ -69,6 +69,7 @@ impl Backend for HttpBackend {
             service: req.service,
             device_key_hash: req.device_key_hash,
             ttl_seconds: req.ttl_seconds,
+            namespaces_allowed: req.namespaces_allowed,
         };
 
         let resp = self
@@ -138,6 +139,7 @@ impl Backend for HttpBackend {
             s3_key: parsed.s3_key,
             envelope_size: parsed.envelope_size,
             namespace: input.namespace,
+            namespace_violation: parsed.namespace_violation,
         })
     }
 
@@ -169,6 +171,7 @@ impl Backend for HttpBackend {
             ok: parsed.ok,
             plaintext_b64: parsed.plaintext_b64,
             namespace: input.namespace,
+            namespace_violation: parsed.namespace_violation,
         })
     }
 

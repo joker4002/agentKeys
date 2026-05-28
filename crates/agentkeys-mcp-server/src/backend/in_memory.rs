@@ -80,7 +80,7 @@ impl InMemoryBackend {
         );
         backend.seed(
             DEMO_ACTOR,
-            "profile",
+            "personal",
             "Allergic to shellfish. Prefers windowed flights.",
         );
         backend
@@ -109,6 +109,22 @@ impl InMemoryBackend {
             .and_then(Value::as_str)
             .map(str::to_string)
     }
+
+    /// Extract the signed `namespaces_allowed` claim from a cap-token JSON
+    /// value (issue #108). Mirrors what the real worker reads off the
+    /// deserialized `CapPayload`.
+    fn namespaces_allowed_of(cap: &Value) -> Vec<String> {
+        cap.get("payload")
+            .and_then(|p| p.get("namespaces_allowed"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
@@ -134,6 +150,13 @@ impl Backend for InMemoryBackend {
             );
         }
 
+        // Mirror the broker: memory caps carry namespaces_allowed; cred
+        // caps get an empty list (issue #108).
+        let namespaces_allowed = match op {
+            CapMintOp::MemoryPut | CapMintOp::MemoryGet => req.namespaces_allowed.clone(),
+            CapMintOp::CredStore | CapMintOp::CredFetch => Vec::new(),
+        };
+
         Ok(json!({
             "payload": {
                 "operator_omni": req.operator_omni,
@@ -141,6 +164,7 @@ impl Backend for InMemoryBackend {
                 "service":       req.service,
                 "op":            format!("{op:?}"),
                 "data_class":    op.data_class(),
+                "namespaces_allowed": namespaces_allowed,
                 "device_key_hash": req.device_key_hash,
                 "k3_epoch":      1,
                 "issued_at":     issued_at,
@@ -197,6 +221,21 @@ impl Backend for InMemoryBackend {
             minted.actor.clone()
         };
 
+        // Namespace gate (issue #108): refuse a write outside the cap's
+        // signed namespaces_allowed claim.
+        if !Self::namespaces_allowed_of(&input.cap)
+            .iter()
+            .any(|n| n == &input.namespace)
+        {
+            return Ok(MemoryPutResult {
+                ok: false,
+                s3_key: String::new(),
+                envelope_size: 0,
+                namespace: input.namespace,
+                namespace_violation: true,
+            });
+        }
+
         let plaintext = String::from_utf8(
             base64::Engine::decode(
                 &base64::engine::general_purpose::STANDARD,
@@ -212,9 +251,10 @@ impl Backend for InMemoryBackend {
 
         Ok(MemoryPutResult {
             ok: true,
-            s3_key: format!("bots/{actor}/{}/in-memory.bin", input.namespace),
+            s3_key: format!("bots/{actor}/memory/{}/in-memory.bin", input.namespace),
             envelope_size: input.plaintext_b64.len(),
             namespace: input.namespace,
+            namespace_violation: false,
         })
     }
 
@@ -244,24 +284,40 @@ impl Backend for InMemoryBackend {
             minted.actor.clone()
         };
 
-        let g = self.inner.lock().unwrap();
-        let content = g
-            .memory
-            .get(&(actor, input.namespace.clone()))
-            .cloned()
-            .ok_or_else(|| BackendError::Http {
-                status: 404,
-                body: format!("no memory in namespace `{}`", input.namespace),
-            })?;
+        // Namespace gate (issue #108): a read outside the cap's signed
+        // namespaces_allowed returns an empty violation result, never data.
+        if !Self::namespaces_allowed_of(&input.cap)
+            .iter()
+            .any(|n| n == &input.namespace)
+        {
+            return Ok(MemoryGetResult {
+                ok: false,
+                plaintext_b64: String::new(),
+                namespace: input.namespace,
+                namespace_violation: true,
+            });
+        }
 
-        Ok(MemoryGetResult {
-            ok: true,
-            plaintext_b64: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                content.as_bytes(),
-            ),
-            namespace: input.namespace,
-        })
+        let g = self.inner.lock().unwrap();
+        match g.memory.get(&(actor, input.namespace.clone())).cloned() {
+            Some(content) => Ok(MemoryGetResult {
+                ok: true,
+                plaintext_b64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    content.as_bytes(),
+                ),
+                namespace: input.namespace,
+                namespace_violation: false,
+            }),
+            // Allowed namespace but nothing stored — a legitimate empty
+            // read, not a violation.
+            None => Ok(MemoryGetResult {
+                ok: false,
+                plaintext_b64: String::new(),
+                namespace: input.namespace,
+                namespace_violation: false,
+            }),
+        }
     }
 
     async fn audit_append(

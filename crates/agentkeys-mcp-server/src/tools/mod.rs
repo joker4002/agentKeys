@@ -63,7 +63,8 @@ Returns the saved note as a plain-text string under `content`.".into(),
                 "properties": {
                     "namespace": {
                         "type": "string",
-                        "description": "Topic of the memory. Pick: 'travel' (trips, destinations, plans / 旅行、行程、计划); 'family' (relatives, birthdays / 家人、生日); 'profile' (preferences, allergies, dietary / 偏好、过敏、饮食). Default to 'travel' when the user asks about places or trips."
+                        "enum": ["personal", "family", "work", "travel"],
+                        "description": "Topic of the memory. Pick: 'travel' (trips, destinations, plans / 旅行、行程、计划); 'family' (relatives, birthdays / 家人、生日); 'work' (projects, deadlines, work contacts / 工作、项目、截止); 'personal' (preferences, allergies, health, dietary / 偏好、过敏、健康、饮食). Default to 'travel' when the user asks about places or trips."
                     }
                 },
                 "required": ["namespace"]
@@ -81,7 +82,8 @@ Group by topic via `namespace`.".into(),
                 "properties": {
                     "namespace": {
                         "type": "string",
-                        "description": "Topic: 'travel', 'family', or 'profile'. 主题: 旅行 / 家人 / 偏好."
+                        "enum": ["personal", "family", "work", "travel"],
+                        "description": "Topic: 'travel', 'family', 'work', or 'personal'. 主题: 旅行 / 家人 / 工作 / 个人."
                     },
                     "content": {"type": "string", "description": "The note in natural language. 笔记内容。"}
                 },

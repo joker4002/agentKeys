@@ -242,8 +242,8 @@ All new endpoints under `/v1/memory/`. Cap-token gating unchanged — every endp
 | `POST /v1/memory/export` | `Fetch` | `{ cap, types?: [...], since_ts? }` | `{ ok, presigned_url, expires_at }` | enumerate keys; stream a multipart tar on the fly via presigned URL |
 | `POST /v1/memory/rebuild-index` | `Store` | `{ cap, embedding_model, vectors_b64, if_match_etag? }` where `vectors_b64` is the operator-built embedding bundle | `{ ok, manifest_etag }` or 412 | overwrite `index/*` atomically (PUT to `.tmp` keys, CopyObject to canonical); If-Match guards concurrent rebuilders |
 | `POST /v1/memory/teardown` | `Teardown` | unchanged | unchanged | unchanged |
-| `POST /v1/memory/put` | `Store` | unchanged (legacy blob KV) | unchanged | unchanged — `bots/<actor>/memory/<service>.enc`. **Rejects reserved service names per §3.1.** |
-| `POST /v1/memory/get` | `Fetch` | unchanged | unchanged | unchanged. **Rejects reserved service names per §3.1.** |
+| `POST /v1/memory/put` | `Store` | legacy blob KV + `namespace` field (issue #108) | `{ ok, s3_key, envelope_size, namespace, namespace_violation }` | `bots/<actor>/memory/<namespace>/<service>.enc` — namespace path component per [arch.md §17.6](../arch.md). Refuses a namespace outside the cap's `namespaces_allowed` (`ok:false, namespace_violation:true`). **Rejects reserved service names per §3.1.** |
+| `POST /v1/memory/get` | `Fetch` | legacy + `namespace` field (issue #108) | `{ ok, plaintext_b64, namespace, namespace_violation }` | reads `bots/<actor>/memory/<namespace>/<service>.enc`; a namespace outside the cap returns an **empty** result + `namespace_violation:true` (never the data). **Rejects reserved service names per §3.1.** |
 
 **Notes on the new shape:**
 

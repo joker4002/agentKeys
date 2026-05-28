@@ -49,10 +49,18 @@ async fn act_1_permissioned_memory_returns_travel_namespace_only() {
         "Chengdu trip — Apr 12 to 16, hotpot at Yulin.",
     );
     backend.seed_memory(ACTOR, "family", "Wife's bday Aug 3");
-    backend.seed_memory(ACTOR, "profile", "Allergic to shellfish");
+    backend.seed_memory(ACTOR, "personal", "Allergic to shellfish");
 
-    let server = server_with(backend.clone());
+    // The toy's cap is scoped to `travel` only (operator-provisioned via
+    // server config). This is the issue #108 enforcement boundary: the
+    // agent can't widen it because namespaces_allowed comes from config,
+    // not the request.
+    let config = Config::for_tests()
+        .with_vendor_token("magiclick", "demo-tok")
+        .with_namespaces_allowed(["travel"]);
+    let server = Server::new(config, backend.clone());
 
+    // travel → in the cap's namespaces_allowed → returns the Chengdu trip.
     let resp = server
         .dispatch(
             &caller(),
@@ -71,7 +79,7 @@ async fn act_1_permissioned_memory_returns_travel_namespace_only() {
 
     assert!(
         resp.error.is_none(),
-        "act 1 unexpected error: {:?}",
+        "act 1 travel read errored: {:?}",
         resp.error
     );
     let result = resp.result.expect("result");
@@ -82,7 +90,39 @@ async fn act_1_permissioned_memory_returns_travel_namespace_only() {
     assert!(!content.contains("Wife"));
     assert!(!content.contains("shellfish"));
 
-    // Try the wrong namespace — the mock returns 404 → Backend error.
+    // personal → NOT in namespaces_allowed → empty result + violation flag,
+    // and a namespace_violation audit row is recorded. The toy "sees
+    // nothing", not an error that would leak that the memory exists.
+    let resp = server
+        .dispatch(
+            &caller(),
+            "session-bearer",
+            call_tool(
+                "agentkeys.memory.get",
+                json!({
+                    "actor": ACTOR,
+                    "namespace": "personal",
+                    "operator_omni": OPERATOR,
+                    "device_key_hash": DEVICE_KEY_HASH
+                }),
+            ),
+        )
+        .await;
+    assert!(
+        resp.error.is_none(),
+        "cross-namespace read should be a clean empty result, not an error: {:?}",
+        resp.error
+    );
+    let inner = &resp.result.expect("result")["structuredContent"];
+    assert_eq!(inner["namespace_violation"], true);
+    assert_eq!(inner["content"], "");
+    assert_eq!(
+        backend.audit_count(),
+        1,
+        "cross-namespace access must emit exactly one audit row"
+    );
+
+    // family → also denied; emits a second audit row.
     let resp = server
         .dispatch(
             &caller(),
@@ -98,13 +138,9 @@ async fn act_1_permissioned_memory_returns_travel_namespace_only() {
             ),
         )
         .await;
-    // M1 namespace enforcement happens at the worker (mocked); we
-    // expect the call to succeed when the actor IS bound to family.
-    // The point of Act 1's storyboard is that the cap-scoped read
-    // returns only what the actor's cap is bound to — the MCP server
-    // forwards the namespace and the worker enforces. Confirm the
-    // forwarded namespace by inspecting the cap mints.
-    assert!(resp.error.is_none() || resp.result.is_some());
+    let inner = &resp.result.expect("result")["structuredContent"];
+    assert_eq!(inner["namespace_violation"], true);
+    assert_eq!(backend.audit_count(), 2);
 
     let mints = backend.cap_mints();
     assert!(

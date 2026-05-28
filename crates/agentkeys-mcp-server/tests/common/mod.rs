@@ -11,6 +11,22 @@ use agentkeys_mcp_server::backend::{
     CapToken, MemoryGetInput, MemoryGetResult, MemoryPutInput, MemoryPutResult, RevokeResult,
 };
 
+/// Read the signed `namespaces_allowed` claim off a cap-token JSON value
+/// (issue #108) — the mock filters reads/writes against it exactly as the
+/// real memory worker does.
+fn namespaces_allowed_of(cap: &Value) -> Vec<String> {
+    cap.get("payload")
+        .and_then(|p| p.get("namespaces_allowed"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Default)]
 pub struct MockBackend {
     inner: Mutex<MockInner>,
@@ -71,6 +87,7 @@ impl Backend for MockBackend {
                 "service": req.service,
                 "op": format!("{op:?}"),
                 "data_class": op.data_class(),
+                "namespaces_allowed": req.namespaces_allowed,
                 "device_key_hash": req.device_key_hash,
                 "k3_epoch": 1,
                 "issued_at": 0,
@@ -107,14 +124,28 @@ impl Backend for MockBackend {
         )
         .map_err(|e| BackendError::Parse(e.to_string()))?;
 
+        if !namespaces_allowed_of(&input.cap)
+            .iter()
+            .any(|n| n == &input.namespace)
+        {
+            return Ok(MemoryPutResult {
+                ok: false,
+                s3_key: String::new(),
+                envelope_size: 0,
+                namespace: input.namespace,
+                namespace_violation: true,
+            });
+        }
+
         let mut g = self.inner.lock().unwrap();
         g.memory
             .insert((actor.clone(), input.namespace.clone()), plaintext);
         Ok(MemoryPutResult {
             ok: true,
-            s3_key: format!("bots/{actor}/{}/mock.bin", input.namespace),
+            s3_key: format!("bots/{actor}/memory/{}/mock.bin", input.namespace),
             envelope_size: input.plaintext_b64.len(),
             namespace: input.namespace,
+            namespace_violation: false,
         })
     }
 
@@ -127,24 +158,38 @@ impl Backend for MockBackend {
             .unwrap_or("")
             .to_string();
 
-        let g = self.inner.lock().unwrap();
-        let content = g
-            .memory
-            .get(&(actor, input.namespace.clone()))
-            .cloned()
-            .ok_or_else(|| BackendError::Http {
-                status: 404,
-                body: format!("no memory in namespace `{}`", input.namespace),
-            })?;
+        // Namespace gate (issue #108): the worker the mock stands in for
+        // filters by the cap's signed namespaces_allowed claim.
+        if !namespaces_allowed_of(&input.cap)
+            .iter()
+            .any(|n| n == &input.namespace)
+        {
+            return Ok(MemoryGetResult {
+                ok: false,
+                plaintext_b64: String::new(),
+                namespace: input.namespace,
+                namespace_violation: true,
+            });
+        }
 
-        Ok(MemoryGetResult {
-            ok: true,
-            plaintext_b64: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                content.as_bytes(),
-            ),
-            namespace: input.namespace,
-        })
+        let g = self.inner.lock().unwrap();
+        match g.memory.get(&(actor, input.namespace.clone())).cloned() {
+            Some(content) => Ok(MemoryGetResult {
+                ok: true,
+                plaintext_b64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    content.as_bytes(),
+                ),
+                namespace: input.namespace,
+                namespace_violation: false,
+            }),
+            None => Ok(MemoryGetResult {
+                ok: false,
+                plaintext_b64: String::new(),
+                namespace: input.namespace,
+                namespace_violation: false,
+            }),
+        }
     }
 
     async fn audit_append(

@@ -13,4 +13,10 @@ pub struct BrokerCapRequest {
     pub service: String,
     pub device_key_hash: String,
     pub ttl_seconds: u64,
+    /// Memory namespaces to grant (issue #108). The broker validates each
+    /// against the v0 set and signs them into the cap; ignored for cred
+    /// caps. Skipped on the wire when empty so cred cap-mint bodies are
+    /// byte-identical to pre-#108.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces_allowed: Vec<String>,
 }

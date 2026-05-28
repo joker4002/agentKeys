@@ -57,6 +57,13 @@ pub struct CapPayload {
     /// Data class the cap is bound to. REQUIRED — workers reject caps
     /// whose data_class doesn't match the URL's bucket.
     pub data_class: DataClass,
+    /// Memory namespaces the cap may read/write (issue #108). MUST stay at
+    /// this field position — identical to the broker's
+    /// `CapPayload::namespaces_allowed` so the re-serialized struct matches
+    /// the bytes the broker signed. `#[serde(default)]` lets a credential
+    /// cap (which omits the field upstream of this rollout) still verify.
+    #[serde(default)]
+    pub namespaces_allowed: Vec<String>,
     pub device_key_hash: String,
     pub k3_epoch: u64,
     pub issued_at: u64,
@@ -92,6 +99,11 @@ pub enum VerifyError {
     OpMismatch { expected: CapOp, got: CapOp },
     #[error("cap data_class {got:?} does not match endpoint {expected:?}")]
     DataClassMismatch { expected: DataClass, got: DataClass },
+    #[error("namespace `{requested}` not in cap's namespaces_allowed {allowed:?}")]
+    NamespaceNotAllowed {
+        requested: String,
+        allowed: Vec<String>,
+    },
     #[error("chain RPC error: {0}")]
     ChainRpc(String),
     #[error("requested service not in agent's on-chain scope")]
@@ -145,6 +157,29 @@ pub fn check_data_class(token: &CapToken, expected: DataClass) -> Result<(), Ver
         });
     }
     Ok(())
+}
+
+/// Namespace membership gate (issue #108, agent-iam-strategy.md §3.5).
+/// Deterministic string-set membership — NO LLM, NO fuzzy matching. The
+/// `requested` namespace MUST already be lowercased + validated against
+/// the v0 set by the caller (the memory worker rejects unknown names with
+/// 400 before this point). Returns `NamespaceNotAllowed` when the cap's
+/// signed `namespaces_allowed` claim does not contain the request's
+/// namespace — the worker turns that into an empty read / refused write.
+pub fn check_namespace_allowed(token: &CapToken, requested: &str) -> Result<(), VerifyError> {
+    if token
+        .payload
+        .namespaces_allowed
+        .iter()
+        .any(|allowed| allowed == requested)
+    {
+        Ok(())
+    } else {
+        Err(VerifyError::NamespaceNotAllowed {
+            requested: requested.to_string(),
+            allowed: token.payload.namespaces_allowed.clone(),
+        })
+    }
 }
 
 pub fn check_freshness(token: &CapToken) -> Result<(), VerifyError> {
@@ -374,6 +409,7 @@ mod tests {
                 service: "openrouter".into(),
                 op,
                 data_class,
+                namespaces_allowed: vec![],
                 device_key_hash: format!("0x{}", "c".repeat(64)),
                 k3_epoch: 1,
                 issued_at: 1,
@@ -484,6 +520,47 @@ mod tests {
             check_freshness(&t),
             Err(VerifyError::Future { .. })
         ));
+    }
+
+    #[test]
+    fn check_namespace_allowed_accepts_member() {
+        let mut t = sample_token_with_class(CapOp::Fetch, DataClass::Memory);
+        t.payload.namespaces_allowed = vec!["travel".into()];
+        assert!(check_namespace_allowed(&t, "travel").is_ok());
+    }
+
+    #[test]
+    fn check_namespace_allowed_rejects_non_member() {
+        // Toy's cap is travel-only; a personal read must be denied.
+        let mut t = sample_token_with_class(CapOp::Fetch, DataClass::Memory);
+        t.payload.namespaces_allowed = vec!["travel".into()];
+        match check_namespace_allowed(&t, "personal") {
+            Err(VerifyError::NamespaceNotAllowed { requested, allowed }) => {
+                assert_eq!(requested, "personal");
+                assert_eq!(allowed, vec!["travel".to_string()]);
+            }
+            other => panic!("expected NamespaceNotAllowed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_namespace_allowed_empty_claim_denies_everything() {
+        // A cap minted with no namespaces grants nothing — every read is
+        // a violation (fail-closed at the cap layer).
+        let t = sample_token_with_class(CapOp::Fetch, DataClass::Memory);
+        assert!(matches!(
+            check_namespace_allowed(&t, "travel"),
+            Err(VerifyError::NamespaceNotAllowed { .. })
+        ));
+    }
+
+    #[test]
+    fn check_namespace_allowed_multi_member() {
+        let mut t = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        t.payload.namespaces_allowed = vec!["travel".into(), "family".into()];
+        assert!(check_namespace_allowed(&t, "family").is_ok());
+        assert!(check_namespace_allowed(&t, "travel").is_ok());
+        assert!(check_namespace_allowed(&t, "work").is_err());
     }
 
     #[test]

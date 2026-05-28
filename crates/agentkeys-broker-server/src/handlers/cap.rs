@@ -35,6 +35,8 @@ use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use agentkeys_types::Namespace;
+
 use crate::jwt::verify::verify_session_jwt;
 use crate::state::SharedState;
 
@@ -83,6 +85,16 @@ pub struct CapPayload {
     /// Data class binding (issue #90 followup). REQUIRED; workers reject
     /// caps whose data_class doesn't match their bucket.
     pub data_class: DataClass,
+    /// Memory namespaces this cap may read/write (issue #108,
+    /// agent-iam-strategy.md §3.5). The broker SIGNS this list into the
+    /// payload; the memory worker filters by deterministic string-set
+    /// membership. Empty for credential caps (namespaces are a
+    /// memory-data-class concept only). MUST stay at this field position
+    /// in both the broker and `agentkeys_worker_creds::verify::CapPayload`
+    /// — the signature is over the serialized struct, so field order must
+    /// match byte-for-byte across the sign/verify boundary.
+    #[serde(default)]
+    pub namespaces_allowed: Vec<String>,
     pub device_key_hash: String,
     pub k3_epoch: u64,
     pub issued_at: u64,
@@ -104,6 +116,14 @@ pub struct CapRequest {
     pub device_key_hash: String,
     #[serde(default = "default_ttl_seconds")]
     pub ttl_seconds: u64,
+    /// Memory namespaces the minted cap should grant (issue #108). Only
+    /// honored for the `/v1/cap/memory-*` endpoints; ignored for cred
+    /// caps. Each entry MUST be one of the v0 namespaces or the mint is
+    /// rejected with 400 (a typo'd namespace must not silently grant
+    /// nothing). Empty/absent → cap grants no namespaces (worker denies
+    /// every namespaced read/write).
+    #[serde(default)]
+    pub namespaces_allowed: Vec<String>,
 }
 
 fn default_ttl_seconds() -> u64 {
@@ -290,6 +310,15 @@ async fn mint_cap(
     // 3. K3EpochCounter.currentEpoch → embed.
     let k3_epoch = call_current_epoch(&state.http, &chain.rpc_url, &chain.epoch).await?;
 
+    // Namespace claim (issue #108): only memory caps carry namespaces;
+    // credential caps always get an empty list. Validate + normalize so a
+    // typo'd namespace is rejected at mint time (not silently signed into
+    // a cap that grants nothing).
+    let namespaces_allowed = match data_class {
+        DataClass::Memory => normalize_namespaces(&req.namespaces_allowed)?,
+        DataClass::Credentials => Vec::new(),
+    };
+
     // 4. Build payload + sign.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -305,6 +334,7 @@ async fn mint_cap(
         service: req.service.to_lowercase(),
         op,
         data_class,
+        namespaces_allowed,
         device_key_hash: format!("0x{}", strip_0x_lc(&req.device_key_hash)),
         k3_epoch,
         issued_at: now,
@@ -538,6 +568,31 @@ fn strip_0x_lc(s: &str) -> String {
     s.strip_prefix("0x").unwrap_or(s).to_lowercase()
 }
 
+/// Validate + normalize a requested namespace list for a memory cap.
+/// Lowercases, rejects any name outside the v0 set (issue #108), and
+/// de-duplicates while preserving first-seen order. An unknown name is a
+/// 400 so a typo can't silently mint a cap that grants nothing.
+fn normalize_namespaces(requested: &[String]) -> Result<Vec<String>, CapError> {
+    let mut out: Vec<String> = Vec::with_capacity(requested.len());
+    for raw in requested {
+        let lc = raw.trim().to_lowercase();
+        if !Namespace::is_valid(&lc) {
+            return Err(CapError::InvalidInput(format!(
+                "unknown namespace `{raw}` — must be one of: {}",
+                Namespace::ALL
+                    .iter()
+                    .map(|n| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        if !out.contains(&lc) {
+            out.push(lc);
+        }
+    }
+    Ok(out)
+}
+
 fn parse_bool_result(s: &str) -> bool {
     s.trim_start_matches("0x")
         .trim_start_matches('0')
@@ -626,6 +681,29 @@ mod tests {
         let h1 = keccak256_of_lc_service("OpenRouter");
         let h2 = keccak256_of_lc_service("openrouter");
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn normalize_namespaces_lowercases_dedupes_and_orders() {
+        let got = normalize_namespaces(&[
+            "Travel".into(),
+            "personal".into(),
+            "travel".into(), // dup after lowercasing
+        ])
+        .unwrap();
+        assert_eq!(got, vec!["travel".to_string(), "personal".to_string()]);
+    }
+
+    #[test]
+    fn normalize_namespaces_rejects_unknown() {
+        // `profile` is a memory TYPE, not a namespace — must 400.
+        let err = normalize_namespaces(&["profile".into()]).unwrap_err();
+        assert!(matches!(err, CapError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn normalize_namespaces_empty_is_ok() {
+        assert_eq!(normalize_namespaces(&[]).unwrap(), Vec::<String>::new());
     }
 
     #[test]
@@ -720,6 +798,7 @@ mod tests {
             service: "openrouter".into(),
             op: CapOp::Store,
             data_class: DataClass::Credentials,
+            namespaces_allowed: vec![],
             device_key_hash: format!("0x{}", "c".repeat(64)),
             k3_epoch: 1,
             issued_at: 1,
@@ -747,6 +826,7 @@ mod tests {
                 service: "openrouter".into(),
                 op: CapOp::Store,
                 data_class: dc,
+                namespaces_allowed: vec![],
                 device_key_hash: format!("0x{}", "c".repeat(64)),
                 k3_epoch: 1,
                 issued_at: 1,

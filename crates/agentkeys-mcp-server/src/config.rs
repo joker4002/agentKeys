@@ -4,6 +4,7 @@
 //! built once at startup, cloned into every request handler via shared state,
 //! and treated as immutable from then on.
 
+use agentkeys_types::Namespace;
 use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -79,6 +80,17 @@ pub struct Cli {
     /// agent runs on for cap-mint binding.
     #[arg(long, env = "MCP_DEFAULT_DEVICE_KEY_HASH")]
     pub default_device_key_hash: Option<String>,
+
+    /// Comma-separated memory namespaces this server's caps may access
+    /// (issue #108). Sourced server-side — the agent cannot widen its own
+    /// namespace scope by asking. Each entry must be one of: personal,
+    /// family, work, travel. Empty → all four namespaces (permissive), so
+    /// existing deploys + the dev walkthrough keep working; `--backend=http`
+    /// also logs a startup WARN. To exercise the gate in the dev binary set
+    /// e.g. `MCP_DEFAULT_NAMESPACES_ALLOWED=travel`. The three-act
+    /// integration test scopes a cap to `travel` only to prove enforcement.
+    #[arg(long, env = "MCP_DEFAULT_NAMESPACES_ALLOWED", default_value = "")]
+    pub default_namespaces_allowed: String,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +111,10 @@ pub struct Config {
     pub default_actor: Option<String>,
     pub default_operator_omni: Option<String>,
     pub default_device_key_hash: Option<String>,
+    /// Memory namespaces the agent's caps may access (issue #108). Threaded
+    /// into every memory cap-mint so the broker signs them into the cap and
+    /// the worker filters reads/writes by membership.
+    pub default_namespaces_allowed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +201,9 @@ impl Config {
                 )
             };
 
+        let default_namespaces_allowed =
+            resolve_namespaces_allowed(&cli.default_namespaces_allowed, backend)?;
+
         Ok(Self {
             transport,
             backend,
@@ -198,6 +217,7 @@ impl Config {
             default_actor,
             default_operator_omni,
             default_device_key_hash,
+            default_namespaces_allowed,
         })
     }
 
@@ -216,6 +236,13 @@ impl Config {
             default_actor: None,
             default_operator_omni: None,
             default_device_key_hash: None,
+            // Tests default to the full v0 set so existing memory tests are
+            // unaffected; namespace-gate tests opt into a narrower set via
+            // `with_namespaces_allowed`.
+            default_namespaces_allowed: Namespace::ALL
+                .iter()
+                .map(|n| n.as_str().to_string())
+                .collect(),
         }
     }
 
@@ -223,5 +250,69 @@ impl Config {
         self.vendor_tokens
             .insert(vendor.to_string(), token.to_string());
         self
+    }
+
+    /// Test builder — scope the server's caps to a specific namespace set
+    /// (issue #108). Used by the three-act demo to give the toy a
+    /// `travel`-only cap so the cross-namespace read is denied.
+    pub fn with_namespaces_allowed<I, S>(mut self, namespaces: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.default_namespaces_allowed = namespaces.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+/// Resolve + validate the configured namespace allowlist (issue #108).
+/// Explicit list → validate every entry against the v0 set (`bail` on an
+/// unknown name so a typo fails fast at startup). Empty → backend-specific
+/// default (see the `MCP_DEFAULT_NAMESPACES_ALLOWED` CLI doc).
+fn resolve_namespaces_allowed(raw: &str, backend: BackendKind) -> anyhow::Result<Vec<String>> {
+    let explicit: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect();
+
+    if !explicit.is_empty() {
+        let mut out: Vec<String> = Vec::with_capacity(explicit.len());
+        for ns in explicit {
+            if !Namespace::is_valid(&ns) {
+                anyhow::bail!(
+                    "MCP_DEFAULT_NAMESPACES_ALLOWED has unknown namespace `{ns}` \
+                     — must be one of: personal, family, work, travel"
+                );
+            }
+            if !out.contains(&ns) {
+                out.push(ns);
+            }
+        }
+        return Ok(out);
+    }
+
+    let all: Vec<String> = Namespace::ALL
+        .iter()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    match backend {
+        // Dev binary: permissive so the in-memory walkthrough can exercise
+        // every namespace. The gate is proven by the three-act integration
+        // test (which scopes a cap to `travel` only). To see enforcement in
+        // the binary, set MCP_DEFAULT_NAMESPACES_ALLOWED=travel.
+        BackendKind::InMemory => Ok(all),
+        // Production: still permissive (non-breaking) but LOUD — operators
+        // must scope per-device for the namespace filter to mean anything.
+        BackendKind::Http => {
+            eprintln!(
+                "==> ⚠️  WARN [issue #108]: MCP_DEFAULT_NAMESPACES_ALLOWED unset — \
+                 defaulting to ALL namespaces (personal, family, work, travel). \
+                 The namespace filter is permissive. Set it per-device to scope \
+                 the agent's memory access."
+            );
+            Ok(all)
+        }
     }
 }

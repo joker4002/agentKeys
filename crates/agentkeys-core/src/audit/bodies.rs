@@ -61,6 +61,14 @@ pub struct MemoryTeardownBody {
     pub actor_target: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNamespaceViolationBody {
+    /// The namespace the cap tried to access but wasn't granted (issue #108).
+    pub namespace: String,
+    /// `"get"` or `"put"` — which op was refused.
+    pub op: String,
+}
+
 // ── 20..29 — signs family ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -67,6 +67,12 @@ pub struct CapMintRequest {
     pub service: String,
     pub device_key_hash: String,
     pub ttl_seconds: u64,
+    /// Memory namespaces to grant in the minted cap (issue #108). Sourced
+    /// from operator-provisioned server config — NOT from the agent's
+    /// per-call request — so the agent can't widen its own namespace
+    /// scope. Empty for credential caps (the broker ignores it there).
+    #[serde(default)]
+    pub namespaces_allowed: Vec<String>,
 }
 
 /// Opaque cap-token blob — we never inspect the inside on this side; the
@@ -93,6 +99,11 @@ pub struct MemoryPutResult {
     pub s3_key: String,
     pub envelope_size: usize,
     pub namespace: String,
+    /// Worker refused the write — `namespace` was outside the cap's
+    /// `namespaces_allowed` (issue #108). The memory tool emits a
+    /// `memory.namespace_violation` audit row when this is true.
+    #[serde(default)]
+    pub namespace_violation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +111,10 @@ pub struct MemoryGetResult {
     pub ok: bool,
     pub plaintext_b64: String,
     pub namespace: String,
+    /// Worker refused the read — `namespace` was outside the cap's
+    /// `namespaces_allowed` (issue #108). Paired with empty plaintext.
+    #[serde(default)]
+    pub namespace_violation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -76,6 +76,10 @@ pub async fn mint(
         service,
         device_key_hash,
         ttl_seconds,
+        // The broker only honors this for memory caps (it forces an empty
+        // list for credential caps), so passing the server's configured
+        // allowlist unconditionally is safe (issue #108).
+        namespaces_allowed: config.default_namespaces_allowed.clone(),
     };
 
     let cap = backend
