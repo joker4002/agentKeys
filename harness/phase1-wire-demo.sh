@@ -365,7 +365,7 @@ phase1_sandbox() {
       elif [[ "$WEBAUTHN" == true ]]; then
         # 1.5b scope rejected + --webauthn → grant via real Touch ID, then retry.
         log "  1.5b scope grant: heima-scope-set.sh --webauthn --agent $AGENT_LABEL --services $svcs (expect a Touch ID prompt)"
-        local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "$svcs" --session-id "$SESSION_ID" 2>&1)"
+        local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "$svcs" 2>&1)"
         echo "$grant" | sed 's/^/      /' >&2
         if echo "$grant" | grep -q '"skipped"'; then
           fail "1.5 seed memory" "scope grant SKIPPED — K11 not enrolled with webauthn. Run: agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI ; then re-run."
