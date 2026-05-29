@@ -73,6 +73,7 @@ OPERATOR_OMNI="${AGENTKEYS_OPERATOR_OMNI:-}"
 VENDOR_TOKEN="${AGENTKEYS_MCP_VENDOR_TOKEN:-}"
 SESSION_BEARER="${AGENTKEYS_SESSION_BEARER:-}"
 DEVICE_KEY_HASH="${AGENTKEYS_DEVICE_KEY_HASH:-}"   # Mode R: agent device key hash (from agent file) — memory.put cap-mint needs it
+BROKER_URL="${AGENTKEYS_BROKER_URL:-}"             # Mode R: the BROKER (serves /v1/cap/*), resolved from OIDC_ISSUER in phase 0 — NOT the signer ($BACKEND_URL)
 
 # ─── flags ──────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -182,13 +183,18 @@ phase0_prereqs() {
     fail "0.0 operator-workstation.env" "missing $ENV_FILE — run scripts/setup-cloud.sh + setup-heima.sh"
   fi
 
+  # Cap-mint (/v1/cap/*) goes to the BROKER = OIDC_ISSUER (https://$BROKER_HOST),
+  # NOT the signer ($BACKEND_URL = $AGENTKEYS_SIGNER_URL, which only signs).
+  # Pointing the MCP --broker-url at the signer 404s every cap-mint.
+  BROKER_URL="${BROKER_URL:-${AGENTKEYS_BROKER_URL:-${OIDC_ISSUER:-}}}"
+
   if AGENTKEYS_CHAIN=heima bash "$REPO_ROOT/scripts/verify-heima-contracts.sh" >/dev/null 2>&1; then
     ok "0.1 heima contracts" "verify-heima-contracts.sh passed"
   else
     fail "0.1 heima contracts" "verify-heima-contracts.sh failed — run scripts/setup-heima.sh"
   fi
 
-  local broker="${BACKEND_URL:-${AGENTKEYS_BROKER_URL:-}}"
+  local broker="$BROKER_URL"
   if [[ -n "$broker" ]] && curl -fsS "${broker%/}/healthz" >/dev/null 2>&1; then
     ok "0.2 broker healthz" "$broker"
   else
@@ -304,19 +310,22 @@ phase1_sandbox() {
   # restarted; otherwise the wired hook's token won't match the server and every
   # memory.get/permission.check 401s ("bearer token not recognized"). Also
   # restart when a fresh binary was just uploaded.
-  local mcp_backend mcp_vendor cmd
+  local mcp_backend mcp_vendor mcp_brokerarg cmd
   if [[ "$MODE" == "light" ]]; then
-    mcp_backend="in-memory"; mcp_vendor="magiclick:$VENDOR_TOKEN"
+    mcp_backend="in-memory"; mcp_vendor="magiclick:$VENDOR_TOKEN"; mcp_brokerarg=""
     cmd="$MCP_BIN_DST --backend in-memory --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor"
   else
-    mcp_backend="http"; mcp_vendor="harness:$VENDOR_TOKEN"
-    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BACKEND_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH"
+    mcp_backend="http"; mcp_vendor="harness:$VENDOR_TOKEN"; mcp_brokerarg="--broker-url ${BROKER_URL:-}"
+    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BROKER_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH"
   fi
-  # Reuse only if a live server's argv carries BOTH the intended backend + token.
+  # Reuse only if a live server's argv carries the intended backend + token AND
+  # (real mode) the intended --broker-url — else a stale server pointed at the
+  # wrong broker (e.g. the signer) is silently reused. Empty mcp_brokerarg in
+  # light mode makes that last grep a no-op (empty pattern matches every line).
   local reuse=false
   if [[ "$mcp_bin_changed" != true \
         && "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" \
-        && -n "$(sbx_exec "pgrep -af agentkeys-mcp-server | grep -F -- '--backend $mcp_backend' | grep -F -- '--vendor-tokens $mcp_vendor'")" ]]; then
+        && -n "$(sbx_exec "pgrep -af agentkeys-mcp-server | grep -F -- '--backend $mcp_backend' | grep -F -- '--vendor-tokens $mcp_vendor' | grep -F -- '$mcp_brokerarg'")" ]]; then
     reuse=true
   fi
   if [[ "$reuse" == true ]]; then
