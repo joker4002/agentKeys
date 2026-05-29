@@ -43,12 +43,12 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 | **In one line** | Self-contained sandbox demo — nothing external | The live product wired to real infra |
 | **MCP backend** | `in-memory` (data lives in the server's RAM) | `http` → real broker + workers |
 | **Memory data** | a **pre-seeded fixture** — the "Chengdu trip" is baked into the binary | the real S3-backed memory worker (empty unless you seeded it) |
-| **The Chengdu surprise** | ✅ works out of the box | ✅ harness **step 1.5 seeds it** (`agentkeys memory put`) — needs the memory scope granted to the agent (Touch ID at 0.5) + a live master session |
+| **The Chengdu surprise** | ✅ works out of the box | ✅ harness **step 1.5 self-seeds it** — grants the memory scope (real Touch ID via `heima-scope-set.sh --webauthn`), then `agentkeys memory put`. Needs a live master session + K11 enrolled in webauthn mode |
 | **Broker / chain** | none | real broker (`signer.litentry.org`) + Heima **mainnet** |
 | **Account** | a fixed demo actor/operator | your real `setup-heima.sh` account (alice + demo-agent) |
 | **Cap-mint** | stubbed — always succeeds | real cap-mint (needs a valid master session) |
 | **Vendor token** | `demo-tok` | `harness-tok` |
-| **Touch ID** | never | at scope grant (if not already scoped) |
+| **Touch ID** | never | at **step 1.5** seed (it self-grants the memory scope) + at any other scope grant |
 | **Needs network to** | sandbox + Docker + (first build) a rust image | + reachable broker / workers / Heima RPC |
 | **Proves** | the wire + hook + memory-injection **plumbing** works | the same, against **real IAM infra** (real signing + isolation) |
 | **Cost / risk** | free, can't break anything | real gas/cost, mutates real account state |
@@ -70,12 +70,13 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 - The `setup-heima.sh` account already created (the harness verifies, never rebuilds). It reads `operator_omni` + `actor_omni` from `~/.agentkeys/agents/demo-agent.json`.
 - A non-expired master session at `~/.agentkeys/alice/session.json` (the harness reads its `.token` as the cap-mint bearer). If it's stale, refresh: `agentkeys init --session-id alice …`.
 - `export OPENROUTER_API_KEY=...` in `~/.zshenv` — the harness uses it as the LLM-key fallback (no prompt).
+- **For the 1.5 memory seed:** the master's primary K11 enrolled in **webauthn** mode — `agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x<operator>`. Without it, 1.5a's `heima-scope-set.sh --webauthn` skips the grant (and 1.5 fails loud with this exact command). Override the granted service list with `SEED_SCOPE_SERVICES` (it **sets** the full list, so include every service the agent needs).
 
 ## The manual gates (the "test through" essence)
 
 - **LLM key** — auto from `OPENROUTER_API_KEY` (or `LLM_API_KEY`); only prompts if absent. Phase 4.0 writes it to the sandbox `~/.hermes/.env` and sets `provider: openrouter` + `model.default` (default `deepseek/deepseek-v4-flash`; override `LLM_MODEL`). A non-fatal `4.1 model smoke` confirms the model is live before the surprise.
-- **Real Touch ID** — only at scope grant in real mode, and only if the reused account isn't already scoped (`--webauthn`). This grants the agent the **memory scope** that step 1.5's seed write depends on.
-- **Seed the real memory worker** (`--real` only) — step **1.5** writes the demo memory (`agentkeys memory put`, default the Chengdu fixture; override `SEED_MEMORY_CONTENT`). Idempotent — skips if the namespace already has content. Prompts before writing (auto with `--yes`); it needs the memory scope granted (the Touch ID above) + a live master session, and fails loud with the `heima-scope-set.sh --webauthn` command if the cap-mint is rejected.
+- **Real Touch ID** — in real mode, at **step 1.5** the seed self-grants the agent's memory scope via `heima-scope-set.sh --webauthn`. The Touch ID is a hardware prompt: `--yes` does NOT bypass it (it only auto-confirms the software "proceed?" gate before the grant).
+- **Seed the real memory worker** (`--real` only) — step **1.5** is idempotent + self-authorizing: it checks the namespace, and if empty (after the confirm gate) it (a) grants the memory scope via real Touch ID, then (b) writes the demo memory (`agentkeys memory put`; default the Chengdu fixture — override `SEED_MEMORY_CONTENT`, or the granted services with `SEED_SCOPE_SERVICES`). Skips entirely when already populated. Fails loud with the `agentkeys k11 enroll --webauthn …` command if the grant is skipped (K11 not webauthn-enrolled), or with guidance if the master session expired.
 - **The Hermes surprise** — open Hermes in the sandbox, send "where am I going this weekend?", and judge the memory-aware reply (`[y/N]`).
 
 Pass `--yes` to auto-confirm the non-secret prompts.
@@ -106,6 +107,7 @@ Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `OPENROUTER_API_KEY` / `LLM_API_KEY`, `LLM_MODEL` (default `deepseek/deepseek-v4-flash`) /
 `LLM_BASE_URL`, `RUST_BUILD_IMAGE` (base image) ·
 `BUILDER_IMAGE` / `CARGO_REGISTRY_VOL` / `CARGO_GIT_VOL` (build cache),
+`SEED_MEMORY_CONTENT` / `SEED_SCOPE_SERVICES` (real-mode 1.5 seed),
 `AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER`.
 
 ## Drift detection
@@ -131,6 +133,9 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | Memory swap not reflected | hooks fetch per-call but Hermes caches the LLM context | start a fresh Hermes session |
 | Phase 1 `1.3 … upload failed` | sandbox upload API runs non-root → can't write `/usr/local/bin` (`Errno 13`) | fixed: binaries now upload to the writable `~/.local/bin` (on PATH); just re-run |
 | Phase 4 surprise → "No inference provider configured" | key not in `~/.hermes/.env`, or wrong provider | 4.0 writes `OPENROUTER_API_KEY` to `~/.hermes/.env` + sets `provider: openrouter`; confirm `0.6 LLM key` shows `ok` |
+| `agentkeys memory put` → `error: unrecognized subcommand 'memory'` (run by hand) | a **stale** `agentkeys` on your PATH predates the `memory` command | rebuild + reinstall: `cargo build --release -p agentkeys-cli && cp target/release/agentkeys ~/.local/bin/agentkeys`. The harness itself uses the freshly cross-built **sandbox** binary, so 1.5 is unaffected |
+| `1.5a scope grant` → `grant SKIPPED` | the master's primary K11 isn't enrolled in webauthn mode | `agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x<operator>`, then re-run (the failure prints this exact command) |
+| `1.5b seed memory` fails after the grant | master session expired, or the memory worker unreachable | refresh the session (`agentkeys init --session-id alice …`); check `AGENTKEYS_WORKER_MEMORY_URL` reachability |
 | Phase 4 `4.1 model smoke` / surprise → HTTP 429 | OpenRouter throttling a `:free` model | retry, or use the paid default `LLM_MODEL=deepseek/deepseek-v4-flash` |
 | Surprise reply says "nothing in memory" | wire hooks/MCP missing → `pre_llm_call` never injected | 4.0 now prechecks + fails loud; ensure Phases 1+2 ran (no `--skip-1/--skip-2`): `~/.hermes/agent-hooks/` exists + `:18088/healthz` up; use a fresh Hermes session |
 | Phase 1 `1.4 mcp server … did not come up` → `Address already in use` | `MCP_PORT` collides with a sandbox service (8088 = built-in `gem-server`) | default is now `18088` (outside the sandbox's range); override `MCP_PORT` if it still clashes — check `ss -ltnp` in the sandbox |
