@@ -108,6 +108,10 @@ else
   echo "════════════════════════════════════════════════════════════════════"
   echo "  MODE: REAL — live broker + workers + Heima MAINNET"
   echo "               (NO in-memory Chengdu fixture; uses the real account)"
+  if [[ "$WEBAUTHN" != true ]]; then
+    echo "               webauthn=false → step 1.5 will NOT grant the memory scope;"
+    echo "               re-run with --webauthn to seed the Chengdu memory (Touch ID)."
+  fi
   echo "════════════════════════════════════════════════════════════════════"
 fi
 
@@ -334,15 +338,18 @@ phase1_sandbox() {
   fi
 
   # 1.5 seed the real memory worker (Mode R ONLY — in-memory auto-seeds). The
-  # agent reads this back in Act 1. Idempotent + self-authorizing:
-  #   a. check the namespace — if it already returns content, skip everything;
-  #   b. else grant the agent the memory SERVICE scope via real WebAuthn
-  #      (heima-scope-set.sh --webauthn → Touch ID; on-chain idempotent, only
-  #      prompts when not yet scoped because we gate on the empty-memory check);
-  #   c. then memory.put (cap-mint Store via the master session → real worker).
-  # SEED_MEMORY_CONTENT overrides the fixture; SEED_SCOPE_SERVICES overrides the
-  # granted service list (NOTE: heima-scope-set.sh SETS the full list — include
-  # every service the agent needs, comma-separated).
+  # agent reads this back in Act 1. Idempotent + scope-aware + --webauthn-gated:
+  #   a. namespace already has content → skip everything (no Touch ID);
+  #   b. else try memory.put directly — succeeds if the scope is already granted
+  #      (also no Touch ID);
+  #   c. if the put is scope-rejected:
+  #        --webauthn passed → grant the memory SERVICE scope via real WebAuthn
+  #                            (heima-scope-set.sh → Touch ID), then retry the put;
+  #        --webauthn ABSENT → do NOT trigger Touch ID; fail loud telling the
+  #                            operator to re-run with --webauthn.
+  # This is why the banner shows webauthn=<flag>: it gates whether 1.5 may run a
+  # real Touch ID ceremony. SEED_MEMORY_CONTENT overrides the fixture;
+  # SEED_SCOPE_SERVICES the granted list (heima-scope-set.sh SETS the full list).
   if [[ "$MODE" == "real" ]]; then
     local seed="${SEED_MEMORY_CONTENT:-Chengdu trip — Apr 12 to 16, hotpot at Yulin.}"
     local svcs="${SEED_SCOPE_SERVICES:-memory}"
@@ -350,24 +357,28 @@ phase1_sandbox() {
     local got; got="$(sbx_exec "$env_pfx $AGENT_BIN_DST hook memory-inject --namespaces $MEMORY_NS 2>/dev/null")"
     if echo "$got" | grep -q '"context"'; then
       ok "1.5 seed memory" "namespace '$MEMORY_NS' already populated — skip"
-    elif gate "1.5 seed memory" "memory '$MEMORY_NS' is empty — grant the memory scope (real Touch ID) + seed \"$seed\" to the real worker. Proceed?" confirm; then
-      # 1.5a grant the memory service scope via real WebAuthn (Touch ID on the Mac).
-      log "  1.5a scope grant: heima-scope-set.sh --webauthn --agent $AGENT_LABEL --services $svcs (expect a Touch ID prompt)"
-      local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "$svcs" --session-id "$SESSION_ID" 2>&1)"
-      echo "$grant" | sed 's/^/      /' >&2
-      if echo "$grant" | grep -q '"skipped"'; then
-        fail "1.5a scope grant" "grant SKIPPED — K11 likely not enrolled with webauthn. Run: agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI ; then re-run."
-      elif echo "$grant" | grep -qiE '"ok":[[:space:]]*true|isServiceInScope|already'; then
-        ok "1.5a scope grant" "memory scope granted/confirmed (services: $svcs)"
-        # 1.5b seed (sandbox-side memory.put → cap-mint Store → real worker).
-        local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
-        if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
-          ok "1.5b seed memory" "wrote '$MEMORY_NS' to the real memory worker"
+    elif gate "1.5 seed memory" "memory '$MEMORY_NS' is empty — seed \"$seed\" to the real worker (grants the scope via real Touch ID only if --webauthn). Proceed?" confirm; then
+      # 1.5a try the put directly — works if the scope is already granted.
+      local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
+      if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
+        ok "1.5 seed memory" "wrote '$MEMORY_NS' to the real worker (scope already granted)"
+      elif [[ "$WEBAUTHN" == true ]]; then
+        # 1.5b scope rejected + --webauthn → grant via real Touch ID, then retry.
+        log "  1.5b scope grant: heima-scope-set.sh --webauthn --agent $AGENT_LABEL --services $svcs (expect a Touch ID prompt)"
+        local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "$svcs" --session-id "$SESSION_ID" 2>&1)"
+        echo "$grant" | sed 's/^/      /' >&2
+        if echo "$grant" | grep -q '"skipped"'; then
+          fail "1.5 seed memory" "scope grant SKIPPED — K11 not enrolled with webauthn. Run: agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI ; then re-run."
         else
-          fail "1.5b seed memory" "memory.put failed after grant — master session expired, or worker unreachable. Output: $(echo "$out" | tr '\n' ' ' | cut -c1-180)"
+          local out2; out2="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
+          if echo "$out2" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
+            ok "1.5 seed memory" "granted scope (Touch ID) + wrote '$MEMORY_NS' to the real worker"
+          else
+            fail "1.5 seed memory" "memory.put still failed after grant — session expired or worker unreachable. Output: $(echo "$out2" | tr '\n' ' ' | cut -c1-160)"
+          fi
         fi
       else
-        fail "1.5a scope grant" "heima-scope-set.sh failed — see output above (master session valid? contracts up?)"
+        fail "1.5 seed memory" "memory.put rejected (scope not granted) and --webauthn NOT passed — the harness won't trigger Touch ID. Re-run: bash harness/phase1-wire-demo.sh --real --webauthn (grants the memory scope + seeds). put: $(echo "$out" | tr '\n' ' ' | cut -c1-120)"
       fi
     else
       skip "1.5 seed memory" "operator declined"

@@ -20,9 +20,11 @@ reads only its permitted memory, is deterministically denied an over-cap action
 # backend. No real account/broker/chain. The Chengdu surprise lives here. START HERE.
 bash harness/phase1-wire-demo.sh --light
 
-# Real — reuses your heima account (master alice + agent demo-agent),
-# real broker + workers + Heima mainnet. NO in-memory Chengdu fixture.
-bash harness/phase1-wire-demo.sh --real
+# Real — reuses your heima account (master alice + agent demo-agent), real
+# broker + workers + Heima mainnet. Add --webauthn so step 1.5 grants the memory
+# scope (real Touch ID) and seeds the Chengdu memory; without it, 1.5 seeds only
+# if the scope is already granted.
+bash harness/phase1-wire-demo.sh --real --webauthn
 ```
 
 **A mode is REQUIRED** — `--light` or `--real`. The harness refuses to guess
@@ -43,12 +45,12 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 | **In one line** | Self-contained sandbox demo — nothing external | The live product wired to real infra |
 | **MCP backend** | `in-memory` (data lives in the server's RAM) | `http` → real broker + workers |
 | **Memory data** | a **pre-seeded fixture** — the "Chengdu trip" is baked into the binary | the real S3-backed memory worker (empty unless you seeded it) |
-| **The Chengdu surprise** | ✅ works out of the box | ✅ harness **step 1.5 self-seeds it** — grants the memory scope (real Touch ID via `heima-scope-set.sh --webauthn`), then `agentkeys memory put`. Needs a live master session + K11 enrolled in webauthn mode |
+| **The Chengdu surprise** | ✅ works out of the box | ✅ harness **step 1.5 seeds it** — run **`--real --webauthn`** so 1.5 grants the memory scope (real Touch ID) then `agentkeys memory put`. Without `--webauthn` it seeds only if the scope is already granted, else fails telling you to add `--webauthn`. Needs a live master session + K11 enrolled in webauthn mode |
 | **Broker / chain** | none | real broker (`signer.litentry.org`) + Heima **mainnet** |
 | **Account** | a fixed demo actor/operator | your real `setup-heima.sh` account (alice + demo-agent) |
 | **Cap-mint** | stubbed — always succeeds | real cap-mint (needs a valid master session) |
 | **Vendor token** | `demo-tok` | `harness-tok` |
-| **Touch ID** | never | at **step 1.5** seed (it self-grants the memory scope) + at any other scope grant |
+| **Touch ID** | never | at **step 1.5** ONLY when you pass `--webauthn` (it self-grants the memory scope); never otherwise |
 | **Needs network to** | sandbox + Docker + (first build) a rust image | + reachable broker / workers / Heima RPC |
 | **Proves** | the wire + hook + memory-injection **plumbing** works | the same, against **real IAM infra** (real signing + isolation) |
 | **Cost / risk** | free, can't break anything | real gas/cost, mutates real account state |
@@ -75,8 +77,8 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 ## The manual gates (the "test through" essence)
 
 - **LLM key** — auto from `OPENROUTER_API_KEY` (or `LLM_API_KEY`); only prompts if absent. Phase 4.0 writes it to the sandbox `~/.hermes/.env` and sets `provider: openrouter` + `model.default` (default `deepseek/deepseek-v4-flash`; override `LLM_MODEL`). A non-fatal `4.1 model smoke` confirms the model is live before the surprise.
-- **Real Touch ID** — in real mode, at **step 1.5** the seed self-grants the agent's memory scope via `heima-scope-set.sh --webauthn`. The Touch ID is a hardware prompt: `--yes` does NOT bypass it (it only auto-confirms the software "proceed?" gate before the grant).
-- **Seed the real memory worker** (`--real` only) — step **1.5** is idempotent + self-authorizing: it checks the namespace, and if empty (after the confirm gate) it (a) grants the memory scope via real Touch ID, then (b) writes the demo memory (`agentkeys memory put`; default the Chengdu fixture — override `SEED_MEMORY_CONTENT`, or the granted services with `SEED_SCOPE_SERVICES`). Skips entirely when already populated. Fails loud with the `agentkeys k11 enroll --webauthn …` command if the grant is skipped (K11 not webauthn-enrolled), or with guidance if the master session expired.
+- **Real Touch ID** — in real mode, **only when you pass `--webauthn`**: step 1.5 then self-grants the agent's memory scope via `heima-scope-set.sh --webauthn`. The banner prints `webauthn=<flag>` so you know upfront whether 1.5 may run a Touch ID ceremony. It's a hardware prompt — `--yes` does NOT bypass it (it only auto-confirms the software "proceed?" gate).
+- **Seed the real memory worker** (`--real` only) — step **1.5** is idempotent + scope-aware: it tries `agentkeys memory put` **directly** (succeeds if the scope is already granted — no Touch ID); if rejected for scope, it grants via real Touch ID **only when `--webauthn` was passed**, then retries; without `--webauthn` it fails loud telling you to re-run with it. Skips entirely when the namespace already has content. Override `SEED_MEMORY_CONTENT` / `SEED_SCOPE_SERVICES`; fails loud with the `agentkeys k11 enroll --webauthn …` command if the grant is skipped (K11 not webauthn-enrolled).
 - **The Hermes surprise** — open Hermes in the sandbox, send "where am I going this weekend?", and judge the memory-aware reply (`[y/N]`).
 
 Pass `--yes` to auto-confirm the non-secret prompts.
