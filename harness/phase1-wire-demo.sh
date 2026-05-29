@@ -345,25 +345,42 @@ build_linux_binaries() {
   local mcp_bin="$LINUX_TARGET_DIR/release/agentkeys-mcp-server"
   # Idempotent + source-aware: skip when both binaries exist and no tracked
   # source is newer; otherwise (re)build incrementally (caches persist).
-  if [[ -x "$agent_bin" && -x "$mcp_bin" ]] && ! sources_newer "$agent_bin"; then
+  # Check BOTH binaries against the source — a stale mcp-server must not be
+  # masked by an up-to-date cli (the two crates build + fail independently).
+  if [[ -x "$agent_bin" && -x "$mcp_bin" ]] \
+     && ! sources_newer "$agent_bin" && ! sources_newer "$mcp_bin"; then
     ok "1.3 linux build" "up-to-date (no source changes; cached)"; return 0
   fi
   if ! command -v docker >/dev/null 2>&1; then
     fail "1.3 linux build" "docker required to cross-build the aarch64-linux agent binary"; return 1
   fi
   ensure_builder_image || return 1
-  log "  1.3 linux build: cross-compiling aarch64-linux binaries (incremental; first run is slow)…"
+  # Pin the cross-build toolchain to the host's rustc version. rust-toolchain.toml
+  # pins `channel = "stable"`, which FLOATS — a fresh container pulls the LATEST
+  # stable, which has broken clean builds of pre-release deps (crypto-common 0.2 /
+  # hybrid-array). Matching the host keeps the cross-build reproducible. Override
+  # with CROSS_RUST_TOOLCHAIN=<ver>.
+  local host_toolchain; host_toolchain="$(rustc --version 2>/dev/null | awk '{print $2}')"
+  local cross_toolchain="${CROSS_RUST_TOOLCHAIN:-${host_toolchain:-stable}}"
+  log "  1.3 linux build: cross-compiling aarch64-linux binaries (toolchain $cross_toolchain; first run is slow)…"
+  local build_rc=0
   docker run --rm --platform linux/arm64 \
     -v "$REPO_ROOT":/src -w /src \
     -v "$CARGO_REGISTRY_VOL":/usr/local/cargo/registry \
     -v "$CARGO_GIT_VOL":/usr/local/cargo/git \
     -e CARGO_TARGET_DIR=/src/target/sandbox-linux \
+    -e RUSTUP_TOOLCHAIN="$cross_toolchain" \
     "$BUILDER_IMAGE" \
-    cargo build --release -p agentkeys-cli -p agentkeys-mcp-server
-  if [[ -x "$agent_bin" ]]; then
-    ok "1.3 linux build" "built aarch64-linux binaries"; return 0
+    cargo build --release -p agentkeys-cli -p agentkeys-mcp-server || build_rc=$?
+  # Check the BUILD EXIT CODE, not just file existence — a stale binary from a
+  # prior build must not be mistaken for a fresh success (silent-failure trap).
+  if [[ "$build_rc" -eq 0 && -x "$agent_bin" && -x "$mcp_bin" ]]; then
+    ok "1.3 linux build" "built aarch64-linux binaries (toolchain $cross_toolchain)"; return 0
+  elif [[ -x "$agent_bin" && -x "$mcp_bin" ]]; then
+    skip "1.3 linux build" "cross-build FAILED (rc=$build_rc) — using the previously-built binary; SOURCE CHANGES ARE NOT DEPLOYED (try CROSS_RUST_TOOLCHAIN=<ver>, or clear target/sandbox-linux; see docker output above)"
+    return 0
   else
-    fail "1.3 linux build" "cross-build produced no binary (see docker output above)"; return 1
+    fail "1.3 linux build" "cross-build failed (rc=$build_rc) and no usable binary present (see docker output above)"; return 1
   fi
 }
 

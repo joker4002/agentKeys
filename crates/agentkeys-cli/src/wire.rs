@@ -293,8 +293,55 @@ fn write_if_changed(
     )))
 }
 
+/// Strip a column-0 `hooks:` block (and any top-level `hooks_auto_accept:`) from
+/// `existing`, returning the remaining text — or `None` if there is no top-level
+/// `hooks:` key.
+///
+/// `agentkeys wire` OWNS the runtime's `hooks:` key: the IAM guarantee depends on
+/// the hooks being un-bypassable, and a YAML config allows only one `hooks:` key.
+/// So on (re)wire we REPLACE whatever is there — whether it's our own block whose
+/// sentinel comments a host re-serialization (`hermes config set`) dropped, or a
+/// hand-authored block. This take-over is documented for users in
+/// `docs/user-manual.md`.
+fn strip_top_level_hooks(existing: &str) -> Option<String> {
+    let lines: Vec<&str> = existing.lines().collect();
+    let hooks_start = lines
+        .iter()
+        .position(|l| l.starts_with("hooks:") && *l == l.trim_start())?;
+    // The block runs until the next column-0 (non-indented, non-blank) line.
+    let mut hooks_end = lines.len();
+    for (offset, l) in lines.iter().enumerate().skip(hooks_start + 1) {
+        if l.is_empty() {
+            continue;
+        }
+        if !(l.starts_with(' ') || l.starts_with('\t')) {
+            hooks_end = offset;
+            break;
+        }
+    }
+    // Drop the hooks block + any top-level `hooks_auto_accept:` (our block re-adds it).
+    let mut kept: Vec<&str> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let l: &str = *l;
+        if i >= hooks_start && i < hooks_end {
+            continue;
+        }
+        if l.starts_with("hooks_auto_accept:") && l == l.trim_start() {
+            continue;
+        }
+        kept.push(l);
+    }
+    let mut cleaned = kept.join("\n");
+    if existing.ends_with('\n') && !cleaned.is_empty() && !cleaned.ends_with('\n') {
+        cleaned.push('\n');
+    }
+    Some(cleaned)
+}
+
 /// Merge the AgentKeys-managed sentinel block into a runtime config file:
 ///   - if the file already contains our block → replace that region only,
+///   - else if a top-level `hooks:` is ours but de-sentineled (the host
+///     re-serialized the YAML + dropped our comments) → adopt + re-wrap it,
 ///   - else if the file has a top-level `hooks:` we don't own → refuse
 ///     (manual merge required) so we never clobber the operator's hooks,
 ///   - else append our block (creating the file if absent).
@@ -324,12 +371,29 @@ fn merge_block(path: &std::path::Path, block: &str, check_only: bool) -> Result<
         )));
     }
 
-    // No managed block yet. Refuse if the operator already has their own
-    // top-level `hooks:` key (don't clobber hand-authored hooks).
-    if existing.lines().any(|l| l.trim_start() == l && l.starts_with("hooks:")) {
-        return Ok(Outcome::Fail(format!(
-            "{} already has a top-level `hooks:` not managed by agentkeys — \
-             merge manually or remove it, then re-run",
+    // No sentinel block. agentkeys wire OWNS the runtime's `hooks:` key (the IAM
+    // guarantee requires the hooks be un-bypassable, and YAML allows only one
+    // `hooks:` key), so if any top-level `hooks:` is present we REPLACE it —
+    // whether it's our own block whose sentinel comments a host re-serialization
+    // (`hermes config set`) dropped, or a hand-authored block. Documented for
+    // users in docs/user-manual.md.
+    if let Some(cleaned) = strip_top_level_hooks(&existing) {
+        if check_only {
+            return Ok(Outcome::Ok(format!(
+                "[check-only] would replace the existing top-level `hooks:` in {} with the managed block",
+                path.display()
+            )));
+        }
+        let sep = if cleaned.is_empty() || cleaned.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let merged = format!("{cleaned}{sep}{block}\n");
+        std::fs::write(path, merged).with_context(|| format!("write {}", path.display()))?;
+        return Ok(Outcome::Ok(format!(
+            "replaced existing `hooks:` with the managed block in {} \
+             (agentkeys wire owns this key — see docs/user-manual.md)",
             path.display()
         )));
     }
@@ -519,14 +583,60 @@ mod tests {
     }
 
     #[test]
-    fn merge_block_refuses_foreign_hooks() {
+    fn merge_block_replaces_foreign_hooks() {
         let dir = std::env::temp_dir().join(format!("agentkeys-foreign-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config.yaml");
-        std::fs::write(&cfg, "hooks:\n  pre_tool_call: []\n").unwrap();
+        // A hand-authored hooks: block. agentkeys wire OWNS the hooks: key
+        // (docs/user-manual.md), so it REPLACES this — never coexists.
+        std::fs::write(
+            &cfg,
+            "model:\n  default: gpt\nhooks:\n  pre_tool_call:\n    - command: ~/my-own-hook.sh\n",
+        )
+        .unwrap();
         let block = format!("{BLOCK_START}\nhooks_auto_accept: true\n{BLOCK_END}");
         let outcome = merge_block(&cfg, &block, false).unwrap();
-        assert!(matches!(outcome, Outcome::Fail(_)));
+        assert!(matches!(outcome, Outcome::Ok(_)), "should replace, not refuse");
+        let after = std::fs::read_to_string(&cfg).unwrap();
+        assert!(after.contains(BLOCK_START), "managed block installed");
+        assert!(after.contains("model:"), "unrelated keys preserved");
+        assert!(
+            !after.contains("my-own-hook.sh"),
+            "the foreign hook is replaced (wire owns the hooks: key)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_block_adopts_unsentineled_agentkeys_block() {
+        let dir = std::env::temp_dir().join(format!("agentkeys-adopt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.yaml");
+        // Simulate Hermes having re-serialized config.yaml: our hooks DATA is
+        // present but the sentinel COMMENTS were dropped, next to an unrelated key.
+        let stripped = "model:\n  default: gpt\nhooks:\n  pre_llm_call:\n    - command: ~/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh\n      timeout: 5\nhooks_auto_accept: true\n";
+        std::fs::write(&cfg, stripped).unwrap();
+
+        let block = format!("{BLOCK_START}\nhooks_auto_accept: true\n{BLOCK_END}");
+        let out = merge_block(&cfg, &block, false).unwrap();
+        assert!(matches!(out, Outcome::Ok(_)), "should adopt the stripped block");
+        let after = std::fs::read_to_string(&cfg).unwrap();
+        assert!(after.contains("model:"), "preserves unrelated keys");
+        assert_eq!(
+            after.matches(BLOCK_START).count(),
+            1,
+            "exactly one sentinel block"
+        );
+        assert!(after.contains(BLOCK_END));
+        assert!(
+            !after.contains("agentkeys-prellm-memory-inject.sh"),
+            "the old bare hooks block is removed, not duplicated"
+        );
+
+        // Idempotent: a second run now sees the sentinels → skip.
+        let again = merge_block(&cfg, &block, false).unwrap();
+        assert!(matches!(again, Outcome::Skip(_)), "second run should skip");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

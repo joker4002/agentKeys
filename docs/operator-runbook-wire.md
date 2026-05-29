@@ -115,6 +115,7 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | Phase 4 `4.1 model smoke` / surprise → HTTP 429 | OpenRouter throttling a `:free` model | retry, or use the paid default `LLM_MODEL=deepseek/deepseek-v4-flash` |
 | Surprise reply says "nothing in memory" | wire hooks/MCP missing → `pre_llm_call` never injected | 4.0 now prechecks + fails loud; ensure Phases 1+2 ran (no `--skip-1/--skip-2`): `~/.hermes/agent-hooks/` exists + `:18088/healthz` up; use a fresh Hermes session |
 | Phase 1 `1.4 mcp server … did not come up` → `Address already in use` | `MCP_PORT` collides with a sandbox service (8088 = built-in `gem-server`) | default is now `18088` (outside the sandbox's range); override `MCP_PORT` if it still clashes — check `ss -ltnp` in the sandbox |
+| Hermes was memory-aware, now replies "nothing in memory" | a sandbox/host restart killed the `nohup`-started MCP server — the memory hook then gets `{}` (and `hooks doctor` shows "modified since approval") | bring MCP back: `bash harness/phase1-wire-demo.sh --light --skip-2 --skip-3 --skip-4 --skip-5` (Phases 0+1 only — restarts MCP without touching the wiring), then ask again in a fresh Hermes turn. The MCP server is not yet a supervised service, so it does not survive a container restart. |
 
 ## Appendix A — what `agentkeys wire` writes (reference)
 
