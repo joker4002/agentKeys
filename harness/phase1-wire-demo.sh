@@ -260,25 +260,36 @@ phase1_sandbox() {
     fi
   done
 
-  # 1.4 MCP server in the sandbox (detached; idempotent on :MCP_PORT).
-  # If a fresh server binary was just uploaded, restart so re-runs serve new code.
-  if [[ "$mcp_bin_changed" == true ]]; then
-    sbx_exec "pkill -f agentkeys-mcp-server || true; sleep 1" >/dev/null
-  fi
-  if [[ "$mcp_bin_changed" != true && "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" ]]; then
-    ok "1.4 mcp server" "already up on :$MCP_PORT"
+  # 1.4 MCP server in the sandbox (detached). Idempotent + mode/token-aware:
+  # a server already on :MCP_PORT is REUSED only when its --backend AND
+  # --vendor-tokens match THIS run's intent. A mismatched server — a leftover
+  # real-mode server when we asked for --light, or a stale token — is killed and
+  # restarted; otherwise the wired hook's token won't match the server and every
+  # memory.get/permission.check 401s ("bearer token not recognized"). Also
+  # restart when a fresh binary was just uploaded.
+  local mcp_backend mcp_vendor cmd
+  if [[ "$MODE" == "light" ]]; then
+    mcp_backend="in-memory"; mcp_vendor="magiclick:$VENDOR_TOKEN"
+    cmd="$MCP_BIN_DST --backend in-memory --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor"
   else
-    local cmd
-    if [[ "$MODE" == "light" ]]; then
-      cmd="$MCP_BIN_DST --backend in-memory --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens magiclick:$VENDOR_TOKEN"
-    else
-      cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens harness:$VENDOR_TOKEN --broker-url ${BACKEND_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI"
-    fi
+    mcp_backend="http"; mcp_vendor="harness:$VENDOR_TOKEN"
+    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BACKEND_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI"
+  fi
+  # Reuse only if a live server's argv carries BOTH the intended backend + token.
+  local reuse=false
+  if [[ "$mcp_bin_changed" != true \
+        && "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" \
+        && -n "$(sbx_exec "pgrep -af agentkeys-mcp-server | grep -F -- '--backend $mcp_backend' | grep -F -- '--vendor-tokens $mcp_vendor'")" ]]; then
+    reuse=true
+  fi
+  if [[ "$reuse" == true ]]; then
+    ok "1.4 mcp server" "already up on :$MCP_PORT ($mcp_backend, token matches)"
+  else
+    # Kill any mismatched/stale/leftover server, then start the correct one.
+    sbx_exec "pkill -f agentkeys-mcp-server 2>/dev/null || true; sleep 1" >/dev/null
     sbx_exec "nohup $cmd >/tmp/agentkeys-mcp.log 2>&1 & sleep 2; echo started" >/dev/null
-    local started_msg="started ($MODE backend)"
-    [[ "$mcp_bin_changed" == true ]] && started_msg="restarted with fresh binary ($MODE backend)"
     [[ "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" ]] \
-      && ok "1.4 mcp server" "$started_msg" \
+      && ok "1.4 mcp server" "(re)started ($mcp_backend backend, token $mcp_vendor)" \
       || fail "1.4 mcp server" "did not come up — see /tmp/agentkeys-mcp.log in the sandbox"
   fi
 }
