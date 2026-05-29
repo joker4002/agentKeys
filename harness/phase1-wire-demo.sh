@@ -333,23 +333,41 @@ phase1_sandbox() {
       || fail "1.4 mcp server" "did not come up — see /tmp/agentkeys-mcp.log in the sandbox"
   fi
 
-  # 1.5 seed the real memory worker (Mode R ONLY — in-memory auto-seeds the
-  # fixture). Writes the demo travel memory so the agent reads it back in Act 1.
-  # The cap-mint Store needs the memory scope granted to the agent (Touch ID via
-  # heima-scope-set.sh --webauthn at 0.5) + a live master session. Idempotent:
-  # skip when the namespace already returns content. SEED_MEMORY_CONTENT overrides.
+  # 1.5 seed the real memory worker (Mode R ONLY — in-memory auto-seeds). The
+  # agent reads this back in Act 1. Idempotent + self-authorizing:
+  #   a. check the namespace — if it already returns content, skip everything;
+  #   b. else grant the agent the memory SERVICE scope via real WebAuthn
+  #      (heima-scope-set.sh --webauthn → Touch ID; on-chain idempotent, only
+  #      prompts when not yet scoped because we gate on the empty-memory check);
+  #   c. then memory.put (cap-mint Store via the master session → real worker).
+  # SEED_MEMORY_CONTENT overrides the fixture; SEED_SCOPE_SERVICES overrides the
+  # granted service list (NOTE: heima-scope-set.sh SETS the full list — include
+  # every service the agent needs, comma-separated).
   if [[ "$MODE" == "real" ]]; then
     local seed="${SEED_MEMORY_CONTENT:-Chengdu trip — Apr 12 to 16, hotpot at Yulin.}"
+    local svcs="${SEED_SCOPE_SERVICES:-memory}"
     local env_pfx="AGENTKEYS_MCP_URL=$MCP_URL_IN_SANDBOX AGENTKEYS_MCP_VENDOR_TOKEN=$VENDOR_TOKEN AGENTKEYS_ACTOR_OMNI=$ACTOR_OMNI AGENTKEYS_OPERATOR_OMNI=$OPERATOR_OMNI AGENTKEYS_SESSION_BEARER=$SESSION_BEARER"
     local got; got="$(sbx_exec "$env_pfx $AGENT_BIN_DST hook memory-inject --namespaces $MEMORY_NS 2>/dev/null")"
     if echo "$got" | grep -q '"context"'; then
       ok "1.5 seed memory" "namespace '$MEMORY_NS' already populated — skip"
-    elif gate "1.5 seed memory" "seed the REAL memory worker: write \"$seed\" to the agent's '$MEMORY_NS' namespace (needs the memory scope granted via Touch ID at 0.5). Proceed?" confirm; then
-      local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
-      if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
-        ok "1.5 seed memory" "wrote '$MEMORY_NS' to the real memory worker"
+    elif gate "1.5 seed memory" "memory '$MEMORY_NS' is empty — grant the memory scope (real Touch ID) + seed \"$seed\" to the real worker. Proceed?" confirm; then
+      # 1.5a grant the memory service scope via real WebAuthn (Touch ID on the Mac).
+      log "  1.5a scope grant: heima-scope-set.sh --webauthn --agent $AGENT_LABEL --services $svcs (expect a Touch ID prompt)"
+      local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "$svcs" --session-id "$SESSION_ID" 2>&1)"
+      echo "$grant" | sed 's/^/      /' >&2
+      if echo "$grant" | grep -q '"skipped"'; then
+        fail "1.5a scope grant" "grant SKIPPED — K11 likely not enrolled with webauthn. Run: agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI ; then re-run."
+      elif echo "$grant" | grep -qiE '"ok":[[:space:]]*true|isServiceInScope|already'; then
+        ok "1.5a scope grant" "memory scope granted/confirmed (services: $svcs)"
+        # 1.5b seed (sandbox-side memory.put → cap-mint Store → real worker).
+        local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
+        if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
+          ok "1.5b seed memory" "wrote '$MEMORY_NS' to the real memory worker"
+        else
+          fail "1.5b seed memory" "memory.put failed after grant — master session expired, or worker unreachable. Output: $(echo "$out" | tr '\n' ' ' | cut -c1-180)"
+        fi
       else
-        fail "1.5 seed memory" "memory.put failed — likely the memory scope isn't granted (run scripts/heima-scope-set.sh --webauthn for actor ${ACTOR_OMNI:0:12}… + Touch ID) or the master session expired. Output: $(echo "$out" | tr '\n' ' ' | cut -c1-180)"
+        fail "1.5a scope grant" "heima-scope-set.sh failed — see output above (master session valid? contracts up?)"
       fi
     else
       skip "1.5 seed memory" "operator declined"
