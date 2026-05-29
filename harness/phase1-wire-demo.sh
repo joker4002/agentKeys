@@ -6,13 +6,14 @@
 #
 # Spec: docs/spec/plans/phase1-wire-harness-test-plan.md
 #
-# Two modes:
+# Two modes — you MUST pick ONE explicitly (there is NO default; running real
+# mode by accident flips the sandbox MCP to the live broker and loses the demo):
 #   --light   In-memory MCP IN THE SANDBOX + real Hermes + the wire flow.
-#             No real account / broker / chain. The lighter inner loop.
-#   (default) Mode R — real broker + workers + Heima mainnet, REUSING the
-#             account `setup-heima.sh` created (master `alice`, agent
-#             `demo-agent`). Live-env steps fail-loud with guidance if a
-#             prerequisite is missing.
+#             Self-contained: NO real account / broker / chain. Seeds the demo
+#             memory fixture — the "Chengdu" surprise lives HERE. Start here.
+#   --real    Live broker + workers + Heima mainnet, REUSING the account
+#             `setup-heima.sh` created (master `alice`, agent `demo-agent`).
+#             NO in-memory fixture. Live-env steps fail-loud if a prereq missing.
 #
 # The agent binary must be aarch64-linux (the sandbox is aarch64 Linux); the
 # harness cross-builds it in an arm64 Linux rust container and uploads it via
@@ -24,15 +25,16 @@
 # else is automated.
 #
 # Usage:
-#   bash harness/phase1-wire-demo.sh [--light] [--webauthn] [--unwire]
+#   bash harness/phase1-wire-demo.sh {--light | --real} [--webauthn] [--unwire]
 #                                    [--yes] [--skip-N ...] [--help]
+#   (--light or --real is REQUIRED — the harness refuses to guess.)
 
 set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ─── config (env overridable) ──────────────────────────────────────────────
-MODE="real"
+MODE=""   # no default — must be set explicitly via --light or --real (see flags)
 SANDBOX_URL="${SANDBOX_URL:-http://localhost:8080}"
 MCP_PORT="${MCP_PORT:-18088}"   # 8088 collides with the aiosandbox built-in gem-server; 18088 is outside its range
 MCP_URL_IN_SANDBOX="http://localhost:${MCP_PORT}/mcp"
@@ -75,14 +77,38 @@ SESSION_BEARER="${AGENTKEYS_SESSION_BEARER:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --light)     MODE="light"; shift ;;
+    --real)      MODE="real"; shift ;;
     --webauthn)  WEBAUTHN=true; shift ;;
     --unwire)    UNWIRE=true; shift ;;
     --yes)       ASSUME_YES=true; shift ;;
     --skip-*)    SKIP_PHASES="$SKIP_PHASES ${1#--skip-}"; shift ;;
-    --help|-h)   sed -n '2,28p' "$0"; exit 0 ;;
+    --help|-h)   sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
+
+# Require an explicit mode — never silently default to the live broker.
+if [[ -z "$MODE" ]]; then
+  echo "ERROR: pick a mode explicitly — this harness will NOT guess." >&2
+  echo "  --light   in-memory demo, self-contained (the Chengdu surprise lives here) — START HERE" >&2
+  echo "  --real    live broker + workers + Heima mainnet (reuses the real account)" >&2
+  echo "Running --real by accident flips the sandbox MCP to the live broker and" >&2
+  echo "loses the in-memory demo fixture. See --help." >&2
+  exit 2
+fi
+
+# Loud mode banner so the active mode is never ambiguous.
+if [[ "$MODE" == "light" ]]; then
+  echo "════════════════════════════════════════════════════════════════════"
+  echo "  MODE: LIGHT — in-memory MCP, self-contained, seeded demo fixture"
+  echo "                (the Chengdu memory surprise lives here)"
+  echo "════════════════════════════════════════════════════════════════════"
+else
+  echo "════════════════════════════════════════════════════════════════════"
+  echo "  MODE: REAL — live broker + workers + Heima MAINNET"
+  echo "               (NO in-memory Chengdu fixture; uses the real account)"
+  echo "════════════════════════════════════════════════════════════════════"
+fi
 
 # ─── output (CLAUDE.md ok/skip/fail convention) ──────────────────────────────
 FAILED=0
@@ -288,11 +314,18 @@ phase1_sandbox() {
   if [[ "$reuse" == true ]]; then
     ok "1.4 mcp server" "already up on :$MCP_PORT ($mcp_backend, token matches)"
   else
-    # Kill any mismatched/stale/leftover server, then start the correct one.
-    sbx_exec "pkill -f agentkeys-mcp-server 2>/dev/null || true; sleep 1" >/dev/null
-    sbx_exec "nohup $cmd >/tmp/agentkeys-mcp.log 2>&1 & sleep 2; echo started" >/dev/null
+    # Kill any mismatched/stale/leftover server. The server runs under a respawn
+    # loop (below); the wrapper's argv also matches agentkeys-mcp-server, so a
+    # double-pkill (with a beat between) takes down both the loop and any child
+    # it respawns mid-restart.
+    sbx_exec "pkill -f agentkeys-mcp-server 2>/dev/null; sleep 1; pkill -f agentkeys-mcp-server 2>/dev/null; sleep 1" >/dev/null
+    # Start under a RESPAWN LOOP so a crash self-heals without a harness re-run,
+    # and append (>>) to the log so a restart never truncates the audit trail
+    # (a plain > wiped it on every restart). The server re-seeds its in-memory
+    # fixture on each (re)start, so a respawn is a clean reset — no data drift.
+    sbx_exec "nohup bash -c 'while true; do $cmd >>/tmp/agentkeys-mcp.log 2>&1; echo \"[respawn]\" >>/tmp/agentkeys-mcp.log; sleep 1; done' >/dev/null 2>&1 & sleep 2; echo started" >/dev/null
     [[ "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" ]] \
-      && ok "1.4 mcp server" "(re)started ($mcp_backend backend, token $mcp_vendor)" \
+      && ok "1.4 mcp server" "(re)started under respawn loop ($mcp_backend backend, token $mcp_vendor)" \
       || fail "1.4 mcp server" "did not come up — see /tmp/agentkeys-mcp.log in the sandbox"
   fi
 }

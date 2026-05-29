@@ -17,23 +17,26 @@ reads only its permitted memory, is deterministically denied an over-cap action
 
 ```bash
 # Lighter path — real Hermes + the full wire flow in the sandbox, in-memory
-# backend. No real account/broker/chain. START HERE.
+# backend. No real account/broker/chain. The Chengdu surprise lives here. START HERE.
 bash harness/phase1-wire-demo.sh --light
 
 # Real — reuses your heima account (master alice + agent demo-agent),
-# real broker + workers + Heima mainnet.
-bash harness/phase1-wire-demo.sh
+# real broker + workers + Heima mainnet. NO in-memory Chengdu fixture.
+bash harness/phase1-wire-demo.sh --real
 ```
 
-Every step prints `ok proceeding` / `skip <reason>` / `fail <reason>`. The
-harness is idempotent — re-running is safe.
+**A mode is REQUIRED** — `--light` or `--real`. The harness refuses to guess
+(running `--real` by accident flips the sandbox MCP to the live broker and loses
+the in-memory demo fixture). It prints a loud `MODE:` banner so the active mode
+is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
+`fail <reason>`; the harness is idempotent — re-running is safe.
 
 ## The two modes
 
 | Mode | What it exercises | Needs | Time | Manual gates |
 |---|---|---|---|---|
 | **`--light`** | In-memory MCP **in the sandbox** + real Hermes + the full `agentkeys wire` flow. No real account/broker/chain. | Docker, aiosandbox, a reachable rust image | minutes (first cross-build) | the Hermes surprise + confirm |
-| **(default) real** | The real broker + workers + Heima **mainnet**, reusing the `setup-heima.sh` account (master `alice`, agent `demo-agent`). | + a live broker/account + a non-expired master session | minutes | LLM key (auto if `OPENROUTER_API_KEY` set), Touch ID at scope grant (only if not already scoped), the surprise + confirm |
+| **`--real`** | The real broker + workers + Heima **mainnet**, reusing the `setup-heima.sh` account (master `alice`, agent `demo-agent`). NO in-memory Chengdu fixture. | + a live broker/account + a non-expired master session | minutes | LLM key (auto if `OPENROUTER_API_KEY` set), Touch ID at scope grant (only if not already scoped), the surprise + confirm |
 
 ## Prerequisites
 
@@ -115,7 +118,7 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | Phase 4 `4.1 model smoke` / surprise → HTTP 429 | OpenRouter throttling a `:free` model | retry, or use the paid default `LLM_MODEL=deepseek/deepseek-v4-flash` |
 | Surprise reply says "nothing in memory" | wire hooks/MCP missing → `pre_llm_call` never injected | 4.0 now prechecks + fails loud; ensure Phases 1+2 ran (no `--skip-1/--skip-2`): `~/.hermes/agent-hooks/` exists + `:18088/healthz` up; use a fresh Hermes session |
 | Phase 1 `1.4 mcp server … did not come up` → `Address already in use` | `MCP_PORT` collides with a sandbox service (8088 = built-in `gem-server`) | default is now `18088` (outside the sandbox's range); override `MCP_PORT` if it still clashes — check `ss -ltnp` in the sandbox |
-| Hermes was memory-aware, now replies "nothing in memory" | a sandbox/host restart killed the `nohup`-started MCP server — the memory hook then gets `{}` (and `hooks doctor` shows "modified since approval") | bring MCP back: `bash harness/phase1-wire-demo.sh --light --skip-2 --skip-3 --skip-4 --skip-5` (Phases 0+1 only — restarts MCP without touching the wiring), then ask again in a fresh Hermes turn. The MCP server is not yet a supervised service, so it does not survive a container restart. |
+| Hermes was memory-aware, now replies "nothing in memory" | the MCP server died, **or** a `--real` run flipped the sandbox to the live broker (no Chengdu fixture) | the MCP server now runs under a **respawn loop** (1.4), so a crash self-heals; if it's still down (e.g. a sandbox *container* restart killed the loop), bring it back with `bash harness/phase1-wire-demo.sh --light --skip-2 --skip-3 --skip-4 --skip-5` (Phases 0+1 only). If you ran `--real`, re-run `--light` to restore the in-memory fixture. Then ask again in a fresh Hermes turn. |
 
 ## Appendix A — what `agentkeys wire` writes (reference)
 
