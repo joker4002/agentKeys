@@ -269,6 +269,33 @@ pub async fn memory_inject(
     Ok(String::new())
 }
 
+/// `agentkeys memory put --namespace <ns> --content <text>` — write a memory
+/// entry via `agentkeys.memory.put`. Used to SEED a namespace (e.g. the demo
+/// travel/Chengdu fixture) in the REAL memory worker; the in-memory backend
+/// auto-seeds the fixture, so this is only needed for `--real`. Identity
+/// (actor / operator / device_key_hash) defaults from the MCP server's
+/// configured defaults; the actor header is sent when known. Unlike the hook
+/// helpers this surfaces errors (returns Err) so a failed seed is loud.
+pub async fn memory_put(
+    namespace: &str,
+    content: &str,
+    mcp_url: Option<String>,
+    vendor_token: Option<String>,
+    actor: Option<String>,
+    operator: Option<String>,
+) -> Result<String> {
+    let client = HookClient::resolve(mcp_url, vendor_token, actor, operator);
+    let mut args = json!({"namespace": namespace, "content": content});
+    if !client.actor.is_empty() {
+        args["actor"] = json!(client.actor);
+    }
+    let result = client
+        .call_tool("agentkeys.memory.put", args)
+        .await
+        .context("memory.put")?;
+    Ok(result.to_string())
+}
+
 /// Extract the `content` field of an `agentkeys.memory.get` result. The
 /// MCP tool layer already base64-decodes the worker's `plaintext_b64`
 /// into a UTF-8 `content` string (see

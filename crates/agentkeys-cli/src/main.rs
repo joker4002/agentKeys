@@ -358,6 +358,15 @@ enum Commands {
         #[command(subcommand)]
         action: HookAction,
     },
+
+    #[command(
+        about = "Memory namespace helpers (e.g. SEED a namespace in the real worker)",
+        long_about = "Direct memory operations against the AgentKeys MCP server. `put` writes an entry — used to SEED a namespace (e.g. the demo travel fixture) in the REAL memory worker; in-memory mode auto-seeds the fixture, so this is only needed for the real backend. Identity (actor / operator / device_key_hash) defaults from the MCP server's configured defaults."
+    )]
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -607,6 +616,29 @@ enum HookAction {
         /// Comma-separated memory namespaces to inject.
         #[arg(long, default_value = "travel")]
         namespaces: String,
+        #[arg(long, env = "AGENTKEYS_MCP_URL")]
+        mcp_url: Option<String>,
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
+        vendor_token: Option<String>,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Write a memory entry — SEED a namespace (e.g. the demo travel fixture).
+    /// Reaches the real memory worker in --real mode (in-memory auto-seeds).
+    #[command(about = "Write/seed a memory namespace entry via agentkeys.memory.put")]
+    Put {
+        /// Namespace to write (e.g. `travel`).
+        #[arg(long)]
+        namespace: String,
+        /// Plaintext content to store.
+        #[arg(long)]
+        content: String,
         #[arg(long, env = "AGENTKEYS_MCP_URL")]
         mcp_url: Option<String>,
         #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
@@ -1014,6 +1046,26 @@ async fn main() {
             } => {
                 agentkeys_cli::hook::memory_inject(
                     namespaces,
+                    mcp_url.clone(),
+                    vendor_token.clone(),
+                    actor.clone(),
+                    operator.clone(),
+                )
+                .await
+            }
+        },
+        Commands::Memory { action } => match action {
+            MemoryAction::Put {
+                namespace,
+                content,
+                mcp_url,
+                vendor_token,
+                actor,
+                operator,
+            } => {
+                agentkeys_cli::hook::memory_put(
+                    namespace,
+                    content,
                     mcp_url.clone(),
                     vendor_token.clone(),
                     actor.clone(),

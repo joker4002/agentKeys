@@ -72,6 +72,7 @@ ACTOR_OMNI="${AGENTKEYS_ACTOR_OMNI:-}"
 OPERATOR_OMNI="${AGENTKEYS_OPERATOR_OMNI:-}"
 VENDOR_TOKEN="${AGENTKEYS_MCP_VENDOR_TOKEN:-}"
 SESSION_BEARER="${AGENTKEYS_SESSION_BEARER:-}"
+DEVICE_KEY_HASH="${AGENTKEYS_DEVICE_KEY_HASH:-}"   # Mode R: agent device key hash (from agent file) — memory.put cap-mint needs it
 
 # ─── flags ──────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -198,6 +199,9 @@ phase0_prereqs() {
   if [[ -z "$OPERATOR_OMNI" && -f "$AGENT_FILE" ]]; then
     OPERATOR_OMNI="$(jq -r '.operator_omni // empty' "$AGENT_FILE" 2>/dev/null)"
   fi
+  if [[ -z "$DEVICE_KEY_HASH" && -f "$AGENT_FILE" ]]; then
+    DEVICE_KEY_HASH="$(jq -r '.device_key_hash // empty' "$AGENT_FILE" 2>/dev/null)"
+  fi
   if [[ -n "$ACTOR_OMNI" ]]; then ok "0.4 agent actor_omni" "${ACTOR_OMNI:0:14}…"
   else fail "0.4 agent actor_omni" "unknown — pass --actor-omni / AGENTKEYS_ACTOR_OMNI, or run heima-agent-create.sh (--agent-file $AGENT_FILE)"; fi
   if [[ -n "$OPERATOR_OMNI" ]]; then ok "0.3 operator_omni" "${OPERATOR_OMNI:0:14}… (from agent file)"
@@ -302,7 +306,7 @@ phase1_sandbox() {
     cmd="$MCP_BIN_DST --backend in-memory --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor"
   else
     mcp_backend="http"; mcp_vendor="harness:$VENDOR_TOKEN"
-    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BACKEND_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI"
+    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BACKEND_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH"
   fi
   # Reuse only if a live server's argv carries BOTH the intended backend + token.
   local reuse=false
@@ -327,6 +331,29 @@ phase1_sandbox() {
     [[ "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" ]] \
       && ok "1.4 mcp server" "(re)started under respawn loop ($mcp_backend backend, token $mcp_vendor)" \
       || fail "1.4 mcp server" "did not come up — see /tmp/agentkeys-mcp.log in the sandbox"
+  fi
+
+  # 1.5 seed the real memory worker (Mode R ONLY — in-memory auto-seeds the
+  # fixture). Writes the demo travel memory so the agent reads it back in Act 1.
+  # The cap-mint Store needs the memory scope granted to the agent (Touch ID via
+  # heima-scope-set.sh --webauthn at 0.5) + a live master session. Idempotent:
+  # skip when the namespace already returns content. SEED_MEMORY_CONTENT overrides.
+  if [[ "$MODE" == "real" ]]; then
+    local seed="${SEED_MEMORY_CONTENT:-Chengdu trip — Apr 12 to 16, hotpot at Yulin.}"
+    local env_pfx="AGENTKEYS_MCP_URL=$MCP_URL_IN_SANDBOX AGENTKEYS_MCP_VENDOR_TOKEN=$VENDOR_TOKEN AGENTKEYS_ACTOR_OMNI=$ACTOR_OMNI AGENTKEYS_OPERATOR_OMNI=$OPERATOR_OMNI AGENTKEYS_SESSION_BEARER=$SESSION_BEARER"
+    local got; got="$(sbx_exec "$env_pfx $AGENT_BIN_DST hook memory-inject --namespaces $MEMORY_NS 2>/dev/null")"
+    if echo "$got" | grep -q '"context"'; then
+      ok "1.5 seed memory" "namespace '$MEMORY_NS' already populated — skip"
+    elif gate "1.5 seed memory" "seed the REAL memory worker: write \"$seed\" to the agent's '$MEMORY_NS' namespace (needs the memory scope granted via Touch ID at 0.5). Proceed?" confirm; then
+      local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
+      if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
+        ok "1.5 seed memory" "wrote '$MEMORY_NS' to the real memory worker"
+      else
+        fail "1.5 seed memory" "memory.put failed — likely the memory scope isn't granted (run scripts/heima-scope-set.sh --webauthn for actor ${ACTOR_OMNI:0:12}… + Touch ID) or the master session expired. Output: $(echo "$out" | tr '\n' ' ' | cut -c1-180)"
+      fi
+    else
+      skip "1.5 seed memory" "operator declined"
+    fi
   fi
 }
 

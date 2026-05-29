@@ -43,7 +43,7 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 | **In one line** | Self-contained sandbox demo — nothing external | The live product wired to real infra |
 | **MCP backend** | `in-memory` (data lives in the server's RAM) | `http` → real broker + workers |
 | **Memory data** | a **pre-seeded fixture** — the "Chengdu trip" is baked into the binary | the real S3-backed memory worker (empty unless you seeded it) |
-| **The Chengdu surprise** | ✅ works out of the box | ❌ only if you first seed the real memory worker |
+| **The Chengdu surprise** | ✅ works out of the box | ✅ harness **step 1.5 seeds it** (`agentkeys memory put`) — needs the memory scope granted to the agent (Touch ID at 0.5) + a live master session |
 | **Broker / chain** | none | real broker (`signer.litentry.org`) + Heima **mainnet** |
 | **Account** | a fixed demo actor/operator | your real `setup-heima.sh` account (alice + demo-agent) |
 | **Cap-mint** | stubbed — always succeeds | real cap-mint (needs a valid master session) |
@@ -74,7 +74,8 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 ## The manual gates (the "test through" essence)
 
 - **LLM key** — auto from `OPENROUTER_API_KEY` (or `LLM_API_KEY`); only prompts if absent. Phase 4.0 writes it to the sandbox `~/.hermes/.env` and sets `provider: openrouter` + `model.default` (default `deepseek/deepseek-v4-flash`; override `LLM_MODEL`). A non-fatal `4.1 model smoke` confirms the model is live before the surprise.
-- **Real Touch ID** — only at scope grant in real mode, and only if the reused account isn't already scoped (`--webauthn`).
+- **Real Touch ID** — only at scope grant in real mode, and only if the reused account isn't already scoped (`--webauthn`). This grants the agent the **memory scope** that step 1.5's seed write depends on.
+- **Seed the real memory worker** (`--real` only) — step **1.5** writes the demo memory (`agentkeys memory put`, default the Chengdu fixture; override `SEED_MEMORY_CONTENT`). Idempotent — skips if the namespace already has content. Prompts before writing (auto with `--yes`); it needs the memory scope granted (the Touch ID above) + a live master session, and fails loud with the `heima-scope-set.sh --webauthn` command if the cap-mint is rejected.
 - **The Hermes surprise** — open Hermes in the sandbox, send "where am I going this weekend?", and judge the memory-aware reply (`[y/N]`).
 
 Pass `--yes` to auto-confirm the non-secret prompts.
