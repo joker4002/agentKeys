@@ -31,12 +31,27 @@ the in-memory demo fixture). It prints a loud `MODE:` banner so the active mode
 is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 `fail <reason>`; the harness is idempotent — re-running is safe.
 
-## The two modes
+## The two modes — `--light` vs `--real`
 
-| Mode | What it exercises | Needs | Time | Manual gates |
-|---|---|---|---|---|
-| **`--light`** | In-memory MCP **in the sandbox** + real Hermes + the full `agentkeys wire` flow. No real account/broker/chain. | Docker, aiosandbox, a reachable rust image | minutes (first cross-build) | the Hermes surprise + confirm |
-| **`--real`** | The real broker + workers + Heima **mainnet**, reusing the `setup-heima.sh` account (master `alice`, agent `demo-agent`). NO in-memory Chengdu fixture. | + a live broker/account + a non-expired master session | minutes | LLM key (auto if `OPENROUTER_API_KEY` set), Touch ID at scope grant (only if not already scoped), the surprise + confirm |
+> **`--light` = self-contained demo** (fake-but-pre-seeded data, nothing
+> external). **`--real` = the live product** (real broker + chain + your
+> account, no demo data). "Light" = *lightweight / no external dependencies*,
+> not "fewer features" — it runs the identical wire + hook + memory flow.
+
+| | **`--light`** (start here) | **`--real`** |
+|---|---|---|
+| **In one line** | Self-contained sandbox demo — nothing external | The live product wired to real infra |
+| **MCP backend** | `in-memory` (data lives in the server's RAM) | `http` → real broker + workers |
+| **Memory data** | a **pre-seeded fixture** — the "Chengdu trip" is baked into the binary | the real S3-backed memory worker (empty unless you seeded it) |
+| **The Chengdu surprise** | ✅ works out of the box | ❌ only if you first seed the real memory worker |
+| **Broker / chain** | none | real broker (`signer.litentry.org`) + Heima **mainnet** |
+| **Account** | a fixed demo actor/operator | your real `setup-heima.sh` account (alice + demo-agent) |
+| **Cap-mint** | stubbed — always succeeds | real cap-mint (needs a valid master session) |
+| **Vendor token** | `demo-tok` | `harness-tok` |
+| **Touch ID** | never | at scope grant (if not already scoped) |
+| **Needs network to** | sandbox + Docker + (first build) a rust image | + reachable broker / workers / Heima RPC |
+| **Proves** | the wire + hook + memory-injection **plumbing** works | the same, against **real IAM infra** (real signing + isolation) |
+| **Cost / risk** | free, can't break anything | real gas/cost, mutates real account state |
 
 ## Prerequisites
 
