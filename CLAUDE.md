@@ -40,14 +40,14 @@ When you discover a name divergence while making any change, fix it in the same 
 ## Version Control
 Use `jj` (Jujutsu) for all version control. Never use raw `git` commands.
 
-## Branch push policy (this branch: `evm`)
-On the `evm` branch, after **every** code/doc update that lands a `jj describe` (or amends the working change), push immediately with `jj git push`. The remote broker host pulls from `origin/evm` via `scripts/setup-broker-host.sh --upgrade`, so an unpushed local commit means the deploy script silently picks up the previous revision. No "I'll push at the end" — push per change.
+## Branch / deploy policy (`origin/main` is the default + deploy branch)
+**`origin/evm` is DEPRECATED.** All new work lands on the default branch **`origin/main`** (feature branch → PR → `main`). The remote broker host now deploys from `origin/main`: `bash scripts/setup-broker-host.sh --ref main` (fetch + checkout + pull `main`, rebuild, redeploy). `--upgrade` is a back-compat no-op — the script is idempotent and `--ref` drives any pull. Push per change so the branch the host deploys from is never behind your local commits; an unpushed commit means the deploy silently picks up the previous revision. (Historical note: the broker used to deploy from `origin/evm`; that branch is frozen — do not push to it.)
 
 ## Diagnosis-before-edit policy
 Before changing any file in response to a reported failure, **reproduce the failure locally** and isolate the layer (shell quoting, client tooling, doc command, broker code, network). If the cause is local (shell, copy-paste, env var), respond with the one-line fix and let the user run it — do NOT edit code or docs. Only edit when the cause is in the repo. Keep the response concise: failing command, root cause, fix command — nothing else.
 
 ## Land-the-fix policy
-Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to `origin/evm`. Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/evm`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
+Once a local repro proves a fix is correct, **land it the same turn**: edit every affected file (search repo-wide — never assume one file), commit, push to your working branch (PR'd to `origin/main`). Do not stop at "verified locally" or "fixed in one place" — the next operator running the docs will hit the same bug if the fix isn't on `origin/main`. Pair this with the diagnosis-before-edit policy: diagnose once, fix everywhere, push immediately.
 
 ## Runbook-fix-fold-back policy
 When the user is walking through a runbook (`docs/cloud-setup.md`, `docs/v2-stage1-migration-and-demo.md`, `scripts/setup-broker-host.sh`, etc.) and hits a step that fails, **two things must land in the same turn**:
