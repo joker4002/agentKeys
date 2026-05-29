@@ -252,6 +252,9 @@ phase1_sandbox() {
     if [[ -n "$want" && "$want" == "$have" ]]; then
       ok "1.3 $name" "already present (sha matches)"
     else
+      # A RUNNING executable can't be overwritten (ETXTBSY "Text file busy"), so
+      # stop a live mcp-server before uploading its new binary; 1.4 restarts it.
+      [[ "$dst" == "$MCP_BIN_DST" ]] && sbx_exec "pkill -f agentkeys-mcp-server 2>/dev/null; sleep 1" >/dev/null
       [[ "$(sbx_put "$src" "$dst")" == "$dst" ]] || { fail "1.3 $name" "upload failed"; continue; }
       sbx_exec "chmod +x $dst" >/dev/null
       [[ "$dst" == "$MCP_BIN_DST" ]] && mcp_bin_changed=true
