@@ -595,34 +595,53 @@ phase1_sandbox() {
     # </dev/null gives stdin an immediate EOF — older binaries' memory-inject
     # block on read_to_string(stdin) without it (fixed in hook.rs, kept here so
     # a stale on-sandbox binary can't re-freeze the demo before 1.3 re-uploads).
-    local got; got="$(sbx_exec "$env_pfx $AGENT_BIN_DST hook memory-inject --namespaces $MEMORY_NS </dev/null 2>/dev/null")"
-    if echo "$got" | grep -q '"context"'; then
-      ok "1.5 seed memory" "namespace '$MEMORY_NS' already populated — skip"
-    elif gate "1.5 seed memory" "memory '$MEMORY_NS' is empty — seed \"$seed\" to the real worker (grants the scope via real Touch ID only if --webauthn). Proceed?" confirm; then
-      # 1.5a try the put directly — works if the scope is already granted.
+    if [[ "$REUSE_AGENT" != true ]]; then
+      # Fresh pairing: Phase P just paired this brand-new actor and (with
+      # --webauthn) approved its [memory] scope at P.3 — you already gave Touch
+      # ID there. A fresh actor's namespace is always empty. So SEED
+      # AUTOMATICALLY — no [y/N] gate, no second prompt, no second Touch ID. One
+      # memory.put, which succeeds because P.3 granted the scope.
       local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
       if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
-        ok "1.5 seed memory" "wrote '$MEMORY_NS' to the real worker (scope already granted)"
-      elif [[ "$WEBAUTHN" == true ]]; then
-        # 1.5b scope rejected + --webauthn → grant via real Touch ID, then retry.
-        log "  1.5b scope grant: heima-scope-set.sh --webauthn --agent $AGENT_LABEL --services $svcs (expect a Touch ID prompt)"
-        local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "$svcs" 2>&1)"
-        echo "$grant" | sed 's/^/      /' >&2
-        if echo "$grant" | grep -q '"skipped"'; then
-          fail "1.5 seed memory" "scope grant SKIPPED — K11 not enrolled with webauthn. Run: agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI ; then re-run."
-        else
-          local out2; out2="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
-          if echo "$out2" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
-            ok "1.5 seed memory" "granted scope (Touch ID) + wrote '$MEMORY_NS' to the real worker"
-          else
-            fail "1.5 seed memory" "memory.put still failed after grant — session expired or worker unreachable. Output: $(echo "$out2" | tr '\n' ' ' | cut -c1-160)"
-          fi
-        fi
+        ok "1.5 seed memory" "auto-seeded '$MEMORY_NS' (scope approved at Phase P — no extra prompt)"
+      elif [[ "$WEBAUTHN" != true ]]; then
+        fail "1.5 seed memory" "memory.put scope-rejected and --webauthn NOT passed → Phase P (P.3) couldn't approve the scope. Re-run: bash harness/phase1-wire-demo.sh --real --webauthn. put: $(echo "$out" | tr '\n' ' ' | cut -c1-120)"
       else
-        fail "1.5 seed memory" "memory.put rejected (scope not granted) and --webauthn NOT passed — the harness won't trigger Touch ID. Re-run: bash harness/phase1-wire-demo.sh --real --webauthn (grants the memory scope + seeds). put: $(echo "$out" | tr '\n' ' ' | cut -c1-120)"
+        fail "1.5 seed memory" "memory.put failed despite Phase P granting the scope at P.3 — check the 'P.3 approve permissions' result above + worker reachability. put: $(echo "$out" | tr '\n' ' ' | cut -c1-160)"
       fi
     else
-      skip "1.5 seed memory" "operator declined"
+      # Legacy --reuse-agent: the agent was NOT freshly paired this run, so its
+      # memory may already be populated and the scope may need granting here.
+      # Idempotent + scope-aware + gated (the original flow).
+      local got; got="$(sbx_exec "$env_pfx $AGENT_BIN_DST hook memory-inject --namespaces $MEMORY_NS </dev/null 2>/dev/null")"
+      if echo "$got" | grep -q '"context"'; then
+        ok "1.5 seed memory" "namespace '$MEMORY_NS' already populated — skip"
+      elif gate "1.5 seed memory" "memory '$MEMORY_NS' is empty — seed \"$seed\"? (grants the scope via Touch ID only if --webauthn) Proceed?" confirm; then
+        # 1.5a try the put directly — works if the scope is already granted.
+        local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
+        if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
+          ok "1.5 seed memory" "wrote '$MEMORY_NS' to the real worker (scope already granted)"
+        elif [[ "$WEBAUTHN" == true ]]; then
+          # 1.5b scope rejected + --webauthn → grant via real Touch ID, then retry.
+          log "  1.5b scope grant: heima-scope-set.sh --webauthn --agent $AGENT_LABEL --services $svcs (expect a Touch ID prompt)"
+          local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "$svcs" 2>&1)"
+          echo "$grant" | sed 's/^/      /' >&2
+          if echo "$grant" | grep -q '"skipped"'; then
+            fail "1.5 seed memory" "scope grant SKIPPED — K11 not enrolled with webauthn. Run: agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI ; then re-run."
+          else
+            local out2; out2="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
+            if echo "$out2" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
+              ok "1.5 seed memory" "granted scope (Touch ID) + wrote '$MEMORY_NS' to the real worker"
+            else
+              fail "1.5 seed memory" "memory.put still failed after grant — session expired or worker unreachable. Output: $(echo "$out2" | tr '\n' ' ' | cut -c1-160)"
+            fi
+          fi
+        else
+          fail "1.5 seed memory" "memory.put rejected (scope not granted) and --webauthn NOT passed — the harness won't trigger Touch ID. Re-run with --real --webauthn. put: $(echo "$out" | tr '\n' ' ' | cut -c1-120)"
+        fi
+      else
+        skip "1.5 seed memory" "operator declined"
+      fi
     fi
   fi
 }
