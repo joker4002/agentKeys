@@ -77,9 +77,16 @@ ACTOR_OMNI="${AGENTKEYS_ACTOR_OMNI:-}"
 OPERATOR_OMNI="${AGENTKEYS_OPERATOR_OMNI:-}"
 VENDOR_TOKEN="${AGENTKEYS_MCP_VENDOR_TOKEN:-}"
 SESSION_BEARER="${AGENTKEYS_SESSION_BEARER:-}"
-# Agent session JWT (omni == ACTOR_OMNI) for the per-actor STS relay (0.8).
+# Agent session JWT (omni == ACTOR_OMNI) for the per-actor STS relay.
 # Distinct from SESSION_BEARER (the operator session that authorizes cap-mint).
+# In fresh §10.2 pairing it is minted IN THE SANDBOX by Phase P; legacy 0.8 mints
+# it on the master (only under --reuse-agent).
 AGENT_SESSION_BEARER="${AGENTKEYS_AGENT_SESSION_BEARER:-}"
+# Fresh §10.2 pairing (DEFAULT in --real): the agent generates its OWN device key
+# in the sandbox each run (key never on the master). --reuse-agent (or
+# AGENTKEYS_REUSE_AGENT=1) falls back to the legacy master-side agent file.
+REUSE_AGENT="${AGENTKEYS_REUSE_AGENT:-false}"
+[[ "$REUSE_AGENT" == "1" ]] && REUSE_AGENT=true
 DEVICE_KEY_HASH="${AGENTKEYS_DEVICE_KEY_HASH:-}"   # Mode R: agent device key hash (from agent file) — memory.put cap-mint needs it
 BROKER_URL="${AGENTKEYS_BROKER_URL:-}"             # Mode R: the BROKER (serves /v1/cap/*), resolved from OIDC_ISSUER in phase 0 — NOT the signer ($BACKEND_URL)
 
@@ -89,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     --light)     MODE="light"; shift ;;
     --real)      MODE="real"; shift ;;
     --webauthn)  WEBAUTHN=true; shift ;;
+    --reuse-agent) REUSE_AGENT=true; shift ;;
     --unwire)    UNWIRE=true; shift ;;
     --yes)       ASSUME_YES=true; shift ;;
     --skip-*)    SKIP_PHASES="$SKIP_PHASES ${1#--skip-}"; shift ;;
@@ -264,21 +272,31 @@ phase0_prereqs() {
     fail "0.2 broker healthz" "broker not reachable (BACKEND_URL=$broker) — run scripts/setup-broker-host.sh"
   fi
 
-  # Resolve actor_omni + operator_omni (flag/env → agent file → guidance).
-  # heima-agent-create.sh writes BOTH into the agent file.
-  if [[ -z "$ACTOR_OMNI" && -f "$AGENT_FILE" ]]; then
+  # Resolve operator_omni + actor_omni. OPERATOR_OMNI is the MASTER's omni
+  # (sha256("agentkeys"||"evm"||master_addr_lc)) — derive it from OPERATOR_KEY_FILE
+  # so it NEVER depends on the (key-less, fresh-each-run) agent file. In fresh
+  # §10.2 pairing (real, default) ACTOR_OMNI is set later by Phase P; the legacy
+  # file path stays for --reuse-agent.
+  local fresh_pairing=false
+  [[ "$MODE" == "real" && "$REUSE_AGENT" != true ]] && fresh_pairing=true
+  if [[ -z "$OPERATOR_OMNI" && -f "$OPERATOR_KEY_FILE" ]] && command -v cast >/dev/null 2>&1; then
+    local _maddr; _maddr="$(cast wallet address --private-key "$(tr -d '[:space:]' < "$OPERATOR_KEY_FILE")" 2>/dev/null | tr 'A-F' 'a-f')"
+    [[ -n "$_maddr" ]] && OPERATOR_OMNI="0x$(printf 'agentkeysevm%s' "$_maddr" | shasum -a 256 | awk '{print $1}')"
+  fi
+  if [[ -z "$ACTOR_OMNI" && "$fresh_pairing" != true && -f "$AGENT_FILE" ]]; then
     ACTOR_OMNI="$(jq -r '.actor_omni // empty' "$AGENT_FILE" 2>/dev/null)"
   fi
   if [[ -z "$OPERATOR_OMNI" && -f "$AGENT_FILE" ]]; then
     OPERATOR_OMNI="$(jq -r '.operator_omni // empty' "$AGENT_FILE" 2>/dev/null)"
   fi
-  if [[ -z "$DEVICE_KEY_HASH" && -f "$AGENT_FILE" ]]; then
+  if [[ -z "$DEVICE_KEY_HASH" && "$fresh_pairing" != true && -f "$AGENT_FILE" ]]; then
     DEVICE_KEY_HASH="$(jq -r '.device_key_hash // empty' "$AGENT_FILE" 2>/dev/null)"
   fi
   if [[ -n "$ACTOR_OMNI" ]]; then ok "0.4 agent actor_omni" "${ACTOR_OMNI:0:14}…"
+  elif [[ "$fresh_pairing" == true ]]; then skip "0.4 agent actor_omni" "fresh pairing — Phase P generates the agent key in the sandbox + sets actor_omni"
   else fail "0.4 agent actor_omni" "unknown — pass --actor-omni / AGENTKEYS_ACTOR_OMNI, or run heima-agent-create.sh (--agent-file $AGENT_FILE)"; fi
-  if [[ -n "$OPERATOR_OMNI" ]]; then ok "0.3 operator_omni" "${OPERATOR_OMNI:0:14}… (from agent file)"
-  else fail "0.3 operator_omni" "unknown — set .operator_omni in $AGENT_FILE, or pass --operator-omni / AGENTKEYS_OPERATOR_OMNI"; fi
+  if [[ -n "$OPERATOR_OMNI" ]]; then ok "0.3 operator_omni" "${OPERATOR_OMNI:0:14}… (from master key)"
+  else fail "0.3 operator_omni" "unknown — set OPERATOR_KEY_FILE (master key) or AGENTKEYS_OPERATOR_OMNI / .operator_omni in $AGENT_FILE"; fi
 
   # 0.5 scope (verify; grant via real Touch ID only if missing).
   if [[ -n "${SCOPE_CONTRACT_ADDRESS_HEIMA:-}" && -n "$ACTOR_OMNI" ]]; then
@@ -355,21 +373,23 @@ phase0_prereqs() {
   # 0.8 agent session bearer — for the per-actor STS relay (issue #90). The MCP
   # server uses THIS session (omni == actor_omni) to mint
   # AssumeRoleWithWebIdentity creds tagged with the agent actor, so the worker's
-  # S3 ops are AWS-scoped to bots/<actor>/memory/. Minted non-interactively from
-  # the agent's own key (agent_private_key in the agent file). Distinct from
-  # 0.7's OPERATOR session (which authorizes cap-mint). Without it the worker
-  # falls back to its instance profile (no S3) and every memory op 502s.
-  if [[ "$MODE" == "real" && -z "$AGENT_SESSION_BEARER" ]]; then
-    local agent_key; agent_key="$(jq -r '.agent_private_key // empty' "$AGENT_FILE" 2>/dev/null)"
-    if [[ -n "$agent_key" ]] && command -v cast >/dev/null 2>&1 && [[ -n "$BROKER_URL" ]]; then
-      [[ "${agent_key:0:2}" != "0x" ]] && agent_key="0x$agent_key"
-      local akf asf; akf="$(mktemp)"; asf="$(mktemp)"
-      ( umask 077; printf '%s' "$agent_key" > "$akf" )
-      local ajwt; ajwt="$(wallet_sig_init_session "$akf" "$asf" "$BROKER_URL")" && AGENT_SESSION_BEARER="$ajwt" || true
-      rm -f "$akf" "$asf"
+  # S3 ops are AWS-scoped to bots/<actor>/memory/. Distinct from 0.7's OPERATOR
+  # session. In fresh §10.2 pairing it is minted IN THE SANDBOX by Phase P (the
+  # key never touches the master); only the legacy --reuse-agent path mints it
+  # here from the master-held agent_private_key.
+  if [[ "$MODE" == "real" && "$REUSE_AGENT" != true ]]; then
+    skip "0.8 agent session" "fresh pairing — minted in the sandbox by Phase P (key never on master)"
+  elif [[ "$MODE" == "real" ]]; then
+    if [[ -z "$AGENT_SESSION_BEARER" ]]; then
+      local agent_key; agent_key="$(jq -r '.agent_private_key // empty' "$AGENT_FILE" 2>/dev/null)"
+      if [[ -n "$agent_key" ]] && command -v cast >/dev/null 2>&1 && [[ -n "$BROKER_URL" ]]; then
+        [[ "${agent_key:0:2}" != "0x" ]] && agent_key="0x$agent_key"
+        local akf asf; akf="$(mktemp)"; asf="$(mktemp)"
+        ( umask 077; printf '%s' "$agent_key" > "$akf" )
+        local ajwt; ajwt="$(wallet_sig_init_session "$akf" "$asf" "$BROKER_URL")" && AGENT_SESSION_BEARER="$ajwt" || true
+        rm -f "$akf" "$asf"
+      fi
     fi
-  fi
-  if [[ "$MODE" == "real" ]]; then
     if [[ -n "$AGENT_SESSION_BEARER" ]]; then
       local aomni wa; aomni="$(jwt_omni "$AGENT_SESSION_BEARER")"
       wa="$(printf '%s' "$ACTOR_OMNI" | sed 's/^0x//' | tr 'A-F' 'a-f')"
@@ -379,7 +399,7 @@ phase0_prereqs() {
         fail "0.8 agent session" "agent session omni 0x${aomni:0:12}… != actor_omni 0x${wa:0:12}… — agent_private_key in $AGENT_FILE doesn't derive actor_omni; worker S3 ops will 502."
       fi
     else
-      fail "0.8 agent session" "could not mint agent session — worker S3 relay OFF (memory ops will 502). Needs agent_private_key in $AGENT_FILE + cast + broker wallet_sig, or set AGENTKEYS_AGENT_SESSION_BEARER."
+      fail "0.8 agent session" "(--reuse-agent) could not mint agent session — needs agent_private_key in $AGENT_FILE + cast + broker wallet_sig, or set AGENTKEYS_AGENT_SESSION_BEARER."
     fi
   fi
 }
@@ -454,6 +474,51 @@ phase1_sandbox() {
       [[ "$(sbx_rc "$dst --help")" == "0" ]] && ok "1.3 $name" "uploaded + executable" || fail "1.3 $name" "not runnable in sandbox"
     fi
   done
+
+  # ─── Phase P — install (pair) ────────────────────────────────────────────────
+  # Fresh §10.2 pairing: the agent generates its OWN secp256k1 device key IN THE
+  # SANDBOX (never on the master), mints a session via wallet_sig, the master
+  # binds the device on-chain, then "approves" the memory scope. Fresh each run
+  # (--regen) → new omni → empty memory → seeded at 1.5 → recalled in Act 1: the
+  # full "install an app + approve its permissions" story. Skipped under
+  # --reuse-agent (legacy master-side agent key) and in --light.
+  if [[ "$MODE" == "real" && "$REUSE_AGENT" != true ]]; then
+    log "  Phase P — install (pair): agent generates its device key IN THE SANDBOX (arch.md §10.2; interim #144)"
+    local link_code ds ds_addr ds_actor ds_dkh ds_pop ds_jwt
+    link_code="lc-$(openssl rand -hex 16)"   # one-time link code (master-minted; stub binding per #144)
+    ds="$(sbx_exec "$AGENT_BIN_DST agent device-session --broker-url ${BROKER_URL:-} --link-code $link_code --regen 2>&1")"
+    ds_addr="$(echo "$ds" | jq -r '.agent_address // empty' 2>/dev/null)"
+    ds_actor="$(echo "$ds" | jq -r '.actor_omni // empty' 2>/dev/null)"
+    ds_dkh="$(echo "$ds" | jq -r '.device_key_hash // empty' 2>/dev/null)"
+    ds_pop="$(echo "$ds" | jq -r '.pop_sig // empty' 2>/dev/null)"
+    ds_jwt="$(echo "$ds" | jq -r '.session_jwt // empty' 2>/dev/null)"
+    if [[ -z "$ds_jwt" || -z "$ds_actor" || -z "$ds_addr" || -z "$ds_dkh" || -z "$ds_pop" ]]; then
+      fail "P.1 device-session" "in-sandbox device-session failed: $(echo "$ds" | tr '\n' ' ' | cut -c1-200)"
+    else
+      ACTOR_OMNI="$ds_actor"; AGENT_SESSION_BEARER="$ds_jwt"; DEVICE_KEY_HASH="$ds_dkh"
+      ok "P.1 device-session" "📲 agent paired — addr ${ds_addr:0:12}…, omni ${ds_actor:0:14}… (key SANDBOX-only)"
+      # P.2 master binds the SANDBOX-generated device on-chain (it never saw the key).
+      local reg; reg="$(bash "$REPO_ROOT/scripts/heima-agent-create.sh" --label "$AGENT_LABEL" \
+        --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
+      echo "$reg" | sed 's/^/        /' >&2
+      if echo "$reg" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true'; then
+        ok "P.2 register device" "on-chain registerAgentDevice (or already-active)"
+      else
+        fail "P.2 register device" "registerAgentDevice failed: $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
+      fi
+      # P.3 approve permissions: master grants the FRESH actor the memory scope.
+      if [[ "$WEBAUTHN" == true ]]; then
+        log "    P.3 approve permissions: heima-scope-set --webauthn --agent $AGENT_LABEL --services ${SEED_SCOPE_SERVICES:-memory} (expect Touch ID)"
+        local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" 2>&1)"
+        echo "$grant" | sed 's/^/        /' >&2
+        echo "$grant" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true' \
+          && ok "P.3 approve permissions" "🔐 master granted [${SEED_SCOPE_SERVICES:-memory}] to ${ds_actor:0:14}… (Touch ID)" \
+          || fail "P.3 approve permissions" "scope grant failed: $(echo "$grant" | tr '\n' ' ' | cut -c1-160)"
+      else
+        skip "P.3 approve permissions" "no --webauthn — re-run with --real --webauthn so the master can grant the fresh actor's scope (Touch ID)"
+      fi
+    fi
+  fi
 
   # 1.4 MCP server in the sandbox (detached). Idempotent + mode/token-aware:
   # a server already on :MCP_PORT is REUSED only when its --backend AND
