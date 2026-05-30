@@ -237,7 +237,13 @@ pub async fn memory_inject(
     actor: Option<String>,
     operator: Option<String>,
 ) -> Result<String> {
-    let _payload = read_stdin_payload(); // discarded — we inject regardless
+    // NOTE: deliberately does NOT read stdin. memory-inject discards the host
+    // payload (we inject regardless), and reading stdin would block on
+    // read_to_string until EOF — which never arrives when the binary is invoked
+    // directly without a piped payload (e.g. the harness's 1.5 seed probe, or
+    // any `aiosandbox /v1/shell/exec` call that leaves stdin open). That stall
+    // silently froze the whole wire demo after step 1.4. Wired hook scripts
+    // pipe a payload (EOF arrives) so they were unaffected; direct calls were not.
     let client = HookClient::resolve(mcp_url, vendor_token, actor, operator);
 
     let mut chunks = Vec::new();

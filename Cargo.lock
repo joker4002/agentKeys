@@ -197,6 +197,7 @@ dependencies = [
 name = "agentkeys-mcp-server"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-provisioner",
  "agentkeys-types",
  "anyhow",
  "async-trait",

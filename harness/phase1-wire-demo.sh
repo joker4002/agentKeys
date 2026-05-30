@@ -51,6 +51,11 @@ MEMORY_NS="${MEMORY_NS:-travel}"
 PAYMENT_SCOPE="${PAYMENT_SCOPE:-payment.spend}"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 AGENT_FILE="${AGENT_FILE:-$HOME/.agentkeys/agents/${AGENT_LABEL}.json}"
+# Operator/master private key used to non-interactively mint a fresh session JWT
+# whose agentkeys.omni_account == OPERATOR_OMNI (cap-mint requires this). Default
+# is the Heima master/deployer key (its broker omni == the demo operator_omni).
+# Override if your operator identity is a different wallet.
+OPERATOR_KEY_FILE="${OPERATOR_KEY_FILE:-${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/heima-deployer.key}}"
 LINUX_TARGET_DIR="$REPO_ROOT/target/sandbox-linux"
 # Binaries land in the sandbox user's ~/.local/bin — it's writable + already on
 # PATH (hermes lives there). The sandbox upload API runs as a NON-ROOT user, so
@@ -72,6 +77,9 @@ ACTOR_OMNI="${AGENTKEYS_ACTOR_OMNI:-}"
 OPERATOR_OMNI="${AGENTKEYS_OPERATOR_OMNI:-}"
 VENDOR_TOKEN="${AGENTKEYS_MCP_VENDOR_TOKEN:-}"
 SESSION_BEARER="${AGENTKEYS_SESSION_BEARER:-}"
+# Agent session JWT (omni == ACTOR_OMNI) for the per-actor STS relay (0.8).
+# Distinct from SESSION_BEARER (the operator session that authorizes cap-mint).
+AGENT_SESSION_BEARER="${AGENTKEYS_AGENT_SESSION_BEARER:-}"
 DEVICE_KEY_HASH="${AGENTKEYS_DEVICE_KEY_HASH:-}"   # Mode R: agent device key hash (from agent file) — memory.put cap-mint needs it
 BROKER_URL="${AGENTKEYS_BROKER_URL:-}"             # Mode R: the BROKER (serves /v1/cap/*), resolved from OIDC_ISSUER in phase 0 — NOT the signer ($BACKEND_URL)
 
@@ -141,14 +149,69 @@ gate() {
 }
 
 # ─── sandbox helpers (the agent host) ────────────────────────────────────────
-sbx_exec()  { curl -sS -X POST "$SANDBOX_URL/v1/shell/exec" -H 'content-type: application/json' \
+# --max-time is a hard ceiling so an in-sandbox command that blocks (e.g. a hook
+# stalling on stdin, a worker call with no timeout) FAILS LOUD instead of hanging
+# the whole demo silently forever. 600s covers the slowest legit call (hermes
+# install). Override per-call with SBX_EXEC_MAXTIME if a step needs longer.
+sbx_exec()  { curl -sS --max-time "${SBX_EXEC_MAXTIME:-600}" -X POST "$SANDBOX_URL/v1/shell/exec" -H 'content-type: application/json' \
                 -d "$(jq -n --arg c "$1" '{command:$c}')" | jq -r '.data.output // ""'; }
-sbx_rc()    { curl -sS -X POST "$SANDBOX_URL/v1/shell/exec" -H 'content-type: application/json' \
+sbx_rc()    { curl -sS --max-time "${SBX_EXEC_MAXTIME:-600}" -X POST "$SANDBOX_URL/v1/shell/exec" -H 'content-type: application/json' \
                 -d "$(jq -n --arg c "$1" '{command:$c}')" | jq -r '.data.exit_code // 1'; }
 sbx_put()   { curl -sS -X POST "$SANDBOX_URL/v1/file/upload" -F "file=@$1" -F "path=$2" \
                 | jq -r '.data.file_path // "UPLOAD_FAILED"'; }
 # Run one of the wired hook scripts in the sandbox against a stdin payload.
 sbx_hook()  { sbx_exec "printf '%s' $(printf '%q' "$2") | bash \$HOME/.hermes/agent-hooks/$1"; }
+
+# ─── session helpers (operator JWT for real-broker cap-mint) ──────────────────
+# Decode a session JWT's agentkeys.omni_account claim (lowercase, no 0x). Empty
+# on any failure. base64url → openssl (portable across macOS + Linux) → jq.
+jwt_omni() {
+  local b64 pad
+  b64="$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')"
+  pad=$(( (4 - ${#b64} % 4) % 4 ))
+  [ "$pad" -gt 0 ] && b64="${b64}$(printf '%*s' "$pad" '' | tr ' ' '=')"
+  printf '%s' "$b64" | openssl base64 -d -A 2>/dev/null \
+    | jq -r '.agentkeys.omni_account // empty' 2>/dev/null \
+    | sed 's/^0x//' | tr 'A-F' 'a-f'
+}
+
+# Non-interactive session mint: SIWE-sign the broker challenge with $1 (operator
+# key file) so the JWT's agentkeys.omni_account == that wallet's broker omni.
+# Mirrors harness/v2-stage1-demo.sh::wallet_sig_init_session. Writes session.json
+# at $2 and echoes the JWT on stdout (errors to stderr, returns non-zero).
+# Requires the broker ($3) to have the wallet_sig auth plugin enabled + `cast`.
+wallet_sig_init_session() {
+  local key_file="$1" session_file="$2" issuer="${3:-$BROKER_URL}"
+  local key addr rid msg sig jwt t1 t2
+  key="$(tr -d '[:space:]' < "$key_file")"
+  case "$key" in 0x*) ;; *) echo "wallet_sig: $key_file is not 0x-prefixed" >&2; return 1 ;; esac
+  addr="$(cast wallet address --private-key "$key" 2>/dev/null)" \
+    || { echo "wallet_sig: cast wallet address failed (cast on PATH? key valid?)" >&2; return 1; }
+  t1="$(mktemp)"; t2="$(mktemp)"
+  if ! curl -sS --max-time 15 -X POST "${issuer%/}/v1/auth/wallet/start" -H 'content-type: application/json' \
+        -d "$(jq -n --arg a "$addr" '{address:$a, chain_id:1}')" -o "$t1"; then
+    echo "wallet_sig: POST ${issuer%/}/v1/auth/wallet/start failed" >&2; rm -f "$t1" "$t2"; return 1
+  fi
+  rid="$(jq -r '.request_id // empty' "$t1" 2>/dev/null)"
+  msg="$(jq -r '.siwe_message // empty' "$t1" 2>/dev/null)"
+  if [ -z "$rid" ] || [ -z "$msg" ]; then
+    echo "wallet_sig: wallet/start missing request_id/siwe_message: $(head -c 200 "$t1")" >&2; rm -f "$t1" "$t2"; return 1
+  fi
+  sig="$(cast wallet sign --private-key "$key" "$msg" 2>/dev/null)" \
+    || { echo "wallet_sig: cast wallet sign failed" >&2; rm -f "$t1" "$t2"; return 1; }
+  if ! curl -sS --max-time 15 -X POST "${issuer%/}/v1/auth/wallet/verify" -H 'content-type: application/json' \
+        -d "$(jq -n --arg r "$rid" --arg s "$sig" '{request_id:$r, signature:$s}')" -o "$t2"; then
+    echo "wallet_sig: POST ${issuer%/}/v1/auth/wallet/verify failed" >&2; rm -f "$t1" "$t2"; return 1
+  fi
+  jwt="$(jq -r '.session_jwt // .jwt // empty' "$t2" 2>/dev/null)"
+  rm -f "$t1" "$t2"
+  [ -z "$jwt" ] && { echo "wallet_sig: wallet/verify returned no session JWT (broker wallet_sig enabled?)" >&2; return 1; }
+  mkdir -p "$(dirname "$session_file")"
+  ( umask 077; jq -n --arg t "$jwt" --arg w "$addr" --argjson ttl 18000 --argjson now "$(date +%s)" \
+      '{token:$t, wallet:$w, scope:null, ttl_seconds:$ttl, created_at:$now}' > "$session_file" )
+  chmod 600 "$session_file" 2>/dev/null || true
+  printf '%s' "$jwt"
+}
 
 # Resolve the sandbox user's $HOME → binaries go in ~/.local/bin (writable + on
 # PATH; the upload API is non-root so /usr/local/bin gives Errno 13). Idempotent:
@@ -235,23 +298,89 @@ phase0_prereqs() {
     else skip "0.6 LLM key" "none provided — Phase 4 surprise will be skipped"; fi
   fi
 
-  # 0.7 session bearer — flag/env → master session file (.token) → guidance.
-  # arch.md §22b.4: cap-mint to the broker authenticates with the session JWT.
+  # 0.7 session bearer — must be a FRESH JWT whose agentkeys.omni_account ==
+  # OPERATOR_OMNI. cap-mint enforces session_omni == operator_omni (arch.md
+  # §22b.4 + handlers/cap.rs OperatorMismatch). Two silent traps this guards:
+  #   • a reused email session (e.g. 'alice') is a DIFFERENT operator omni →
+  #     cap-mint 401/OperatorMismatch even though the file looks valid;
+  #   • an old session → ExpiredSignature.
+  # So: validate the on-disk session's omni + expiry, and auto-mint a fresh
+  # OPERATOR session non-interactively via wallet_sig (SIWE-sign with
+  # OPERATOR_KEY_FILE) whenever it's missing / stale / wrong-omni.
   local sess_file="${MASTER_SESSION_FILE:-$HOME/.agentkeys/$SESSION_ID/session.json}"
-  if [[ -z "$SESSION_BEARER" && -f "$sess_file" ]]; then
-    SESSION_BEARER="$(jq -r '.token // empty' "$sess_file" 2>/dev/null)"
-    local ca tl now
+  local want_omni; want_omni="$(printf '%s' "$OPERATOR_OMNI" | sed 's/^0x//' | tr 'A-F' 'a-f')"
+  [[ -z "$SESSION_BEARER" && -f "$sess_file" ]] && SESSION_BEARER="$(jq -r '.token // empty' "$sess_file" 2>/dev/null)"
+
+  local need_mint=1 reason="no session on disk"
+  if [[ -n "$SESSION_BEARER" ]]; then
+    local sess_omni ca tl now
+    sess_omni="$(jwt_omni "$SESSION_BEARER")"
     ca="$(jq -r '.created_at // 0' "$sess_file" 2>/dev/null)"
     tl="$(jq -r '.ttl_seconds // 0' "$sess_file" 2>/dev/null)"
     now="$(date +%s)"
-    if [[ "$ca" =~ ^[0-9]+$ && "$tl" =~ ^[0-9]+$ && "$tl" -gt 0 && $((ca + tl)) -lt "$now" ]]; then
-      log "  0.7 session bearer: WARNING — the '$SESSION_ID' session looks expired (created+ttl < now). If cap-mint 401s, refresh with 'agentkeys init --session-id $SESSION_ID …'."
+    if [[ -n "$want_omni" && -n "$sess_omni" && "$sess_omni" != "$want_omni" ]]; then
+      reason="session omni 0x${sess_omni:0:12}… != operator_omni 0x${want_omni:0:12}…"
+    elif [[ "$ca" =~ ^[0-9]+$ && "$tl" =~ ^[0-9]+$ && "$tl" -gt 0 && $((ca + tl)) -lt "$now" ]]; then
+      reason="session expired"
+    else
+      need_mint=0
     fi
   fi
+
+  if [[ "$need_mint" -eq 1 ]]; then
+    if [[ -f "$OPERATOR_KEY_FILE" ]] && command -v cast >/dev/null 2>&1 && [[ -n "$BROKER_URL" ]]; then
+      log "  0.7 session bearer: $reason → minting a fresh operator session via wallet_sig ($(basename "$OPERATOR_KEY_FILE"))"
+      local minted
+      if minted="$(wallet_sig_init_session "$OPERATOR_KEY_FILE" "$sess_file" "$BROKER_URL")"; then
+        SESSION_BEARER="$minted"
+      else
+        log "  0.7 session bearer: wallet_sig mint failed (see message above)"
+      fi
+    else
+      log "  0.7 session bearer: $reason, and cannot auto-mint (need OPERATOR_KEY_FILE=$OPERATOR_KEY_FILE, 'cast' on PATH, and a broker URL)"
+    fi
+  fi
+
   if [[ -n "$SESSION_BEARER" ]]; then
-    ok "0.7 session bearer" "from '$SESSION_ID' session (${#SESSION_BEARER} chars)"
+    local got_omni; got_omni="$(jwt_omni "$SESSION_BEARER")"
+    if [[ -n "$want_omni" && -n "$got_omni" && "$got_omni" != "$want_omni" ]]; then
+      fail "0.7 session bearer" "session omni 0x${got_omni:0:12}… != operator_omni 0x${want_omni:0:12}… — OPERATOR_KEY_FILE ($OPERATOR_KEY_FILE) signs as the WRONG operator. Set OPERATOR_KEY_FILE to the master key whose broker omni == operator_omni."
+    else
+      ok "0.7 session bearer" "operator session ready (omni matches operator_omni, ${#SESSION_BEARER} chars)"
+    fi
   else
-    fail "0.7 session bearer" "no session JWT — run 'agentkeys init --session-id $SESSION_ID …' (master), or pass AGENTKEYS_SESSION_BEARER. Required for real-broker cap-mint."
+    fail "0.7 session bearer" "no valid operator session — set OPERATOR_KEY_FILE to the master key for operator_omni 0x$want_omni (broker $BROKER_URL must have the wallet_sig plugin), or pass AGENTKEYS_SESSION_BEARER for that operator."
+  fi
+
+  # 0.8 agent session bearer — for the per-actor STS relay (issue #90). The MCP
+  # server uses THIS session (omni == actor_omni) to mint
+  # AssumeRoleWithWebIdentity creds tagged with the agent actor, so the worker's
+  # S3 ops are AWS-scoped to bots/<actor>/memory/. Minted non-interactively from
+  # the agent's own key (agent_private_key in the agent file). Distinct from
+  # 0.7's OPERATOR session (which authorizes cap-mint). Without it the worker
+  # falls back to its instance profile (no S3) and every memory op 502s.
+  if [[ "$MODE" == "real" && -z "$AGENT_SESSION_BEARER" ]]; then
+    local agent_key; agent_key="$(jq -r '.agent_private_key // empty' "$AGENT_FILE" 2>/dev/null)"
+    if [[ -n "$agent_key" ]] && command -v cast >/dev/null 2>&1 && [[ -n "$BROKER_URL" ]]; then
+      [[ "${agent_key:0:2}" != "0x" ]] && agent_key="0x$agent_key"
+      local akf asf; akf="$(mktemp)"; asf="$(mktemp)"
+      ( umask 077; printf '%s' "$agent_key" > "$akf" )
+      local ajwt; ajwt="$(wallet_sig_init_session "$akf" "$asf" "$BROKER_URL")" && AGENT_SESSION_BEARER="$ajwt" || true
+      rm -f "$akf" "$asf"
+    fi
+  fi
+  if [[ "$MODE" == "real" ]]; then
+    if [[ -n "$AGENT_SESSION_BEARER" ]]; then
+      local aomni wa; aomni="$(jwt_omni "$AGENT_SESSION_BEARER")"
+      wa="$(printf '%s' "$ACTOR_OMNI" | sed 's/^0x//' | tr 'A-F' 'a-f')"
+      if [[ -n "$wa" && "$aomni" == "$wa" ]]; then
+        ok "0.8 agent session" "minted (omni == actor_omni — per-actor STS relay enabled)"
+      else
+        fail "0.8 agent session" "agent session omni 0x${aomni:0:12}… != actor_omni 0x${wa:0:12}… — agent_private_key in $AGENT_FILE doesn't derive actor_omni; worker S3 ops will 502."
+      fi
+    else
+      fail "0.8 agent session" "could not mint agent session — worker S3 relay OFF (memory ops will 502). Needs agent_private_key in $AGENT_FILE + cast + broker wallet_sig, or set AGENTKEYS_AGENT_SESSION_BEARER."
+    fi
   fi
 }
 
@@ -310,20 +439,32 @@ phase1_sandbox() {
   # restarted; otherwise the wired hook's token won't match the server and every
   # memory.get/permission.check 401s ("bearer token not recognized"). Also
   # restart when a fresh binary was just uploaded.
-  local mcp_backend mcp_vendor mcp_brokerarg cmd
+  local mcp_backend mcp_vendor mcp_brokerarg mcp_relayarg cmd
   if [[ "$MODE" == "light" ]]; then
-    mcp_backend="in-memory"; mcp_vendor="magiclick:$VENDOR_TOKEN"; mcp_brokerarg=""
+    mcp_backend="in-memory"; mcp_vendor="magiclick:$VENDOR_TOKEN"; mcp_brokerarg=""; mcp_relayarg=""
     cmd="$MCP_BIN_DST --backend in-memory --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor"
   else
     mcp_backend="http"; mcp_vendor="harness:$VENDOR_TOKEN"; mcp_brokerarg="--broker-url ${BROKER_URL:-}"
-    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BROKER_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH"
+    # Per-actor STS relay (issue #90): the MCP server uses the AGENT session
+    # (0.8 — omni == actor_omni) to mint AssumeRoleWithWebIdentity creds tagged
+    # with the actor, then forwards them to the worker as X-Aws-* headers so the
+    # worker's S3 ops are AWS-scoped to bots/<actor>/memory/. Without it the
+    # worker falls back to its instance profile (no S3) and every op 502s.
+    mcp_relayarg=""
+    [[ -n "$AGENT_SESSION_BEARER" ]] && mcp_relayarg="--agent-session-bearer $AGENT_SESSION_BEARER --memory-role-arn ${MEMORY_ROLE_ARN:-} --vault-role-arn ${VAULT_ROLE_ARN:-} --aws-region ${REGION:-us-east-1}"
+    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BROKER_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH $mcp_relayarg"
   fi
   # Reuse only if a live server's argv carries the intended backend + token AND
   # (real mode) the intended --broker-url — else a stale server pointed at the
   # wrong broker (e.g. the signer) is silently reused. Empty mcp_brokerarg in
   # light mode makes that last grep a no-op (empty pattern matches every line).
+  # In real mode with the STS relay, never reuse: the agent session bearer is
+  # freshly minted each run (0.8), and a reused server would hold a stale bearer
+  # → mint-oidc-jwt 401 on every memory op. -z "$AGENT_SESSION_BEARER" is true in
+  # light mode (and real-without-relay), preserving fast reuse there.
   local reuse=false
   if [[ "$mcp_bin_changed" != true \
+        && -z "$AGENT_SESSION_BEARER" \
         && "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" \
         && -n "$(sbx_exec "pgrep -af agentkeys-mcp-server | grep -F -- '--backend $mcp_backend' | grep -F -- '--vendor-tokens $mcp_vendor' | grep -F -- '$mcp_brokerarg'")" ]]; then
     reuse=true
@@ -363,7 +504,10 @@ phase1_sandbox() {
     local seed="${SEED_MEMORY_CONTENT:-Chengdu trip — Apr 12 to 16, hotpot at Yulin.}"
     local svcs="${SEED_SCOPE_SERVICES:-memory}"
     local env_pfx="AGENTKEYS_MCP_URL=$MCP_URL_IN_SANDBOX AGENTKEYS_MCP_VENDOR_TOKEN=$VENDOR_TOKEN AGENTKEYS_ACTOR_OMNI=$ACTOR_OMNI AGENTKEYS_OPERATOR_OMNI=$OPERATOR_OMNI AGENTKEYS_SESSION_BEARER=$SESSION_BEARER"
-    local got; got="$(sbx_exec "$env_pfx $AGENT_BIN_DST hook memory-inject --namespaces $MEMORY_NS 2>/dev/null")"
+    # </dev/null gives stdin an immediate EOF — older binaries' memory-inject
+    # block on read_to_string(stdin) without it (fixed in hook.rs, kept here so
+    # a stale on-sandbox binary can't re-freeze the demo before 1.3 re-uploads).
+    local got; got="$(sbx_exec "$env_pfx $AGENT_BIN_DST hook memory-inject --namespaces $MEMORY_NS </dev/null 2>/dev/null")"
     if echo "$got" | grep -q '"context"'; then
       ok "1.5 seed memory" "namespace '$MEMORY_NS' already populated — skip"
     elif gate "1.5 seed memory" "memory '$MEMORY_NS' is empty — seed \"$seed\" to the real worker (grants the scope via real Touch ID only if --webauthn). Proceed?" confirm; then
@@ -405,6 +549,11 @@ phase1_sandbox() {
 #   • REGISTRY + git    → named docker volumes, so the crates.io index and the
 #                         downloaded .crate sources survive the --rm container
 #                         (no multi-minute re-fetch every run).
+#   • RUSTUP toolchain  → named docker volume for /usr/local/rustup, so the
+#                         host-pinned toolchain (RUSTUP_TOOLCHAIN) is downloaded
+#                         ONCE, not re-fetched (~250 MB) on every --rm run. This
+#                         is the difference between a one-line change taking ~15s
+#                         (incremental compile only) vs ~2 min (toolchain + compile).
 #   • OpenSSL deps      → reqwest's default native-tls links libssl, so we bake
 #                         pkg-config + libssl-dev into a derived builder image
 #                         ONCE (docker caches it) instead of apt-getting per run.
@@ -415,6 +564,14 @@ RUST_BUILD_IMAGE="${RUST_BUILD_IMAGE:-rust:1.83-slim-bookworm}"
 BUILDER_IMAGE="${BUILDER_IMAGE:-agentkeys-sandbox-builder:1.83-bookworm}"
 CARGO_REGISTRY_VOL="${CARGO_REGISTRY_VOL:-agentkeys-sandbox-cargo-registry}"
 CARGO_GIT_VOL="${CARGO_GIT_VOL:-agentkeys-sandbox-cargo-git}"
+# Persist the rustup toolchain dir too. The builder image bakes only the BASE
+# image's toolchain (e.g. 1.83), but the cross-build pins RUSTUP_TOOLCHAIN to the
+# host's rustc (e.g. 1.94). Without this volume, rustup re-downloads the entire
+# pinned toolchain (~250 MB) on EVERY --rm run — which dwarfs the incremental
+# compile and is why a one-line change "rebuilds slowly". A named volume is
+# seeded from the image's /usr/local/rustup on first use, then caches the
+# downloaded pinned toolchain so later runs only recompile the changed crate.
+RUSTUP_VOL="${RUSTUP_VOL:-agentkeys-sandbox-rustup}"
 
 # True (0) when any tracked source is newer than the reference binary ($1).
 sources_newer() {
@@ -480,6 +637,7 @@ build_linux_binaries() {
     -v "$REPO_ROOT":/src -w /src \
     -v "$CARGO_REGISTRY_VOL":/usr/local/cargo/registry \
     -v "$CARGO_GIT_VOL":/usr/local/cargo/git \
+    -v "$RUSTUP_VOL":/usr/local/rustup \
     -e CARGO_TARGET_DIR=/src/target/sandbox-linux \
     -e RUSTUP_TOOLCHAIN="$cross_toolchain" \
     "$BUILDER_IMAGE" \

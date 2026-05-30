@@ -1083,7 +1083,11 @@ async fn main() {
             }
         }
         Err(err) => {
-            eprintln!("{}", err);
+            // {:#} prints the FULL anyhow context chain (e.g.
+            // "memory.put: MCP error (http 200): ... 502 ... s3_put"), not just
+            // the top context ("memory.put") — without it the real cause of a
+            // failed command is invisible (the harness only saw "memory.put").
+            eprintln!("{:#}", err);
             std::process::exit(1);
         }
     }

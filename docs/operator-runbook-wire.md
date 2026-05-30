@@ -70,7 +70,8 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 
 **Real mode only:**
 - The `setup-heima.sh` account already created (the harness verifies, never rebuilds). It reads `operator_omni` + `actor_omni` from `~/.agentkeys/agents/demo-agent.json`.
-- A non-expired master session at `~/.agentkeys/alice/session.json` (the harness reads its `.token` as the cap-mint bearer). If it's stale, refresh: `agentkeys init --session-id alice …`.
+- An **operator session JWT** for cap-mint. The harness now mints this **automatically and non-interactively**: step `0.7` decodes the on-disk session, and if it's missing, expired, **or for the wrong operator** (its `agentkeys.omni_account` ≠ the agent's `operator_omni`), it SIWE-signs a fresh one with `OPERATOR_KEY_FILE` (default `~/.agentkeys/heima-deployer.key` — the master key whose broker omni == `operator_omni`) via the broker's `wallet_sig` plugin. Requires `cast` (Foundry) on PATH. **Note:** the old `alice` email session is a *different* omni and is no longer used for cap-mint — set `OPERATOR_KEY_FILE` to the master key for your operator if the default isn't it. (Pass `AGENTKEYS_SESSION_BEARER` to override entirely.)
+- **For real memory (S3) to work:** the agent file (`~/.agentkeys/agents/demo-agent.json`) must contain `agent_private_key` (whose wallet derives `actor_omni`). Step `0.8` mints an **agent session** from it and the MCP server uses it for the per-actor STS relay (`mint-oidc-jwt` → `AssumeRoleWithWebIdentity` → `X-Aws-*` headers to the worker). Also needs `cast` (Foundry) + the per-data-class role ARNs (`MEMORY_ROLE_ARN`/`VAULT_ROLE_ARN`, from `operator-workstation.env`). Without the relay the worker falls back to its instance profile (no S3) and memory ops 502.
 - `export OPENROUTER_API_KEY=...` in `~/.zshenv` — the harness uses it as the LLM-key fallback (no prompt).
 - **For the 1.5 memory seed:** the master's primary K11 enrolled in **webauthn** mode — `agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x<operator>`. Without it, 1.5a's `heima-scope-set.sh --webauthn` skips the grant (and 1.5 fails loud with this exact command). Override the granted service list with `SEED_SCOPE_SERVICES` (it **sets** the full list, so include every service the agent needs).
 
@@ -108,8 +109,12 @@ Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `AGENT_LABEL` (default `demo-agent`), `MEMORY_NS` (default `travel`),
 `OPENROUTER_API_KEY` / `LLM_API_KEY`, `LLM_MODEL` (default `deepseek/deepseek-v4-flash`) /
 `LLM_BASE_URL`, `RUST_BUILD_IMAGE` (base image) ·
-`BUILDER_IMAGE` / `CARGO_REGISTRY_VOL` / `CARGO_GIT_VOL` (build cache),
+`BUILDER_IMAGE` / `CARGO_REGISTRY_VOL` / `CARGO_GIT_VOL` / `RUSTUP_VOL` (build cache),
+`SBX_EXEC_MAXTIME` (per-sandbox-call ceiling, default 600s),
 `SEED_MEMORY_CONTENT` / `SEED_SCOPE_SERVICES` (real-mode 1.5 seed),
+`OPERATOR_KEY_FILE` (master key for the 0.7 operator-session mint),
+`AGENTKEYS_AGENT_SESSION_BEARER` (override the 0.8 agent session) ·
+`MEMORY_ROLE_ARN` / `VAULT_ROLE_ARN` / `REGION` (per-actor STS relay; sourced from `operator-workstation.env`),
 `AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER`.
 
 ## Drift detection
@@ -123,7 +128,10 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Phase 0 `0.7 session bearer` warns "looks expired" then cap-mint 401s | the `alice` session JWT expired (TTL ≤ 5h) | `agentkeys init --session-id alice …` to refresh |
+| cap-mint → 401 `ExpiredSignature` | the operator session JWT expired | the harness now auto-mints a fresh one at `0.7` via `wallet_sig` (`OPERATOR_KEY_FILE`). If it didn't: ensure `cast` is on PATH and `OPERATOR_KEY_FILE` exists |
+| cap-mint → 401/`OperatorMismatch` (`session_omni != operator_omni`) | the session is for a *different* operator (e.g. the legacy `alice` email session, omni `4231cd8f…` ≠ agent operator `941cb1c3…`) | `0.7` now detects the omni mismatch and re-mints from `OPERATOR_KEY_FILE`. If `0.7` fails with "wrong operator", point `OPERATOR_KEY_FILE` at the master key whose broker omni == `operator_omni` |
+| memory put/get → HTTP **502** `{"reason":"s3_put"}` / `{"reason":"s3_get"}` | the MCP `http` backend didn't forward per-actor STS creds, so the worker fell back to its EC2 instance profile (SES-only, **no S3**) → AccessDenied on every op. cap-mint + chain-verify themselves SUCCEED (the agent IS authorized); the gap was the credential **relay**. | **Fixed (issue #90):** the backend now mints agent-tagged STS creds (`0.8` agent session → broker `/v1/mint-oidc-jwt` → `AssumeRoleWithWebIdentity(memory-role)`, tagged `agentkeys_actor_omni`) and forwards them as `X-Aws-*` headers, so AWS scopes S3 to `bots/<actor>/memory/`. If it still 502s: confirm `0.8 agent session` shows "minted (omni == actor_omni)"; the relay needs `agent_private_key` in the agent file + `cast` + broker `wallet_sig`, plus `MEMORY_ROLE_ARN`/`VAULT_ROLE_ARN`/`REGION` from `operator-workstation.env`. Optional strict enforcement: set `AGENTKEYS_WORKER_REQUIRE_STS=1` in the worker env (rejects credless requests with 401 instead of falling back). |
+| `1.3 linux build` is slow even for a one-line change | rustup re-downloaded the host-pinned toolchain (~250 MB, ~4 min) because `/usr/local/rustup` wasn't cached | fixed: the toolchain now persists in the `RUSTUP_VOL` docker volume — the **first** build seeds it (~4 min), later builds skip the download (incremental compile only, ~15 s) |
 | Phase 1 `1.3 linux build` → "cannot pull" | Docker Hub unreachable for the base image | `RUST_BUILD_IMAGE=<local/mirror rust image>` or pre-pull `rust:1.83-slim-bookworm` |
 | `1.3 linux build` won't pick up a Rust edit | gate compares source mtime vs binary; re-runs rebuild automatically on a real edit | to force a from-scratch rebuild: `rm -rf target/sandbox-linux && docker volume rm agentkeys-sandbox-cargo-registry agentkeys-sandbox-cargo-git`; to rebuild the deps image: `docker rmi agentkeys-sandbox-builder:1.83-bookworm` |
 | `wire` step 0 → `fail hermes not installed` | Hermes not on the sandbox PATH | the harness installs it; or run the guarded install (Appendix) — needs GitHub reachable |
@@ -137,7 +145,7 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | Phase 4 surprise → "No inference provider configured" | key not in `~/.hermes/.env`, or wrong provider | 4.0 writes `OPENROUTER_API_KEY` to `~/.hermes/.env` + sets `provider: openrouter`; confirm `0.6 LLM key` shows `ok` |
 | `agentkeys memory put` → `error: unrecognized subcommand 'memory'` (run by hand) | a **stale** `agentkeys` on your PATH predates the `memory` command | rebuild + reinstall: `cargo build --release -p agentkeys-cli && cp target/release/agentkeys ~/.local/bin/agentkeys`. The harness itself uses the freshly cross-built **sandbox** binary, so 1.5 is unaffected |
 | `1.5a scope grant` → `grant SKIPPED` | the master's primary K11 isn't enrolled in webauthn mode | `agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x<operator>`, then re-run (the failure prints this exact command) |
-| `1.5b seed memory` fails after the grant | master session expired, or the memory worker unreachable | refresh the session (`agentkeys init --session-id alice …`); check `AGENTKEYS_WORKER_MEMORY_URL` reachability |
+| `1.5b seed memory` fails after the grant (`memory.put` failed) | (a) the operator session was stale/wrong-omni — now auto-minted at `0.7`; (b) the worker 502'd because the per-actor STS relay wasn't wired — now fixed (the MCP backend forwards `X-Aws-*` creds; see the 502 row) | confirm `0.7` shows "operator session ready" AND `0.8 agent session` shows "minted (omni == actor_omni)"; the `{:#}` CLI error now prints the full chain if it still fails |
 | Phase 4 `4.1 model smoke` / surprise → HTTP 429 | OpenRouter throttling a `:free` model | retry, or use the paid default `LLM_MODEL=deepseek/deepseek-v4-flash` |
 | Surprise reply says "nothing in memory" | wire hooks/MCP missing → `pre_llm_call` never injected | 4.0 now prechecks + fails loud; ensure Phases 1+2 ran (no `--skip-1/--skip-2`): `~/.hermes/agent-hooks/` exists + `:18088/healthz` up; use a fresh Hermes session |
 | Phase 1 `1.4 mcp server … did not come up` → `Address already in use` | `MCP_PORT` collides with a sandbox service (8088 = built-in `gem-server`) | default is now `18088` (outside the sandbox's range); override `MCP_PORT` if it still clashes — check `ss -ltnp` in the sandbox |
