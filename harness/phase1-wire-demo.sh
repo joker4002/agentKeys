@@ -850,13 +850,39 @@ phase4_surprise() {
     skip "4.1 model smoke" "empty response (check sandbox network egress)"
   fi
 
-  printf '    Open a Hermes session in the sandbox (v0.14.0, hooks active) and send:\n'
+  # 4.2 DETERMINISTIC inject check — fire the pre_llm_call hook through Hermes'
+  # OWN config-wired dispatcher (`hermes hooks test`, NOT the harness running the
+  # script directly) and assert the real permissioned memory is injected. NO LLM
+  # inference: this is the authoritative pass/fail for the memory-injection
+  # guarantee. The human "surprise" at 4.3 is supplementary — an LLM may phrase a
+  # memory-aware reply any number of ways, or even DISOWN the injected context as
+  # a hallucination, so its prose is NOT a reliable success signal.
+  local hooktest; hooktest="$(sbx_exec "export PATH=\$HOME/.local/bin:\$PATH; hermes hooks test pre_llm_call 2>&1")"
+  echo "$hooktest" | sed 's/^/      /' >&2
+  if echo "$hooktest" | grep -q 'exit=0' && echo "$hooktest" | grep -qF '"context"'; then
+    ok "4.2 inject (deterministic)" "Hermes' config-wired pre_llm_call hook injected the real memory (no inference)"
+  else
+    fail "4.2 inject (deterministic)" "Hermes did NOT inject memory (stdout '{}' → MCP down / scope missing / session bad). THIS is the real failure even if a chat reply 'sounds' memory-aware."
+  fi
+  # 4.2b structural — all 3 wired hooks exec + emit valid JSON via Hermes' dispatcher.
+  local doctor; doctor="$(sbx_exec "export PATH=\$HOME/.local/bin:\$PATH; hermes hooks doctor 2>&1")"
+  if [[ "$(echo "$doctor" | grep -c 'produced valid JSON')" -ge 3 ]]; then
+    ok "4.2b hooks doctor" "all 3 wired hooks exec + valid JSON (config-driven)"
+  else
+    fail "4.2b hooks doctor" "hermes hooks doctor: not all hooks healthy — $(echo "$doctor" | tr '\n' ' ' | cut -c1-120)"
+  fi
+
+  # 4.3 the human "surprise" — OPTIONAL live demo. 4.2 above is the real signal.
+  # NOTE: chat WHILE this gate is open — Phase 5 teardown stops the MCP, after
+  # which a fresh Hermes turn would inject nothing.
+  printf '    (Optional live demo — 4.2 above is the authoritative pass/fail.)\n'
+  printf '    WHILE this gate is open, open a Hermes session in the sandbox (hooks active) and send:\n'
   printf '      "where am I going this weekend?"\n'
   printf '    Terminal: %s/code-server/  (or: docker exec -it <sandbox> bash -lc "hermes chat")\n' "$SANDBOX_URL"
-  if gate "4.2 confirm surprise" "did the reply reference the memory (Chengdu / travel)?" confirm; then
-    ok "4.2 confirm surprise" "operator confirmed memory-aware response"
+  if gate "4.3 confirm surprise (optional)" "did the reply reference the memory (Chengdu / travel)? (LLM prose varies — 4.2 is authoritative)" confirm; then
+    ok "4.3 confirm surprise" "operator confirmed memory-aware response"
   else
-    skip "4.2 confirm surprise" "not confirmed (run the Hermes session manually)"
+    skip "4.3 confirm surprise" "not confirmed — LLM prose is non-deterministic; rely on 4.2's deterministic result"
   fi
 }
 

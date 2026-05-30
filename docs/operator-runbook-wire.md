@@ -130,6 +130,29 @@ Pass `--yes` to auto-confirm the non-secret prompts.
 
 (Act 3 — Online Revocation — is out of scope for this harness; tested elsewhere.)
 
+## Verifying it worked — deterministically (no LLM inference)
+
+**Do NOT judge success by the chat reply.** An LLM may phrase a memory-aware
+answer many ways, treat a past-dated memory as "not this weekend", or even
+*disown* the injected context as a hallucination — the prose is not a reliable
+signal. The harness's authoritative check is **step 4.2**, which fires the
+`pre_llm_call` hook through **Hermes' own config-wired dispatcher** and asserts
+the real memory is injected:
+
+```bash
+# what step 4.2 runs (in the sandbox) — deterministic, no model call:
+hermes hooks test pre_llm_call
+#   → stdout: {"context":"## Memory: travel\nChengdu trip — Apr 12 to 16, hotpot at Yulin."}
+#   → parsed (Hermes wire shape): {"context": "..."}   ← injected into the LLM request
+hermes hooks doctor              # all 3 wired hooks: exec + valid JSON
+```
+
+`4.2 inject (deterministic) ok` means the permissioned memory reached the LLM
+request — the actual AgentKeys guarantee. `stdout: {}` / `parsed: <none>` means it
+did **not** (MCP down, scope not granted, or session bad) — that's the real
+failure even if a chat reply *sounds* memory-aware. The 4.3 chat "surprise" is an
+optional live demo; run it **while the gate is open** (Phase 5 stops the MCP).
+
 ## Useful flags
 
 ```
