@@ -367,6 +367,11 @@ enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Agent-side device bootstrap (interim §10.2 — full ceremony: issue #144).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -647,6 +652,37 @@ enum MemoryAction {
         actor: Option<String>,
         #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
         operator: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Generate (or reuse) THIS machine's secp256k1 device key, mint a broker
+    /// session via wallet_sig SIWE, and print the JSON the master needs to bind
+    /// the device on-chain (device_key_hash + pop_sig). Runs in the sandbox so
+    /// the agent key is never born on the master. Interim §10.2 (issue #144).
+    #[command(
+        about = "Mint this agent's device session (in-sandbox keygen + wallet_sig) — emits JSON"
+    )]
+    DeviceSession {
+        #[arg(long, env = "AGENTKEYS_BROKER_URL", help = "Broker base URL (OIDC issuer)")]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/agent-device.key",
+            help = "Device key file — sandbox-local, 0600, NEVER leaves the agent"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "One-time link code from the master (echoed into the output for binding)"
+        )]
+        link_code: String,
+        #[arg(long, default_value_t = 1, help = "SIWE chain_id replay nonce (not a chain hop)")]
+        chain_id: u64,
+        #[arg(long, help = "Force a fresh device key → fresh pairing (new omni)")]
+        regen: bool,
     },
 }
 
@@ -1070,6 +1106,20 @@ async fn main() {
                     vendor_token.clone(),
                     actor.clone(),
                     operator.clone(),
+                )
+                .await
+            }
+        },
+        Commands::Agent { action } => match action {
+            AgentAction::DeviceSession {
+                broker_url,
+                key_file,
+                link_code,
+                chain_id,
+                regen,
+            } => {
+                agentkeys_cli::device_session::device_session(
+                    broker_url, key_file, link_code, *chain_id, *regen,
                 )
                 .await
             }

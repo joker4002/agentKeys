@@ -384,6 +384,22 @@ phase0_prereqs() {
   fi
 }
 
+# Clean slate before a run: the real-memory demo must prove the agent recalls
+# from the LIVE worker, so it must NOT start from a cached Hermes session/answer
+# or a leftover fake (in-memory) MCP launcher. Each sbx_exec is its own call +
+# `; true` so a no-op (nothing to kill/remove) never trips the sandbox shell API.
+clean_slate() {
+  # stop orphaned interactive Hermes (holds state.db open). Specific patterns so
+  # the install / this exec are never matched.
+  sbx_exec "pkill -f 'venv/bin/hermes chat' 2>/dev/null; pkill -f 'venv/bin/hermes -z' 2>/dev/null; sleep 1; true" >/dev/null 2>&1
+  # remove stale MCP launcher leftovers — these start the FAKE in-memory server
+  # (magiclick:demo-tok + seeded Chengdu fixture) and would defeat --real.
+  sbx_exec "rm -f \"\$HOME/start-mcp-light.sh\" \"\$HOME/test-respawn.sh\" \"\$HOME\"/.hermes/start-mcp*.sh 2>/dev/null; true" >/dev/null 2>&1
+  # clear Hermes native session + conversation state + native memory (no cached answer)
+  sbx_exec "rm -f \"\$HOME\"/.hermes/state.db \"\$HOME\"/.hermes/state.db-shm \"\$HOME\"/.hermes/state.db-wal \"\$HOME\"/.hermes/sessions/* \"\$HOME/.hermes/.hermes_history\" 2>/dev/null; : > \"\$HOME/.hermes/memories/MEMORY.md\" 2>/dev/null; : > \"\$HOME/.hermes/memories/USER.md\" 2>/dev/null; true" >/dev/null 2>&1
+  ok "1.2b clean slate" "Hermes session/state + native memory cleared; stale fake-MCP launchers removed"
+}
+
 # ─── Phase 1 — sandbox bring-up ──────────────────────────────────────────────
 phase1_sandbox() {
   skip_phase 1 && { log "Phase 1 — sandbox bring-up: skip (--skip-1)"; return; }
@@ -408,6 +424,13 @@ phase1_sandbox() {
     sbx_exec "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash" >/dev/null
     [[ "$(sbx_rc 'command -v hermes')" == "0" ]] && ok "1.2 hermes" "installed" || fail "1.2 hermes" "install failed"
   fi
+
+  # 1.2b clean slate — a REAL-memory demo must prove the agent recalls from the
+  # LIVE worker via injection, not from a cached Hermes session or a leftover
+  # fake (in-memory) MCP launcher. Wipe Hermes' native session/conversation
+  # state + remove stale launchers so every run starts from zero. SKIP_CLEAN=1
+  # opts out (e.g. to inspect a prior session).
+  [[ "${SKIP_CLEAN:-0}" == "1" ]] && skip "1.2b clean slate" "SKIP_CLEAN=1" || clean_slate
 
   # 1.3 agentkeys + mcp-server binaries (aarch64-linux) into the sandbox via its file API
   build_linux_binaries || return

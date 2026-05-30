@@ -194,6 +194,17 @@ Verified live:
 
 **When a third data class lands** (e.g. payments-audit per arch.md §15.6): mint two more endpoints (`/v1/cap/payaudit-store` + `/v1/cap/payaudit-fetch`), add `DataClass::PaymentsAudit` variant, plumb to the new worker. The pattern is closed-extension: existing data classes don't need to know about the new one.
 
+## Agent-side wire demo — REAL memory only (`harness/phase1-wire-demo.sh`)
+
+The agent-side wire demo (`agentkeys wire hermes` inside the aiosandbox) MUST exercise the **real memory worker only**. Run it `--real`: the MCP server uses `--backend http`, and every `agentkeys.memory.get/put` goes broker cap-mint → per-actor STS relay (`X-Aws-*`) → `memory.litentry.org` → S3 (`bots/<actor>/memory/`). **Never use `--light` / `--backend in-memory` for any demo memory assertion** — that backend auto-seeds a fake Chengdu fixture (actor `0xa0c7…`) and is a dev-loop convenience only, NOT a real-memory proof. When demoing or QA-ing the agent's memory, assert against the real worker (`--real`), or directly: `agentkeys hook memory-inject --namespaces travel </dev/null` (returns the real S3 content) / the live S3 object `bots/<actor>/memory/memory.enc`.
+
+**Three distinct memory systems — never conflate them:**
+1. **Real AgentKeys memory** (the only one the demo proves): MCP `http` backend → worker → S3. Source of truth.
+2. **In-memory fixture** (light mode): fake, dev-only. Forbidden in demo assertions.
+3. **Hermes native session memory** (`recall` / `session_search`): the runtime's own store — **NOT** AgentKeys memory. Wiping Hermes "session memory" does not touch the real worker, and Hermes' native `recall` will never return AgentKeys content.
+
+**No conflict with "passive injection":** passive injection (the `pre_llm_call` hook prepending memory each turn) is the *delivery mechanism* (when/how memory reaches Hermes), orthogonal to the *source*. In `--real` mode the passively-injected block IS the real worker memory — they are the same bytes, just delivered automatically. The rule is only about the SOURCE: real worker, never the in-memory fixture, never Hermes-native.
+
 ## Development Workflow (Anthropic Harness Pattern)
 
 On every session start:
