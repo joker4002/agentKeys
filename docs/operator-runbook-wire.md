@@ -137,15 +137,28 @@ answer many ways, treat a past-dated memory as "not this weekend", or even
 *disown* the injected context as a hallucination — the prose is not a reliable
 signal. The harness's authoritative check is **step 4.2**, which fires the
 `pre_llm_call` hook through **Hermes' own config-wired dispatcher** and asserts
-the real memory is injected:
+the real memory is injected.
+
+**Where to run it — IN THE SANDBOX, not on your laptop.** The harness (run on
+your laptop) does the *setup*: sandbox + build + `wire` + MCP + Phase P pairing +
+seed. Verifying is a separate, **standalone** command run *inside the sandbox* —
+you do **not** need to re-run the harness, as long as the demo is already set up
+(MCP up + hooks wired + memory seeded). Two ways to run it:
 
 ```bash
-# what step 4.2 runs (in the sandbox) — deterministic, no model call:
+# From your laptop, into the running sandbox container:
+docker exec -it <sandbox-container> bash -lc "hermes hooks test pre_llm_call"
+
+# …or from a shell already inside the sandbox (e.g. the code-server terminal):
 hermes hooks test pre_llm_call
 #   → stdout: {"context":"## Memory: travel\nChengdu trip — Apr 12 to 16, hotpot at Yulin."}
 #   → parsed (Hermes wire shape): {"context": "..."}   ← injected into the LLM request
 hermes hooks doctor              # all 3 wired hooks: exec + valid JSON
 ```
+
+Step 4.2 of the harness runs exactly this for you (so a full `--real --webauthn`
+run reports the result inline); the standalone command is for re-checking anytime
+without re-running the harness.
 
 `4.2 inject (deterministic) ok` means the permissioned memory reached the LLM
 request — the actual AgentKeys guarantee. `stdout: {}` / `parsed: <none>` means it
