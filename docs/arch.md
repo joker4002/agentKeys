@@ -582,6 +582,43 @@ OS keychain when available (Linux GNOME Keyring, Windows Credential Locker). Whe
 | **Master K10 + biometric presence** | Above plus: mutate scope, bind new master device, rotate K10, mint new agent omnis. Bounded to this human's actor tree. Visible on chain (sovereign mode default). Recovery (§11) revokes within ~60s. |
 | **Agent K10 leaked** (sandbox host root) | Cap-mint under `O_agent_A` until link-code rotation or session-JWT TTL expiry. **Per-actor binding** prevents impersonating siblings. Cannot rebind, mutate scope, or escalate to master. PrincipalTag at STS prevents cross-agent S3 access. |
 
+### 10.7 Permission-grant ceremony — the mobile-OS analog (added 2026-05-31)
+
+The strategy doc ([agent-iam-strategy.md §2.7](agent-iam-strategy.md)) frames the whole product as the mobile-OS app-permission model: install → first-launch permission prompt → per-permission grant → OS-enforced at the syscall boundary → revoke in Settings. This section records how that UX maps onto the **existing** v2 primitives. It introduces no new contract, key, or wire change — it is a naming + composition layer over what §10.2, §16.1, §19, and §22d already ship.
+
+**Mapping to shipped primitives:**
+
+| Mobile-OS step | AgentKeys mechanism | Where it already lives |
+|---|---|---|
+| Install app | Agent onboarding | §10.2 link-code bootstrap |
+| First-launch permission prompt | Master grant ceremony — K11 WebAuthn on master, with operator-readable intent | §10.1 K11 ceremony + intent-rendering |
+| Grant / deny per permission | `set_scope_with_webauthn(operator, agent, Scope, k10_sig, k11_assertion)` | §16.1 `AgentKeysScope` |
+| Bounded grant (≤ ¥50, read-only) | `Scope.{read_only, max_per_call, max_per_period, max_total, payment_k11_threshold}` + cap-token `namespaces_allowed` | §16.1 + §19 cap shape |
+| OS enforces at the syscall boundary | **`PreToolUse` hook → `permission.check`** — the IAM *guarantee* | §22d hooks-first |
+| Runtime re-prompt | `permission.check → ask_parent` | deterministic policy engine (§22d tool layer) |
+| Revoke in Settings | `revoke_scope_with_webauthn` / `cap.revoke` | §16.1 + Act-3 demo |
+| Per-app sandbox | per-actor isolation | §14, §17 |
+
+**The one-step-vs-two-step UX nuance.** Today §10.2 (agent bootstrap via link-code) and the scope grant (`set_scope_with_webauthn`) are *two* master actions. The mobile-OS model unifies them into *one* onboarding moment: when the master runs `agentkeys agent create` (or `agentkeys wire <runtime>` per strategy §3.7), the CLI presents the requested capabilities and captures a single K11 assertion authorizing both the device binding and the initial scope grant. This is a CLI/UX composition of two existing chain calls — **not** a protocol change. The two underlying transactions stay separate and independently auditable on chain.
+
+**Identified gap — per-category structured grants (additive, future).** The current `AgentKeysScope.Scope` (§16.1) expresses a grant as a *flat* `services[]` list, *one* global `read_only` bool covering all services, and *payment-specific* bounds (`max_per_call` etc.). The mobile-OS model wants *per-category* grants — "read-only travel memory AND no health memory AND payment ≤ ¥50 AND these two IoT devices" — which needs each category to carry its own operation + bound rather than a single global `read_only` + payment-only caps.
+
+The conservative path is **additive**: a future `Scope.grants` field — `PermissionGrant[] { category, operation, bound }` — layered alongside the existing fields, not replacing them. Existing fields stay for back-compat (the cap verifier already ignores unknown fields gracefully by design); v0 ships the flat model; the structured model lands when the parent-control UI needs per-category toggles (the mobile-OS Settings screen). **No v0 contract change is implied by this section** — it records the direction so the eventual `Scope` extension is a known, bounded addition rather than a surprise rewrite. Tracked against the Phase-4 capability-depth work (strategy §5 Phase 4).
+
+**arch.md compatibility check (no contradictions, verified 2026-05-31):**
+- ✅ §10.2 link-code bootstrap unchanged — the ceremony composes the existing two chain calls; it alters neither.
+- ✅ §16.1 `AgentKeysScope` contract unchanged — the per-category `grants` field is explicitly deferred + additive; the shipped struct is untouched.
+- ✅ §22d hooks-first enforcement unchanged — this section names the `PreToolUse` hook as the syscall-analog enforcement point; it introduces no competing enforcement path.
+- ✅ §6.3 identity ≠ actor ≠ capability separation unchanged — grants attach to the (operator, agent) scope edge, exactly as `AgentKeysScope` already keys them.
+- ✅ Canonical names (§5) — "permission-grant ceremony" and "permission category" are UX terms layered on existing canonical names (`agent_omni`, `cap-token`, `Scope`); no new identity/key spelling introduced.
+
+**Cross-references:**
+- [strategy §2.7](agent-iam-strategy.md) — consumer-facing framing + the permission-category vocabulary
+- [§10.2](#102-agent-bootstrap-link-code-only--single-path) — the bootstrap the ceremony composes with the scope grant
+- [§16.1](#161-contracts) — the `AgentKeysScope.Scope` struct the grant writes
+- [§22d](#22d-iam-guarantee-delivery--hooks-first-proxy-fallback) — the hook enforcement that turns the grant into an IAM guarantee
+- [#110](https://github.com/litentry/agentKeys/issues/110) — parent-control UI where per-category toggles surface
+
 ---
 
 ## 11. Recovery — M-of-N device quorum (no anchor wallet, no seed phrase)
