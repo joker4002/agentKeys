@@ -26,6 +26,13 @@ bash harness/phase1-wire-demo.sh --light
 # --webauthn "approves" the memory scope via Touch ID. Then it seeds + recalls
 # the Chengdu memory. Expect ONE Touch ID + one on-chain tx per run.
 bash harness/phase1-wire-demo.sh --real --webauthn
+
+# VERIFY — deterministic, no LLM. Run IN THE SANDBOX after setup (the harness
+# also runs this at step 4.2). A "context" block = the permissioned memory
+# reached the LLM request — the actual guarantee. Don't judge by the chat reply.
+docker exec -it <sandbox-container> bash -lc "hermes hooks test pre_llm_call"
+#   → stdout: {"context":"## Memory: travel\nChengdu trip — Apr 12 to 16, hotpot at Yulin."}   ✅
+#   → stdout: {}   ❌  (MCP down / scope not granted / session bad)
 ```
 
 **A mode is REQUIRED** — `--light` or `--real`. The harness refuses to guess
