@@ -793,6 +793,10 @@ do_step_15() {
   mcp_bring_up_script=$(cat <<EOSH
 #!/usr/bin/env bash
 set -euo pipefail
+# SSM RunShellScript runs this as root with a MINIMAL env (no HOME). Under set -u
+# an unset \$HOME is a fatal "unbound variable", which broke step 15 the moment
+# SSM delivery started working. Default it before any \$HOME use (root => /root).
+export HOME="\${HOME:-/root}"
 export PATH="\$HOME/.cargo/bin:\$PATH"
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -901,6 +905,7 @@ do_step_16() {
   printf "    bash scripts/setup-cloud.sh --only-step 6   # re-UPSERT DNS\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 12  # re-create SSH user (e.g. after EC2 replace)\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 13  # re-run per-data-class provisioning\n" >&2
+  printf "    bash scripts/setup-cloud.sh --only-step 15  # re-run the MCP bring-up on the broker via SSM (add --test for the test broker)\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 15  # re-deploy agentkeys-mcp-server on broker (cargo install --git)\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 15 --test  # same for test-mcp.\${ZONE}\n\n" >&2
 }
