@@ -125,11 +125,16 @@ pub async fn mint_oidc_jwt(
         // (omni_account), with the CAP_MINT role. Checking only actor would let any
         // OTHER registered operator bind (this device hash, this actor) and pass the
         // gate, bypassing the master that issued the link code.
-        let parent_omni = session_claims.agentkeys.parent_omni.as_deref().unwrap_or("");
+        let parent_omni = session_claims
+            .agentkeys
+            .parent_omni
+            .as_deref()
+            .unwrap_or("");
         let chain = ChainContracts::from_state(&state)
             .map_err(|e| BrokerError::Internal(format!("chain config for agent gate: {e:?}")))?;
-        let dkh = agentkeys_core::device_crypto::device_key_hash(device_pubkey)
-            .map_err(|e| BrokerError::BadRequest(format!("bad device_pubkey in session claim: {e}")))?;
+        let dkh = agentkeys_core::device_crypto::device_key_hash(device_pubkey).map_err(|e| {
+            BrokerError::BadRequest(format!("bad device_pubkey in session claim: {e}"))
+        })?;
         let device = call_get_device(&state.http, &chain.rpc_url, &chain.registry, &dkh)
             .await
             .map_err(|e| BrokerError::Internal(format!("on-chain device read: {e:?}")))?;
