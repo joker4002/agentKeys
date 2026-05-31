@@ -594,7 +594,11 @@ phase1_sandbox() {
         elif [[ -n "$prior_dkh" && "$ds_dkh" == "$prior_dkh" ]]; then
           fail "P.1 install" "fresh pairing produced the SAME device_key_hash as the prior run ($ds_dkh) — the P.depair K10 wipe did not take; this is NOT a genuine re-pair"
         else
-          ACTOR_OMNI="$ds_actor"; AGENT_SESSION_FILE="$ds_session_file"; DEVICE_KEY_HASH="$ds_dkh"
+          # cap-mint (validate_hex32) requires 0x-prefixed omnis, like OPERATOR_OMNI.
+          # The §10.2 child omni is un-prefixed by design, so normalize to exactly
+          # one 0x for --default-actor (else memory.put → cap_mint 400 "actor_omni
+          # must start with 0x"). ds_actor stays un-prefixed for the chain helpers.
+          ACTOR_OMNI="0x${ds_actor#0x}"; AGENT_SESSION_FILE="$ds_session_file"; DEVICE_KEY_HASH="$ds_dkh"
           # Record the (public) device hash in a sandbox sidecar so the NEXT fresh
           # run can depair THIS exact device (P.depair). It's the on-chain id, not
           # the key — custody is unaffected.
@@ -615,10 +619,15 @@ phase1_sandbox() {
           local reg; reg="$(bash "$REPO_ROOT/scripts/heima-agent-create.sh" --label "$AGENT_LABEL" \
             --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
           echo "$reg" | sed 's/^/        /' >&2
-          if echo "$reg" | grep -qiE '"skipped"[[:space:]]*:[[:space:]]*"already-registered"'; then
+          # heima-agent-create.sh prints stderr logs + a final JSON line; $reg is
+          # BOTH (2>&1), so extract the JSON line before jq — jq on the mixed text
+          # silently fails and would false-FAIL a real registration. The JSON
+          # discriminates a real tx_hash from the already-registered skip.
+          local reg_json; reg_json="$(echo "$reg" | grep -oE '\{.*\}' | tail -1)"
+          if echo "$reg_json" | jq -e '.skipped=="already-registered"' >/dev/null 2>&1; then
             fail "P.2 bind" "registerAgentDevice was SKIPPED (already-registered) — P.depair/P.1 did NOT yield a fresh device, so the pairing path was NOT exercised (check P.depair revoke + sandbox wipe): $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
-          elif echo "$reg" | jq -e '.ok==true and ((.tx_hash // "") != "")' >/dev/null 2>&1; then
-            ok "P.2 bind" "on-chain registerAgentDevice — REAL tx $(echo "$reg" | jq -r '.tx_hash' 2>/dev/null | cut -c1-18)… (fresh K10 from P.depair)"
+          elif echo "$reg_json" | jq -e '.ok==true and ((.tx_hash // "") != "")' >/dev/null 2>&1; then
+            ok "P.2 bind" "on-chain registerAgentDevice — REAL tx $(echo "$reg_json" | jq -r '.tx_hash' 2>/dev/null | cut -c1-18)… (fresh K10 from P.depair)"
             # Ack the rendezvous: tell the broker the master bound this device so it
             # drops out of pending-bindings (self-cleaning → idempotent re-runs).
             curl -sS --max-time 15 -X POST "${BROKER_URL%/}/v1/agent/pending-bindings/ack" \
