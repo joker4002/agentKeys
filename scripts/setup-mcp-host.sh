@@ -186,7 +186,7 @@ echo "    install dir:       ${INSTALL_DIR}" >&2
 echo "    run user:          ${RUN_USER}" >&2
 echo "    env file:          ${ENV_FILE}" >&2
 echo "    mcp binary dst:    ${MCP_BIN_DST}" >&2
-echo "    mcp install:       cargo install --git ${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git} --branch ${AGENTKEYS_REV:-main}" >&2
+echo "    mcp build:         cargo build --release -p agentkeys-mcp-server  (in ${REPO_ROOT}, cached/incremental)" >&2
 echo "    with nginx:        ${WITH_NGINX}" >&2
 echo "    with certbot:      ${WITH_CERTBOT}" >&2
 echo "    with build:        ${WITH_BUILD}" >&2
@@ -332,31 +332,29 @@ fi  # MODE == self-hosted (closes step 3 self-hosted branch)
 # Override repo/rev for development (e.g. testing a PR branch):
 #   AGENTKEYS_REPO_URL=https://github.com/me/agentKeys.git \
 #   AGENTKEYS_REV=my-pr-branch bash scripts/setup-mcp-host.sh
-head "4/9 install agentkeys-mcp-server (cargo install --git)"
-REPO_URL="${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git}"
-REV="${AGENTKEYS_REV:-main}"
-INSTALL_CACHE="${HOME}/.cache/agentkeys-mcp-install"
+head "4/9 build agentkeys-mcp-server (cached workspace build)"
 
 if [ "$WITH_BUILD" = "yes" ]; then
   command -v cargo >/dev/null 2>&1 \
-    || fail "cargo not found — install Rust toolchain (curl https://sh.rustup.rs | sh) or pass --without-build if binary already at $MCP_BIN_DST"
-  mkdir -p "$INSTALL_CACHE"
-  ok "cargo install --git $REPO_URL --branch $REV → $INSTALL_CACHE/bin/"
-  # --force: cargo install won't overwrite "the same version" without it.
-  # With --git there's no semver to compare against, so --force is the
-  # right call. cargo's incremental compile + on-disk cache keep re-runs
-  # fast (~5s when nothing changed; ~2 min on a fresh build).
-  cargo install --quiet --force \
-    --git "$REPO_URL" --branch "$REV" \
-    --bin agentkeys-mcp-server \
-    --root "$INSTALL_CACHE" \
-    agentkeys-mcp-server \
-    || fail "cargo install --git $REPO_URL@$REV failed"
+    || fail "cargo not found — install Rust (curl https://sh.rustup.rs | sh) or pass --without-build if the binary is already at $MCP_BIN_DST"
+  # Build IN the on-host repo checkout ($REPO_ROOT, e.g. /opt/agentkeys-src) using
+  # its PERSISTENT target/ — NOT `cargo install --git`, which re-clones + builds
+  # the ENTIRE dep tree in a throwaway target every run (a ~10–20 min COLD build
+  # on the t3.medium broker). setup-broker-host.sh already compiled
+  # aws-sdk/tokio/k256/etc. into this same target/release, and the target persists
+  # across re-runs, so `cargo build -p` is INCREMENTAL — only the mcp-server crate
+  # recompiles (seconds–2 min). Same cached-build approach as setup-broker-host.sh
+  # and harness/phase1-wire-demo.sh. ($REPO_ROOT was already checked out to the
+  # desired ref by the caller — e.g. setup-cloud.sh step 15's clone/reset — so no
+  # separate `--git` fetch is needed; we build the code that's actually here.)
+  ok "cargo build --release -p agentkeys-mcp-server (in $REPO_ROOT, reusing the target/release cache)"
+  ( cd "$REPO_ROOT" && cargo build --release --locked -p agentkeys-mcp-server ) \
+    || fail "cargo build -p agentkeys-mcp-server failed in $REPO_ROOT"
 fi
 
-CACHED_BIN="$INSTALL_CACHE/bin/agentkeys-mcp-server"
+CACHED_BIN="$REPO_ROOT/target/release/agentkeys-mcp-server"
 if [ ! -x "$CACHED_BIN" ]; then
-  fail "$CACHED_BIN not installed; drop --without-build or place the binary at $MCP_BIN_DST yourself"
+  fail "$CACHED_BIN not built; drop --without-build or place the binary at $MCP_BIN_DST yourself"
 fi
 
 src_sha=$(sha256sum "$CACHED_BIN" | awk '{print $1}')
