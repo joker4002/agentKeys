@@ -760,7 +760,7 @@ ensure_ssm_managed() {
   done
   die "SSM: $INSTANCE_ID never reached PingStatus=Online (last: ${ping:-none}) after ~3min. The role now carries AmazonSSMManagedInstanceCore, so the on-host amazon-ssm-agent likely isn't running. (Re)start it via the single entry point, then re-run this step:
      bash scripts/ssh-broker.sh $([ "$TEST_MODE" = "1" ] && echo test || echo prod)
-     sudo bash /opt/agentkeys-src/scripts/setup-broker-host.sh --upgrade   # installs+enables the agent
+     sudo bash /opt/agentkeys-src/scripts/setup-broker-host.sh --ref main   # idempotent; installs+enables the agent
    or reboot (broker auto-restarts via systemd): aws --region $REGION ec2 reboot-instances --instance-ids $INSTANCE_ID"
 }
 
