@@ -65,27 +65,46 @@ impl HttpBackend {
         &self,
         role_arn: Option<&String>,
     ) -> Result<Option<[(&'static str, String); 3]>, BackendError> {
-        let bearer = match self.agent_session_bearer.as_deref() {
-            Some(b) if !b.is_empty() => b,
-            _ => return Ok(None),
-        };
-        let role = match role_arn {
-            Some(r) if !r.is_empty() => r.as_str(),
-            _ => return Ok(None),
-        };
-        let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-            self.broker()?,
-            bearer,
-            role,
-            &self.region,
-        )
-        .await
-        .map_err(|e| BackendError::Transport(format!("sts relay (role {role}): {e}")))?;
-        Ok(Some([
-            ("x-aws-access-key-id", creds.access_key_id),
-            ("x-aws-secret-access-key", creds.secret_access_key),
-            ("x-aws-session-token", creds.session_token),
-        ]))
+        let bearer = self
+            .agent_session_bearer
+            .as_deref()
+            .filter(|b| !b.is_empty());
+        let role = role_arn.map(String::as_str).filter(|r| !r.is_empty());
+        match (bearer, role) {
+            (Some(bearer), Some(role)) => {
+                let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+                    self.broker()?,
+                    bearer,
+                    role,
+                    &self.region,
+                )
+                .await
+                .map_err(|e| BackendError::Transport(format!("sts relay (role {role}): {e}")))?;
+                Ok(Some([
+                    ("x-aws-access-key-id", creds.access_key_id),
+                    ("x-aws-secret-access-key", creds.secret_access_key),
+                    ("x-aws-session-token", creds.session_token),
+                ]))
+            }
+            // Neither configured → no per-actor relay. Legitimate for the
+            // legacy/--reuse-agent path, but a SILENT downgrade here is exactly
+            // how a real-mode misconfig turns into a confusing worker 502
+            // (issue #90), so make it loud. The worker then uses its own creds.
+            (None, None) => {
+                tracing::warn!(
+                    "STS relay NOT configured (no agent-session-bearer + role ARN) — forwarding \
+                     no X-Aws-* headers; the worker will use its own credentials. For per-actor \
+                     isolation set --agent-session-bearer + --memory-role-arn/--vault-role-arn."
+                );
+                Ok(None)
+            }
+            // Exactly one set → inconsistent config; fail loud BEFORE the worker
+            // call rather than silently dropping per-actor isolation.
+            _ => Err(BackendError::NotConfigured(
+                "STS relay partially configured — need BOTH --agent-session-bearer and the \
+                 per-data-class role ARN (--memory-role-arn / --vault-role-arn), got only one",
+            )),
+        }
     }
 
     fn broker(&self) -> Result<&str, BackendError> {

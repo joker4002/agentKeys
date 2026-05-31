@@ -754,8 +754,16 @@ build_linux_binaries() {
   if [[ "$build_rc" -eq 0 && -x "$agent_bin" && -x "$mcp_bin" ]]; then
     ok "1.3 linux build" "built aarch64-linux binaries (toolchain $cross_toolchain)"; return 0
   elif [[ -x "$agent_bin" && -x "$mcp_bin" ]]; then
-    skip "1.3 linux build" "cross-build FAILED (rc=$build_rc) — using the previously-built binary; SOURCE CHANGES ARE NOT DEPLOYED (try CROSS_RUST_TOOLCHAIN=<ver>, or clear target/sandbox-linux; see docker output above)"
-    return 0
+    # A stale binary must NOT silently pass: the deterministic checks below
+    # (4.2 inject, the new crypto + STS relay) would then verify OLD code and the
+    # summary could read green while SOURCE CHANGES ARE NOT DEPLOYED. Fail by
+    # default; require an explicit unsafe opt-in to knowingly reuse the old build.
+    if [[ "${ALLOW_STALE_BINARY:-0}" == "1" ]]; then
+      skip "1.3 linux build" "cross-build FAILED (rc=$build_rc) but ALLOW_STALE_BINARY=1 — REUSING the previous binary; SOURCE CHANGES ARE NOT DEPLOYED, so the deterministic checks may verify STALE code."
+      return 0
+    fi
+    fail "1.3 linux build" "cross-build FAILED (rc=$build_rc) — SOURCE CHANGES ARE NOT DEPLOYED. Refusing to run against stale binaries (would invalidate the deterministic verify). Fix the build (try CROSS_RUST_TOOLCHAIN=<ver>, or clear target/sandbox-linux; see docker output above), or set ALLOW_STALE_BINARY=1 to knowingly proceed."
+    return 1
   else
     fail "1.3 linux build" "cross-build failed (rc=$build_rc) and no usable binary present (see docker output above)"; return 1
   fi

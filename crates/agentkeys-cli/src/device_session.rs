@@ -107,6 +107,40 @@ fn write_key_0600(path: &str, content: &str) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("write {path}"))
 }
 
+/// Before minting a session from an EXISTING device key, verify it's a regular,
+/// owner-only file. A copied/restored key with group/other read bits — or a
+/// symlink to another file — would otherwise still mint a valid session,
+/// silently breaking the "key never leaves / only the owner can use it"
+/// guarantee. We reject (not auto-repair): loose perms mean the key may already
+/// have been exposed, so the operator should `chmod 600` it deliberately or
+/// `--regen` a fresh one.
+#[cfg(unix)]
+fn enforce_owner_only(path: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path}"))?;
+    if meta.file_type().is_symlink() {
+        return Err(anyhow!(
+            "device key {path} is a symlink — refusing (key-custody); use a real owner-only file or --regen"
+        ));
+    }
+    if !meta.file_type().is_file() {
+        return Err(anyhow!("device key {path} is not a regular file — refusing"));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(anyhow!(
+            "device key {path} has loose permissions {mode:o} (group/other bits set) — \
+             it may already be exposed. Run `chmod 600 {path}` (or --regen for a fresh key) and retry."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn enforce_owner_only(_path: &str) -> Result<()> {
+    Ok(())
+}
+
 /// `agentkeys agent device-session` — generate/load the in-sandbox device key,
 /// mint the broker session, emit the JSON the harness feeds to the master for
 /// on-chain binding. Returns the JSON string (printed by the caller).
@@ -123,6 +157,10 @@ pub async fn device_session(
     }
 
     let sk = if Path::new(&key_path).exists() {
+        // Custody guarantee holds only if the EXISTING key is owner-only — a
+        // fresh key is created 0600, but a copied/restored file may be looser
+        // (or a symlink to someone else's file). Reject those before minting.
+        enforce_owner_only(&key_path)?;
         let raw = std::fs::read_to_string(&key_path).context("read device key file")?;
         let raw = raw.trim().trim_start_matches("0x");
         let bytes = hex::decode(raw).context("device key file is not hex")?;

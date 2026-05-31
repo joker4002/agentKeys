@@ -206,9 +206,18 @@ impl RuntimeAdapter for HermesAdapter {
         } else {
             std::fs::create_dir_all(&hooks_dir)
                 .with_context(|| format!("create {}", hooks_dir.display()))?;
+            // 0o700 — the dir holds bearer-bearing hook scripts; no group/other
+            // traversal or read (defense-in-depth with the 0o700 scripts).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&hooks_dir)?.permissions();
+                perms.set_mode(0o700);
+                let _ = std::fs::set_permissions(&hooks_dir, perms);
+            }
             log.push((
                 "1 hooks-dir".into(),
-                Outcome::Ok(format!("{} ready", hooks_dir.display())),
+                Outcome::Ok(format!("{} ready (0700)", hooks_dir.display())),
             ));
         }
 
@@ -282,7 +291,12 @@ fn write_if_changed(
     if exec {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o755);
+        // 0o700 (owner rwx only) — these hook scripts export the operator
+        // session bearer + vendor token; they only need to be exec'd by the
+        // agent's own user (Hermes runs as that user), never read by
+        // group/other. Closes the cross-user token-theft vector. (Same-user
+        // exposure is architectural — out-of-process custody is issue #144.)
+        perms.set_mode(0o700);
         std::fs::set_permissions(path, perms)?;
     }
     let _ = exec; // silence unused on non-unix
