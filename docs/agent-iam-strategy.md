@@ -5,9 +5,9 @@
 **Purpose**: be the source of truth for "what AgentKeys is, what it isn't, and what we ship next." Future planning, positioning, and scope decisions reference this doc.
 
 **Companion docs**:
-- [`ai-hardware-companion-office-hours.md`](./ai-hardware-companion-office-hours.md) — original wedge brainstorm (positioning is updated by this doc)
-- [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md), [`volcano-ark-mcp-integration.md`](./volcano-ark-mcp-integration.md), [`tuya-vs-xiaozhi.md`](./tuya-vs-xiaozhi.md) — tactical adapter architectures (unchanged by this doc)
-- [issue #103 plan](../spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) — Phase 1 execution (scope is updated by this doc)
+- [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) — original wedge brainstorm (positioning is updated by this doc)
+- [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md), [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md), [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — tactical adapter architectures (unchanged by this doc)
+- [issue #103 plan](./spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) — Phase 1 execution (scope is updated by this doc)
 
 ---
 
@@ -62,6 +62,8 @@ This is a $20B+ comparable market with deep mental models (Okta, Auth0, AWS IAM,
 MCP is the protocol vendor LLMs use to call our tools. Important. But also: SDKs, OAuth-style flows, device APIs, runtime adapters, policy APIs are all eventually-needed surfaces. **We sequence**: MCP first (open standard, broad reach), Python + TypeScript SDKs second, OAuth-style flows third, the rest later.
 
 The product identity is "Agent IAM" — not "an MCP server."
+
+**Addendum (2026-05-28)**: the MCP server delivers IAM *tools*. Turning a tool into an IAM *guarantee* (a check the LLM cannot skip) requires a non-LLM enforcement layer — either lifecycle **hooks** in the Task Host runtime (primary, [#133](https://github.com/litentry/agentKeys/issues/133)) or an OpenAI-compatible **proxy** for hosts without hooks (fallback, Phase 3b). See §3.6 for the IAM-tool-vs-IAM-guarantee distinction and the hooks-first / proxy-fallback decision.
 
 ### 2.4 Zero orchestration in v1 — hard line
 
@@ -155,7 +157,7 @@ Three audiences, three pitches, one product. Don't conflate.
 
 ### 3.5 Memory namespace model (early-phase, composes with the 4-type taxonomy)
 
-The existing AgentKeys memory design ([`docs/plan/agentkeys-memory-design.md`](../plan/agentkeys-memory-design.md), committed on `main` as `53ccc9f`) defines four STRUCTURAL types — `profile` (single CAS-mutable file), `procedural` (append + occasional rewrite), `semantic` (one S3 object per ULID), `episodic` (date-prefixed per ULID). These are how memory is STORED on the per-actor S3 prefix.
+The existing AgentKeys memory design ([`docs/plan/agentkeys-memory-design.md`](./plan/agentkeys-memory-design.md), committed on `main` as `53ccc9f`) defines four STRUCTURAL types — `profile` (single CAS-mutable file), `procedural` (append + occasional rewrite), `semantic` (one S3 object per ULID), `episodic` (date-prefixed per ULID). These are how memory is STORED on the per-actor S3 prefix.
 
 For Agent IAM, we add an ORTHOGONAL semantic dimension: **namespaces**. These are how memory is SCOPED for permission and discovery. Namespaces compose with structural types — a memory item belongs to one namespace AND one structural type.
 
@@ -170,7 +172,7 @@ The MagicLick's cap-token grants `namespaces_allowed: ["travel"]`. It can read t
 
 **Why this composes cleanly with the existing memory design**:
 
-- The 4-type S3 key derivation in [memory-design §3.2a](../plan/agentkeys-memory-design.md) is unchanged. No new path components in v0. (S3 layout: `bots/<actor>/memory/{profile.json.enc, procedural.jsonl.enc, semantic/<ulid>.enc, episodic/<date>/<ulid>.enc}` — exactly as designed.)
+- The 4-type S3 key derivation in [memory-design §3.2a](./plan/agentkeys-memory-design.md) is unchanged. No new path components in v0. (S3 layout: `bots/<actor>/memory/{profile.json.enc, procedural.jsonl.enc, semantic/<ulid>.enc, episodic/<date>/<ulid>.enc}` — exactly as designed.)
 - Namespaces live in the wire-format metadata + line envelope, NOT in the S3 key derivation. The memory worker filters at retrieval time.
 - Cap-tokens add a `namespaces_allowed: ["personal", "travel"]` claim. The worker enforces the filter deterministically (no LLM, no fuzzy matching — string-set membership check).
 - Future evolution: if scale / perf demands a path-prefixed namespace layout for cheap S3 LIST per namespace, migration is well-defined (rewrite per-actor under `bots/<actor>/memory/<namespace>/{...}` paths); cap-tokens already speak the namespace language at that point.
@@ -202,12 +204,53 @@ A device's cap-token scopes which namespaces it can read AND write. The MagicLic
 
 **arch.md compatibility check** (no contradictions found, verified 2026-05-24):
 
-- ✅ Memory data_class binding ([arch.md §17.5](../arch.md)) unchanged — namespaces are inside the data_class, not parallel to it
-- ✅ Per-actor isolation via PrincipalTag ([arch.md §17](../arch.md)) unchanged — namespaces are inside the actor's prefix
+- ✅ Memory data_class binding ([arch.md §17.5](./arch.md)) unchanged — namespaces are inside the data_class, not parallel to it
+- ✅ Per-actor isolation via PrincipalTag ([arch.md §17](./arch.md)) unchanged — namespaces are inside the actor's prefix
 - ✅ Cap-token format extensible — adding `namespaces_allowed` is additive (existing cap verifier ignores unknown fields gracefully per its design)
 - ✅ Memory worker never calls an LLM (memory-design §1 invariant 1) — namespace filter is deterministic string-set membership, no inference
-- ✅ K3 epoch rotation ([arch.md §16](../arch.md), memory-design §8.3) unchanged — namespaces are envelope metadata, not part of the keying material
+- ✅ K3 epoch rotation ([arch.md §16](./arch.md), memory-design §8.3) unchanged — namespaces are envelope metadata, not part of the keying material
 - ✅ Architecture-as-source-of-truth (CLAUDE.md policy) — once v0 namespaces ship, arch.md §17 gets an additive paragraph + memory-design §3 adds the namespace field to the wire format. No conflicting canonical names introduced.
+
+### 3.6 IAM tool vs IAM guarantee — and how AgentKeys delivers each
+
+Added 2026-05-28 to crystallize the distinction that drives the Phase 3 architecture choice.
+
+**Terminology** (full reference: [`docs/wiki/agent-iam-guarantee-glossary.md`](./wiki/agent-iam-guarantee-glossary.md)):
+
+| | Definition | Whether the check runs is decided by... | Failure mode |
+|---|---|---|---|
+| **IAM tool** | Function in the LLM's tool registry | The LLM (prompt + context + sampling) | LLM skips / is jailbroken → unauthorized action proceeds |
+| **IAM guarantee** | Non-LLM gate in the execution path | The runtime (deterministically) | Gate fails closed; action cannot proceed without allow verdict |
+
+The seven Phase-1 MCP tools in §4.2 are *tools* by themselves. They become *guarantees* only when a non-LLM enforcement layer wraps them.
+
+**Decision (2026-05-28)**: AgentKeys delivers guarantees via two tracks, with explicit priority:
+
+1. **Primary — Hooks** ([issue #133](https://github.com/litentry/agentKeys/issues/133)). Task Host runtimes (Claude Code, Codex, Hermes, OpenClaw) fire lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd`) that synchronously invoke AgentKeys MCP tool calls. Verified 2026-05-28: Hermes's hook JSON shape is explicitly Claude-Code-compatible; Codex shape is similar but needs a thin shim; OpenClaw shares Hermes lineage. One reference script bundle ports across Tier-1 with low per-host adapter cost.
+2. **Fallback — OpenAI-compatible proxy** (lower priority). For hosts without a hook surface (xiaozhi-server, vendor mobile chatbots, plain `openai.ChatCompletion` scripts), the LLM client's `base_url` points at an AgentKeys-hosted proxy that intercepts prompts + `tool_calls` + responses and enforces policy before forwarding upstream. Lower priority because: (a) §2.4 mission-creep risk — proxy lives in the path of every byte; (b) competitively crowded space (Vercel AI Gateway, Helicone, Portkey, OpenRouter, Cloudflare AI Gateway); (c) hooks cover the strategically-important Tier-1 hosts.
+
+This decision sharpens §3.1's bounded-revocation commitment: *high-risk = always-online permission check + fresh cap-token mint per call* is only deliverable when there's a non-LLM gate. Hooks are the primary gate; proxy is the fallback gate for hooks-less hosts.
+
+Phasing per §5: hooks land in Phase 3 (issue #133); proxy lands as Phase 3b (after #133 ships + at least one vendor pilot is on hooks).
+
+### 3.7 Authority-provisioned config — `agentkeys wire <runtime>` (added 2026-05-28)
+
+A corollary of §3.6: if hooks are the IAM-guarantee delivery mechanism, *who writes the hook configs into the user's runtime?* Two extremes:
+
+- **Manual** — user runs both `agentkeys …` and the runtime's own setup wizard, then hand-edits `~/.<runtime>/config.<ext>` to register AgentKeys hooks. Two-wizard friction. Demo "surprise" effect diluted because the user already configured the runtime.
+- **Automatic** — AgentKeys CLI writes the hook scripts + the `hooks:` block + the runtime's LLM-provider config in one idempotent command. One wizard. Strong demo surprise. Higher maintenance burden (track each runtime's config schema; nightly drift check needed).
+
+**Decision (2026-05-28): hybrid.** Detailed in [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](./spec/plans/phase-1-fresh-user-wire-onboarding.md):
+
+| AgentKeys owns | Runtime owns |
+|---|---|
+| IAM-gate config — the `hooks:` block, the AgentKeys hook scripts, first-use consent pre-approval | OAuth flows (Claude Code login, Codex login, Hermes Portal OAuth) — cannot be scripted remotely |
+| LLM-provider config when the user provisioned the key via AgentKeys creds — `model.provider`, `model.base_url`, `model.api_key` come from the credential broker | Non-AgentKeys-managed config — model selection, region, custom prompts, runtime-specific knobs |
+| Idempotent re-runs — `agentkeys wire <runtime>` is safe to invoke repeatedly; diffs current vs intended, writes only on drift | The runtime's own state — sessions, history, checkpoints, plugins |
+
+The user-facing entry point is `agentkeys wire <runtime>` (one CLI command). The CLI dispatches to per-runtime adapters. Output follows the CLAUDE.md idempotent-remote-setup convention (`ok proceeding / skip <reason> / fail <reason>` per step).
+
+This pattern stays cleanly on §2.1 Authority Host side — AgentKeys is configuring an integration, not running the runtime. It also operationalizes §2.5 "deploy → grow → standardize": ship the hybrid for Hermes first (open-source, scriptable), expand to additional Task Hosts once a vendor pilot validates the approach.
 
 ---
 
@@ -252,7 +295,7 @@ What we wrap with MCP for Phase 1 (~1 week of new code, thin layer over backend 
 
 ### 4.3 Phase 1 three-act demo storyboard
 
-The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-tech/xiaozhi-esp32-server with our MCP server registered in `mcp_server_settings.json` (per [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) MCP-direct pivot).
+The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-tech/xiaozhi-esp32-server with our MCP server registered in `mcp_server_settings.json` (per [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md) MCP-direct pivot).
 
 **Act 1 — Permissioned Memory** (not "smart memory")
 
@@ -287,12 +330,14 @@ The demo runs on MagicLick 2.5 (xiaozhi-esp32 v1.9.4, unchanged) + stock xinnan-
 | Deliverable | What it is | Why it matters |
 |---|---|---|
 | AgentKeys MCP server | 7 active tools wrapping existing backend RPCs | The integration surface vendors plug into |
-| xiaozhi-server deploy with MCP config | Stock xinnan-tech build, our MCP server registered in `mcp_server_settings.json` | Demo runtime; vendor sees no fork required |
+| **`agentkeys wire <runtime>` CLI** (per §3.7) | Hybrid auto-provisioning — writes IAM-gate config + LLM-provider config into a Task Host's config files; idempotent; tracked in [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](./spec/plans/phase-1-fresh-user-wire-onboarding.md) | The user-facing entry point that turns "AgentKeys is wired into the runtime" into one command. The fresh-user "surprise" moment depends on this. |
+| Hermes adapter (Phase 1.a) | First runtime adapter for `wire`; lives in `crates/agentkeys-cli/src/wire/adapters/hermes.rs` | Validates the hybrid auto-provisioning shape against a real Task Host inside aiosandbox |
+| `agentkeys hook check / audit / memory-inject` CLI helpers | The thin wrappers the dropped hook scripts call — translate host stdin/stdout JSON to AgentKeys MCP tool calls | Makes the hook scripts trivial (single `exec` line); bug fixes ship in the AgentKeys binary, not in the user's filesystem |
 | Parent-control web UI (mobile-responsive) | One page: actor list, scope toggles, revoke buttons, audit feed | The face of "Agent IAM" — without this, Act 3 isn't a demo |
 | Two-tier audit | Real-time off-chain feed + 2-min batched on-chain anchor | §3.2 corrected architecture |
 | Bounded revocation model | Immediate online; documented TTL/cache for offline | §3.1 corrected architecture |
 | Three mock memory namespaces | `profile`, `travel`, `family` (only `travel` readable by demo actor) | Shows scoped access in Act 1 |
-| Demo runbook + 15-min vendor pitch script | Operator can re-run; vendor sees value in 5 min | Distribution-ready |
+| Demo runbook + 15-min vendor pitch script | Operator can re-run; vendor sees value in 5 min via the 7-step fresh-user journey (install → curl-bootstrap → master approve → install Task Host → `agentkeys wire` → open runtime → memory-aware first turn) | Distribution-ready; the 7 steps are the runbook scaffold |
 
 ### 4.5 What Phase 1 does NOT include
 
@@ -337,17 +382,40 @@ Not "build many protocol surfaces." Land a real vendor pilot.
 
 Goal: 1 paid vendor pilot signed at the $2-3/active-device/mo Basic tier from the office-hours pricing doc.
 
-### Phase 3 — Runtime neutrality (3-4 months)
+### Phase 3 — Runtime neutrality via hook reference configs (3-4 months) — primary IAM-guarantee track
 
-Prove "the same authority layer works across different agent runtimes."
+Prove "the same authority layer works across different agent runtimes" by shipping the **hook reference configs** that turn AgentKeys MCP tools into IAM guarantees inside each Task Host. Per §3.6, this is the primary enforcement seam: hooks live in the Task Host runtime, fire deterministically around tool calls, and don't depend on LLM discretion.
 
-- Hermes-MCP (`hermes.execute_task` as a callable tool — per yesterday's "agent-as-MCP-tool" decision)
-- OpenClaw-MCP (same shape)
-- Doubao agent compatibility (already covered by Volcano Ark Phase 2)
-- Claude Code / Codex CLI compatibility (these are coding agents — different use case, but proves cross-runtime IAM works for developer-tier agents too)
+Tracked under [issue #133](https://github.com/litentry/agentKeys/issues/133). Tier-1 hosts (verified 2026-05-28 — see [`docs/wiki/agent-iam-guarantee-glossary.md`](./wiki/agent-iam-guarantee-glossary.md) §3 for the full availability table):
+
+- **Hermes** — `~/.hermes/config.yaml` `hooks:` block; explicitly Claude-Code-compatible JSON shape. The reference implementation.
+- **Claude Code** — `~/.claude/settings.json`; richest hook surface (~24 events). Same shell scripts as Hermes (compatible JSON).
+- **Codex (OpenAI)** — `~/.codex/hooks.json` / `~/.codex/config.toml`; same event names but needs a thin `decision ↔ continue` shim.
+- **OpenClaw** — likely Hermes-compatible (Hermes ships `hermes claw` as the migration tool); verify with live install.
+- **Hermes-MCP / OpenClaw-MCP / Doubao via Volcano Ark** — also exposed as MCP tools so other Task Hosts can call them; not the same as IAM enforcement.
+
+Phase 3 deliverables ([#133](https://github.com/litentry/agentKeys/issues/133)):
+
+- Reference hook configs for all Tier-1 hosts (one script bundle ports across with thin shims thanks to Hermes-Claude-Code shape parity)
+- `agentkeys hook check` CLI helper (wraps host stdin/stdout JSON convention so operators just write `command: 'agentkeys hook check --scope payment.spend'`)
+- Cap-mint pre-warming for sub-50ms p99 hook latency (mint a short-TTL cap on session start; per-call check is in-process)
+- One end-to-end demo per runtime — same three-act storyboard (Permissioned Memory / Deterministic Denial / Online Revocation per §4.3) running on each Tier-1 host via hooks instead of LLM-invoked tools
+- Reverse-direction stub — JSON shape AgentKeys fires when our server initiates a denial/revocation (impl deferred to M4)
 - Python SDK + TypeScript SDK (for non-MCP integration paths)
 
-Goal: 3+ runtimes integrated, demonstrably interoperable through the same AgentKeys backend.
+Goal: 3+ runtimes integrated, demonstrably interoperable through the same AgentKeys backend with the same IAM-guarantee semantics.
+
+### Phase 3b — OpenAI-compatible proxy fallback (post-Phase-3, lower priority)
+
+For Tier-2 hosts without a hook surface — xiaozhi-server (verified 2026-05-28: only plugin/MCP tool registration), vendor mobile chatbots, plain `openai.ChatCompletion` scripts — ship an OpenAI-compatible proxy that the host's LLM client points at via `OPENAI_BASE_URL`. The proxy intercepts prompts + `tool_calls` + completions, enforces policy, logs audit, then forwards upstream.
+
+**Sequenced lower than Phase 3** because:
+
+1. §2.4 mission-creep risk — proxy lives in the path of every byte; vendors will ask for retry/fallback/caching that edges toward Task Host territory.
+2. Competitive crowding — Vercel AI Gateway, Helicone, LangSmith, Portkey, OpenRouter, Cloudflare AI Gateway. We want this only when our authority position is established and we own the IAM-shaped differentiation.
+3. Tier-1 hosts already cover the strategically-important runtimes; Phase 3 is broader-reach for less per-host cost.
+
+**Gate to start Phase 3b**: #133 reference configs ship + at least one vendor pilot is live on the hooks path.
 
 ### Phase 4 — Capability + revocation depth (6 months)
 
@@ -425,13 +493,13 @@ Privacy is a benefit, not a category. "Privacy product" is crowded (Brave, DuckD
 
 | Doc | Update needed |
 |---|---|
-| [`ai-hardware-companion-office-hours.md`](./ai-hardware-companion-office-hours.md) | Update positioning note at top to point at this strategy doc + add Agent IAM framing + three-narrative reality. Substance below the banner stays. |
-| [`ai-hardware-companion-wedge.md`](./ai-hardware-companion-wedge.md) | Update positioning sections — sharper "Agent IAM" framing; keep market sizing + competitive analysis as-is. |
-| [issue #103 plan](../spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) | Pivot demo storyboard to the three-act IAM demo per §4.3. Add parent-control web UI deliverable. Note the four corrections (bounded revocation, two-tier audit, delegation-as-preview, zero orchestration). Implementation detail unchanged (cap-token machinery already exists). |
-| [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) | No change — MCP-direct pivot still correct. |
-| [`volcano-ark-mcp-integration.md`](./volcano-ark-mcp-integration.md) | Minor: clarify Phase 2 timing per §5 above; tool inventory unchanged. |
-| [`tuya-vs-xiaozhi.md`](./tuya-vs-xiaozhi.md) | No change — complement-not-compete framing still correct. |
-| [`xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) | No change — risk analysis still applies; many risks evaporate under MCP-direct. |
+| [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) | Update positioning note at top to point at this strategy doc + add Agent IAM framing + three-narrative reality. Substance below the banner stays. |
+| [`ai-hardware-companion-wedge.md`](./research/ai-hardware-companion-wedge.md) | Update positioning sections — sharper "Agent IAM" framing; keep market sizing + competitive analysis as-is. |
+| [issue #103 plan](./spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) | Pivot demo storyboard to the three-act IAM demo per §4.3. Add parent-control web UI deliverable. Note the four corrections (bounded revocation, two-tier audit, delegation-as-preview, zero orchestration). Implementation detail unchanged (cap-token machinery already exists). |
+| [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md) | No change — MCP-direct pivot still correct. |
+| [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) | Minor: clarify Phase 2 timing per §5 above; tool inventory unchanged. |
+| [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) | No change — complement-not-compete framing still correct. |
+| [`xiaozhi-hermes-risks.md`](./research/xiaozhi-hermes-risks.md) | No change — risk analysis still applies; many risks evaporate under MCP-direct. |
 
 ---
 
@@ -449,10 +517,10 @@ Privacy is a benefit, not a category. "Privacy product" is crowded (Brave, DuckD
 - **This doc**: synthesis of all three. Source of truth for Agent IAM positioning + Phase 1 scope + roadmap. Future planning references this anchor.
 
 Companion architectural research:
-- [`ai-hardware-companion-wedge.md`](./ai-hardware-companion-wedge.md) — market + competitive landscape
-- [`ai-hardware-companion-office-hours.md`](./ai-hardware-companion-office-hours.md) — wedge brainstorm + Approach D selection
-- [`xiaozhi-esp32-magiclink.md`](./xiaozhi-esp32-magiclink.md) — hardware identification + Option 1 decision
-- [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) — MCP-direct architecture
-- [`xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) — risk verification
-- [`volcano-ark-mcp-integration.md`](./volcano-ark-mcp-integration.md) — Volcano Ark MCP-server adapter
-- [`tuya-vs-xiaozhi.md`](./tuya-vs-xiaozhi.md) — Tuya vs xiaozhi role comparison + Phase 3 feasibility
+- [`ai-hardware-companion-wedge.md`](./research/ai-hardware-companion-wedge.md) — market + competitive landscape
+- [`ai-hardware-companion-office-hours.md`](./research/ai-hardware-companion-office-hours.md) — wedge brainstorm + Approach D selection
+- [`xiaozhi-esp32-magiclink.md`](./research/xiaozhi-esp32-magiclink.md) — hardware identification + Option 1 decision
+- [`xiaozhi-hermes-architecture.md`](./research/xiaozhi-hermes-architecture.md) — MCP-direct architecture
+- [`xiaozhi-hermes-risks.md`](./research/xiaozhi-hermes-risks.md) — risk verification
+- [`volcano-ark-mcp-integration.md`](./research/volcano-ark-mcp-integration.md) — Volcano Ark MCP-server adapter
+- [`tuya-vs-xiaozhi.md`](./research/tuya-vs-xiaozhi.md) — Tuya vs xiaozhi role comparison + Phase 3 feasibility

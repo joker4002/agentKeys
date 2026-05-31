@@ -561,7 +561,7 @@ log "Rust: $(rustc --version)"
 # `cargo build --message-format json` shows features=[…] with auth-email-link
 # missing in the combined form, present in the separate form.
 log "Building agentkeys-mock-server (release)"
-( cd "$REPO_ROOT" && cargo build --release -p agentkeys-mock-server )
+( cd "$REPO_ROOT" && cargo build --release --locked -p agentkeys-mock-server )
 
 # Build agentkeys-broker-server with auth-email-link, asserting via
 # cargo's --message-format=json output that the feature is actually
@@ -586,7 +586,7 @@ trap 'rm -f "$BUILD_JSON" "$BUILD_ERR"' EXIT
 
 build_broker_with_features() {
   log "Building agentkeys-broker-server (release, +auth-email-link)"
-  ( cd "$REPO_ROOT" && cargo build --release \
+  ( cd "$REPO_ROOT" && cargo build --release --locked \
       -p agentkeys-broker-server --features auth-email-link \
       --message-format=json ) > "$BUILD_JSON" 2> "$BUILD_ERR" \
     || { warn "cargo build failed — last 30 lines of stderr:"; tail -30 "$BUILD_ERR" >&2; die "build failed"; }
@@ -703,7 +703,7 @@ done
 # isolate all the services"). One cargo invocation builds all 4 in parallel.
 if [[ "$WITH_WORKERS" == "yes" ]]; then
   log "Building service workers (audit + email + creds + memory, release)"
-  ( cd "$REPO_ROOT" && cargo build --release \
+  ( cd "$REPO_ROOT" && cargo build --release --locked \
       -p agentkeys-worker-audit \
       -p agentkeys-worker-email \
       -p agentkeys-worker-creds \
