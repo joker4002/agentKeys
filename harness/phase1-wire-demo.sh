@@ -82,6 +82,11 @@ SESSION_BEARER="${AGENTKEYS_SESSION_BEARER:-}"
 # In fresh §10.2 pairing it is minted IN THE SANDBOX by Phase P; legacy 0.8 mints
 # it on the master (only under --reuse-agent).
 AGENT_SESSION_BEARER="${AGENTKEYS_AGENT_SESSION_BEARER:-}"
+# Finding 2 (adversarial review): fresh-pairing passes the agent bearer to the
+# in-sandbox MCP by FILE PATH (the daemon writes it 0600 in the sandbox), so the
+# JWT never transits the master shell or the process list. --reuse-agent still
+# uses the value it mints on the master.
+AGENT_SESSION_FILE=""
 # Fresh §10.2 pairing (DEFAULT in --real): the agent generates its OWN device key
 # in the sandbox each run (key never on the master). --reuse-agent (or
 # AGENTKEYS_REUSE_AGENT=1) falls back to the legacy master-side agent file.
@@ -575,21 +580,21 @@ phase1_sandbox() {
         # P.1 agent generates K10 + redeems IN THE SANDBOX (daemon one-shot; key
         # never on the master). 2>/dev/null drops the daemon's stderr logs so
         # stdout is clean artifact JSON for jq.
-        local ds ds_addr ds_actor ds_dkh ds_pop ds_jwt
+        local ds ds_addr ds_actor ds_dkh ds_pop ds_session_file
         ds="$(sbx_exec "$DAEMON_BIN_DST --init-link-code $link_code --broker-url ${BROKER_URL:-} 2>/dev/null")"
         ds_addr="$(echo "$ds" | jq -r '.agent_address // empty' 2>/dev/null)"
         ds_actor="$(echo "$ds" | jq -r '.actor_omni // empty' 2>/dev/null)"
         ds_dkh="$(echo "$ds" | jq -r '.device_key_hash // empty' 2>/dev/null)"
         ds_pop="$(echo "$ds" | jq -r '.pop_sig // empty' 2>/dev/null)"
-        ds_jwt="$(echo "$ds" | jq -r '.session_jwt // empty' 2>/dev/null)"
-        if [[ -z "$ds_jwt" || -z "$ds_actor" || -z "$ds_addr" || -z "$ds_dkh" || -z "$ds_pop" ]]; then
+        ds_session_file="$(echo "$ds" | jq -r '.session_file // empty' 2>/dev/null)"
+        if [[ -z "$ds_session_file" || -z "$ds_actor" || -z "$ds_addr" || -z "$ds_dkh" || -z "$ds_pop" ]]; then
           fail "P.1 install" "in-sandbox daemon redeem failed: $(echo "$ds" | tr '\n' ' ' | cut -c1-200)"
         elif [[ "$ds_actor" != "$child_omni" ]]; then
           fail "P.1 install" "redeemed omni ${ds_actor:0:14}… != created child ${child_omni:0:14}… (broker/derivation mismatch)"
         elif [[ -n "$prior_dkh" && "$ds_dkh" == "$prior_dkh" ]]; then
           fail "P.1 install" "fresh pairing produced the SAME device_key_hash as the prior run ($ds_dkh) — the P.depair K10 wipe did not take; this is NOT a genuine re-pair"
         else
-          ACTOR_OMNI="$ds_actor"; AGENT_SESSION_BEARER="$ds_jwt"; DEVICE_KEY_HASH="$ds_dkh"
+          ACTOR_OMNI="$ds_actor"; AGENT_SESSION_FILE="$ds_session_file"; DEVICE_KEY_HASH="$ds_dkh"
           # Record the (public) device hash in a sandbox sidecar so the NEXT fresh
           # run can depair THIS exact device (P.depair). It's the on-chain id, not
           # the key — custody is unaffected.
@@ -658,7 +663,16 @@ phase1_sandbox() {
     # worker's S3 ops are AWS-scoped to bots/<actor>/memory/. Without it the
     # worker falls back to its instance profile (no S3) and every op 502s.
     mcp_relayarg=""
-    [[ -n "$AGENT_SESSION_BEARER" ]] && mcp_relayarg="--agent-session-bearer $AGENT_SESSION_BEARER --memory-role-arn ${MEMORY_ROLE_ARN:-} --vault-role-arn ${VAULT_ROLE_ARN:-} --aws-region ${REGION:-us-east-1}"
+    # Fresh-pairing passes the bearer by FILE (sandbox path — finding 2: the JWT
+    # never transits the master/ps); --reuse-agent passes the value it minted on
+    # the master. Either configures the per-actor STS relay.
+    local mcp_session_arg=""
+    if [[ -n "$AGENT_SESSION_FILE" ]]; then
+      mcp_session_arg="--agent-session-bearer-file $AGENT_SESSION_FILE"
+    elif [[ -n "$AGENT_SESSION_BEARER" ]]; then
+      mcp_session_arg="--agent-session-bearer $AGENT_SESSION_BEARER"
+    fi
+    [[ -n "$mcp_session_arg" ]] && mcp_relayarg="$mcp_session_arg --memory-role-arn ${MEMORY_ROLE_ARN:-} --vault-role-arn ${VAULT_ROLE_ARN:-} --aws-region ${REGION:-us-east-1}"
     cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BROKER_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH $mcp_relayarg"
   fi
   # Reuse only if a live server's argv carries the intended backend + token AND
@@ -667,11 +681,12 @@ phase1_sandbox() {
   # light mode makes that last grep a no-op (empty pattern matches every line).
   # In real mode with the STS relay, never reuse: the agent session bearer is
   # freshly minted each run (0.8), and a reused server would hold a stale bearer
-  # → mint-oidc-jwt 401 on every memory op. -z "$AGENT_SESSION_BEARER" is true in
-  # light mode (and real-without-relay), preserving fast reuse there.
+  # → mint-oidc-jwt 401 on every memory op. -z both AGENT_SESSION_BEARER and
+  # AGENT_SESSION_FILE is true in light mode (and real-without-relay), preserving
+  # fast reuse there.
   local reuse=false
   if [[ "$mcp_bin_changed" != true \
-        && -z "$AGENT_SESSION_BEARER" \
+        && -z "$AGENT_SESSION_BEARER" && -z "$AGENT_SESSION_FILE" \
         && "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" \
         && -n "$(sbx_exec "pgrep -af agentkeys-mcp-server | grep -F -- '--backend $mcp_backend' | grep -F -- '--vendor-tokens $mcp_vendor' | grep -F -- '$mcp_brokerarg'")" ]]; then
     reuse=true

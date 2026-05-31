@@ -526,6 +526,20 @@ async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<
         .unwrap_or_else(|| format!("daemon-{child_omni}"));
     session_store::save_session(&sess, &sid).context("save link-code session")?;
 
+    // Finding 2 (adversarial review): keep the bearer IN the sandbox. Write the
+    // session JWT to an owner-only (0600) file that the in-sandbox MCP server reads
+    // directly via --agent-session-bearer-file, and DO NOT print it on stdout — the
+    // master captures stdout and would otherwise expose the bearer in its shell +
+    // the sandbox process list (`ps`). Only PUBLIC binding fields leave the box.
+    let session_file = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let dir = format!("{home}/.agentkeys");
+        std::fs::create_dir_all(&dir).ok();
+        format!("{dir}/agent-session.jwt")
+    };
+    agentkeys_core::device_crypto::write_key_0600(&session_file, session_jwt)
+        .context("persist agent session jwt (0600)")?;
+
     info!(
         target: "agentkeys.daemon.init",
         child_omni = %child_omni,
@@ -547,7 +561,7 @@ async fn run_link_code_bootstrap(args: Args, link_code: &str) -> anyhow::Result<
             "derivation_path": derivation_path,
             "device_key_hash": device_key_hash,
             "pop_sig": pop_sig,
-            "session_jwt": session_jwt,
+            "session_file": session_file,
             "link_code": link_code,
             "key_file": key_file,
         })
