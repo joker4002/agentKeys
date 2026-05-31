@@ -24,7 +24,8 @@ bash harness/phase1-wire-demo.sh --light
 # mainnet. Runs a FRESH §10.2 pairing EACH run: the agent generates its own key
 # IN THE SANDBOX (never on the master), the master binds it on-chain, and
 # --webauthn "approves" the memory scope via Touch ID. Then it seeds + recalls
-# the Chengdu memory. Expect ONE Touch ID + one on-chain tx per run.
+# the Chengdu memory. Each run DEPAIRS the prior device (revoke) + re-pairs a fresh
+# K10 (register), so expect ONE Touch ID + ~2 on-chain txs per run.
 bash harness/phase1-wire-demo.sh --real --webauthn
 
 # VERIFY — deterministic, no LLM. Run IN THE SANDBOX after setup (the harness
@@ -44,8 +45,10 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 ## How to run — the `--real --webauthn` walkthrough
 
 One command runs the whole "install an app → approve its permissions → use it"
-story. Each run does a **fresh pairing** (a brand-new agent identity), so expect
-**one Touch ID + one on-chain tx per run**.
+story. Each run does a **genuine fresh pairing** — it **depairs** the prior device
+(on-chain revoke) and mints a **new K10 in the sandbox** for the same agent, so
+`registerAgentDevice` actually runs (not the already-registered skip). Expect
+**one Touch ID + ~2 on-chain txs (revoke + register) per run**.
 
 1. **Start the sandbox** (once — the harness checks but will not start it):
    ```bash

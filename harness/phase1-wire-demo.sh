@@ -496,14 +496,31 @@ phase1_sandbox() {
   # P.2+P.3 are ONE product approval conceptually; kept as two steps so the test
   # drives + verifies each deterministically. Skipped under --reuse-agent + --light.
   #
-  # IDEMPOTENT: AGENT_LABEL (default `demo-agent`) is stable, and the child omni is
-  # a deterministic HDKD of (O_master, label), so re-runs converge — the K10 file
-  # persists in the long-lived sandbox (clean_slate never wipes ~/.agentkeys), so
-  # registerAgentDevice hits the already-registered skip, the scope grant re-sets
-  # the same scope, the seed (1.5) overwrites, and the ack keeps `agent pending`
-  # self-cleaning. (Set AGENT_LABEL=demo-agent-$(date +%s) for a brand-new omni.)
+  # GENUINE FRESH PAIRING: AGENT_LABEL (default `demo-agent`) is stable and the
+  # child omni is a deterministic HDKD of (O_master, label). The persisted sandbox
+  # K10 used to make registerAgentDevice (P.2) hit the already-registered skip — so
+  # the pairing path was never actually exercised. We now DEPAIR + re-pair each run
+  # (P.depair below): revoke the prior on-chain device, wipe the sandbox K10 so P.1
+  # mints a NEW key, and P.2 does a REAL registerAgentDevice. The contract refuses
+  # to re-register a hash (registeredAt stays set even after revoke), so a fresh key
+  # is REQUIRED — depair alone would not let the same key re-register. Use
+  # --reuse-agent for a fast loop that skips pairing entirely.
   if [[ "$MODE" == "real" && "$REUSE_AGENT" != true ]]; then
     log "  Phase P — install (pair): §10.2 HDKD bootstrap (issue #144)"
+    # P.depair — guarantee a genuine fresh pairing. If a prior run recorded a
+    # device hash (sandbox sidecar — the hash is the PUBLIC on-chain id, never the
+    # key), revoke it (depair; agent-tier, no Touch ID; heima-device-revoke.sh
+    # self-checks isActive + is idempotent). Then wipe the sandbox K10 so P.1 mints
+    # a brand-new key and P.2 does a REAL registerAgentDevice instead of the
+    # already-registered skip. Custody holds: only the public hash leaves via the
+    # sidecar; the private key never leaves the sandbox.
+    local prior_dkh; prior_dkh="$(sbx_exec 'cat ~/.agentkeys/agent-device.hash 2>/dev/null' | tr -d '[:space:]')"
+    if [[ "$prior_dkh" == 0x* ]]; then
+      log "    P.depair: revoking prior device ${prior_dkh:0:14}… (idempotent — skips if already revoked) so this run re-pairs"
+      bash "$REPO_ROOT/scripts/heima-device-revoke.sh" --device-key-hash "$prior_dkh" 2>&1 | sed 's/^/        /' >&2 || true
+    fi
+    sbx_exec 'rm -f ~/.agentkeys/agent-device.key ~/.agentkeys/agent-device.hash' >/dev/null 2>&1 || true
+    ok "P.depair" "clean slate — sandbox K10 wiped; P.1 mints a fresh key, P.2 registers it for real"
     if [[ -z "$SESSION_BEARER" ]]; then
       fail "P.0 create" "no operator session bearer (0.7) — cannot mint a link code"
     else
@@ -547,6 +564,10 @@ phase1_sandbox() {
           fail "P.1 install" "redeemed omni ${ds_actor:0:14}… != created child ${child_omni:0:14}… (broker/derivation mismatch)"
         else
           ACTOR_OMNI="$ds_actor"; AGENT_SESSION_BEARER="$ds_jwt"; DEVICE_KEY_HASH="$ds_dkh"
+          # Record the (public) device hash in a sandbox sidecar so the NEXT fresh
+          # run can depair THIS exact device (P.depair). It's the on-chain id, not
+          # the key — custody is unaffected.
+          sbx_exec "printf '%s' '$ds_dkh' > ~/.agentkeys/agent-device.hash" >/dev/null 2>&1 || true
           ok "P.1 install" "📲 agent redeemed in-sandbox — addr ${ds_addr:0:12}…, omni ${ds_actor:0:14}… (K10 SANDBOX-only, J1_agent minted)"
           # P.1b master pulls the pending binding via `agentkeys agent pending` (the
           # rendezvous we built) and confirms THIS agent is awaiting approval.
@@ -564,7 +585,7 @@ phase1_sandbox() {
             --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
           echo "$reg" | sed 's/^/        /' >&2
           if echo "$reg" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true'; then
-            ok "P.2 bind" "on-chain registerAgentDevice (or already-active)"
+            ok "P.2 bind" "on-chain registerAgentDevice (fresh K10 from P.depair — a real registration, not the already-active skip)"
             # Ack the rendezvous: tell the broker the master bound this device so it
             # drops out of pending-bindings (self-cleaning → idempotent re-runs).
             curl -sS --max-time 15 -X POST "${BROKER_URL%/}/v1/agent/pending-bindings/ack" \
