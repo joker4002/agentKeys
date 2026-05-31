@@ -99,22 +99,35 @@ Note it puts the agent key back on the master; use only for quick loops.
 | **Proves** | the wire + hook + memory-injection **plumbing** works | the same, against **real IAM infra** (real signing + isolation) |
 | **Cost / risk** | free, can't break anything | real gas/cost, mutates real account state |
 
-## Setup entry points — run only what changed (idempotent, no flags to remember)
+## Setup entry points — first-time bring-up + re-runs
 
-`--light` needs none of this (it's self-contained). For `--real`, the live infra is owned by **three idempotent scripts — run only the one whose domain changed**, then re-run the harness:
+`--light` needs **none** of this (self-contained — skip to *How to run*). For **`--real`**, the live infra is owned by three idempotent scripts. **Run each ON the machine shown** — this is the part that bites: `setup-broker-host.sh` runs *on the broker host* (SSH in first), the other two from your laptop.
 
-| Script | Owns | Re-run when |
+### Starting from scratch (nothing set up yet) — run ONCE, in order
+
+| # | Run it on… | Command | Brings up |
+|---|---|---|---|
+| 1 | **laptop** (`agentkeys-admin` AWS profile) | `AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh` | Cloud/IAM: SES, S3, DNS, roles, OIDC, EC2 + EIP |
+| 2 | **the broker host** — SSH in first: `bash scripts/ssh-broker.sh` | `sudo bash scripts/setup-broker-host.sh --ref <branch>` | broker + signer + 4 workers (binaries, systemd, nginx/TLS) |
+| 3 | **laptop** | `bash scripts/setup-heima.sh` | chain: contracts + per-actor binding ceremonies |
+| 4 | **laptop** | `bash harness/phase1-wire-demo.sh --real --webauthn` | the demo itself |
+
+Notes:
+- **Step 1 prints these exact next-steps** when it finishes — it's the canonical source for the broker-host command (issuer URL + account ID filled in).
+- **Step 2 — which branch:** pass the branch you're deploying. Until [#149](https://github.com/litentry/agentKeys/pull/149) merges, that's **`--ref claude/impl-144-hdkd-bootstrap`**; after it merges, `--ref main`. `--ref` does the `git fetch` + checkout on the broker for you, so it builds the code you *mean* — not whatever happened to be checked out (this is why `git pull` on `main` didn't change anything: the work is on the feature branch). `--issuer-url` / `--account-id` auto-derive from the committed `scripts/operator-workstation.env`, so usually `--ref <branch>` is all you pass.
+- The broker MUST run the **#144 code** (the §10.2 `/v1/agent/*` routes) or Phase P fails with HTTP 404 — `--ref` guarantees that. The script self-checks (a no-bearer `POST /v1/agent/create` must return 401, not 404).
+
+### Re-runs — only run the one whose domain changed
+
+| Script (where it runs) | Owns | Re-run when |
 |---|---|---|
-| [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) | **Cloud / IAM only** (as `agentkeys-admin`) — SES, S3, DNS, roles, OIDC | a permission / role / DNS change |
-| [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) | **The broker host** — broker + signer + 4 workers (binaries, systemd, nginx) | broker/worker code changed |
-| [`scripts/setup-heima.sh`](../scripts/setup-heima.sh) | **The chain** — contracts + per-actor binding ceremonies | a chain / contract change |
+| [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) — **laptop** | Cloud / IAM (SES, S3, DNS, roles, OIDC) | a permission / role / DNS change |
+| [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) — **broker host** | broker + signer + 4 workers | broker/worker code changed |
+| [`scripts/setup-heima.sh`](../scripts/setup-heima.sh) — **laptop** | contracts + per-actor ceremonies | a chain / contract change |
 
-All three are **idempotent and unattended by default** — a re-run with the same inputs converges and exits 0 without re-applying. There are **no opt-in/opt-out flags to remember**: behaviour follows state (workers always build but skip when up-to-date; the broker self-heals a bad feature build on its own). `--yes` / `--non-interactive` are still *accepted* (CI passes them) but are no longer needed.
+All three are **idempotent + unattended by default** — re-running converges and exits 0 without re-applying; **no flags to remember** (workers always build but skip when up-to-date; the broker self-heals a bad feature build itself). `--yes` / `--non-interactive` are still *accepted* (CI passes them) but no longer needed.
 
-**The wire demo does NOT need a broker-hosted MCP server** — its MCP server runs **in the sandbox** (cross-built there once, then cached; see Prerequisites). The broker-hosted MCP endpoint is the *Hosted-LLM* path (xiaozhi / vendor-cloud), **deferred to [#152](https://github.com/litentry/agentKeys/issues/152)**; `setup-cloud.sh` step 15 is now a no-op that points there. So the right order to test the wire flow is just:
-
-1. *(only if the matching infra above changed)* run that one script
-2. `bash harness/phase1-wire-demo.sh --real --webauthn`
+**The wire demo does NOT need a broker-hosted MCP server** — its MCP server runs **in the sandbox** (cross-built there once, then cached; see Prerequisites). The broker-hosted MCP endpoint is the *Hosted-LLM* path (xiaozhi / vendor-cloud), **deferred to [#152](https://github.com/litentry/agentKeys/issues/152)**; `setup-cloud.sh` step 15 is now a no-op pointing there.
 
 ## Prerequisites
 
