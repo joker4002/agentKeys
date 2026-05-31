@@ -24,7 +24,8 @@ bash harness/phase1-wire-demo.sh --light
 # mainnet. Runs a FRESH §10.2 pairing EACH run: the agent generates its own key
 # IN THE SANDBOX (never on the master), the master binds it on-chain, and
 # --webauthn "approves" the memory scope via Touch ID. Then it seeds + recalls
-# the Chengdu memory. Expect ONE Touch ID + one on-chain tx per run.
+# the Chengdu memory. Each run DEPAIRS the prior device (revoke) + re-pairs a fresh
+# K10 (register), so expect ONE Touch ID + ~2 on-chain txs per run.
 bash harness/phase1-wire-demo.sh --real --webauthn
 
 # VERIFY — deterministic, no LLM. Run IN THE SANDBOX after setup (the harness
@@ -44,8 +45,10 @@ is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
 ## How to run — the `--real --webauthn` walkthrough
 
 One command runs the whole "install an app → approve its permissions → use it"
-story. Each run does a **fresh pairing** (a brand-new agent identity), so expect
-**one Touch ID + one on-chain tx per run**.
+story. Each run does a **genuine fresh pairing** — it **depairs** the prior device
+(on-chain revoke) and mints a **new K10 in the sandbox** for the same agent, so
+`registerAgentDevice` actually runs (not the already-registered skip). Expect
+**one Touch ID + ~2 on-chain txs (revoke + register) per run**.
 
 1. **Start the sandbox** (once — the harness checks but will not start it):
    ```bash
@@ -58,11 +61,14 @@ story. Each run does a **fresh pairing** (a brand-new agent identity), so expect
 3. **What happens, in order:**
    - **Phase 0** — prereqs + operator session (auto-minted from the master key).
    - **Phase 1** — sandbox up → Hermes installed → clean slate (1.2b) → binaries (re)built + uploaded (first build ~1 min).
-   - **Phase P — install (pair)** 📲
-     - `P.1` the agent generates its **own device key in the sandbox** + mints a session (the key never touches the master).
-     - `P.2` the master binds that device **on-chain** (`registerAgentDevice`).
-     - `P.3` **🔐 Touch ID** — the master *approves* the agent's `[memory]` permission (on-chain scope grant).
-   - **1.4–1.5** — MCP server (per-actor STS relay) starts; the fresh actor's memory is seeded (new identity ⇒ empty ⇒ seeds "Chengdu trip").
+   - **Phase P — install (pair)** 📲 (full §10.2 HDKD bootstrap, issue #144)
+     - `P.depair` — **genuine fresh pairing**: if a prior run left this agent's device paired, the master **revokes** it on-chain (depair; agent-tier, no biometric, idempotent) and the sandbox K10 is **wiped**. Required because the contract won't re-register a revoked hash (`registeredAt` sticks), so a real re-pair needs a brand-new key. Skipped under `--reuse-agent`.
+     - `P.0` the **master** mints a one-time link code bound to the HDKD child omni `O_agent = SHA256(.. ‖ O_master ‖ "//label")` (real broker `/v1/agent/create`; no more `openssl` stub).
+     - `P.1` the **agent daemon** (`agentkeys-daemon --init-link-code`) generates a **fresh K10 device key in the sandbox** (P.depair wiped the old one), proves possession, and **redeems** the code → `J1_agent` (the key never touches the master).
+     - `P.1b` the master pulls the rendezvous (`agentkeys agent pending`) and sees this agent awaiting approval.
+     - `P.2` the master **binds** that device **on-chain** — a **real `registerAgentDevice`** for the fresh key (no biometric), *not* the old already-registered skip — and **acks** the broker so it clears from `pending`.
+     - `P.3` **🔐 Touch ID** — the master **grants** the agent's `[memory]` permission (`setScopeWithWebauthn`). Conceptually `P.2`+`P.3` are **one approval** (install + permissions, iOS/Android-style); kept as two steps for deterministic test automation.
+   - **1.4–1.5** — MCP server (per-actor STS relay) starts; step 1.5 (re)seeds the "Chengdu trip" fixture into the agent's memory namespace (keyed by the **stable** omni — only the device key is fresh — so 1.5 overwrites each run).
    - **Phase 2** — `agentkeys wire hermes` installs the IAM-gate hooks.
    - **Phase 4 — the surprise** — talk to Hermes and ask **"where am I going this weekend?"** → it recalls Chengdu (memory it *just earned permission to read*).
 4. **Talk to Hermes** for the surprise: open the printed `code-server` URL, or
@@ -87,15 +93,46 @@ Note it puts the agent key back on the master; use only for quick loops.
 | **In one line** | Self-contained sandbox demo — nothing external | The live product wired to real infra |
 | **MCP backend** | `in-memory` (data lives in the server's RAM) | `http` → real broker + workers |
 | **Memory data** | a **pre-seeded fixture** — the "Chengdu trip" is baked into the binary | the real S3-backed memory worker (empty unless you seeded it) |
-| **The Chengdu surprise** | ✅ works out of the box | ✅ **Phase P pairs + approves the scope (Touch ID), then 1.5 seeds** the fresh actor's memory — run **`--real --webauthn`**. The new agent identity starts with empty memory, so 1.5 always seeds it. Needs a live master session + K11 enrolled in webauthn mode |
+| **The Chengdu surprise** | ✅ works out of the box | ✅ **Phase P pairs + approves the scope (Touch ID), then 1.5 seeds** the agent's memory — run **`--real --webauthn`**. Step 1.5 (re)seeds the fixture each run — memory is keyed by the agent's **stable** omni (only the device key is fresh), so 1.5 overwrites and it's always present. Needs a live master session + K11 enrolled in webauthn mode |
 | **Broker / chain** | none | real broker (`signer.litentry.org`) + Heima **mainnet** |
-| **Account** | a fixed demo actor/operator | your master (operator) + a **fresh agent identity generated in the sandbox each run** (`--reuse-agent` reuses one master-side agent) |
+| **Account** | a fixed demo actor/operator | your master (operator) + the **same agent omni** (stable HDKD of the label) re-paired with a **fresh device key minted in the sandbox each run** (`--reuse-agent` reuses one master-side agent) |
 | **Cap-mint** | stubbed — always succeeds | real cap-mint (needs a valid master session) |
 | **Vendor token** | `demo-tok` | `harness-tok` |
 | **Touch ID** | never | at **Phase P (P.3)** EACH run when you pass `--webauthn` — the master *approves* the fresh agent's `[memory]` scope; never otherwise |
 | **Needs network to** | sandbox + Docker + (first build) a rust image | + reachable broker / workers / Heima RPC |
 | **Proves** | the wire + hook + memory-injection **plumbing** works | the same, against **real IAM infra** (real signing + isolation) |
 | **Cost / risk** | free, can't break anything | real gas/cost, mutates real account state |
+
+## Setup entry points — first-time bring-up + re-runs
+
+`--light` needs **none** of this (self-contained — skip to *How to run*). For **`--real`**, the live infra is owned by three idempotent scripts. **Run each ON the machine shown** — this is the part that bites: `setup-broker-host.sh` runs *on the broker host* (SSH in first), the other two from your laptop.
+
+### Starting from scratch (nothing set up yet) — run ONCE, in order
+
+| # | Run it on… | Command | Brings up |
+|---|---|---|---|
+| 1 | **laptop** (`agentkeys-admin` AWS profile) | `AWS_PROFILE=agentkeys-admin bash scripts/setup-cloud.sh` | Cloud/IAM: SES, S3, DNS, roles, OIDC, EC2 + EIP |
+| 2 | **the broker host** — SSH in first: `bash scripts/ssh-broker.sh` | `sudo bash scripts/setup-broker-host.sh --ref <branch>` | broker + signer + 4 workers (binaries, systemd, nginx/TLS) |
+| 3 | **laptop** | `bash scripts/setup-heima.sh` | chain: contracts + per-actor binding ceremonies |
+| 4 | **laptop** | `bash harness/phase1-wire-demo.sh --real --webauthn` | the demo itself |
+
+Notes:
+- **Step 1 prints these exact next-steps** when it finishes — it's the canonical source for the broker-host command (issuer URL + account ID filled in).
+- **Step 2 — which branch:** pass the branch you're deploying. Until [#149](https://github.com/litentry/agentKeys/pull/149) merges, that's **`--ref claude/impl-144-hdkd-bootstrap`**; after it merges, `--ref main`. `--ref` does the `git fetch` + checkout on the broker for you, so it builds the code you *mean* — not whatever happened to be checked out (this is why `git pull` on `main` didn't change anything: the work is on the feature branch). `--issuer-url` / `--account-id` auto-derive from the committed `scripts/operator-workstation.env`, so usually `--ref <branch>` is all you pass.
+- **Don't `git pull` by hand on the broker** — `--ref` does the fetch/checkout/pull. A `sudo bash …` run executes the script's git+cargo as root, which would leave repo files **root-owned** (a later manual `git pull` as `agentkey` then dies with `error: unable to unlink old '…': Permission denied`) — but the script now **self-heals**: when invoked via sudo it chowns the checkout back to the invoking user at the end (§8c). For an already-stuck tree, a one-time `sudo chown -R agentkey:agentkey ~/agentKeys` clears it. The broker uses plain **git**, not jj — jj is only for the laptop→origin push.
+- The broker MUST run the **#144 code** (the §10.2 `/v1/agent/*` routes) or Phase P fails with HTTP 404 — `--ref` guarantees that. The script self-checks (a no-bearer `POST /v1/agent/create` must return 401, not 404).
+
+### Re-runs — only run the one whose domain changed
+
+| Script (where it runs) | Owns | Re-run when |
+|---|---|---|
+| [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) — **laptop** | Cloud / IAM (SES, S3, DNS, roles, OIDC) | a permission / role / DNS change |
+| [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh) — **broker host** | broker + signer + 4 workers | broker/worker code changed |
+| [`scripts/setup-heima.sh`](../scripts/setup-heima.sh) — **laptop** | contracts + per-actor ceremonies | a chain / contract change |
+
+All three are **idempotent + unattended by default** — re-running converges and exits 0 without re-applying; **no flags to remember** (workers always build but skip when up-to-date; the broker self-heals a bad feature build itself). `--yes` / `--non-interactive` are still *accepted* (CI passes them) but no longer needed.
+
+**The wire demo does NOT need a broker-hosted MCP server** — its MCP server runs **in the sandbox** (cross-built there once, then cached; see Prerequisites). The broker-hosted MCP endpoint is the *Hosted-LLM* path (xiaozhi / vendor-cloud), **deferred to [#152](https://github.com/litentry/agentKeys/issues/152)**; `setup-cloud.sh` step 15 is now a no-op pointing there.
 
 ## Prerequisites
 
@@ -107,22 +144,23 @@ Note it puts the agent key back on the master; use only for quick loops.
   docker run --security-opt seccomp=unconfined -d -p 8080:8080 ghcr.io/agent-infra/sandbox:latest
   ```
   The `--security-opt seccomp=unconfined` flag is required (Docker's default seccomp blocks syscalls the sandbox needs; without it the container exits silently). Re-run after every Docker Desktop upgrade.
-- A **reachable rust image** for the aarch64-linux cross-build (the sandbox is aarch64 Linux; the harness cross-builds the agent binary in an `arm64` rust container). The **first** build is slow; after that re-runs are **incremental** — the harness persists cargo's registry + compiled artifacts in docker volumes and bakes the OpenSSL build deps into a cached `agentkeys-sandbox-builder` image, recompiling only when a tracked source file changed (and restarting the sandbox MCP server when the binary changed). If Docker Hub is unreachable, pre-pull or point at a mirror: `RUST_BUILD_IMAGE=<local-or-mirror-rust-image>`.
+- A **reachable rust image** for the aarch64-linux cross-build (the sandbox is aarch64 Linux; the harness cross-builds the agent binary in an `arm64` rust container). The **first** build is slow; after that re-runs are **incremental** — the harness persists cargo's registry, git db, the rustup toolchain, **and the `target/` dir** in named docker volumes, and bakes the OpenSSL build deps into a cached `agentkeys-sandbox-builder` image, recompiling only when a tracked source file changed (and restarting the sandbox MCP server when the binary changed). The `target/` dir lives in a **named volume** (`agentkeys-sandbox-target`), *not* a host bind-mount — on macOS a bind-mounted target routes cargo's thousands of small incremental files through the Docker VM's virtiofs layer and dominates re-run time; only the three final binaries are copied out to `target/sandbox-linux/release/`. If Docker Hub is unreachable, pre-pull or point at a mirror: `RUST_BUILD_IMAGE=<local-or-mirror-rust-image>`.
 - **Hermes** in the sandbox — the harness installs it (guarded `curl|bash`) if absent; needs GitHub reachable.
 
 **Real mode only:**
+- **The broker must be running the issue-#144 code** — the §10.2 endpoints (`/v1/agent/create`, `/v1/auth/link-code/redeem`, `/v1/agent/pending-bindings`). If your broker predates #144, run `bash scripts/setup-broker-host.sh --ref main` (or `--test --yes` for the test host) FIRST, or Phase P `P.0 create` fails with HTTP **404**. The deploy self-checks this — a no-bearer `POST /v1/agent/create` must return **401** (route live), not 404 (stale binary).
 - The `setup-heima.sh` account already created (master device registered + contracts deployed; the harness verifies, never rebuilds). `OPERATOR_OMNI` is derived from your master key (`OPERATOR_KEY_FILE`); the **agent** identity is generated fresh in the sandbox by Phase P (no pre-existing agent file needed in the default fresh-pairing mode).
 - An **operator session JWT** for cap-mint. The harness now mints this **automatically and non-interactively**: step `0.7` decodes the on-disk session, and if it's missing, expired, **or for the wrong operator** (its `agentkeys.omni_account` ≠ the agent's `operator_omni`), it SIWE-signs a fresh one with `OPERATOR_KEY_FILE` (default `~/.agentkeys/heima-deployer.key` — the master key whose broker omni == `operator_omni`) via the broker's `wallet_sig` plugin. Requires `cast` (Foundry) on PATH. **Note:** the old `alice` email session is a *different* omni and is no longer used for cap-mint — set `OPERATOR_KEY_FILE` to the master key for your operator if the default isn't it. (Pass `AGENTKEYS_SESSION_BEARER` to override entirely.)
-- **For real memory (S3) to work:** **Phase P** generates the agent's device key **in the sandbox** and mints its **agent session** there (`agentkeys agent device-session`); the MCP server uses that session for the per-actor STS relay (`mint-oidc-jwt` → `AssumeRoleWithWebIdentity` → `X-Aws-*` headers to the worker), so the agent key never touches the master. Needs the per-data-class role ARNs (`MEMORY_ROLE_ARN`/`VAULT_ROLE_ARN`, from `operator-workstation.env`). Without the relay the worker falls back to its instance profile (no S3) and memory ops 502. (`--reuse-agent` instead mints the session on the master from `agent_private_key` in the agent file — legacy.)
+- **For real memory (S3) to work:** **Phase P** generates the agent's device key **in the sandbox** and redeems the master link code there (`agentkeys-daemon --init-link-code` → `J1_agent`); the MCP server uses that session for the per-actor STS relay (`mint-oidc-jwt` → `AssumeRoleWithWebIdentity` → `X-Aws-*` headers to the worker), so the agent key never touches the master. Needs the per-data-class role ARNs (`MEMORY_ROLE_ARN`/`VAULT_ROLE_ARN`, from `operator-workstation.env`). Without the relay the worker falls back to its instance profile (no S3) and memory ops 502. (`--reuse-agent` instead mints the session on the master from `agent_private_key` in the agent file — legacy.)
 - `export OPENROUTER_API_KEY=...` in `~/.zshenv` — the harness uses it as the LLM-key fallback (no prompt).
 - **For the Phase P scope grant (P.3):** the master's primary K11 enrolled in **webauthn** mode — `agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x<operator>`. Without it, `heima-scope-set.sh --webauthn` can't run and the freshly-paired agent never gets the memory scope (memory ops will be scope-rejected). Override the granted service list with `SEED_SCOPE_SERVICES` (it **sets** the full list, so include every service the agent needs).
 
 ## The manual gates (the "test through" essence)
 
 - **LLM key** — auto from `OPENROUTER_API_KEY` (or `LLM_API_KEY`); only prompts if absent. Phase 4.0 writes it to the sandbox `~/.hermes/.env` and sets `provider: openrouter` + `model.default` (default `deepseek/deepseek-v4-flash`; override `LLM_MODEL`). A non-fatal `4.1 model smoke` confirms the model is live before the surprise.
-- **Install (pair)** — `--real` only: **Phase P** generates the agent's device key **in the sandbox** (`P.1`), the master binds it on-chain (`P.2`), and — with `--webauthn` — the master **approves** the agent's memory scope via Touch ID (`P.3`). Because every run pairs a **fresh** identity, this happens once per run. `--reuse-agent` skips it.
+- **Install (pair)** — `--real` only: **Phase P** — `P.depair` revokes any prior device + wipes the sandbox K10 so the re-pair is genuine, the master mints a one-time link code (`P.0`), the agent daemon (`agentkeys-daemon --init-link-code`) generates a **fresh** device key **in the sandbox** + redeems it (`P.1`), the master does a real `registerAgentDevice` (`P.2`), and — with `--webauthn` — the master **approves** the agent's memory scope via Touch ID (`P.3`). Every run depairs + re-pairs the same agent with a fresh device key (~2 on-chain txs). `--reuse-agent` skips all of Phase P.
 - **Real Touch ID** — in real mode with `--webauthn`: **Phase P (P.3)** grants the freshly-paired agent's memory scope via `heima-scope-set.sh --webauthn`. The banner prints `webauthn=<flag>` so you know upfront whether a Touch ID ceremony will run. It's a hardware prompt — `--yes` does NOT bypass it (it only auto-confirms the software "proceed?" gates). Without `--webauthn`, `P.3` is skipped (the agent won't be able to read memory) — re-run with `--real --webauthn`.
-- **Seed the real memory worker** (`--real` only) — after pairing, step **1.5** writes the Chengdu fixture into the fresh actor's namespace (a brand-new identity always starts empty). Override `SEED_MEMORY_CONTENT` / `SEED_SCOPE_SERVICES` (the latter is the service set Phase P grants — it **sets** the full list).
+- **Seed the real memory worker** (`--real` only) — after pairing, step **1.5** (re)writes the Chengdu fixture into the agent's memory namespace (keyed by the **stable** omni; 1.5 overwrites each run). Override `SEED_MEMORY_CONTENT` / `SEED_SCOPE_SERVICES` (the latter is the service set Phase P grants — it **sets** the full list).
 - **The Hermes surprise** — open Hermes in the sandbox, send "where am I going this weekend?", and judge the memory-aware reply (`[y/N]`).
 
 Pass `--yes` to auto-confirm the non-secret prompts.
@@ -212,11 +250,11 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 |---|---|---|
 | cap-mint → 401 `ExpiredSignature` | the operator session JWT expired | the harness now auto-mints a fresh one at `0.7` via `wallet_sig` (`OPERATOR_KEY_FILE`). If it didn't: ensure `cast` is on PATH and `OPERATOR_KEY_FILE` exists |
 | cap-mint → 401/`OperatorMismatch` (`session_omni != operator_omni`) | the session is for a *different* operator (e.g. the legacy `alice` email session, omni `4231cd8f…` ≠ agent operator `941cb1c3…`) | `0.7` now detects the omni mismatch and re-mints from `OPERATOR_KEY_FILE`. If `0.7` fails with "wrong operator", point `OPERATOR_KEY_FILE` at the master key whose broker omni == `operator_omni` |
-| memory put/get → HTTP **502** `{"reason":"s3_put"}` / `{"reason":"s3_get"}` | the MCP `http` backend didn't forward per-actor STS creds, so the worker fell back to its EC2 instance profile (SES-only, **no S3**) → AccessDenied on every op. cap-mint + chain-verify themselves SUCCEED (the agent IS authorized); the gap was the credential **relay**. | **Fixed (issue #90):** the backend now mints agent-tagged STS creds (`0.8` agent session → broker `/v1/mint-oidc-jwt` → `AssumeRoleWithWebIdentity(memory-role)`, tagged `agentkeys_actor_omni`) and forwards them as `X-Aws-*` headers, so AWS scopes S3 to `bots/<actor>/memory/`. If it still 502s: confirm `P.1 device-session` shows "agent paired" (or `0.8 agent session` under `--reuse-agent`) and `P.3 approve permissions` granted the scope; the relay needs the in-sandbox agent session + `MEMORY_ROLE_ARN`/`VAULT_ROLE_ARN`/`REGION` from `operator-workstation.env`. Optional strict enforcement: set `AGENTKEYS_WORKER_REQUIRE_STS=1` in the worker env (rejects credless requests with 401 instead of falling back). |
-| **Phase P** `P.1`/`P.2`/`P.3` fails | `P.1` device-session: stale sandbox `agentkeys` (no `agent device-session` subcommand) or broker `/v1/auth/wallet/*` down. `P.2` register: on-chain `registerAgentDevice` failed (master gas / RPC). `P.3` approve: `heima-scope-set --webauthn` needs K11 webauthn enrollment + Touch ID. | `P.1` 1.3 rebuilds+uploads the binary — just re-run. `P.2` check the master wallet balance / RPC. `P.3` enroll K11 webauthn + pass `--webauthn`. For a quick loop without pairing use `--reuse-agent`. |
-| `1.3 linux build` is slow even for a one-line change | rustup re-downloaded the host-pinned toolchain (~250 MB, ~4 min) because `/usr/local/rustup` wasn't cached | fixed: the toolchain now persists in the `RUSTUP_VOL` docker volume — the **first** build seeds it (~4 min), later builds skip the download (incremental compile only, ~15 s) |
+| memory put/get → HTTP **502** `{"reason":"s3_put"}` / `{"reason":"s3_get"}` | the MCP `http` backend didn't forward per-actor STS creds, so the worker fell back to its EC2 instance profile (SES-only, **no S3**) → AccessDenied on every op. cap-mint + chain-verify themselves SUCCEED (the agent IS authorized); the gap was the credential **relay**. | **Fixed (issue #90):** the backend now mints agent-tagged STS creds (`0.8` agent session → broker `/v1/mint-oidc-jwt` → `AssumeRoleWithWebIdentity(memory-role)`, tagged `agentkeys_actor_omni`) and forwards them as `X-Aws-*` headers, so AWS scopes S3 to `bots/<actor>/memory/`. If it still 502s: confirm `P.1 install` shows "agent redeemed in-sandbox" (or `0.8 agent session` under `--reuse-agent`) and `P.3 grant` granted the scope; the relay needs the in-sandbox agent session + `MEMORY_ROLE_ARN`/`VAULT_ROLE_ARN`/`REGION` from `operator-workstation.env`. Optional strict enforcement: set `AGENTKEYS_WORKER_REQUIRE_STS=1` in the worker env (rejects credless requests with 401 instead of falling back). |
+| **Phase P** `P.depair`/`P.0`/`P.1`/`P.2`/`P.3` fails | `P.depair` revoke: master gas / RPC, or the sandbox unreachable for the K10 wipe. `P.0` create: broker `/v1/agent/create` down or the operator session (0.7) invalid. `P.1` install: stale sandbox `agentkeys-daemon` (no `--init-link-code`), broker `/v1/auth/link-code/redeem` down, or an expired link code (>600s). `P.2` bind: on-chain `registerAgentDevice` failed (master gas / RPC). `P.3` grant: `heima-scope-set --webauthn` needs K11 webauthn enrollment + Touch ID. | `P.depair`/`P.0` check 0.7 + the broker + master wallet balance. `P.1` 1.3 rebuilds+uploads the daemon binary — just re-run (each run mints a **fresh** K10, so a retry re-pairs cleanly). `P.2` check the master wallet balance / RPC. `P.3` enroll K11 webauthn + pass `--webauthn`. For a quick loop without pairing use `--reuse-agent`. |
+| `1.3 linux build` is slow even for a one-line change | (a) rustup re-downloaded the host-pinned toolchain (~250 MB, ~4 min) because `/usr/local/rustup` wasn't cached; (b) on macOS, cargo's `target/` sat on a **host bind-mount**, so every incremental file crossed the Docker VM's virtiofs layer | fixed on both: (a) the toolchain persists in `RUSTUP_VOL`; (b) `CARGO_TARGET_DIR` is now a **named volume** (`agentkeys-sandbox-target`) on the VM's native fs, with only the 3 final binaries copied out. First build seeds the caches (~4 min); later builds are incremental compile only (~15 s) |
 | Phase 1 `1.3 linux build` → "cannot pull" | Docker Hub unreachable for the base image | `RUST_BUILD_IMAGE=<local/mirror rust image>` or pre-pull `rust:1.83-slim-bookworm` |
-| `1.3 linux build` won't pick up a Rust edit | gate compares source mtime vs binary; re-runs rebuild automatically on a real edit | to force a from-scratch rebuild: `rm -rf target/sandbox-linux && docker volume rm agentkeys-sandbox-cargo-registry agentkeys-sandbox-cargo-git`; to rebuild the deps image: `docker rmi agentkeys-sandbox-builder:1.83-bookworm` |
+| `1.3 linux build` won't pick up a Rust edit | gate compares source mtime vs binary; re-runs rebuild automatically on a real edit | to force a from-scratch rebuild: `rm -rf target/sandbox-linux && docker volume rm agentkeys-sandbox-target agentkeys-sandbox-cargo-registry agentkeys-sandbox-cargo-git` (the `target/` dir now lives in the `agentkeys-sandbox-target` volume — `target/sandbox-linux` on the host holds only the 3 extracted binaries); to rebuild the deps image: `docker rmi agentkeys-sandbox-builder:1.83-bookworm` |
 | `wire` step 0 → `fail hermes not installed` | Hermes not on the sandbox PATH | the harness installs it; or run the guarded install (Appendix) — needs GitHub reachable |
 | `wire` step 3 → `fail … already has a top-level hooks:` | hand-authored `hooks:` in `~/.hermes/config.yaml` | merge manually or remove it, then re-run |
 | `hook check` blocks with `agentkeys_unreachable` | MCP server down | start it (the harness does in Phase 1); check `AGENTKEYS_MCP_URL` |
@@ -293,3 +331,4 @@ echo '{"tool_name":"x"}'                  | agentkeys hook audit                
 - [`docs/spec/plans/phase1-wire-harness-test-plan.md`](spec/plans/phase1-wire-harness-test-plan.md) — the action table + automation decisions
 - [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.6/§3.7/§4.3 · [`docs/arch.md`](arch.md) §22d · [`docs/wiki/agent-iam-guarantee-glossary.md`](wiki/agent-iam-guarantee-glossary.md)
 - [Issue #133](https://github.com/litentry/agentKeys/issues/133) — multi-runtime hook reference configs (Phase 1.b)
+- [Issue #152](https://github.com/litentry/agentKeys/issues/152) — **scope:** this runbook covers the **Local-LLM / Task-agent** path only (stdio MCP server built + run *in the sandbox*). The **Hosted-LLM** path (xiaozhi / vendor-cloud — a broker-hosted `mcp-endpoint` the remote LLM connects *into*, per arch.md §22c.2 / §22d.3) is deferred to #152.

@@ -1,10 +1,18 @@
-# AgentKeys memory — design plan
+# AgentKeys memory — gated backend design
 
-**Status:** plan (2026-05). Pre-implementation. Companion to research at [`../research/ai-memory-systems-survey.md`](../research/ai-memory-systems-survey.md). Will land as arch.md updates (§15.2, §17) once accepted.
+**Status:** plan (2026-05). Pre-implementation. Reframed per the decision record [`../research/memory-build-vs-gate-decision.md`](../research/memory-build-vs-gate-decision.md) (**Position C — gated store, pluggable engine**). Companion research: [`../research/ai-memory-systems-survey.md`](../research/ai-memory-systems-survey.md). Lands as arch.md updates (§15.2, §17) once accepted.
 
-**Scope:** how the AgentKeys memory worker ([`crates/agentkeys-worker-memory`](../../crates/agentkeys-worker-memory)) should evolve from today's blob-storage primitive (`memory_put` / `memory_get` / `memory_teardown` over AES-256-GCM-encrypted S3 objects) into a structured-memory service that is **portable, extractable, efficient, and LLM-pluggable**.
+> **⚠️ Read this first — what this doc is, after the Position-C decision.**
+>
+> Memory is three layers: **engine** (extract / embed / rank / consolidate), **store** (encrypted bytes, keys, per-actor isolation), **gate** (who reads what, scoped, audited). Per the decision record, **AgentKeys owns the store + gate and delegates the engine** to the ecosystem (mem0-self-hosted / Claude memory tool / Hermes-native / agentmemory).
+>
+> So this doc is the spec for the **gated memory backend** — the cap-gated, K3-encrypted, per-actor S3 store and its read/write/list API. It is **NOT** a spec for a memory *engine*. The sections describing ranking/retrieval machinery (**§4.2, §4.4, §5 — vector index, BM25, `query_vec` search, `/rebuild-index`, embedding-model rotation**) are retained as a reference for an **optional, pluggable engine** an operator may run *in front of* this store. They are **explicitly not part of the v0 build.** Each carries an `ENGINE — pluggable, not built in v0` banner.
+>
+> The v0 build is the **store + gate**: cap-gated `append` / `get` / `snapshot` / `list` / `teardown` over the encrypted per-actor S3 prefix, with deterministic namespace filtering and audit. No LLM, no embeddings, no ranking inside the worker.
 
-**Non-scope:** changing the broker cap-mint protocol, the IAM / OIDC stack, K3 rotation, or the per-data-class isolation gates. Those invariants from arch.md §§12, 15.2, 17 hold unchanged.
+**Scope:** how the AgentKeys memory worker ([`crates/agentkeys-worker-memory`](../../crates/agentkeys-worker-memory)) evolves from today's blob primitive (`memory_put` / `memory_get` / `memory_teardown`) into the **gated memory backend** — a structured, cap-gated, K3-encrypted, per-actor, namespaced, audited store that is **portable, extractable, efficient, and engine-agnostic**. The ranking/retrieval *engine* is pluggable and out of scope for the AgentKeys build.
+
+**Non-scope:** (1) building a memory *engine* (extraction, embeddings, ranking, consolidation) — delegated, see decision record; (2) changing the broker cap-mint protocol, the IAM / OIDC stack, K3 rotation, or the per-data-class isolation gates — those invariants from arch.md §§12, 15.2, 17 hold unchanged.
 
 ---
 
@@ -12,34 +20,34 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  agent process (the LLM consumer — any LLM, any framework, any host)     │
-│                                                                          │
-│   ┌─────────────────────┐                ┌─────────────────────────┐    │
-│   │   embedding model    │  vector       │   LLM (pluggable)        │    │
-│   │   (caller's choice)  │ ──────►       │   GPT / Claude / Llama  │    │
-│   └─────────────────────┘                │   / local / none        │    │
-│           │                              └─────────────────────────┘    │
-│           │ embed(query)                          ▲                     │
-│           ▼                                       │ retrieved snippets   │
-│   ┌─────────────────────────────────────────────┐ │ (top-K only)        │
-│   │  memory SDK (in agentkeys-core)              │ │                     │
-│   │  • memory.search(query, k) → snippets        │─┘                     │
-│   │  • memory.append(event) → ack                │                       │
-│   │  • memory.snapshot() / .export()             │                       │
-│   └─────────────────────────────────────────────┘                       │
-│           │                                                              │
-└───────────┼──────────────────────────────────────────────────────────────┘
-            │ HTTPS + cap-token (data_class=Memory, op ∈ {Store, Fetch})
+│  ENGINE — pluggable, NOT AgentKeys' build (decision record Position C)   │
+│  mem0-self-hosted / Claude memory tool / Hermes-native / agentmemory     │
+│  • decides what to remember + how to rank/recall                         │
+│  • embeds queries, runs vector/BM25/graph ranking — its own concern      │
+│  • the LLM is the engine's concern too (pluggable: GPT/Claude/Llama)     │
+└───────────┬──────────────────────────────────────────────────────────────┘
+            │ reads/writes plaintext lines via the SDK
             ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  agentkeys-worker-memory  (Rust, operator's AWS, NEVER calls an LLM)     │
+│  memory SDK (agentkeys-core) — cap-mint + envelope + wire calls           │
+│   • memory.append(event)  • memory.get(id)  • memory.list(filter)         │
+│   • memory.snapshot()     • memory.export()                              │
+└───────────┼──────────────────────────────────────────────────────────────┘
+            │ HTTPS + cap-token (data_class=Memory, op ∈ {Store,Fetch}, namespaces_allowed)
+            ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  agentkeys-worker-memory = STORE + GATE (Rust, operator's AWS, NO LLM)   │
 │                                                                          │
-│   POST /v1/memory/append   { cap, type, payload, ts }   → JSONL line     │
-│   POST /v1/memory/search   { cap, query_vec, k, type? } → snippets        │
-│   POST /v1/memory/snapshot { cap, type }                → manifest        │
-│   POST /v1/memory/export   { cap, type? }               → presigned URL   │
-│   POST /v1/memory/teardown { cap }                      → unchanged       │
-│   (legacy) POST /v1/memory/{put,get}                    → kept; deprecated│
+│   GATE   verify cap → op-match → data_class=Memory → namespace filter →   │
+│          freshness → chain device/scope/k3 → audit. Deterministic only.   │
+│   STORE  POST /v1/memory/append   { cap, type, line_id, line_b64 }        │
+│          POST /v1/memory/get      { cap, id }            → one line       │
+│          POST /v1/memory/list     { cap, type, filter }  → ids/metadata   │
+│          POST /v1/memory/snapshot { cap, type }          → bytes          │
+│          POST /v1/memory/export   { cap, type? }         → presigned URL  │
+│          POST /v1/memory/teardown { cap }                → delete prefix  │
+│          (legacy) /v1/memory/{put,get} kept; deprecated                   │
+│   ── ENGINE endpoints (/search, /rebuild-index) are PLUGGABLE, not v0 ──  │
 │                                                                          │
 └──────────┬───────────────────────────────────────────────────────────────┘
            │ STS creds scoped to bots/<actor_omni_hex>/memory/* (PrincipalTag)
@@ -70,13 +78,16 @@
 
 ## 2. Goals + non-goals
 
-**Goals (v0):**
+**Goals (v0) — the gated store, not an engine:**
 
-- Persist four memory types — episodic, semantic, procedural, profile (per research §1) — under the existing per-actor + per-data-class isolation model.
-- Provide JIT pre-call retrieval (research §4.3) — given an embedded query, return top-K relevant snippets.
-- Export a portable bundle (`agentkeys memory export`) that another runtime — or a future v1 of AgentKeys itself — can ingest.
+- Persist four memory types — episodic, semantic, procedural, profile (per research §1) — under the existing per-actor + per-data-class isolation model, as encrypted per-line S3 objects.
+- Deterministic gate: cap-token verify + op-match + `data_class=Memory` + **namespace filtering** (`namespaces_allowed`) + freshness + chain checks + audit. No LLM, no ranking, no fuzzy matching anywhere in the gate.
+- Engine-agnostic read/write API (`append` / `get` / `list` / `snapshot`) any external engine (mem0-self-hosted / Claude memory tool / Hermes-native / agentmemory) can sit on top of.
+- Export a portable bundle (`agentkeys memory export`) any runtime — or a future AgentKeys version — can ingest.
 - Stay backward-compatible with the current `memory_put` / `memory_get` blob primitive (one operator's "service" might genuinely want raw blob KV).
 - Land **zero** changes to: broker cap-mint protocol, the data_class isolation gate (`DataClass::Memory`), the per-data-class IAM bucket separation (arch.md §17.5), K3-derived KEK, AES-256-GCM envelope format.
+
+**Explicitly delegated (NOT an AgentKeys goal, per decision record Position C):** the memory *engine* — embeddings, vector/BM25/graph ranking, extraction, consolidation, decay. These run in a pluggable external engine in front of the store, or in the optional E1/E2 stages (§9) only if an operator demands in-worker ranking.
 
 **Non-goals (v0):**
 
@@ -231,16 +242,18 @@ All new endpoints under `/v1/memory/`. Cap-token gating unchanged — every endp
 
 ### 4.1 New endpoints
 
+> **STORE vs ENGINE split (decision record Position C).** The rows below are the full surface *if* an in-worker engine is ever built. For the **v0 store+gate build**, the endpoints are: `append`, `get`, `list`, `snapshot`, `procedural-cas`, `profile-get`, `profile-cas`, `export`, `teardown` (+ legacy `put`/`get`). **`search` and `rebuild-index` are 🔌 ENGINE endpoints — pluggable, deferred to optional stage E1 (§9), not in v0.** Two store reads not yet itemized in the table but shown in the §1 diagram + built in M1: `POST /v1/memory/get { cap, id }` → one decrypted line (deterministic, no ranking); `POST /v1/memory/list { cap, type, namespace?, since_ts? }` → ids + metadata for the caller's engine to rank. Both are namespace-filtered by the gate (M1.5).
+
 | Endpoint | Cap op | Request | Response | S3 effect |
 |---|---|---|---|---|
 | `POST /v1/memory/append` | `Store` | `{ cap, type ∈ {episodic, semantic}, line_id, line_b64 }` where `line_b64` is the v3-encrypted per-line JSON; `line_id` is the ULID also embedded in the plaintext | `{ ok, line_id, s3_key }` or `{ ok, line_id, s3_key, duplicate: true }` if HEAD found an existing object | PutObject to `bots/<actor>/memory/<type>/[<date>/]<ulid>.enc`; HEAD-first for idempotency |
 | `POST /v1/memory/procedural-cas` | `Store` | `{ cap, content_b64, if_match_etag? }` | `{ ok, new_etag }` or 412 | conditional PUT to `procedural.jsonl.enc` |
-| `POST /v1/memory/search` | `Fetch` | `{ cap, query_vec_b64, k, type? ∈ {episodic, semantic, all}, since_ts? }` | `{ ok, hits: [{id, type, text_b64, score, ts}] }` | read index + parallel-GetObject the K matched `<ulid>.enc` lines + decrypt |
+| `POST /v1/memory/search` 🔌 *(ENGINE — E1, not v0)* | `Fetch` | `{ cap, query_vec_b64, k, type? ∈ {episodic, semantic, all}, since_ts? }` | `{ ok, hits: [{id, type, text_b64, score, ts}] }` | read index + parallel-GetObject the K matched `<ulid>.enc` lines + decrypt |
 | `POST /v1/memory/snapshot` | `Fetch` | `{ cap, type ∈ {procedural, semantic, episodic}, since_ts? }` | `{ ok, lines: [{id, ts, text_b64, ...}] }` (single-line types) OR `{ ok, content_b64, etag }` (procedural single-file) | LIST prefix + GetObject each + decrypt each; for procedural, single GetObject |
 | `POST /v1/memory/profile-get` | `Fetch` | `{ cap }` | `{ ok, content_b64, etag }` | single GetObject on `profile.json.enc` |
 | `POST /v1/memory/profile-cas` | `Store` | `{ cap, content_b64, if_match_etag }` | `{ ok, new_etag }` or 412 | conditional PUT on `profile.json.enc` |
 | `POST /v1/memory/export` | `Fetch` | `{ cap, types?: [...], since_ts? }` | `{ ok, presigned_url, expires_at }` | enumerate keys; stream a multipart tar on the fly via presigned URL |
-| `POST /v1/memory/rebuild-index` | `Store` | `{ cap, embedding_model, vectors_b64, if_match_etag? }` where `vectors_b64` is the operator-built embedding bundle | `{ ok, manifest_etag }` or 412 | overwrite `index/*` atomically (PUT to `.tmp` keys, CopyObject to canonical); If-Match guards concurrent rebuilders |
+| `POST /v1/memory/rebuild-index` 🔌 *(ENGINE — E1, not v0)* | `Store` | `{ cap, embedding_model, vectors_b64, if_match_etag? }` where `vectors_b64` is the operator-built embedding bundle | `{ ok, manifest_etag }` or 412 | overwrite `index/*` atomically (PUT to `.tmp` keys, CopyObject to canonical); If-Match guards concurrent rebuilders |
 | `POST /v1/memory/teardown` | `Teardown` | unchanged | unchanged | unchanged |
 | `POST /v1/memory/put` | `Store` | unchanged (legacy blob KV) | unchanged | unchanged — `bots/<actor>/memory/<service>.enc`. **Rejects reserved service names per §3.1.** |
 | `POST /v1/memory/get` | `Fetch` | unchanged | unchanged | unchanged. **Rejects reserved service names per §3.1.** |
@@ -253,7 +266,9 @@ All new endpoints under `/v1/memory/`. Cap-token gating unchanged — every endp
 
 ### 4.2 Why `search` takes `query_vec_b64` not `query: string`
 
-This is the single most important API decision and it directly serves the user's pluggability constraint.
+> **🔌 ENGINE — pluggable, not built in v0** (decision record Position C). `/v1/memory/search` is a *ranking* endpoint = engine territory. The v0 store does NOT ship it. This section is retained as the reference design for an operator who runs an in-worker search engine, OR for whoever later builds the optional engine module. The store-layer read path is `/v1/memory/get` + `/v1/memory/list` (deterministic, no ranking). When/if an engine IS built in-worker, the decisions below are the correct ones.
+
+This is the single most important *engine-side* API decision and it directly serves the pluggability constraint — it's why even the optional engine never couples the store to an embedding choice.
 
 - **If `search` took a query string,** the worker would have to call an embedding model to vectorize it. That couples the worker to an embedding choice. Worse, when the operator wants to swap embedding models, the worker has to redeploy. The whole "LLM-pluggable" promise breaks at the embedding seam.
 - **If `search` takes `query_vec_b64`,** the worker is pure linear algebra (cosine similarity over its index). The caller picks the embedding model. Switching from `text-embedding-3-small` to a self-hosted model means the operator rebuilds the index *once* via `/v1/memory/rebuild-index` and updates the embedding model in their agent code. Worker doesn't change. Zero re-deploy.
@@ -276,6 +291,8 @@ This is the same exposure shape as the legacy `/v1/memory/get`. The "raise the b
 
 ### 4.4 Why `/search` is the JIT injection seam
 
+> **🔌 ENGINE — pluggable, not built in v0.** The flow below describes how an *engine* (in-worker or external) uses the store. In Position C the engine — mem0-self-hosted, Hermes-native, a Claude `BetaAbstractMemoryTool` backend, etc. — does steps 2–4 against its own index, then reads the matched lines from the store via `/v1/memory/get`. The privacy property in step 7 (LLM sees top-K snippets, never the whole memory) is preserved by ALL of these engines because they all retrieve-then-inject. The store guarantees the bytes are encrypted + per-actor-isolated + audited regardless of which engine ranks them.
+
 A typical agent turn becomes:
 
 ```
@@ -294,6 +311,8 @@ Step 7 IS the privacy invariant the user asked for, made operational. Step 8 is 
 ---
 
 ## 5. Indexing — derived, rebuildable, optional
+
+> **🔌 ENGINE — pluggable, not built in v0 (entire section).** Indexing is the engine's job. Per the decision record (Position C), AgentKeys does not build the vector index, BM25, RRF fusion, `/rebuild-index`, or embedding-model rotation. This whole section is retained as: (a) the reference design if a future milestone adds an optional in-worker engine module, and (b) the spec the `index/` S3 prefix follows IF an engine chooses to persist its index inside the per-actor store (which the store permits — it's just more encrypted objects under the actor prefix). Nothing here is on the v0 critical path. The store stays a deterministic, no-LLM, no-ranking encrypted KV.
 
 ### 5.1 What the index is
 
@@ -589,37 +608,38 @@ I'll land those in the same PR that introduces the worker changes. Per the "arch
 
 ## 9. Implementation stages
 
-Numbered in order. Each stage is independently shippable (binary stays functional after each one). Estimates assume one engineer.
+Numbered in order. Each stage is independently shippable (binary stays functional after each one). Estimates assume one engineer. **Post-Position-C, the stages split into CORE (store + gate — the AgentKeys build) and ENGINE (optional, pluggable — only if an operator wants in-worker ranking instead of an external engine).**
+
+### Core stages (store + gate — the v0 build)
 
 | Stage | Deliverable | Crate touchpoints | Demo proof |
 |---|---|---|---|
-| **M-1 (PREREQUISITE)** | Envelope v3 lands in `agentkeys-worker-creds::envelope`. AAD widened to `(operator_omni, actor_omni, service, k3_epoch)`; version byte 0x03; explicit `k3_epoch` byte in header (§3.3). Version-byte dispatch handles both v2 + v3 on decrypt. Cred worker tests prove v2-read + v3-write coexistence. **Lands as a separate PR, NOT part of the memory plan.** This plan depends on it. | `agentkeys-worker-creds`, `agentkeys-core::s3_backend` (CLI envelope must match) | `tests/envelope_cross_compat.rs` covers v2-decrypt-after-v3-rollout; cred worker stays green. |
-| **M0** | Refactor `handlers.rs` to extract envelope + S3 IO helpers usable by new endpoints. **Split `handlers.rs` into `handlers/{append,search,snapshot,profile,procedural,export,rebuild_index,teardown,legacy}.rs`** (today's monolithic file becomes a directory; module entry `handlers/mod.rs` re-exports). No behavior change in this stage. | `agentkeys-worker-memory` | `cargo test -p agentkeys-worker-memory` still green. |
-| **M1** | `/v1/memory/append` + `/v1/memory/snapshot` + `/v1/memory/procedural-cas` + `/v1/memory/profile-get` + `/v1/memory/profile-cas`. Per-line JSON formats land. Worker enforces reserved-service-name rejection on legacy endpoints. **Add `ulid = "1"` dep to `agentkeys-types`.** No index, no search. | `agentkeys-worker-memory`, `agentkeys-types` (new `MemoryLine` struct with disk-fixture roundtrip test) | Harness step: write 100 episodic lines (concurrent from 2 tokio tasks), snapshot returns them all in ULID order; duplicate-ULID PUT returns `duplicate: true`. |
-| **M2** | `/v1/memory/rebuild-index` + `/v1/memory/search` (caller embeds, worker scores). Index format finalized. **Microbench (`cargo bench`) pins cosine-over-packed-binary latency at 10K / 100K / 1M vector counts on the operator's typical EC2 size.** Search uses parallel `futures::join_all` on the K matched-line GetObjects. | `agentkeys-worker-memory` + reference SDK helper in `agentkeys-core` | Harness step: write 1000 lines, rebuild index, search returns top-5 with reasonable scores; bench output checked into `crates/agentkeys-worker-memory/benches/`. |
-| **M3** | `/v1/memory/export` (presigned URL) + CLI `agentkeys memory export` / `import`. | `agentkeys-cli` + `agentkeys-core` | Harness step: export bundle, import into a fresh actor, snapshot matches. |
-| **M4** | Plaintext export + adapter to Mem0 JSONL format. | `agentkeys-cli` + adapter script | One round-trip with Mem0 hosted instance. Audit row recorded. |
-| **M5** | Extractor sidecar reference implementation (§6.2). | new crate `agentkeys-memory-extractor` | Operator can run sidecar with rule-based or operator-deployed model; agent's LLM never sees extracted output. |
-| **M6** | arch.md updates land (§15.2 + §15.3 schemas + §17 layout). | docs only | arch-md-vs-code grep finds zero divergence. |
+| **M-1 (PREREQUISITE)** | Envelope v3 lands in `agentkeys-worker-creds::envelope`. AAD widened to `(operator_omni, actor_omni, service, k3_epoch)`; version byte 0x03; explicit `k3_epoch` byte in header (§3.3). Version-byte dispatch handles v2 + v3 on decrypt. **Separate PR, NOT part of the memory plan.** This plan depends on it. | `agentkeys-worker-creds`, `agentkeys-core::s3_backend` | `tests/envelope_cross_compat.rs`; cred worker stays green. |
+| **M0** | Refactor `handlers.rs`; **split into `handlers/{append,get,list,snapshot,profile,procedural,export,teardown,legacy}.rs`** (store endpoints only; `search`/`rebuild_index` land only if the optional engine stage E1 is taken). No behavior change. | `agentkeys-worker-memory` | `cargo test -p agentkeys-worker-memory` green. |
+| **M1** | `/v1/memory/append` + `/get` + `/list` + `/snapshot` + `/procedural-cas` + `/profile-get` + `/profile-cas`. Per-line JSON formats. Reserved-service-name rejection on legacy endpoints. **Add `ulid = "1"` to `agentkeys-types`.** No index, no search — deterministic store only. | `agentkeys-worker-memory`, `agentkeys-types` (new `MemoryLine` struct + disk-fixture roundtrip test) | Harness: write 100 lines (concurrent 2 tasks), get/list returns them in ULID order; duplicate-ULID PUT → `duplicate: true`. |
+| **M1.5 (GATE)** | **Namespace filtering** — wire-format `namespace` field on every line; cap-token `namespaces_allowed` claim; worker filters `/get`/`/list`/`/snapshot` by deterministic string-set membership (no LLM, no fuzzy match). Per [`agent-iam-strategy.md` §3.5](../research/agent-iam-strategy.md) + roadmap M1 issue #108. **This is the gate's resource-scoping primitive — the same shape every other worker reuses; see [`../research/universal-gate-pattern.md`](../research/universal-gate-pattern.md).** | `agentkeys-worker-memory`, `agentkeys-types`, cap-token claim | Harness: cap with `namespaces_allowed:["travel"]` reads `travel` lines, gets empty/403 on `personal`/`family`. |
+| **M2** | `/v1/memory/export` (presigned URL) + CLI `agentkeys memory export` / `import`. | `agentkeys-cli` + `agentkeys-core` | Harness: export bundle, import into fresh actor, snapshot matches. |
+| **M3** | Plaintext export + adapter to Mem0 JSONL format (interop bridge). | `agentkeys-cli` + adapter script | One round-trip with a Mem0 instance. Audit row recorded. |
+| **M4** | arch.md updates land (§15.2 + §15.3 schemas + §17 layout + namespace field). | docs only | arch-md-vs-code grep finds zero divergence. |
 
-M-1 (prerequisite) → M0 → M3 is the v0 ship (~4 weeks including envelope work). M4 → M6 is v0.1 (~2 weeks).
+Core path: **M-1 → M0 → M1 → M1.5 → M2** is the v0 gated-backend ship (~3 weeks incl. envelope). **M3 → M4** is v0.1 (~1 week). The core trunk is mostly sequential (store → gate → export); the only intra-core parallel opportunity is M3 (plaintext+adapter) alongside M4 (docs).
 
-**Parallelization opportunity** (post-M1): M2 (worker search), M3 (CLI export), and M5 (sidecar) can land in parallel worktrees — each owns its own modules, none depend on the others. Lane plan:
+### Engine stages (OPTIONAL — pluggable; only build if an operator wants in-worker ranking)
 
-| Lane | Stages | Owns |
+| Stage | Deliverable | Status |
 |---|---|---|
-| A (sequential trunk) | M-1 → M0 → M1 → M2 | envelope, worker handlers, SDK retrieval |
-| B (parallel after M1) | M3 → M4 | CLI export, plaintext + adapter |
-| C (parallel after M1) | M5 | extractor sidecar (new crate) |
-| D (final) | M6 | arch.md sync |
+| **E1** | `/v1/memory/rebuild-index` + `/v1/memory/search` (caller embeds, worker scores cosine; optionally BM25 + RRF per the agentmemory-followup research). Index format per §5. Microbench at 10K/100K/1M. Adds the `search`/`rebuild_index` handler modules deferred in M0. | **Deferred / pluggable.** Most operators use an external engine (mem0-self-hosted / Claude memory tool / Hermes-native) instead. Build E1 only if "ranking inside the AgentKeys worker, no external engine" is an explicit operator requirement. |
+| **E2** | Extractor sidecar reference (§6.2) — client-side extraction, never in the worker. | **Deferred / pluggable.** External engines bring their own extraction. |
 
-No cross-lane module overlap → no merge conflicts expected. Launch A continuously; fork B + C off A's M1 commit; merge all into D.
+The engine stages are the part the decision record says the ecosystem already does well — buildable fallback, not the plan of record. E1/E2 fork independently of the core trunk if ever taken.
 
 ---
 
 ## 10. Test plan
 
 Per CLAUDE.md "test-discipline rule," any new code lands with positive + negative tests in the harness.
+
+> **Numbering note (post-Position-C reframe).** The `search_*` / `rebuild_*` / `*dim*` / `cosine_bench` entries below are **ENGINE (stage E1) tests — only if an in-worker engine is built**, not v0. The **core v0** tests are: append / get / list / snapshot / profile-cas / reserved-names / k3-rotation-inflight, **plus the M1.5 gate test** — a cap with `namespaces_allowed:["travel"]` reads `travel` lines and is denied `personal`/`family` (add `crates/agentkeys-worker-memory/tests/namespace_filter.rs`). In the inventory below, map old labels: **old "M2" → E1 (engine, optional); old "M3" → M2 (export)**.
 
 ### Positive (unit + integration):
 
@@ -707,17 +727,17 @@ If a PR appears to violate any of these, it's not ready to land. Add the negativ
 
 | # | Question | Decision needed by | Default if no decision |
 |---|---|---|---|
-| 1 | Embedding model the reference SDK ships with? | M2 | `text-embedding-3-small` (cheap, 1536-dim, widely tested) |
-| 2 | Default K for `/search`? | M2 | 5 |
-| 3 | Index sharding threshold? | M2 | One file until count > 100K, then split by date range |
-| 4 | Are episodic lines indexed by default? Or only when explicitly tagged `searchable=true`? | M2 | Yes, default-indexed; operator can opt out per-event |
-| 5 | What's the wire format for query embedding? Raw f32 little-endian as base64? Use protobuf? | M2 | f32 LE bytes, base64-encoded. Avoids protobuf dep in SDK. |
-| 6 | Is the extractor sidecar in v0 or v0.1? | M5 | v0.1 — reference impl lands then; v0 ships hooks only |
+| 1 | Embedding model the reference SDK ships with? | E1 (engine) | `text-embedding-3-small` (cheap, 1536-dim, widely tested) |
+| 2 | Default K for `/search`? | E1 (engine) | 5 |
+| 3 | Index sharding threshold? | E1 (engine) | One file until count > 100K, then split by date range |
+| 4 | Are episodic lines indexed by default? Or only when explicitly tagged `searchable=true`? | E1 (engine) | Yes, default-indexed; operator can opt out per-event |
+| 5 | What's the wire format for query embedding? Raw f32 little-endian as base64? Use protobuf? | E1 (engine) | f32 LE bytes, base64-encoded. Avoids protobuf dep in SDK. |
+| 6 | Is the extractor sidecar in v0 or v0.1? | E2 | Engine stage (pluggable, deferred). External engines bring their own extraction; v0 ships nothing here. Build E2 only if an operator wants AgentKeys-side extraction. |
 | 7 | Do we ship the MCP-server wrapper (à la OpenMemory MCP) in v0? | M3 | No. Bridge to MCP is a separate crate; defer to v0.2. |
 | 8 | What's the cap-token TTL for memory ops? Same as creds (currently 60s per arch.md)? Or longer for search (so a multi-turn chat doesn't have to re-mint every turn)? | M1 | Same as creds (60s). Re-mint per turn is the same property the credentials worker has — don't weaken it for memory. **SDK retry contract:** on a `cap_k3_epoch_stale` 403 response (K3 rotated mid-session), the SDK MUST transparently re-mint the cap and retry the failed call exactly once before propagating the error to the agent. Without this, operator-initiated K3 rotation breaks every in-flight chat session. Tested by `k3_rotation_inflight.rs`. |
 | 9 | What's the default retention for episodic objects? | M1 | Indefinite. Operator policy on bucket lifecycle handles deletion. (S3 Lifecycle = cheaper than worker code.) |
 | 10 | Does `/v1/memory/teardown` recursively delete index files too? | M1 | Yes — `bots/<actor>/memory/` is the deletion root including `index/`. |
-| 11 | Does the worker cache index files in RAM, or load-on-demand per request? | M2 | Load-on-demand. Every `/search` does one GetObject for the index, one decrypt, one cosine pass. Optional LRU cache controlled by `AGENTKEYS_MEMORY_INDEX_CACHE_MB` env var (default 0 = disabled). Multi-tenant operators serving many actors per worker process should raise the cap; single-actor deployments can leave it off. Without an explicit policy, multi-tenant RAM grows linearly with actor count (~75 MB / actor at 50K vectors) — production landmine. |
+| 11 | Does the worker cache index files in RAM, or load-on-demand per request? | E1 (engine) | Load-on-demand. Every `/search` does one GetObject for the index, one decrypt, one cosine pass. Optional LRU cache controlled by `AGENTKEYS_MEMORY_INDEX_CACHE_MB` env var (default 0 = disabled). Multi-tenant operators serving many actors per worker process should raise the cap; single-actor deployments can leave it off. Without an explicit policy, multi-tenant RAM grows linearly with actor count (~75 MB / actor at 50K vectors) — production landmine. |
 
 ---
 
@@ -737,15 +757,23 @@ Per the plan-completion policy in CLAUDE.md, here's what this plan does NOT ship
 
 ## What landed
 
-This is a plan — no code lands here. Once accepted, the M0–M6 stages above translate to one harness-tracked deliverable each, per the development-workflow pattern in CLAUDE.md ("pick the HIGHEST-PRIORITY incomplete deliverable from harness/features.json").
+This is a plan — no code lands here. **Reframed 2026-05 per the decision record [`../research/memory-build-vs-gate-decision.md`](../research/memory-build-vs-gate-decision.md) (Position C — gated store, pluggable engine).** The doc is now the spec for the gated memory **backend** (store + gate); the engine (ranking/extraction) is delegated to the ecosystem and demoted to optional stages E1/E2. Once accepted, the CORE stages (**M-1 → M0 → M1 → M1.5 → M2**) translate to one harness-tracked deliverable each, per the development-workflow pattern in CLAUDE.md ("pick the HIGHEST-PRIORITY incomplete deliverable from harness/features.json").
 
 ## What did NOT land
 
-This is a planning document, not an implementation. **No code changes shipped with this doc.** All implementation work happens in stages M-1 → M0–M6 (see §9) once this plan is accepted.
+This is a planning document, not an implementation. **No code changes shipped with this doc.** Per Position C, the memory *engine* (embeddings, vector/BM25/graph ranking, extraction, consolidation) is **explicitly out of the AgentKeys v0 build** — see §2 "Explicitly delegated", the §4.2/§4.4/§5 ENGINE banners, and §9 stages E1/E2. The CORE store+gate stages (M-1 → M0 → M1 → M1.5 → M2 → M3 → M4) are the plan of record.
+
+---
+
+## Universal gate pattern — memory is one instance of many
+
+The store+gate / engine split this doc applies to memory **generalizes to every AgentKeys worker.** Email, payment, home-IoT, credentials are all the same shape: a deterministic **gate** (cap-token + scope + policy + audit) over a pluggable **engine + effect** (the actual service). The cap-token is the universal policy carrier; each worker is a policy enforcer. The fine-grained policy model (spend limits, content-category constraints, read-not-write, device scoping) and the determinism principle that makes it a sound security control are specified in **[`../research/universal-gate-pattern.md`](../research/universal-gate-pattern.md)**. The namespace filtering in §9 stage M1.5 is the memory worker's instance of that pattern's resource-scoping primitive.
 
 ---
 
 ## GSTACK REVIEW REPORT
+
+> **Superseded numbering.** This report predates the 2026-05 Position-C reframe. Where it references stages M0–M6 or lanes with M5/M6, read the current §9 instead: **core = M-1 → M0 → M1 → M1.5 → M2 → M3 → M4; engine = E1/E2 (optional).** The review's *findings* still hold — only the stage labels changed.
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|

@@ -67,7 +67,7 @@ Skip in v1: ACP/AMP payment rails, MCP marketplace, full LLM resale tier (only s
 - **AWS profile mapping**: `agentkeys-admin` defaults to us-west-2 but operational region is us-east-1. Region-explicit calls only.
 - **No raw `git`**: all version control via `jj`.
 - **Idempotency**: every remote-setup script must short-circuit on re-run (per `CLAUDE.md`).
-- **Architecture-as-source-of-truth**: any new identity / wallet / key naming aligns with `docs/spec/architecture.md` canonical names. Don't invent `aiosandbox_session_wallet` if arch.md already names it `agentkeys_user_wallet`.
+- **Architecture-as-source-of-truth**: any new identity / wallet / key naming aligns with `docs/arch.md` canonical names. Don't invent `aiosandbox_session_wallet` if arch.md already names it `agentkeys_user_wallet`.
 - **PIPL data residency**: Chinese end-user data must reside on China-cloud infrastructure (Tencent Cloud or Alibaba Cloud regions). ROW (rest-of-world) data on AWS us-east-1. Cross-border data movement requires explicit user consent + audit row. This is a v1 hard requirement — cannot defer.
 - **Voice latency**: realistic first-audio target is **1.5–2.0s** with streaming TTS and an intermediate "thinking" cue, NOT <300ms. BLE (50-150ms) + cellular RTT (30-80ms) + LLM TTFT (200-500ms) + sandbox routing (50-100ms) lower-bound at ~400ms even with warm sandboxes. Plan voice UX around the realistic floor.
 
@@ -95,7 +95,7 @@ Hosted Linux sandbox VM with OpenClaw / Hermes agent runtime pre-installed + Age
 
 **OpenClaw / Hermes definitions:**
 - **OpenClaw** — Tencent-published open-source agent runtime (GitHub `Tencent/openclaw-weixin` + related repos, MIT, surfaced March 2026). Substrate-similar to Anthropic Computer Use. License OK on paper; *commercial ToS-compliance for WeChat personal-account integration is unverified* — see `docs/research/ai-hardware-companion-wedge.md` §9.5. For aiosandbox, OpenClaw is referenced as the agent runtime, not the WeChat integration layer.
-- **Hermes** — Open-source agent runtime referenced in `docs/spec/architecture.md` as one of the "extend abilities" that hardware companion toys don't have today. Maturity early; license assumed Apache 2.0 (verify before committing). Either OpenClaw or Hermes is selectable from the vendor dashboard.
+- **Hermes** — Open-source agent runtime referenced in `docs/arch.md` as one of the "extend abilities" that hardware companion toys don't have today. Maturity early; license assumed Apache 2.0 (verify before committing). Either OpenClaw or Hermes is selectable from the vendor dashboard.
 
 Verify both projects' production-readiness and license compatibility in a 1-week research spike before committing.
 

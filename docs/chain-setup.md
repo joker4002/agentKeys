@@ -91,7 +91,7 @@ To override the RPC for one run without forking a profile:
 AGENTKEYS_CHAIN_PROFILE_FILE=./my-custom-profile.json bash scripts/setup-heima.sh
 ```
 
-The JSON shape is documented in [`docs/spec/architecture.md`](spec/architecture.md) §22a. Add a new chain by dropping a JSON file into the profiles directory + running with `--chain <new-name>`.
+The JSON shape is documented in [`docs/arch.md`](arch.md) §22a. Add a new chain by dropping a JSON file into the profiles directory + running with `--chain <new-name>`.
 
 ## EVM version pin (Heima-specific)
 
@@ -125,5 +125,5 @@ MAINNET_CONFIRM=1 \
 - Operator workstation setup: [`docs/dev-setup.md`](dev-setup.md)
 - CI activation: [`docs/ci-setup.md`](ci-setup.md)
 - Live contract addresses: [`docs/spec/deployed-contracts.md`](spec/deployed-contracts.md)
-- Architecture: [`docs/spec/architecture.md`](spec/architecture.md) §22 (chain profiles), §22b (per-actor binding ceremonies)
+- Architecture: [`docs/arch.md`](arch.md) §22 (chain profiles), §22b (per-actor binding ceremonies)
 - FAQ + troubleshooting: [`wiki/heima-setup-faq.md`](../wiki/heima-setup-faq.md)
