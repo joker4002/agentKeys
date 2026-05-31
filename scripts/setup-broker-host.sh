@@ -38,7 +38,7 @@ CRED_MODE=""                 # set by interactive prompt or --cred-mode
 PROFILE_NAME="agentkeys-daemon"
 WITH_NGINX="yes"             # default: install + configure nginx (opt out via --without-nginx)
 WITH_CERTBOT="yes"           # default: install certbot (opt out via --without-certbot)
-ASSUME_YES=false
+ASSUME_YES=true              # unattended by default (script is idempotent). --yes/-y/--non-interactive/--interactive remain accepted no-ops for back-compat with CI + runbooks.
 TEST_MODE=false              # --test: suffix every derived hostname + bucket with "-test"
                              # so a single flag replaces the 8 explicit
                              # --signer-host / --vault-bucket / --email-from / etc.
@@ -60,8 +60,7 @@ MEMORY_BUCKET=""
 SCOPE_ADDR=""
 REGISTRY_ADDR=""
 K3_COUNTER_ADDR=""
-WITH_WORKERS="yes"           # --without-workers: skip build+install of the 4 service workers (audit/email/cred/memory)
-CLEAN_BROKER="auto"          # --clean: force `cargo clean -p` first; auto = self-heal only on assertion miss
+WITH_WORKERS="yes"           # in-file constant: the 4 service workers (audit/email/cred/memory) are core — always built+installed. The build is idempotent (skips up-to-date crates), so there is no operator opt-out flag to remember.
 # Verified SES sender for email-link auth. Operator must register this
 # identity via scripts/ses-verify-sender.sh BEFORE booting the broker;
 # the broker's verify_sender_ready precheck calls SES GetEmailIdentity
@@ -106,10 +105,7 @@ while (( $# > 0 )); do
     --scope-addr)         SCOPE_ADDR="$2"; shift 2 ;;
     --registry-addr)      REGISTRY_ADDR="$2"; shift 2 ;;
     --k3-counter-addr)    K3_COUNTER_ADDR="$2"; shift 2 ;;
-    --without-workers)    WITH_WORKERS="no"; shift ;;
     --email-from)         BROKER_EMAIL_FROM_ADDRESS="$2"; shift 2 ;;
-    --clean)              CLEAN_BROKER="yes"; shift ;;
-    --no-clean)           CLEAN_BROKER="no"; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -490,7 +486,7 @@ cat <<EOF
 This will:
   • install build deps + Rust toolchain (if missing)
   • build agentkeys-mock-server + agentkeys-broker-server in release mode
-  • build agentkeys-worker-{audit,email,creds,memory} in release mode (skip with --without-workers)
+  • build agentkeys-worker-{audit,email,creds,memory} in release mode
   • install all binaries to /usr/local/bin
   • create the 'agentkeys' system user + /var/lib/agentkeys (mode 0700)
   • drop systemd units for backend + broker + signer + 4 service workers
@@ -565,18 +561,12 @@ log "Building agentkeys-mock-server (release)"
 
 # Build agentkeys-broker-server with auth-email-link, asserting via
 # cargo's --message-format=json output that the feature is actually
-# enabled. Three modes for incremental-cache hygiene:
-#
-#   --clean       force `cargo clean -p agentkeys-broker-server --release`
-#                 before the build (3-5min full rebuild).
-#   --no-clean    never clean; trust incremental cache. Use when you
-#                 KNOW the cache is good and want the fastest re-deploy.
-#   (default)     auto: skip clean, run incremental build, ASSERT the
-#                 feature is in cargo's reported feature set; if NOT,
-#                 self-heal by running `cargo clean -p` and rebuilding
-#                 ONCE. Failing again is a real environment bug (host
-#                 .cargo/config.toml override, env-var pin, etc.) and
-#                 the script dies with 5 specific things to check.
+# enabled. Incremental-cache hygiene is fully automatic (no flag): run the
+# incremental build, ASSERT the feature is in cargo's reported feature set,
+# and if it is NOT, self-heal by running `cargo clean -p` and rebuilding
+# ONCE. Failing again is a real environment bug (host .cargo/config.toml
+# override, env-var pin, etc.) and the script dies with 5 specific things
+# to check.
 #
 # Critical: stdout (NDJSON) and stderr (compiler progress / errors) MUST
 # be redirected separately. Merging them with `2>&1` corrupts the NDJSON
@@ -622,19 +612,12 @@ assert_feature_enabled() {
   esac
 }
 
-if [[ "$CLEAN_BROKER" == "yes" ]]; then
-  log "cargo clean -p agentkeys-broker-server --release  (--clean requested)"
-  ( cd "$REPO_ROOT" && cargo clean -p agentkeys-broker-server --release ) \
-    || warn "cargo clean -p returned non-zero — continuing (may be a fresh tree)"
-fi
-
 build_broker_with_features
 
 log "Verifying broker binary has auth-email-link compiled in"
-if ! assert_feature_enabled && [[ "$CLEAN_BROKER" != "no" ]]; then
+if ! assert_feature_enabled; then
   warn "auth-email-link missing from cargo's reported features [$ENABLED_FEATURES]"
   warn "Self-healing: cargo clean -p + rebuild (one retry; ~3-5min)"
-  warn "Pass --no-clean to disable self-heal, or --clean to skip this and clean upfront."
   ( cd "$REPO_ROOT" && cargo clean -p agentkeys-broker-server --release ) \
     || warn "cargo clean -p returned non-zero — continuing"
   build_broker_with_features
@@ -649,10 +632,6 @@ if ! assert_feature_enabled && [[ "$CLEAN_BROKER" != "no" ]]; then
      5. cat $REPO_ROOT/Cargo.lock | head -5  (committed lockfile drift?)
    Then file a repro for the issue tracker."
   fi
-elif ! assert_feature_enabled; then
-  # --no-clean explicitly requested: don't self-heal, just die.
-  die "auth-email-link missing from cargo's reported features [$ENABLED_FEATURES] and --no-clean is set.
-   Re-run without --no-clean (or with --clean) to let the script self-heal."
 fi
 
 # Belt-and-suspenders: nm symbol-table check (more reliable than strings,
@@ -1595,7 +1574,7 @@ case "$agent_create_code" in
   401) log "  §10.2 /v1/agent/create live (401 unauth as expected — issue #144 routes deployed)" ;;
   404) die "POST /v1/agent/create → 404: the running broker binary predates issue #144 (§10.2 routes missing).
    The build/install did not deploy the new code. Fix:
-     rm -rf $REPO_ROOT/target/release/agentkeys-broker-server && re-run this script (--clean forces a clean rebuild)." ;;
+     rm -rf $REPO_ROOT/target/release/agentkeys-broker-server && re-run this script (it self-heals with a clean rebuild when the feature is missing)." ;;
   *)   warn "POST /v1/agent/create → HTTP $agent_create_code (expected 401). Route appears present; continuing (the /healthz probe already passed)." ;;
 esac
 
@@ -1606,6 +1585,25 @@ if [[ "$WITH_WORKERS" == "yes" ]]; then
   probe_or_die worker-email  9093 agentkeys-worker-email
   probe_or_die worker-creds  9094 agentkeys-worker-creds
   probe_or_die worker-memory 9095 agentkeys-worker-memory
+fi
+
+# ─── 8b. Hosted MCP endpoint (auto-converged, no flag; issue #152) ────────────
+# The broker-hosted agentkeys-mcp-server (--transport mcp-endpoint, behind nginx
+# TLS) is the HOSTED-LLM path — a remote vendor LLM (xiaozhi / Doubao) connects
+# INWARD over WSS — issue #152, deferred. There is NO flag to remember: behaviour
+# CONVERGES from state. If the hosted MCP was ever deployed on this host (its
+# binary is installed), every broker setup re-runs setup-mcp-host.sh to keep it
+# current (cached incremental `cargo build -p`, NOT `cargo install --git`,
+# against THIS checkout). On a host that never had it this is a clean no-op.
+# First-time enablement is #152 work; the Local-LLM / Task-agent wire demo never
+# needs it — that MCP server runs in the agent's own sandbox.
+if [[ -x /usr/local/bin/agentkeys-mcp-server ]]; then
+  MCP_TEST_FLAG=""
+  [[ "$TEST_MODE" == "true" ]] && MCP_TEST_FLAG="--test"
+  log "Hosted MCP present on this host — re-converging via setup-mcp-host.sh $MCP_TEST_FLAG"
+  ( cd "$REPO_ROOT" && bash scripts/setup-mcp-host.sh $MCP_TEST_FLAG )
+else
+  log "Hosted MCP not deployed here — skipping (issue #152 path; the wire demo's MCP runs in the sandbox)"
 fi
 
 # ─── 9. Print remaining manual steps ──────────────────────────────────────────

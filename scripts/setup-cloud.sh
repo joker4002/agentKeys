@@ -697,6 +697,11 @@ do_step_14() {
   ok "mail bucket policy applied"
 }
 
+# NOTE: currently UNUSED. Step 15's SSM bring-up of the MCP server was removed
+# (hosted MCP is a broker-host concern now, run via setup-mcp-host.sh — #152). Retained
+# for the #152 path IF the hosted endpoint is ever brought up via SSM
+# SendCommand from the laptop rather than ssh-broker.sh + setup-broker-host.sh.
+#
 # Step-15 precondition: the broker EC2 must be a REGISTERED SSM managed instance
 # before SendCommand, or AWS returns InvalidInstanceId / "not in a valid state".
 # The on-host amazon-ssm-agent only registers if the instance's role carries
@@ -765,123 +770,20 @@ ensure_ssm_managed() {
 }
 
 do_step_15() {
-  CUR_STEP=15; step "Bring up agentkeys-mcp-server on broker (via SSM)"
-  : "${INSTANCE_ID:?INSTANCE_ID missing — broker EC2 needs to exist (re-run step 4 first)}"
-
-  # Make the broker EC2 SSM-ready BEFORE SendCommand (self-heals the missing
-  # AmazonSSMManagedInstanceCore that bit both prod + test brokers). Idempotent.
-  ensure_ssm_managed
-
-  REPO_URL_FOR_MCP="${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git}"
-  REV_FOR_MCP="${AGENTKEYS_REV:-main}"
-  MCP_HOST_FLAGS=""
-  if [ "$TEST_MODE" = "1" ]; then
-    MCP_HOST_FLAGS="--test"
-  fi
-
-  if [ "$DRY_RUN" = "1" ]; then
-    warn "DRY: would SSM-run setup-mcp-host.sh on $INSTANCE_ID ($([ "$TEST_MODE" = "1" ] && echo test-mcp || echo mcp).${ZONE})"
-    return
-  fi
-
-  # The script body that runs on the broker. Idempotent — setup-mcp-host.sh
-  # short-circuits when state is already correct. Steps:
-  #   1. Ensure cargo (install rustup-minimal if missing — common on fresh EC2)
-  #   2. Clone or update the repo at /opt/agentkeys-src
-  #   3. Run scripts/setup-mcp-host.sh (which itself does `cargo install --git`)
-  local mcp_bring_up_script
-  mcp_bring_up_script=$(cat <<EOSH
-#!/usr/bin/env bash
-set -euo pipefail
-# SSM RunShellScript runs this as root with a MINIMAL env (no HOME). Under set -u
-# an unset \$HOME is a fatal "unbound variable", which broke step 15 the moment
-# SSM delivery started working. Default it before any \$HOME use (root => /root).
-export HOME="\${HOME:-/root}"
-export PATH="\$HOME/.cargo/bin:\$PATH"
-
-if ! command -v cargo >/dev/null 2>&1; then
-  curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-  source "\$HOME/.cargo/env"
-fi
-
-REPO_DIR=/opt/agentkeys-src
-if [ ! -d "\$REPO_DIR/.git" ]; then
-  sudo install -d -m 0755 -o ubuntu -g ubuntu "\$REPO_DIR"
-  sudo -u ubuntu git clone --depth 1 -b ${REV_FOR_MCP} ${REPO_URL_FOR_MCP} "\$REPO_DIR"
-else
-  sudo -u ubuntu git -C "\$REPO_DIR" fetch --depth 1 origin ${REV_FOR_MCP}
-  sudo -u ubuntu git -C "\$REPO_DIR" reset --hard FETCH_HEAD
-fi
-
-cd "\$REPO_DIR"
-sudo -E AGENTKEYS_REPO_URL=${REPO_URL_FOR_MCP} AGENTKEYS_REV=${REV_FOR_MCP} \\
-  bash scripts/setup-mcp-host.sh ${MCP_HOST_FLAGS}
-EOSH
-)
-
-  local cmd_id _send_err
-  _send_err="$(mktemp)"
-  if ! cmd_id=$(aws ssm send-command \
-    --region "$REGION" \
-    --instance-ids "$INSTANCE_ID" \
-    --document-name "AWS-RunShellScript" \
-    --comment "agentkeys-mcp-server bring-up ($([ "$TEST_MODE" = "1" ] && echo test || echo prod))" \
-    --parameters "{\"commands\": $(jq -Rs . <<<"$mcp_bring_up_script" | jq -s .)}" \
-    --query "Command.CommandId" --output text 2>"$_send_err"); then
-    local _err; _err="$(cat "$_send_err" 2>/dev/null || true)"; rm -f "$_send_err"
-    # ensure_ssm_managed already verified the instance is registered, so a
-    # SendCommand AccessDenied here is a CALLER policy gap, not an instance one.
-    if printf '%s' "$_err" | grep -qiE 'accessdenied|not authorized|ssm:sendcommand'; then
-      die "ssm:SendCommand DENIED for your CALLER (identity-based policy gap — $INSTANCE_ID is SSM-registered, verified just above, so this is NOT an instance problem). Your operator IAM user needs ssm:SendCommand on the instance + the AWS-RunShellScript document, plus ssm:GetCommandInvocation/ListCommandInvocations. Grant it with \`aws iam put-user-policy\` on your user (see scripts/provision-ci-deploy-role.sh for the exact policy shape it grants the CI deploy role), then re-run. Detail: $_err"
-    fi
-    die "aws ssm send-command failed — does $INSTANCE_ID have amazon-ssm-agent + the SSM instance profile? Detail: $_err"
-  fi
-  rm -f "$_send_err"
-  ok "SSM command $cmd_id queued on $INSTANCE_ID; polling for completion (up to 25 min)"
-
-  # Poll every 10s for up to 25 min. setup-mcp-host.sh runs `cargo install --git`
-  # to build agentkeys-mcp-server FROM SOURCE; a COLD build on a t3.medium can
-  # take 10–20 min. The old 10-min cap timed out mid-build, and the silent poll
-  # (no per-iteration output) looked like a hang. Heartbeat ~every 30s so it's
-  # visibly alive, and on a genuine timeout the build is usually still running on
-  # the broker (not a failure) — re-running --from-step 15 resumes polling and
-  # the cargo cache makes that build finish fast.
-  local status="Pending" last=""
-  for i in $(seq 1 150); do
-    sleep 10
-    status=$(aws ssm get-command-invocation \
-      --region "$REGION" \
-      --command-id "$cmd_id" \
-      --instance-id "$INSTANCE_ID" \
-      --query "Status" --output text 2>/dev/null || echo "Pending")
-    case "$status" in
-      Success)
-        ok "MCP server brought up on $INSTANCE_ID"
-        # Tail the last 30 lines of stdout for a quick sanity check
-        aws ssm get-command-invocation \
-          --region "$REGION" --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
-          --query "StandardOutputContent" --output text 2>/dev/null \
-          | tail -30 | sed 's/^/      /' >&2 || true
-        return ;;
-      Failed|Cancelled|TimedOut)
-        warn "SSM command status: $status"
-        aws ssm get-command-invocation \
-          --region "$REGION" --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
-          --query "StandardErrorContent" --output text 2>/dev/null \
-          | tail -50 | sed 's/^/      /' >&2 || true
-        die "MCP bring-up failed; inspect: aws ssm get-command-invocation --region $REGION --command-id $cmd_id --instance-id $INSTANCE_ID --query StandardErrorContent --output text" ;;
-    esac
-    # Heartbeat on the first tick, on any status change, and ~every 30s, so a long
-    # cold cargo build is visibly alive rather than looking hung.
-    if [ "$status" != "$last" ] || [ $(( i % 3 )) -eq 1 ]; then
-      printf "    … MCP bring-up running: status=%s, ~%ds elapsed (cold cargo build ~10–20 min)\n" "$status" "$(( i * 10 ))" >&2
-      last="$status"
-    fi
-  done
-  die "MCP bring-up still '$status' after 25 min — the cargo build is most likely STILL RUNNING on the broker (not a failure). Re-run to resume polling (idempotent; the cargo cache makes the build finish fast):
-     bash scripts/setup-cloud.sh --from-step 15$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "")
-   Or watch it directly:
-     aws ssm get-command-invocation --region $REGION --command-id $cmd_id --instance-id $INSTANCE_ID --query Status --output text"
+  CUR_STEP=15; step "Hosted MCP endpoint — removed from cloud setup (broker-host concern; issue #152)"
+  # The broker-hosted agentkeys-mcp-server (--transport mcp-endpoint, behind nginx
+  # TLS) is the HOSTED-LLM path (xiaozhi / vendor-cloud connects inward) — issue
+  # #152, deferred. It is a BROKER-HOST concern, not cloud/IAM: setup-cloud.sh is
+  # permission/IAM work under agentkeys-admin ONLY. The old body SSM-ran
+  # setup-mcp-host.sh on the broker, cloning `main` and cold-building via
+  # `cargo install --git` (~10–20 min EVERY run — no warm target/ cache). The
+  # build now lives where broker-host binaries belong — setup-mcp-host.sh on the
+  # broker (cached `cargo build -p` against THIS checkout, not a fresh clone of
+  # stale `main`); once it is deployed, setup-broker-host.sh re-converges it
+  # automatically (no flag to remember — issue #152).
+  skip "step 15 is a no-op now — the hosted MCP endpoint is the deferred #152 path and a broker-host concern, not cloud/IAM. The Local-LLM / Task-agent wire demo does NOT need it (its MCP server runs in the sandbox — harness/phase1-wire-demo.sh). When you work #152, enable it once on the broker; thereafter setup-broker-host.sh re-converges it automatically (no flag):
+       bash scripts/ssh-broker.sh $([ "$TEST_MODE" = "1" ] && echo test || echo prod)
+       sudo bash /opt/agentkeys-src/scripts/setup-mcp-host.sh$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "")"
 }
 
 do_step_16() {
@@ -919,9 +821,8 @@ do_step_16() {
   printf "    bash scripts/setup-cloud.sh --only-step 6   # re-UPSERT DNS\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 12  # re-create SSH user (e.g. after EC2 replace)\n" >&2
   printf "    bash scripts/setup-cloud.sh --only-step 13  # re-run per-data-class provisioning\n" >&2
-  printf "    bash scripts/setup-cloud.sh --only-step 15  # re-run the MCP bring-up on the broker via SSM (add --test for the test broker)\n" >&2
-  printf "    bash scripts/setup-cloud.sh --only-step 15  # re-deploy agentkeys-mcp-server on broker (cargo install --git)\n" >&2
-  printf "    bash scripts/setup-cloud.sh --only-step 15 --test  # same for test-mcp.\${ZONE}\n\n" >&2
+  printf "    # step 15 (hosted MCP on broker) moved OUT of cloud setup — it is a broker-host concern (issue #152).\n" >&2
+  printf "    # deploy it on the broker when needed:  setup-mcp-host.sh (idempotent); setup-broker-host.sh then re-converges it\n\n" >&2
 }
 
 main() {

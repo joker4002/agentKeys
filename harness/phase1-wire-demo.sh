@@ -722,8 +722,17 @@ phase1_sandbox() {
 # OS — so the agent binary must be cross-built.
 #
 # Caching (so re-runs are fast + idempotent, like a local `cargo build`):
-#   • TARGET dir        → target/sandbox-linux is bind-mounted to the host, so
-#                         compiled crates + deps persist across runs.
+#   • TARGET dir        → CARGO_TARGET_DIR is a NAMED docker volume, NOT a host
+#                         bind-mount. cargo's incremental build churns thousands
+#                         of small files in target/; on macOS a host bind-mount
+#                         routes every stat/read/write through the Docker VM's
+#                         virtiofs/gRPC-FUSE layer, which dominates wall-clock on
+#                         re-runs. A named volume keeps that I/O on the VM's native
+#                         fs (the single biggest re-run speedup). After a success,
+#                         ONLY the three final binaries are copied OUT to the host
+#                         target/sandbox-linux/release/ (3 sequential writes —
+#                         cheap over a bind-mount) for the idempotency gate +
+#                         upload step to read.
 #   • REGISTRY + git    → named docker volumes, so the crates.io index and the
 #                         downloaded .crate sources survive the --rm container
 #                         (no multi-minute re-fetch every run).
@@ -750,6 +759,10 @@ CARGO_GIT_VOL="${CARGO_GIT_VOL:-agentkeys-sandbox-cargo-git}"
 # seeded from the image's /usr/local/rustup on first use, then caches the
 # downloaded pinned toolchain so later runs only recompile the changed crate.
 RUSTUP_VOL="${RUSTUP_VOL:-agentkeys-sandbox-rustup}"
+# Named volume for cargo's target dir — see the TARGET dir note above. Holding
+# the incremental build off the macOS host bind-mount is the single biggest
+# re-run speedup; only the final binaries are extracted to $LINUX_TARGET_DIR.
+CARGO_TARGET_VOL="${CARGO_TARGET_VOL:-agentkeys-sandbox-target}"
 
 # True (0) when any tracked source is newer than the reference binary ($1).
 sources_newer() {
@@ -814,15 +827,27 @@ build_linux_binaries() {
   local cross_toolchain="${CROSS_RUST_TOOLCHAIN:-${host_toolchain:-stable}}"
   log "  1.3 linux build: cross-compiling aarch64-linux binaries (toolchain $cross_toolchain; first run is slow)…"
   local build_rc=0
+  # CARGO_TARGET_DIR points at a NAMED VOLUME (/cargo-target), NOT the host
+  # bind-mount — see the TARGET dir note above. After a successful build the
+  # three release binaries are copied OUT of the volume into the bind-mounted
+  # /src/target/sandbox-linux/release/ (= host $LINUX_TARGET_DIR/release) so the
+  # idempotency gate + upload step keep reading them from the same host path.
   docker run --rm --platform linux/arm64 \
     -v "$REPO_ROOT":/src -w /src \
     -v "$CARGO_REGISTRY_VOL":/usr/local/cargo/registry \
     -v "$CARGO_GIT_VOL":/usr/local/cargo/git \
     -v "$RUSTUP_VOL":/usr/local/rustup \
-    -e CARGO_TARGET_DIR=/src/target/sandbox-linux \
+    -v "$CARGO_TARGET_VOL":/cargo-target \
+    -e CARGO_TARGET_DIR=/cargo-target \
     -e RUSTUP_TOOLCHAIN="$cross_toolchain" \
     "$BUILDER_IMAGE" \
-    cargo build --release -p agentkeys-cli -p agentkeys-mcp-server -p agentkeys-daemon || build_rc=$?
+    bash -c 'set -e
+      cargo build --release -p agentkeys-cli -p agentkeys-mcp-server -p agentkeys-daemon
+      mkdir -p /src/target/sandbox-linux/release
+      cp -f /cargo-target/release/agentkeys \
+            /cargo-target/release/agentkeys-mcp-server \
+            /cargo-target/release/agentkeys-daemon \
+            /src/target/sandbox-linux/release/' || build_rc=$?
   # Check the BUILD EXIT CODE, not just file existence — a stale binary from a
   # prior build must not be mistaken for a fresh success (silent-failure trap).
   if [[ "$build_rc" -eq 0 && -x "$agent_bin" && -x "$mcp_bin" && -x "$daemon_bin" ]]; then
