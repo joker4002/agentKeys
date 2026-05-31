@@ -111,6 +111,48 @@ pub async fn mint_oidc_jwt(
     };
     tracing::Span::current().record("wallet", report_id.as_str());
 
+    // Finding 1 (adversarial review of #149): an agent_hdkd session (device_pubkey
+    // present, wallet empty) must NOT mint STS-capable OIDC JWTs until its device is
+    // bound on-chain. J1_agent is minted at link-code redeem (PRE-binding), so
+    // without this gate a redeemed-but-unapproved agent could AssumeRoleWithWebIdentity
+    // to its own actor prefix BEFORE the master's registerAgentDevice + scope grant.
+    // Wallet/master sessions (no device_pubkey) are the operator's own and unaffected.
+    // Same on-chain check the cap-mint path uses (SidecarRegistry.getDevice).
+    if let Some(device_pubkey) = session_claims.agentkeys.device_pubkey.as_deref() {
+        use crate::handlers::cap::{call_get_device, ChainContracts};
+        let chain = ChainContracts::from_state(&state)
+            .map_err(|e| BrokerError::Internal(format!("chain config for agent gate: {e:?}")))?;
+        let dkh = agentkeys_core::device_crypto::device_key_hash(device_pubkey)
+            .map_err(|e| BrokerError::BadRequest(format!("bad device_pubkey in session claim: {e}")))?;
+        let device = call_get_device(&state.http, &chain.rpc_url, &chain.registry, &dkh)
+            .await
+            .map_err(|e| BrokerError::Internal(format!("on-chain device read: {e:?}")))?;
+        let denied: Option<&str> = if device.registered_at == 0 || device.revoked {
+            Some("agent device not active on-chain — the master must registerAgentDevice (bind) before this agent can mint OIDC/STS credentials")
+        } else if device.actor_omni.to_lowercase()
+            != actor_omni.trim_start_matches("0x").to_lowercase()
+        {
+            Some("session omni does not match the on-chain device's actor_omni")
+        } else {
+            None
+        };
+        if let Some(reason) = denied {
+            let _ = state.audit.record_mint(
+                MintRecord {
+                    requester_token: token,
+                    requester_wallet: &report_id,
+                    requested_role: "oidc_jwt",
+                    session_duration_seconds: state.config.oidc_jwt_ttl_seconds as i32,
+                    sts_session_name: "(agent-not-active)",
+                    outcome: MintOutcome::AuthFailed,
+                },
+                Some(reason),
+            );
+            tracing::Span::current().record("outcome", "agent_not_active");
+            return Err(BrokerError::Forbidden(reason.into()));
+        }
+    }
+
     let (claims, _now, exp) = build_oidc_jwt_claims(
         &state.config.oidc_issuer,
         &actor_omni,
