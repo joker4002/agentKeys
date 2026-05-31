@@ -356,7 +356,8 @@ mod tests {
 
     #[test]
     fn extract_memory_content_reads_content_field() {
-        let result = json!({"ok": true, "content": "Chengdu trip — Apr 12 to 16", "namespace": "travel"});
+        let result =
+            json!({"ok": true, "content": "Chengdu trip — Apr 12 to 16", "namespace": "travel"});
         assert_eq!(
             extract_memory_content(&result).as_deref(),
             Some("Chengdu trip — Apr 12 to 16")

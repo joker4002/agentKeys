@@ -231,7 +231,10 @@ impl RuntimeAdapter for HermesAdapter {
         // Step: merge the managed hooks: block into config.yaml.
         let cfg = self.config_path()?;
         let block = self.managed_block(req)?;
-        log.push(("3 config-block".into(), merge_block(&cfg, &block, req.check_only)?));
+        log.push((
+            "3 config-block".into(),
+            merge_block(&cfg, &block, req.check_only)?,
+        ));
 
         // Step: consent pre-approval is encoded as `hooks_auto_accept: true`
         // inside the managed block (one of Hermes's three escape hatches),
@@ -246,9 +249,7 @@ impl RuntimeAdapter for HermesAdapter {
 
     fn verify(&self) -> Outcome {
         match Command::new("hermes").args(["hooks", "doctor"]).output() {
-            Ok(out) if out.status.success() => {
-                Outcome::Ok("hermes hooks doctor passed".into())
-            }
+            Ok(out) if out.status.success() => Outcome::Ok("hermes hooks doctor passed".into()),
             Ok(out) => Outcome::Fail(format!(
                 "hermes hooks doctor exited {}: {}",
                 out.status,
@@ -302,7 +303,11 @@ fn write_if_changed(
     let _ = exec; // silence unused on non-unix
     Ok(Outcome::Ok(format!(
         "{} {}",
-        if current.is_some() { "updated" } else { "wrote" },
+        if current.is_some() {
+            "updated"
+        } else {
+            "wrote"
+        },
         path.display()
     )))
 }
@@ -336,7 +341,7 @@ fn strip_top_level_hooks(existing: &str) -> Option<String> {
     // Drop the hooks block + any top-level `hooks_auto_accept:` (our block re-adds it).
     let mut kept: Vec<&str> = Vec::new();
     for (i, l) in lines.iter().enumerate() {
-        let l: &str = *l;
+        let l: &str = l;
         if i >= hooks_start && i < hooks_end {
             continue;
         }
@@ -451,11 +456,7 @@ pub fn cmd_wire(runtime: &str, req: WireRequest) -> Result<String> {
     let adapter = adapter_for(runtime)?;
     let bin = agentkeys_bin();
     let mut out = Vec::new();
-    let mode = if req.check_only {
-        " (check-only)"
-    } else {
-        ""
-    };
+    let mode = if req.check_only { " (check-only)" } else { "" };
     out.push(format!("[agentkeys wire {}]{mode}", adapter.name()));
 
     // Detect.
@@ -549,9 +550,13 @@ mod tests {
         let pretool = &scripts[0].1;
         assert!(pretool.contains("AGENTKEYS_ACTOR_OMNI='O_demo_001'"));
         assert!(pretool.contains("AGENTKEYS_MCP_URL='http://localhost:8088/mcp'"));
-        assert!(pretool.contains("exec /usr/local/bin/agentkeys hook check --scope 'payment.spend'"));
+        assert!(
+            pretool.contains("exec /usr/local/bin/agentkeys hook check --scope 'payment.spend'")
+        );
         assert!(scripts[1].1.contains("hook audit"));
-        assert!(scripts[2].1.contains("hook memory-inject --namespaces 'travel,personal'"));
+        assert!(scripts[2]
+            .1
+            .contains("hook memory-inject --namespaces 'travel,personal'"));
     }
 
     #[test]
@@ -610,7 +615,10 @@ mod tests {
         .unwrap();
         let block = format!("{BLOCK_START}\nhooks_auto_accept: true\n{BLOCK_END}");
         let outcome = merge_block(&cfg, &block, false).unwrap();
-        assert!(matches!(outcome, Outcome::Ok(_)), "should replace, not refuse");
+        assert!(
+            matches!(outcome, Outcome::Ok(_)),
+            "should replace, not refuse"
+        );
         let after = std::fs::read_to_string(&cfg).unwrap();
         assert!(after.contains(BLOCK_START), "managed block installed");
         assert!(after.contains("model:"), "unrelated keys preserved");
@@ -633,7 +641,10 @@ mod tests {
 
         let block = format!("{BLOCK_START}\nhooks_auto_accept: true\n{BLOCK_END}");
         let out = merge_block(&cfg, &block, false).unwrap();
-        assert!(matches!(out, Outcome::Ok(_)), "should adopt the stripped block");
+        assert!(
+            matches!(out, Outcome::Ok(_)),
+            "should adopt the stripped block"
+        );
         let after = std::fs::read_to_string(&cfg).unwrap();
         assert!(after.contains("model:"), "preserves unrelated keys");
         assert_eq!(

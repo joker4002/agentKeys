@@ -336,11 +336,7 @@ enum Commands {
         mcp_url: String,
 
         /// Vendor bearer token for the MCP server.
-        #[arg(
-            long,
-            env = "AGENTKEYS_MCP_VENDOR_TOKEN",
-            default_value = "demo-tok"
-        )]
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN", default_value = "demo-tok")]
         vendor_token: String,
 
         /// Operator/agent session JWT baked into the hook scripts (forwarded
@@ -665,7 +661,11 @@ enum AgentAction {
         about = "Mint this agent's device session (in-sandbox keygen + wallet_sig) — emits JSON"
     )]
     DeviceSession {
-        #[arg(long, env = "AGENTKEYS_BROKER_URL", help = "Broker base URL (OIDC issuer)")]
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
         broker_url: String,
         #[arg(
             long,
@@ -679,7 +679,11 @@ enum AgentAction {
             help = "One-time link code from the master (echoed into the output for binding)"
         )]
         link_code: String,
-        #[arg(long, default_value_t = 1, help = "SIWE chain_id replay nonce (not a chain hop)")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "SIWE chain_id replay nonce (not a chain hop)"
+        )]
         chain_id: u64,
         #[arg(long, help = "Force a fresh device key → fresh pairing (new omni)")]
         regen: bool,

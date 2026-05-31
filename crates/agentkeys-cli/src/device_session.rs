@@ -124,7 +124,9 @@ fn enforce_owner_only(path: &str) -> Result<()> {
         ));
     }
     if !meta.file_type().is_file() {
-        return Err(anyhow!("device key {path} is not a regular file — refusing"));
+        return Err(anyhow!(
+            "device key {path} is not a regular file — refusing"
+        ));
     }
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
