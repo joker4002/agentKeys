@@ -95,11 +95,25 @@ pub async fn mint_oidc_jwt(
             }
         };
 
+    // The actor_omni is read VERBATIM from the verified (broker-signed) session
+    // claim — never re-derived from a wallet (issue #144). A J1_agent has no
+    // wallet, so re-deriving would yield an empty/garbage tag → STS creds scoped
+    // to the wrong prefix → worker 403. For wallet/master sessions the claim
+    // equals the old re-derived value, so this is byte-identical for them.
     let wallet = session_claims.agentkeys.wallet_address;
-    tracing::Span::current().record("wallet", wallet.as_str());
+    let actor_omni = session_claims.agentkeys.omni_account;
+    // Report id for audit/span/response: the wallet for master sessions, the
+    // actor_omni for agents (no wallet). Drives the STS session name downstream.
+    let report_id = if wallet.is_empty() {
+        actor_omni.clone()
+    } else {
+        wallet.clone()
+    };
+    tracing::Span::current().record("wallet", report_id.as_str());
 
     let (claims, _now, exp) = build_oidc_jwt_claims(
         &state.config.oidc_issuer,
+        &actor_omni,
         &wallet,
         state.config.oidc_jwt_ttl_seconds,
     );
@@ -109,7 +123,7 @@ pub async fn mint_oidc_jwt(
     state.audit.record_mint(
         MintRecord {
             requester_token: token,
-            requester_wallet: &wallet,
+            requester_wallet: &report_id,
             requested_role: "oidc_jwt",
             session_duration_seconds: state.config.oidc_jwt_ttl_seconds as i32,
             sts_session_name: &state.oidc.kid,
@@ -121,7 +135,7 @@ pub async fn mint_oidc_jwt(
 
     Ok(Json(MintOidcJwtResponse {
         jwt,
-        wallet,
+        wallet: report_id,
         expiration: exp,
     }))
 }
@@ -156,6 +170,7 @@ pub async fn mint_oidc_jwt(
 /// v1 can be retired from the claim set.
 pub(crate) fn build_oidc_jwt_claims(
     issuer: &str,
+    actor_omni: &str,
     wallet: &str,
     ttl_seconds: u64,
 ) -> (serde_json::Value, i64, i64) {
@@ -165,24 +180,30 @@ pub(crate) fn build_oidc_jwt_claims(
         .unwrap_or(0);
     let exp = now + ttl_seconds as i64;
     let wallet_lc = wallet.to_lowercase();
-    // v2 actor_omni = SHA256("agentkeys" || "evm" || wallet_lc). Lives in
-    // `crate::identity::omni_account::derive_omni_account` so the broker
-    // never reimplements the hash — same function the storage layer uses
-    // when keying identity-link rows on omni.
-    let actor_omni =
-        crate::identity::omni_account::derive_omni_account("evm", &wallet_lc).to_string();
+    // `actor_omni` is supplied VERBATIM from the verified session claim (issue
+    // #144) — the broker signed it at session-mint time, so it's trusted and is
+    // NOT re-derived here. For a wallet/master session it equals
+    // SHA256("agentkeys"||"evm"||wallet_lc) (what the old code computed); for an
+    // agent J1 it is the HDKD child omni. The v1 `agentkeys_user_wallet` tag
+    // falls back to the actor_omni when there's no wallet so it's never empty
+    // (a v1 policy keyed on it then resolves to the same `bots/<actor>/` prefix).
+    let user_wallet = if wallet_lc.is_empty() {
+        actor_omni
+    } else {
+        wallet_lc.as_str()
+    };
 
     let claims = json!({
         "iss": issuer,
-        "sub": format!("agentkeys:agent:{}", wallet_lc),
+        "sub": format!("agentkeys:agent:{}", user_wallet),
         "aud": "sts.amazonaws.com",
         "iat": now,
         "exp": exp,
-        "agentkeys_user_wallet": wallet_lc,
+        "agentkeys_user_wallet": user_wallet,
         "agentkeys_actor_omni": actor_omni,
         "https://aws.amazon.com/tags": {
             "principal_tags": {
-                "agentkeys_user_wallet": [wallet_lc],
+                "agentkeys_user_wallet": [user_wallet],
                 "agentkeys_actor_omni": [actor_omni],
             },
             "transitive_tag_keys": [
@@ -193,4 +214,41 @@ pub(crate) fn build_oidc_jwt_claims(
     });
 
     (claims, now, exp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::omni_account::derive_omni_account;
+
+    #[test]
+    fn wallet_session_oidc_tags_unchanged_after_144() {
+        // Regression: for a wallet/master session the actor_omni read from the
+        // claim EQUALS the value the old code re-derived from the wallet, so the
+        // OIDC tag set is byte-identical to pre-#144.
+        let wallet = "0xAbCdEf0123456789abcdef0123456789ABCDef00";
+        let wallet_lc = wallet.to_lowercase();
+        let actor_omni = derive_omni_account("evm", &wallet_lc).to_string();
+        let (claims, _n, _e) = build_oidc_jwt_claims("https://issuer", &actor_omni, wallet, 300);
+        assert_eq!(claims["agentkeys_actor_omni"], actor_omni);
+        assert_eq!(claims["agentkeys_user_wallet"], wallet_lc);
+        assert_eq!(claims["sub"], format!("agentkeys:agent:{wallet_lc}"));
+        let tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
+        assert_eq!(tags["agentkeys_actor_omni"][0], actor_omni);
+        assert_eq!(tags["agentkeys_user_wallet"][0], wallet_lc);
+    }
+
+    #[test]
+    fn agent_session_tags_carry_hdkd_omni_and_no_empty_wallet() {
+        // Agent J1: HDKD child omni, empty wallet → the actor tag IS the HDKD
+        // omni (so STS scopes creds to bots/<child>/...), and the v1 user_wallet
+        // tag falls back to the omni rather than being empty.
+        let child = "a".repeat(64);
+        let (claims, _n, _e) = build_oidc_jwt_claims("https://issuer", &child, "", 300);
+        assert_eq!(claims["agentkeys_actor_omni"], child);
+        assert_eq!(claims["agentkeys_user_wallet"], child);
+        assert_eq!(claims["sub"], format!("agentkeys:agent:{child}"));
+        let tags = &claims["https://aws.amazon.com/tags"]["principal_tags"];
+        assert_eq!(tags["agentkeys_actor_omni"][0], child);
+    }
 }

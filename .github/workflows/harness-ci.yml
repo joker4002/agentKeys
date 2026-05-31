@@ -260,7 +260,12 @@ jobs:
       (needs.detect-changes.outputs.broker_changed == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.force_deploy_broker == 'true'))
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 25min (was 15): issue #144 adds agentkeys-core to the broker's build closure
+    # (aws-sdk-s3, keyring/zbus, aes-gcm, …), so a COLD cargo cache rebuild runs
+    # longer. Warm (sccache) builds are still ~3min; this headroom only matters on
+    # the first build after a dep change, and prevents the GH-job-cancels-a-still-
+    # running-build race that flaked PR #141's first attempt.
+    timeout-minutes: 25
     permissions:
       id-token: write
       contents: read
@@ -408,7 +413,7 @@ jobs:
           # expansion (no modifier bugs per CLAUDE.md heredoc-trap rule).
           params=$(jq -n --arg script "$deploy_script" '{
             commands: [$script],
-            executionTimeout: ["900"]
+            executionTimeout: ["1500"]
           }')
 
           cmd_id=$(aws ssm send-command \
@@ -428,10 +433,12 @@ jobs:
           INSTANCE_ID: ${{ secrets.TEST_BROKER_INSTANCE_ID }}
         run: |
           set -euo pipefail
-          # Poll every 10s for up to 15 min. The command runs setup-broker-host.sh
-          # which rebuilds + restarts broker/signer/4 workers; cold cargo cache
-          # can be ~10min, warm ~3min.
-          for i in $(seq 1 90); do
+          # Poll every 10s for up to 25 min. The command runs setup-broker-host.sh
+          # which rebuilds + restarts broker/signer/4 workers; a cold cargo cache
+          # is longer since issue #144 grew the broker's dep closure (agentkeys-core
+          # → aws-sdk-s3 / keyring / aes-gcm), warm (sccache) ~3min. Must stay ≤ the
+          # job timeout-minutes (25) and the SSM executionTimeout (1500s).
+          for i in $(seq 1 150); do
             sleep 10
             status=$(aws ssm get-command-invocation \
               --region "$REGION" \
@@ -469,7 +476,7 @@ jobs:
                 ;;
             esac
           done
-          echo "::error::SSM command $SSM_COMMAND_ID did not complete within 15min"
+          echo "::error::SSM command $SSM_COMMAND_ID did not complete within 25min"
           exit 1
 
   harness-e2e:

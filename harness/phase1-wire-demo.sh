@@ -230,6 +230,9 @@ resolve_sbx_paths() {
   [[ -n "$SBX_HOME" ]] || { fail "1.0 sandbox home" "could not resolve \$HOME in the sandbox"; return 1; }
   AGENT_BIN_DST="$SBX_HOME/.local/bin/agentkeys"
   MCP_BIN_DST="$SBX_HOME/.local/bin/agentkeys-mcp-server"
+  # §10.2 agent bootstrap (issue #144): the daemon's --init-link-code one-shot
+  # generates K10 + redeems the master link code IN THE SANDBOX (Phase P.1).
+  DAEMON_BIN_DST="$SBX_HOME/.local/bin/agentkeys-daemon"
   sbx_exec "mkdir -p \"$SBX_HOME/.local/bin\"" >/dev/null
 }
 
@@ -456,7 +459,8 @@ phase1_sandbox() {
   build_linux_binaries || return
   local mcp_bin_changed=false
   for pair in "$LINUX_TARGET_DIR/release/agentkeys:$AGENT_BIN_DST" \
-              "$LINUX_TARGET_DIR/release/agentkeys-mcp-server:$MCP_BIN_DST"; do
+              "$LINUX_TARGET_DIR/release/agentkeys-mcp-server:$MCP_BIN_DST" \
+              "$LINUX_TARGET_DIR/release/agentkeys-daemon:$DAEMON_BIN_DST"; do
     local src="${pair%%:*}" dst="${pair##*:}"
     local name; name="$(basename "$dst")"
     local want; want="$(shasum -a256 "$src" 2>/dev/null | awk '{print $1}')"
@@ -476,46 +480,72 @@ phase1_sandbox() {
   done
 
   # ─── Phase P — install (pair) ────────────────────────────────────────────────
-  # Fresh §10.2 pairing: the agent generates its OWN secp256k1 device key IN THE
-  # SANDBOX (never on the master), mints a session via wallet_sig, the master
-  # binds the device on-chain, then "approves" the memory scope. Fresh each run
-  # (--regen) → new omni → empty memory → seeded at 1.5 → recalled in Act 1: the
-  # full "install an app + approve its permissions" story. Skipped under
-  # --reuse-agent (legacy master-side agent key) and in --light.
+  # Fresh §10.2 HDKD pairing (issue #144) — the "install an app + approve its
+  # permissions" story, four steps:
+  #   P.0 create  — the MASTER mints a one-time link code bound to the HDKD child
+  #                 omni  O_agent = SHA256(.. || O_master || "//label")  (real
+  #                 broker /v1/agent/create; replaces the old openssl stub).
+  #   P.1 install — the AGENT generates its OWN K10 device key IN THE SANDBOX (the
+  #                 daemon's --init-link-code one-shot; key never on the master),
+  #                 proves possession, redeems the code → J1_agent + binding artifact.
+  #   P.2 bind    — the MASTER submits registerAgentDevice (no biometric).
+  #   P.3 grant   — the MASTER grants the requested scope (one Touch ID).
+  # P.2+P.3 are ONE product approval conceptually; kept as two steps so the test
+  # drives + verifies each deterministically. Skipped under --reuse-agent + --light.
   if [[ "$MODE" == "real" && "$REUSE_AGENT" != true ]]; then
-    log "  Phase P — install (pair): agent generates its device key IN THE SANDBOX (arch.md §10.2; interim #144)"
-    local link_code ds ds_addr ds_actor ds_dkh ds_pop ds_jwt
-    link_code="lc-$(openssl rand -hex 16)"   # one-time link code (master-minted; stub binding per #144)
-    ds="$(sbx_exec "$AGENT_BIN_DST agent device-session --broker-url ${BROKER_URL:-} --link-code $link_code --regen 2>&1")"
-    ds_addr="$(echo "$ds" | jq -r '.agent_address // empty' 2>/dev/null)"
-    ds_actor="$(echo "$ds" | jq -r '.actor_omni // empty' 2>/dev/null)"
-    ds_dkh="$(echo "$ds" | jq -r '.device_key_hash // empty' 2>/dev/null)"
-    ds_pop="$(echo "$ds" | jq -r '.pop_sig // empty' 2>/dev/null)"
-    ds_jwt="$(echo "$ds" | jq -r '.session_jwt // empty' 2>/dev/null)"
-    if [[ -z "$ds_jwt" || -z "$ds_actor" || -z "$ds_addr" || -z "$ds_dkh" || -z "$ds_pop" ]]; then
-      fail "P.1 device-session" "in-sandbox device-session failed: $(echo "$ds" | tr '\n' ' ' | cut -c1-200)"
+    log "  Phase P — install (pair): §10.2 HDKD bootstrap (issue #144)"
+    if [[ -z "$SESSION_BEARER" ]]; then
+      fail "P.0 create" "no operator session bearer (0.7) — cannot mint a link code"
     else
-      ACTOR_OMNI="$ds_actor"; AGENT_SESSION_BEARER="$ds_jwt"; DEVICE_KEY_HASH="$ds_dkh"
-      ok "P.1 device-session" "📲 agent paired — addr ${ds_addr:0:12}…, omni ${ds_actor:0:14}… (key SANDBOX-only)"
-      # P.2 master binds the SANDBOX-generated device on-chain (it never saw the key).
-      local reg; reg="$(bash "$REPO_ROOT/scripts/heima-agent-create.sh" --label "$AGENT_LABEL" \
-        --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
-      echo "$reg" | sed 's/^/        /' >&2
-      if echo "$reg" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true'; then
-        ok "P.2 register device" "on-chain registerAgentDevice (or already-active)"
+      # P.0 master mints a real one-time link code bound to the child omni.
+      local cr link_code child_omni
+      cr="$(curl -sS --max-time 30 -X POST "${BROKER_URL%/}/v1/agent/create" \
+        -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
+        -d "$(jq -n --arg label "$AGENT_LABEL" --arg scope "${SEED_SCOPE_SERVICES:-memory}" '{label:$label, requested_scope:$scope}')" 2>&1)"
+      link_code="$(echo "$cr" | jq -r '.link_code // empty' 2>/dev/null)"
+      child_omni="$(echo "$cr" | jq -r '.child_omni // empty' 2>/dev/null)"
+      if [[ -z "$link_code" || -z "$child_omni" ]]; then
+        fail "P.0 create" "agent/create returned no link code: $(echo "$cr" | tr '\n' ' ' | cut -c1-200)"
       else
-        fail "P.2 register device" "registerAgentDevice failed: $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
-      fi
-      # P.3 approve permissions: master grants the FRESH actor the memory scope.
-      if [[ "$WEBAUTHN" == true ]]; then
-        log "    P.3 approve permissions: heima-scope-set --webauthn --agent $AGENT_LABEL --services ${SEED_SCOPE_SERVICES:-memory} (expect Touch ID)"
-        local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" 2>&1)"
-        echo "$grant" | sed 's/^/        /' >&2
-        echo "$grant" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true' \
-          && ok "P.3 approve permissions" "🔐 master granted [${SEED_SCOPE_SERVICES:-memory}] to ${ds_actor:0:14}… (Touch ID)" \
-          || fail "P.3 approve permissions" "scope grant failed: $(echo "$grant" | tr '\n' ' ' | cut -c1-160)"
-      else
-        skip "P.3 approve permissions" "no --webauthn — re-run with --real --webauthn so the master can grant the fresh actor's scope (Touch ID)"
+        ok "P.0 create" "📇 master minted link code → child omni ${child_omni:0:14}… (label $AGENT_LABEL)"
+        # P.1 agent generates K10 + redeems IN THE SANDBOX (daemon one-shot; key
+        # never on the master). 2>/dev/null drops the daemon's stderr logs so
+        # stdout is clean artifact JSON for jq.
+        local ds ds_addr ds_actor ds_dkh ds_pop ds_jwt
+        ds="$(sbx_exec "$DAEMON_BIN_DST --init-link-code $link_code --broker-url ${BROKER_URL:-} 2>/dev/null")"
+        ds_addr="$(echo "$ds" | jq -r '.agent_address // empty' 2>/dev/null)"
+        ds_actor="$(echo "$ds" | jq -r '.actor_omni // empty' 2>/dev/null)"
+        ds_dkh="$(echo "$ds" | jq -r '.device_key_hash // empty' 2>/dev/null)"
+        ds_pop="$(echo "$ds" | jq -r '.pop_sig // empty' 2>/dev/null)"
+        ds_jwt="$(echo "$ds" | jq -r '.session_jwt // empty' 2>/dev/null)"
+        if [[ -z "$ds_jwt" || -z "$ds_actor" || -z "$ds_addr" || -z "$ds_dkh" || -z "$ds_pop" ]]; then
+          fail "P.1 install" "in-sandbox daemon redeem failed: $(echo "$ds" | tr '\n' ' ' | cut -c1-200)"
+        elif [[ "$ds_actor" != "$child_omni" ]]; then
+          fail "P.1 install" "redeemed omni ${ds_actor:0:14}… != created child ${child_omni:0:14}… (broker/derivation mismatch)"
+        else
+          ACTOR_OMNI="$ds_actor"; AGENT_SESSION_BEARER="$ds_jwt"; DEVICE_KEY_HASH="$ds_dkh"
+          ok "P.1 install" "📲 agent redeemed in-sandbox — addr ${ds_addr:0:12}…, omni ${ds_actor:0:14}… (K10 SANDBOX-only, J1_agent minted)"
+          # P.2 master binds the SANDBOX-generated device on-chain (it never saw the key).
+          local reg; reg="$(bash "$REPO_ROOT/scripts/heima-agent-create.sh" --label "$AGENT_LABEL" \
+            --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
+          echo "$reg" | sed 's/^/        /' >&2
+          if echo "$reg" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true'; then
+            ok "P.2 bind" "on-chain registerAgentDevice (or already-active)"
+          else
+            fail "P.2 bind" "registerAgentDevice failed: $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
+          fi
+          # P.3 master grants the requested scope (one Touch ID).
+          if [[ "$WEBAUTHN" == true ]]; then
+            log "    P.3 grant: heima-scope-set --webauthn --agent $AGENT_LABEL --services ${SEED_SCOPE_SERVICES:-memory} (expect Touch ID)"
+            local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" 2>&1)"
+            echo "$grant" | sed 's/^/        /' >&2
+            echo "$grant" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true' \
+              && ok "P.3 grant" "🔐 master granted [${SEED_SCOPE_SERVICES:-memory}] to ${ds_actor:0:14}… (Touch ID)" \
+              || fail "P.3 grant" "scope grant failed: $(echo "$grant" | tr '\n' ' ' | cut -c1-160)"
+          else
+            skip "P.3 grant" "no --webauthn — re-run with --real --webauthn so the master can grant the fresh actor's scope (Touch ID)"
+          fi
+        fi
       fi
     fi
   fi
@@ -719,12 +749,15 @@ DOCKERFILE
 build_linux_binaries() {
   local agent_bin="$LINUX_TARGET_DIR/release/agentkeys"
   local mcp_bin="$LINUX_TARGET_DIR/release/agentkeys-mcp-server"
-  # Idempotent + source-aware: skip when both binaries exist and no tracked
+  # §10.2 agent bootstrap (issue #144): the daemon does the in-sandbox
+  # keygen + link-code redeem (Phase P.1).
+  local daemon_bin="$LINUX_TARGET_DIR/release/agentkeys-daemon"
+  # Idempotent + source-aware: skip when ALL binaries exist and no tracked
   # source is newer; otherwise (re)build incrementally (caches persist).
-  # Check BOTH binaries against the source — a stale mcp-server must not be
-  # masked by an up-to-date cli (the two crates build + fail independently).
-  if [[ -x "$agent_bin" && -x "$mcp_bin" ]] \
-     && ! sources_newer "$agent_bin" && ! sources_newer "$mcp_bin"; then
+  # Check EVERY binary against the source — a stale one must not be masked by
+  # an up-to-date sibling (the crates build + fail independently).
+  if [[ -x "$agent_bin" && -x "$mcp_bin" && -x "$daemon_bin" ]] \
+     && ! sources_newer "$agent_bin" && ! sources_newer "$mcp_bin" && ! sources_newer "$daemon_bin"; then
     ok "1.3 linux build" "up-to-date (no source changes; cached)"; return 0
   fi
   if ! command -v docker >/dev/null 2>&1; then
@@ -748,12 +781,12 @@ build_linux_binaries() {
     -e CARGO_TARGET_DIR=/src/target/sandbox-linux \
     -e RUSTUP_TOOLCHAIN="$cross_toolchain" \
     "$BUILDER_IMAGE" \
-    cargo build --release -p agentkeys-cli -p agentkeys-mcp-server || build_rc=$?
+    cargo build --release -p agentkeys-cli -p agentkeys-mcp-server -p agentkeys-daemon || build_rc=$?
   # Check the BUILD EXIT CODE, not just file existence — a stale binary from a
   # prior build must not be mistaken for a fresh success (silent-failure trap).
-  if [[ "$build_rc" -eq 0 && -x "$agent_bin" && -x "$mcp_bin" ]]; then
+  if [[ "$build_rc" -eq 0 && -x "$agent_bin" && -x "$mcp_bin" && -x "$daemon_bin" ]]; then
     ok "1.3 linux build" "built aarch64-linux binaries (toolchain $cross_toolchain)"; return 0
-  elif [[ -x "$agent_bin" && -x "$mcp_bin" ]]; then
+  elif [[ -x "$agent_bin" && -x "$mcp_bin" && -x "$daemon_bin" ]]; then
     # A stale binary must NOT silently pass: the deterministic checks below
     # (4.2 inject, the new crypto + STS relay) would then verify OLD code and the
     # summary could read green while SOURCE CHANGES ARE NOT DEPLOYED. Fail by
