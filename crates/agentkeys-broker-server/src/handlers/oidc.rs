@@ -119,7 +119,13 @@ pub async fn mint_oidc_jwt(
     // Wallet/master sessions (no device_pubkey) are the operator's own and unaffected.
     // Same on-chain check the cap-mint path uses (SidecarRegistry.getDevice).
     if let Some(device_pubkey) = session_claims.agentkeys.device_pubkey.as_deref() {
-        use crate::handlers::cap::{call_get_device, ChainContracts};
+        use crate::handlers::cap::{call_get_device, ChainContracts, ROLE_CAP_MINT};
+        // Mirror the FULL cap-mint invariant (cap.rs verify_chain): the device must
+        // be active AND bound to BOTH the session's operator (parent_omni) and actor
+        // (omni_account), with the CAP_MINT role. Checking only actor would let any
+        // OTHER registered operator bind (this device hash, this actor) and pass the
+        // gate, bypassing the master that issued the link code.
+        let parent_omni = session_claims.agentkeys.parent_omni.as_deref().unwrap_or("");
         let chain = ChainContracts::from_state(&state)
             .map_err(|e| BrokerError::Internal(format!("chain config for agent gate: {e:?}")))?;
         let dkh = agentkeys_core::device_crypto::device_key_hash(device_pubkey)
@@ -127,12 +133,17 @@ pub async fn mint_oidc_jwt(
         let device = call_get_device(&state.http, &chain.rpc_url, &chain.registry, &dkh)
             .await
             .map_err(|e| BrokerError::Internal(format!("on-chain device read: {e:?}")))?;
-        let denied: Option<&str> = if device.registered_at == 0 || device.revoked {
+        let norm = |s: &str| s.trim_start_matches("0x").to_lowercase();
+        let denied: Option<&str> = if parent_omni.is_empty() {
+            Some("agent session missing parent_omni lineage — cannot verify operator binding")
+        } else if device.registered_at == 0 || device.revoked {
             Some("agent device not active on-chain — the master must registerAgentDevice (bind) before this agent can mint OIDC/STS credentials")
-        } else if device.actor_omni.to_lowercase()
-            != actor_omni.trim_start_matches("0x").to_lowercase()
-        {
-            Some("session omni does not match the on-chain device's actor_omni")
+        } else if norm(&device.operator_omni) != norm(parent_omni) {
+            Some("on-chain device operator_omni does not match the agent session's parent_omni")
+        } else if norm(&device.actor_omni) != norm(&actor_omni) {
+            Some("on-chain device actor_omni does not match the session omni")
+        } else if (device.roles & ROLE_CAP_MINT) == 0 {
+            Some("on-chain device lacks the CAP_MINT role")
         } else {
             None
         };

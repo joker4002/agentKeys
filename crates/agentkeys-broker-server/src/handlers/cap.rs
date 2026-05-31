@@ -320,7 +320,7 @@ async fn mint_cap(
 
 // ─── on-chain reads (raw eth_call over reqwest) ────────────────────────
 
-const ROLE_CAP_MINT: u8 = 1;
+pub(crate) const ROLE_CAP_MINT: u8 = 1;
 
 #[derive(Debug)]
 pub(crate) struct ChainContracts {
@@ -364,9 +364,9 @@ fn profile_env(profile_uc: &str, base: &str) -> Result<String, CapError> {
 
 #[derive(Debug)]
 pub(crate) struct DeviceEntry {
-    operator_omni: String, // hex without 0x
+    pub(crate) operator_omni: String, // hex without 0x
     pub(crate) actor_omni: String,
-    roles: u8,
+    pub(crate) roles: u8,
     pub(crate) registered_at: u64,
     pub(crate) revoked: bool,
 }

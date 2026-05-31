@@ -679,7 +679,13 @@ phase1_sandbox() {
     if [[ -n "$AGENT_SESSION_FILE" ]]; then
       mcp_session_arg="--agent-session-bearer-file $AGENT_SESSION_FILE"
     elif [[ -n "$AGENT_SESSION_BEARER" ]]; then
-      mcp_session_arg="--agent-session-bearer $AGENT_SESSION_BEARER"
+      # --reuse-agent mints the bearer on the master; stage it into the SAME
+      # owner-only sandbox file (umask 077 → 0600) and pass only the path, so the
+      # JWT is never in the MCP argv / process list (Codex finding C). Both pairing
+      # modes now feed the MCP by file, not by value.
+      local reuse_sf="$SBX_HOME/.agentkeys/agent-session.jwt"
+      sbx_exec "umask 077; mkdir -p ~/.agentkeys && printf '%s' '$AGENT_SESSION_BEARER' > '$reuse_sf'" >/dev/null 2>&1 || true
+      mcp_session_arg="--agent-session-bearer-file $reuse_sf"
     fi
     [[ -n "$mcp_session_arg" ]] && mcp_relayarg="$mcp_session_arg --memory-role-arn ${MEMORY_ROLE_ARN:-} --vault-role-arn ${VAULT_ROLE_ARN:-} --aws-region ${REGION:-us-east-1}"
     cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BROKER_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH $mcp_relayarg"

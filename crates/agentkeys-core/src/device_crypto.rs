@@ -111,7 +111,21 @@ fn expand_home(p: &str) -> String {
 #[cfg(unix)]
 pub fn write_key_0600(path: &str, content: &str) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    // Custody hardening: `mode(0o600)` is honoured ONLY when the file is freshly
+    // created — a pre-existing group/world-readable file would be truncated +
+    // rewritten while KEEPING its loose perms, and a planted symlink at `path`
+    // would redirect the write outside the owner-only file. So reject an existing
+    // symlink / non-regular target, and force 0600 AFTER opening (covers the
+    // pre-existing-loose-file case). Residual TOCTOU between the check and open is
+    // not closed here — O_NOFOLLOW would, but needs a libc dep (follow-up).
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err(anyhow!(
+                "refusing to write {path}: existing target is a symlink/special file (key-custody)"
+            ));
+        }
+    }
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -119,6 +133,9 @@ pub fn write_key_0600(path: &str, content: &str) -> Result<()> {
         .mode(0o600)
         .open(path)
         .with_context(|| format!("open {path} (0600)"))?;
+    // Force owner-only even if the file pre-existed with looser permissions.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod 0600 {path}"))?;
     f.write_all(content.as_bytes())?;
     Ok(())
 }
