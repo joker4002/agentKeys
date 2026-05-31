@@ -477,7 +477,7 @@ The IAM role can stay provisioned indefinitely — without the secret it can't b
 
 Per [issue #101](https://github.com/litentry/agentKeys/issues/101) "Out of scope":
 
-- **Prod broker auto-deploy** — never. The prod broker EC2 stays manual via `bash scripts/setup-broker-host.sh --upgrade` from the operator laptop, per CLAUDE.md "Remote broker host (single entry point)".
+- **Prod broker auto-deploy** — never. The prod broker EC2 stays manual via `bash scripts/setup-broker-host.sh --ref main` from the operator laptop, per CLAUDE.md "Remote broker host (single entry point)".
 - **Auto-deploy of test Heima EVM contracts** — deferred to a follow-up PR (issue #101 rollout plan step 7). Contract redeploys mint new addresses and require the `SECRETS_REWRITE_PAT` token to update six `TEST_*_ADDRESS_HEIMA` secrets — more risk than the broker deploy, so it ships separately.
 - **Mainnet prod contract redeploy** — never automatic. Manual via `bash scripts/setup-heima.sh` only.
 

@@ -22,8 +22,10 @@
 #   https://mcp.litentry.org/mcp_endpoint/health?key=<KEY>   → 智控台 health
 #
 # Run ON the broker host (same host setup-broker-host.sh runs against).
-# Standalone for now; CLAUDE.md follow-up: fold into setup-broker-host.sh
-# as `--with-mcp` once this stabilises.
+# This is the first-time enable for the hosted MCP endpoint. Once the binary is
+# installed, setup-broker-host.sh AUTO-CONVERGES it on every run (re-invokes this
+# script to keep it current) — NO flag to remember; behaviour follows state
+# (issue #152).
 #
 # Usage (xiaozhi-hosted mode — DEFAULT, simpler):
 #   bash scripts/setup-mcp-host.sh --xiaozhi-endpoint 'wss://api.xiaozhi.me/mcp/?token=…'
@@ -71,7 +73,6 @@ XIAOZHI_ENDPOINT_FILE="${ENV_FILE_DIR}/mcp-xiaozhi-endpoint"
 MCP_BIN_DST="/usr/local/bin/agentkeys-mcp-server"
 WITH_NGINX="yes"
 WITH_CERTBOT="yes"
-WITH_BUILD="yes"
 CERTBOT_EMAIL=""
 TEST_MODE="no"
 DOMAIN_OVERRIDE=""
@@ -87,7 +88,6 @@ while [[ $# -gt 0 ]]; do
     --certbot-email)      CERTBOT_EMAIL="$2"; shift 2 ;;
     --without-nginx)      WITH_NGINX="no"; shift ;;
     --without-certbot)    WITH_CERTBOT="no"; shift ;;
-    --without-build)      WITH_BUILD="no"; shift ;;
     --relay-port)         RELAY_PORT="$2"; shift 2 ;;
     --relay-ref)          RELAY_PIN_REF="$2"; shift 2 ;;
     --help|-h)            sed -n '2,50p' "$0"; exit 0 ;;
@@ -186,10 +186,9 @@ echo "    install dir:       ${INSTALL_DIR}" >&2
 echo "    run user:          ${RUN_USER}" >&2
 echo "    env file:          ${ENV_FILE}" >&2
 echo "    mcp binary dst:    ${MCP_BIN_DST}" >&2
-echo "    mcp install:       cargo install --git ${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git} --branch ${AGENTKEYS_REV:-main}" >&2
+echo "    mcp build:         cargo build --release -p agentkeys-mcp-server  (in ${REPO_ROOT}, cached/incremental)" >&2
 echo "    with nginx:        ${WITH_NGINX}" >&2
 echo "    with certbot:      ${WITH_CERTBOT}" >&2
-echo "    with build:        ${WITH_BUILD}" >&2
 
 # ─── 1. /etc/agentkeys exists with the right perms ───────────────────
 head "1/9 /etc/agentkeys layout"
@@ -332,31 +331,27 @@ fi  # MODE == self-hosted (closes step 3 self-hosted branch)
 # Override repo/rev for development (e.g. testing a PR branch):
 #   AGENTKEYS_REPO_URL=https://github.com/me/agentKeys.git \
 #   AGENTKEYS_REV=my-pr-branch bash scripts/setup-mcp-host.sh
-head "4/9 install agentkeys-mcp-server (cargo install --git)"
-REPO_URL="${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git}"
-REV="${AGENTKEYS_REV:-main}"
-INSTALL_CACHE="${HOME}/.cache/agentkeys-mcp-install"
+head "4/9 build agentkeys-mcp-server (cached workspace build)"
 
-if [ "$WITH_BUILD" = "yes" ]; then
-  command -v cargo >/dev/null 2>&1 \
-    || fail "cargo not found — install Rust toolchain (curl https://sh.rustup.rs | sh) or pass --without-build if binary already at $MCP_BIN_DST"
-  mkdir -p "$INSTALL_CACHE"
-  ok "cargo install --git $REPO_URL --branch $REV → $INSTALL_CACHE/bin/"
-  # --force: cargo install won't overwrite "the same version" without it.
-  # With --git there's no semver to compare against, so --force is the
-  # right call. cargo's incremental compile + on-disk cache keep re-runs
-  # fast (~5s when nothing changed; ~2 min on a fresh build).
-  cargo install --quiet --force \
-    --git "$REPO_URL" --branch "$REV" \
-    --bin agentkeys-mcp-server \
-    --root "$INSTALL_CACHE" \
-    agentkeys-mcp-server \
-    || fail "cargo install --git $REPO_URL@$REV failed"
-fi
+command -v cargo >/dev/null 2>&1 \
+  || fail "cargo not found — install Rust first (curl https://sh.rustup.rs | sh -s -- -y)"
+# Build IN the on-host repo checkout ($REPO_ROOT, e.g. /opt/agentkeys-src) using
+# its PERSISTENT target/ — NOT `cargo install --git`, which re-clones + builds
+# the ENTIRE dep tree in a throwaway target every run (a ~10–20 min COLD build
+# on the t3.medium broker). setup-broker-host.sh already compiled
+# aws-sdk/tokio/k256/etc. into this same target/release, and the target persists
+# across re-runs, so `cargo build -p` is INCREMENTAL — only the mcp-server crate
+# recompiles (seconds–2 min). Same cached-build approach as setup-broker-host.sh
+# and harness/phase1-wire-demo.sh. ($REPO_ROOT was already checked out to the
+# desired ref by the caller, so no separate `--git` fetch is needed; we build the
+# code that's actually here.)
+ok "cargo build --release -p agentkeys-mcp-server (in $REPO_ROOT, reusing the target/release cache)"
+( cd "$REPO_ROOT" && cargo build --release --locked -p agentkeys-mcp-server ) \
+  || fail "cargo build -p agentkeys-mcp-server failed in $REPO_ROOT"
 
-CACHED_BIN="$INSTALL_CACHE/bin/agentkeys-mcp-server"
+CACHED_BIN="$REPO_ROOT/target/release/agentkeys-mcp-server"
 if [ ! -x "$CACHED_BIN" ]; then
-  fail "$CACHED_BIN not installed; drop --without-build or place the binary at $MCP_BIN_DST yourself"
+  fail "$CACHED_BIN not built (cargo build did not produce it)"
 fi
 
 src_sha=$(sha256sum "$CACHED_BIN" | awk '{print $1}')
