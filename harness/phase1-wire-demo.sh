@@ -545,7 +545,15 @@ phase1_sandbox() {
       link_code="$(echo "$cr" | jq -r '.link_code // empty' 2>/dev/null)"
       child_omni="$(echo "$cr" | jq -r '.child_omni // empty' 2>/dev/null)"
       if [[ -z "$link_code" || -z "$child_omni" ]]; then
-        fail "P.0 create" "agent/create returned no link code: $(echo "$cr" | tr '\n' ' ' | cut -c1-200)"
+        if echo "$cr" | grep -q '404'; then
+          # The #1 P.0 trap: the DEPLOYED broker predates #144, so the §10.2
+          # routes (/v1/agent/create, /v1/auth/link-code/redeem,
+          # /v1/agent/pending-bindings) 404. The harness code is fine — the
+          # broker host just needs the #144/#149 binary. Name the fix loudly.
+          fail "P.0 create" "broker has NO §10.2 routes (HTTP 404) — the DEPLOYED broker predates #144. Redeploy it with the #144/#149 code FIRST: reach the broker with 'bash scripts/ssh-broker.sh', then on the host run 'sudo bash scripts/setup-broker-host.sh --ref claude/impl-144-hdkd-bootstrap'. Verify before re-running: a no-bearer 'POST ${BROKER_URL%/}/v1/agent/create' must return 401, not 404. (1.4 MCP + 1.5 seed below are cascades of this — they clear once P.0 works.)"
+        else
+          fail "P.0 create" "agent/create returned no link code: $(echo "$cr" | tr '\n' ' ' | cut -c1-200)"
+        fi
       else
         ok "P.0 create" "📇 master minted link code → child omni ${child_omni:0:14}… (label $AGENT_LABEL)"
         # P.1 agent generates K10 + redeems IN THE SANDBOX (daemon one-shot; key
