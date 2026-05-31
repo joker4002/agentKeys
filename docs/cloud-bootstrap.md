@@ -957,6 +957,6 @@ For the test instance, substitute `-test` on every identifier above.
 - CI activation: [`docs/ci-setup.md`](ci-setup.md)
 - Broker host script (single entry point): [`scripts/setup-broker-host.sh`](../scripts/setup-broker-host.sh)
 - Cloud bootstrap script (single entry point): [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh)
-- Architecture (per-data-class buckets + isolation invariants): [`docs/spec/architecture.md`](spec/architecture.md) §17, §17.2
+- Architecture (per-data-class buckets + isolation invariants): [`docs/arch.md`](arch.md) §17, §17.2
 - Future Tencent / TEE DKIM: [`docs/spec/heima-gaps-vs-desired-architecture.md`](spec/heima-gaps-vs-desired-architecture.md) §4
 - FAQ + troubleshooting: [`wiki/cloud-setup-faq.md`](../wiki/cloud-setup-faq.md)
