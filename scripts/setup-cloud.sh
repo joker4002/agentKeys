@@ -697,9 +697,80 @@ do_step_14() {
   ok "mail bucket policy applied"
 }
 
+# Step-15 precondition: the broker EC2 must be a REGISTERED SSM managed instance
+# before SendCommand, or AWS returns InvalidInstanceId / "not in a valid state".
+# The on-host amazon-ssm-agent only registers if the instance's role carries
+# AmazonSSMManagedInstanceCore — and operators repeatedly hit this because the
+# broker-host role (prod `agentkeys-broker-host`; the test broker uses its own
+# profile) was created WITHOUT it. We self-heal idempotently, deriving the role
+# from the INSTANCE's actual attached profile so the SAME code fixes BOTH the
+# prod and test brokers regardless of role naming, then poll until the agent
+# registers. `aws iam` is global (no --region); ec2/ssm reads pass --region
+# "$REGION" per the agentkeys-admin-defaults-to-us-west-2 trap (CLAUDE.md).
+ensure_ssm_managed() {
+  local ssm_core="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  # Resolve the role behind THIS instance's profile (naming-agnostic).
+  local prof_arn
+  prof_arn="$(aws --region "$REGION" ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+    --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' --output text 2>/dev/null || true)"
+  if [ -z "$prof_arn" ] || [ "$prof_arn" = "None" ]; then
+    die "SSM precondition: $INSTANCE_ID has NO instance profile — it can never register with SSM. Attach one carrying AmazonSSMManagedInstanceCore (docs/cloud-bootstrap.md §6), then re-run."
+  fi
+  local prof_name role
+  prof_name="${prof_arn##*/}"
+  role="$(aws iam get-instance-profile --instance-profile-name "$prof_name" \
+    --query 'InstanceProfile.Roles[0].RoleName' --output text 2>/dev/null || true)"
+  if [ -z "$role" ] || [ "$role" = "None" ]; then
+    die "SSM precondition: instance profile $prof_name has no role attached — re-create it (docs/cloud-bootstrap.md §6)."
+  fi
+
+  # Idempotently ensure AmazonSSMManagedInstanceCore on that role.
+  local have
+  have="$(aws iam list-attached-role-policies --role-name "$role" \
+    --query "length(AttachedPolicies[?PolicyArn=='$ssm_core'])" --output text 2>/dev/null || echo 0)"
+  if [ "$have" = "1" ]; then
+    ok "SSM: AmazonSSMManagedInstanceCore already on $role"
+  elif [ "$DRY_RUN" = "1" ]; then
+    warn "DRY: would attach AmazonSSMManagedInstanceCore to $role (instance profile $prof_name)"
+  else
+    if aws iam attach-role-policy --role-name "$role" --policy-arn "$ssm_core" >/dev/null 2>&1; then
+      ok "SSM: attached AmazonSSMManagedInstanceCore to $role (idempotent)"
+    else
+      die "SSM: could not attach AmazonSSMManagedInstanceCore to $role — your caller needs iam:AttachRolePolicy (\`awsp agentkeys-admin\`)."
+    fi
+  fi
+  if [ "$DRY_RUN" = "1" ]; then return 0; fi
+
+  # Poll until the on-host agent registers (it refreshes IMDS creds, ~30s cadence;
+  # a freshly-attached policy is usually picked up within 1–2 min).
+  local ping="" i
+  for i in $(seq 1 18); do
+    ping="$(aws --region "$REGION" ssm describe-instance-information \
+      --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+      --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)"
+    if [ "$ping" = "Online" ]; then
+      ok "SSM: $INSTANCE_ID registered (PingStatus=Online)"
+      return 0
+    fi
+    if [ "$i" = "1" ]; then
+      printf "    waiting up to ~3min for %s to register with SSM (PingStatus=%s)…\n" "$INSTANCE_ID" "${ping:-none}" >&2
+    fi
+    sleep 10
+  done
+  die "SSM: $INSTANCE_ID never reached PingStatus=Online (last: ${ping:-none}) after ~3min. The role now carries AmazonSSMManagedInstanceCore, so the on-host amazon-ssm-agent likely isn't running. (Re)start it via the single entry point, then re-run this step:
+     bash scripts/ssh-broker.sh $([ "$TEST_MODE" = "1" ] && echo test || echo prod)
+     sudo bash /opt/agentkeys-src/scripts/setup-broker-host.sh --upgrade   # installs+enables the agent
+   or reboot (broker auto-restarts via systemd): aws --region $REGION ec2 reboot-instances --instance-ids $INSTANCE_ID"
+}
+
 do_step_15() {
   CUR_STEP=15; step "Bring up agentkeys-mcp-server on broker (via SSM)"
   : "${INSTANCE_ID:?INSTANCE_ID missing — broker EC2 needs to exist (re-run step 4 first)}"
+
+  # Make the broker EC2 SSM-ready BEFORE SendCommand (self-heals the missing
+  # AmazonSSMManagedInstanceCore that bit both prod + test brokers). Idempotent.
+  ensure_ssm_managed
 
   REPO_URL_FOR_MCP="${AGENTKEYS_REPO_URL:-https://github.com/litentry/agentKeys.git}"
   REV_FOR_MCP="${AGENTKEYS_REV:-main}"
@@ -744,15 +815,24 @@ sudo -E AGENTKEYS_REPO_URL=${REPO_URL_FOR_MCP} AGENTKEYS_REV=${REV_FOR_MCP} \\
 EOSH
 )
 
-  local cmd_id
-  cmd_id=$(aws ssm send-command \
+  local cmd_id _send_err
+  _send_err="$(mktemp)"
+  if ! cmd_id=$(aws ssm send-command \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
     --document-name "AWS-RunShellScript" \
     --comment "agentkeys-mcp-server bring-up ($([ "$TEST_MODE" = "1" ] && echo test || echo prod))" \
     --parameters "{\"commands\": $(jq -Rs . <<<"$mcp_bring_up_script" | jq -s .)}" \
-    --query "Command.CommandId" --output text) \
-    || die "aws ssm send-command failed — does $INSTANCE_ID have amazon-ssm-agent + the SSM instance profile?"
+    --query "Command.CommandId" --output text 2>"$_send_err"); then
+    local _err; _err="$(cat "$_send_err" 2>/dev/null || true)"; rm -f "$_send_err"
+    # ensure_ssm_managed already verified the instance is registered, so a
+    # SendCommand AccessDenied here is a CALLER policy gap, not an instance one.
+    if printf '%s' "$_err" | grep -qiE 'accessdenied|not authorized|ssm:sendcommand'; then
+      die "ssm:SendCommand DENIED for your CALLER (identity-based policy gap — $INSTANCE_ID is SSM-registered, verified just above, so this is NOT an instance problem). Your operator IAM user needs ssm:SendCommand on the instance + the AWS-RunShellScript document, plus ssm:GetCommandInvocation/ListCommandInvocations. Grant it with \`aws iam put-user-policy\` on your user (see scripts/provision-ci-deploy-role.sh for the exact policy shape it grants the CI deploy role), then re-run. Detail: $_err"
+    fi
+    die "aws ssm send-command failed — does $INSTANCE_ID have amazon-ssm-agent + the SSM instance profile? Detail: $_err"
+  fi
+  rm -f "$_send_err"
   ok "SSM command $cmd_id queued on $INSTANCE_ID; polling for completion (max 10 min)"
 
   # Poll every 10s for up to 10 min. setup-mcp-host.sh is normally <3 min;
