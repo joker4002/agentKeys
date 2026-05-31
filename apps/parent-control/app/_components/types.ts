@@ -24,6 +24,7 @@ export interface Actor {
   paymentCap?: { perTx: number; daily: number; currency: string };
   timeWindow?: { start: string; end: string; tz: string };
   services?: string[];
+  justPaired?: boolean;
 }
 
 export type ChipKind =
@@ -37,7 +38,74 @@ export type ChipKind =
   | 'broker'
   | 'chain'
   | 'payment'
-  | 'revoke';
+  | 'revoke'
+  | 'scope'
+  | 'device'
+  | 'k11';
+
+// ─── 9-step flow types ───────────────────────────────────────────
+export interface CeremonyStep {
+  label: string;
+  sub: string;
+  onchain?: boolean;
+  fn?: string;
+}
+
+export interface PreservedMemory {
+  ns: Namespace;
+  key: string;
+  title: string;
+  bytes: number;
+  version: string;
+  updated: string;
+  preview: string;
+  body: string;
+}
+
+export interface RequestedPerm {
+  cap: string;
+  ns: string[];
+  reason: string;
+}
+
+export interface PairingRequest {
+  id: string;
+  agent: string;
+  vendor: string;
+  device: string;
+  machine: string;
+  runtime: string;
+  dpub: string;
+  dpubFull: string;
+  pairCode: string;
+  derivation: string;
+  requested: RequestedPerm[];
+  requestedAt: string;
+  attestation: string;
+}
+
+export interface ContractInfo {
+  name: string;
+  addr: string;
+  deployedAt: string;
+  purpose: string;
+}
+
+export interface ChainProfile {
+  name: string;
+  display: string;
+  chainId: number;
+  kind: string;
+  rpc: string;
+  wss: string;
+  substrateWss: string;
+  explorer: string;
+  tokenSymbol: string;
+  tokenDecimals: number;
+  finality: string;
+  block: string;
+  contracts: ContractInfo[];
+}
 
 export interface AuditEvent {
   id: string;
@@ -92,6 +160,9 @@ export type Route =
   | { page: 'audit'; actorId: null }
   | { page: 'anchor'; actorId: null }
   | { page: 'workers'; actorId: null }
+  | { page: 'memory'; actorId: null }
+  | { page: 'pairing'; actorId: null }
+  | { page: 'chain'; actorId: null }
   | { page: 'onboarding'; actorId: null }
   | { page: 'onboarding-mobile'; actorId: null }
   | { page: 'harness'; actorId: null }

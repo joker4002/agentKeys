@@ -14,4 +14,7 @@ export const CHIP_STYLES: Record<ChipKind, string> = {
   chain: 'chip ok',
   payment: 'chip warn',
   revoke: 'chip bad',
+  scope: 'chip',
+  device: 'chip',
+  k11: 'chip',
 };
