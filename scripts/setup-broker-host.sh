@@ -1606,6 +1606,22 @@ else
   log "Hosted MCP not deployed here — skipping (issue #152 path; the wire demo's MCP runs in the sandbox)"
 fi
 
+# ─── 8c. Self-heal repo ownership (idempotent) ───────────────────────────────
+# Root cause of "git pull → unable to unlink … Permission denied": when this
+# script is invoked via `sudo bash …`, its plain git (--ref) + cargo build run as
+# ROOT and leave root-owned files in the checkout, blocking the operator's next
+# `git pull`. If we were sudo'd, chown the checkout back to the invoking user so
+# manual git keeps working. Scoped to $REPO_ROOT only — system files under
+# /usr/local/bin, /etc/agentkeys, /var/lib/agentkeys stay root/agentkeys-owned.
+# No-op when run directly as the user (SUDO_USER unset) or as root with no
+# invoking user (e.g. SSM RunShellScript on the root-managed /opt clone).
+if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  _repo_grp="$(id -gn "$SUDO_USER" 2>/dev/null || echo "$SUDO_USER")"
+  if sudo chown -R "$SUDO_USER:$_repo_grp" "$REPO_ROOT" 2>/dev/null; then
+    log "ownership: $REPO_ROOT chowned back to $SUDO_USER:$_repo_grp (so manual git keeps working)"
+  fi
+fi
+
 # ─── 9. Print remaining manual steps ──────────────────────────────────────────
 cat <<EOF
 
