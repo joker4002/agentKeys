@@ -61,7 +61,8 @@ story. Each run does a **fresh pairing** (a brand-new agent identity), so expect
    - **Phase P — install (pair)** 📲 (full §10.2 HDKD bootstrap, issue #144)
      - `P.0` the **master** mints a one-time link code bound to the HDKD child omni `O_agent = SHA256(.. ‖ O_master ‖ "//label")` (real broker `/v1/agent/create`; no more `openssl` stub).
      - `P.1` the **agent daemon** (`agentkeys-daemon --init-link-code`) generates its **own K10 device key in the sandbox**, proves possession, and **redeems** the code → `J1_agent` (the key never touches the master).
-     - `P.2` the master **binds** that device **on-chain** (`registerAgentDevice`, no biometric).
+     - `P.1b` the master pulls the rendezvous (`agentkeys agent pending`) and sees this agent awaiting approval.
+     - `P.2` the master **binds** that device **on-chain** (`registerAgentDevice`, no biometric) and **acks** the broker so it clears from `pending` (self-cleaning → idempotent re-runs).
      - `P.3` **🔐 Touch ID** — the master **grants** the agent's `[memory]` permission (`setScopeWithWebauthn`). Conceptually `P.2`+`P.3` are **one approval** (install + permissions, iOS/Android-style); kept as two steps for deterministic test automation.
    - **1.4–1.5** — MCP server (per-actor STS relay) starts; the fresh actor's memory is seeded (new identity ⇒ empty ⇒ seeds "Chengdu trip").
    - **Phase 2** — `agentkeys wire hermes` installs the IAM-gate hooks.

@@ -518,7 +518,10 @@ MASTER APPROVAL (async; master ≠ agent machine — the iOS/Android "first laun
     - AgentKeysScope.setScopeWithWebauthn(... requested_scope ...)  [the K11 gesture]
     The CLI exposes these as two deterministic steps (test automation); the
     operator experiences one approval. Install + permissions = one gesture.
-12. Agent's J1_agent now has scope; cap-mint works (§12).
+12. Master acks the binding (POST /v1/agent/pending-bindings/ack) → the broker
+    marks it bound so it drops out of the pending list (the rendezvous self-cleans;
+    re-bootstraps are idempotent).
+13. Agent's J1_agent now has scope; cap-mint works (§12).
 ```
 
 **Trust chain:** `master human → master K11 (at the approval) → master J1 + master-submitted on-chain binding → agent K10 binding`. The agent never holds K11 or any user-presence credential; the K11 gesture is the master's, exercised at step 11 (binding + scope), not at the broker.
@@ -781,7 +784,8 @@ The broker is the cap-mint authority. It does NOT hold credentials, K3, or any c
 /v1/auth/bind/<request_id>                    — WebAuthn enrollment (stage 2)
 /v1/auth/link-code/redeem                     — agent redeems link code → J1_agent (§10.2; no bearer, pop_sig-gated)
 /v1/agent/create                              — mint agent link-code (J1_master-gated; K11 NOT at broker — §10.2)
-/v1/agent/pending-bindings                    — master pulls redeemed-but-unbound agents to approve (§10.2)
+/v1/agent/pending-bindings                    — master pulls redeemed-but-unbound agents to approve (§10.2; GET)
+/v1/agent/pending-bindings/ack                — master acks an on-chain binding → clears it from pending (§10.2; POST, J1_master)
 /v1/wallet/link                               — link wallet to identity (post-derive, pre-SIWE)
 /v1/wallet/device/rotate                      — K10 rotation (§10.3.2; K11 required)
 /v1/cap/cred-fetch                            — cap-mint for credential fetch

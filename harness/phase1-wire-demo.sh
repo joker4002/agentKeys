@@ -488,20 +488,43 @@ phase1_sandbox() {
   #   P.1 install — the AGENT generates its OWN K10 device key IN THE SANDBOX (the
   #                 daemon's --init-link-code one-shot; key never on the master),
   #                 proves possession, redeems the code → J1_agent + binding artifact.
-  #   P.2 bind    — the MASTER submits registerAgentDevice (no biometric).
+  #   P.1b pending— the MASTER pulls the rendezvous (`agentkeys agent pending`) and
+  #                 sees this agent awaiting approval.
+  #   P.2 bind    — the MASTER submits registerAgentDevice (no biometric) + acks the
+  #                 broker (clears the binding from pending).
   #   P.3 grant   — the MASTER grants the requested scope (one Touch ID).
   # P.2+P.3 are ONE product approval conceptually; kept as two steps so the test
   # drives + verifies each deterministically. Skipped under --reuse-agent + --light.
+  #
+  # IDEMPOTENT: AGENT_LABEL (default `demo-agent`) is stable, and the child omni is
+  # a deterministic HDKD of (O_master, label), so re-runs converge — the K10 file
+  # persists in the long-lived sandbox (clean_slate never wipes ~/.agentkeys), so
+  # registerAgentDevice hits the already-registered skip, the scope grant re-sets
+  # the same scope, the seed (1.5) overwrites, and the ack keeps `agent pending`
+  # self-cleaning. (Set AGENT_LABEL=demo-agent-$(date +%s) for a brand-new omni.)
   if [[ "$MODE" == "real" && "$REUSE_AGENT" != true ]]; then
     log "  Phase P — install (pair): §10.2 HDKD bootstrap (issue #144)"
     if [[ -z "$SESSION_BEARER" ]]; then
       fail "P.0 create" "no operator session bearer (0.7) — cannot mint a link code"
     else
-      # P.0 master mints a real one-time link code bound to the child omni.
-      local cr link_code child_omni
-      cr="$(curl -sS --max-time 30 -X POST "${BROKER_URL%/}/v1/agent/create" \
-        -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
-        -d "$(jq -n --arg label "$AGENT_LABEL" --arg scope "${SEED_SCOPE_SERVICES:-memory}" '{label:$label, requested_scope:$scope}')" 2>&1)"
+      # P.0 master mints a real one-time link code bound to the child omni via the
+      # `agentkeys agent create` CLI (the operator command we ship). Resolve a LOCAL
+      # host binary (same release→debug→PATH order as the chain helpers); fall back
+      # to a raw broker POST only if no local binary exists, so a --real run without
+      # a host build still works.
+      local cr link_code child_omni la
+      if [[ -x "$REPO_ROOT/target/release/agentkeys" ]]; then la="$REPO_ROOT/target/release/agentkeys"
+      elif [[ -x "$REPO_ROOT/target/debug/agentkeys" ]]; then la="$REPO_ROOT/target/debug/agentkeys"
+      else la="$(command -v agentkeys 2>/dev/null || true)"; fi
+      if [[ -n "$la" ]]; then
+        cr="$("$la" agent create --label "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" \
+          --broker-url "${BROKER_URL%/}" --session-bearer "$SESSION_BEARER" 2>&1)"
+      else
+        log "    P.0 create: no local agentkeys binary — raw POST fallback (build the host CLI to exercise it: cargo build --release -p agentkeys-cli)"
+        cr="$(curl -sS --max-time 30 -X POST "${BROKER_URL%/}/v1/agent/create" \
+          -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
+          -d "$(jq -n --arg label "$AGENT_LABEL" --arg scope "${SEED_SCOPE_SERVICES:-memory}" '{label:$label, requested_scope:$scope}')" 2>&1)"
+      fi
       link_code="$(echo "$cr" | jq -r '.link_code // empty' 2>/dev/null)"
       child_omni="$(echo "$cr" | jq -r '.child_omni // empty' 2>/dev/null)"
       if [[ -z "$link_code" || -z "$child_omni" ]]; then
@@ -525,12 +548,29 @@ phase1_sandbox() {
         else
           ACTOR_OMNI="$ds_actor"; AGENT_SESSION_BEARER="$ds_jwt"; DEVICE_KEY_HASH="$ds_dkh"
           ok "P.1 install" "📲 agent redeemed in-sandbox — addr ${ds_addr:0:12}…, omni ${ds_actor:0:14}… (K10 SANDBOX-only, J1_agent minted)"
+          # P.1b master pulls the pending binding via `agentkeys agent pending` (the
+          # rendezvous we built) and confirms THIS agent is awaiting approval.
+          # Read-only + idempotent; best-effort (needs the local CLI).
+          if [[ -n "$la" ]]; then
+            local pend; pend="$("$la" agent pending --broker-url "${BROKER_URL%/}" --session-bearer "$SESSION_BEARER" 2>&1)"
+            if echo "$pend" | jq -e --arg c "$ds_actor" '.pending[]? | select(.child_omni==$c)' >/dev/null 2>&1; then
+              ok "P.1b pending" "🔔 master sees agent ${ds_actor:0:14}… awaiting approval (agent pending)"
+            else
+              skip "P.1b pending" "agent pending did not list ${ds_actor:0:14}… (non-fatal): $(echo "$pend" | tr '\n' ' ' | cut -c1-120)"
+            fi
+          fi
           # P.2 master binds the SANDBOX-generated device on-chain (it never saw the key).
           local reg; reg="$(bash "$REPO_ROOT/scripts/heima-agent-create.sh" --label "$AGENT_LABEL" \
             --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
           echo "$reg" | sed 's/^/        /' >&2
           if echo "$reg" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true'; then
             ok "P.2 bind" "on-chain registerAgentDevice (or already-active)"
+            # Ack the rendezvous: tell the broker the master bound this device so it
+            # drops out of pending-bindings (self-cleaning → idempotent re-runs).
+            curl -sS --max-time 15 -X POST "${BROKER_URL%/}/v1/agent/pending-bindings/ack" \
+              -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
+              -d "$(jq -n --arg lc "$link_code" '{link_code:$lc}')" >/dev/null 2>&1 \
+              && log "    P.2 ack: binding acked — cleared from pending (idempotent)" || true
           else
             fail "P.2 bind" "registerAgentDevice failed: $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
           fi
@@ -626,11 +666,12 @@ phase1_sandbox() {
     # block on read_to_string(stdin) without it (fixed in hook.rs, kept here so
     # a stale on-sandbox binary can't re-freeze the demo before 1.3 re-uploads).
     if [[ "$REUSE_AGENT" != true ]]; then
-      # Fresh pairing: Phase P just paired this brand-new actor and (with
-      # --webauthn) approved its [memory] scope at P.3 — you already gave Touch
-      # ID there. A fresh actor's namespace is always empty. So SEED
-      # AUTOMATICALLY — no [y/N] gate, no second prompt, no second Touch ID. One
-      # memory.put, which succeeds because P.3 granted the scope.
+      # Fresh pairing: Phase P just paired this actor and (with --webauthn)
+      # approved its [memory] scope at P.3 — you already gave Touch ID there. The
+      # namespace is empty on the first run for this label and simply overwritten
+      # on idempotent re-runs (stable HDKD omni). So SEED AUTOMATICALLY — no [y/N]
+      # gate, no second prompt, no second Touch ID. One idempotent memory.put,
+      # which succeeds because P.3 granted the scope.
       local out; out="$(sbx_exec "$env_pfx $AGENT_BIN_DST memory put --namespace $MEMORY_NS --content \"$seed\" 2>&1")"
       if echo "$out" | grep -qiE '"ok":[[:space:]]*true|s3_key'; then
         ok "1.5 seed memory" "auto-seeded '$MEMORY_NS' (scope approved at Phase P — no extra prompt)"

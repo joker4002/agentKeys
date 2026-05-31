@@ -77,6 +77,10 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/agent/pending-bindings",
             get(handlers::agent::pending::pending_bindings),
         )
+        .route(
+            "/v1/agent/pending-bindings/ack",
+            post(handlers::agent::pending::ack_binding),
+        )
         // Phase B grant endpoints (US-026).
         .route(
             "/v1/grant/create",

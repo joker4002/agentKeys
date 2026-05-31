@@ -234,6 +234,42 @@ async fn full_create_redeem_pending_flow() {
         .unwrap()
         .starts_with("0x"));
 
+    // ack the binding (master submitted registerAgentDevice) → the rendezvous
+    // self-cleans, so a re-run sees an empty pending list (idempotent).
+    let ack: Value = client
+        .post(format!("{}/v1/agent/pending-bindings/ack", broker_url))
+        .header("Authorization", format!("Bearer {bearer}"))
+        .json(&json!({ "link_code": link_code }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ack["acked"], true);
+    let pending2: Value = client
+        .get(format!("{}/v1/agent/pending-bindings", broker_url))
+        .header("Authorization", format!("Bearer {bearer}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending2["pending"].as_array().unwrap().len(), 0);
+    // Second ack is idempotent (already bound → acked:false).
+    let ack2: Value = client
+        .post(format!("{}/v1/agent/pending-bindings/ack", broker_url))
+        .header("Authorization", format!("Bearer {bearer}"))
+        .json(&json!({ "link_code": link_code }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ack2["acked"], false);
+
     // single-use: a second redeem of the same code is rejected.
     let replay = client
         .post(format!("{}/v1/auth/link-code/redeem", broker_url))

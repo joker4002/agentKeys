@@ -255,15 +255,23 @@ impl LinkCodeStore {
         Ok(out)
     }
 
-    /// Mark a redeemed row as bound (master acked the on-chain submit). Idempotent
-    /// — a second ack is a no-op. Returns the matched/updated row count.
-    pub fn mark_bound(&self, link_code: &str, now: i64) -> BrokerResult<usize> {
+    /// Mark a redeemed row as bound (the master acked its on-chain submit), so
+    /// it drops out of [`pending_bindings`]. Scoped to `operator_omni` — an
+    /// operator can only ack its own bindings. Idempotent: a second ack matches
+    /// nothing. Returns the updated row count (1 = acked, 0 = unknown/already-bound).
+    pub fn mark_bound(
+        &self,
+        link_code: &str,
+        operator_omni: &str,
+        now: i64,
+    ) -> BrokerResult<usize> {
         let conn = self.lock()?;
         let n = conn
             .execute(
                 "UPDATE link_codes SET bound_at = ?1
-                 WHERE link_code = ?2 AND consumed_at IS NOT NULL AND bound_at IS NULL",
-                params![now, link_code],
+                 WHERE link_code = ?2 AND operator_omni = ?3
+                   AND consumed_at IS NOT NULL AND bound_at IS NULL",
+                params![now, link_code, operator_omni],
             )
             .map_err(|e| BrokerError::Internal(format!("mark_bound link_code: {e}")))?;
         Ok(n)
@@ -381,10 +389,16 @@ mod tests {
             .unwrap();
         s.consume("lc-1", "0xdevA", "0xpopA", 200).unwrap();
         assert_eq!(s.pending_bindings("op").unwrap().len(), 1);
-        assert_eq!(s.mark_bound("lc-1", 300).unwrap(), 1);
+        assert_eq!(s.mark_bound("lc-1", "op", 300).unwrap(), 1);
         assert!(s.pending_bindings("op").unwrap().is_empty());
         // Idempotent: a second ack matches nothing.
-        assert_eq!(s.mark_bound("lc-1", 400).unwrap(), 0);
+        assert_eq!(s.mark_bound("lc-1", "op", 400).unwrap(), 0);
+        // Operator-scoped: a different operator cannot ack this binding.
+        s.issue("lc-2", "childZ", "op", "agent-z", "memory", 100, 700)
+            .unwrap();
+        s.consume("lc-2", "0xdevZ", "0xpopZ", 200).unwrap();
+        assert_eq!(s.mark_bound("lc-2", "other-op", 300).unwrap(), 0);
+        assert_eq!(s.pending_bindings("op").unwrap().len(), 1);
     }
 
     #[test]
