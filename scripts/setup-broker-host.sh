@@ -827,7 +827,7 @@ fi
 #   2) deb fallback (older / non-snap images; service: amazon-ssm-agent.service)
 #
 # Both produce a unit named `amazon-ssm-agent` in our systemctl alias check
-# below, so subsequent `setup-broker-host.sh --upgrade` re-runs skip.
+# below, so subsequent `setup-broker-host.sh` re-runs skip.
 ssm_unit_active() {
   systemctl is-active snap.amazon-ssm-agent.amazon-ssm-agent.service >/dev/null 2>&1 \
     || systemctl is-active amazon-ssm-agent.service >/dev/null 2>&1
