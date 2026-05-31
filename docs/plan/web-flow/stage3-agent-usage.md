@@ -1,296 +1,258 @@
-# stage3-agent-usage · normal operation · agents do real work · isolation proofs
+# stage3-agent-usage · add an agent · wire IAM-guarantee hooks · the three acts
 
-**Source scripts:** [`harness/v2-stage1-demo.sh`](../../../harness/v2-stage1-demo.sh) steps 12–14 (agent create + scope + audit) and [`harness/v2-stage3-demo.sh`](../../../harness/v2-stage3-demo.sh) (16 steps — the four-layer isolation invariants).
-**Canonical reference:** [`docs/arch.md`](../../arch.md) §15 (workers), §17.2 (per-actor + per-data-class isolation invariants), §22c.2 (agent backend variants), `CLAUDE.md` "Per-actor + per-data-class isolation invariants (issue #90)" table.
+> **Redesigned 2026-05-31 after PR #141 merged.** The old agent-onboarding flow
+> in this doc ("paste a pair-code into your ChatGPT sandbox" + per-actor S3
+> isolation) is gone. PR [#140](https://github.com/litentry/agentKeys/pull/140)
+> (IAM strategy reset — hooks-first wire architecture) + PR
+> [#141](https://github.com/litentry/agentKeys/pull/141) (`agentkeys wire` +
+> `agentkeys hook`) replaced it with the **Authority-Host / Task-Host** model.
+> This doc now maps that model into the parent-control web UI.
 
-## What we're mapping
-
-Stage 3 is fundamentally different from stages 1 and 2. Stages 1+2 are onboarding wizards — linear, one-time. Stage 3 is *steady-state operation* plus *on-demand verification*. Two distinct surfaces:
-
-| § | Surface | Operator action | Underlying harness steps |
-|--:|---|---|---|
-| 1 | **Agent boot + first credential use** | the operator unboxes a new device, lets it pair to their tree, watches it fetch its first credential | stage-1 steps 12–14 (and the agent's own initialization path) |
-| 2 | **Live operations dashboard** | the operator watches audit, tweaks scope, revokes when needed | every cap-mint + worker call streams into the audit feed |
-| 3 | **Isolation health check** | the operator runs the 4-layer invariant proof on demand against their real cloud | stage-3 steps 1–16 — run as a single in-app demo |
-
-Each surface gets its own section below.
+**Source script:** [`harness/phase1-wire-demo.sh`](../../../harness/phase1-wire-demo.sh) — Phases 0/1/P/2/3/4/5.
+**Source runbook:** [`docs/operator-runbook-wire.md`](../../operator-runbook-wire.md) — the single harness-first operator doc.
+**Source CLI:** `agentkeys wire`, `agentkeys hook check|audit|memory-inject`, `agentkeys agent device-session` ([`crates/agentkeys-cli/src/{wire,hook,device_session}.rs`](../../../crates/agentkeys-cli/src/)).
+**Canonical reference:** [`docs/arch.md`](../../arch.md) §22d (IAM-guarantee delivery), §22c.2 (MCP backend variants); [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md) §2.1/§3.6/§3.7; [`docs/wiki/agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md) (tool-vs-guarantee).
 
 ---
 
-## §1 — Agent boot + first credential use
+## The mental model the UI has to teach
 
-This is the *second* time the operator creates an agent (the first time was the onboarding-screen-E from stage 1, which is necessarily a single demo agent). All subsequent agents go through this flow.
+Two hosts, one boundary. The operator must understand which side they're on.
 
-### §1.1 The agent-create screen (steady state)
+| | **Authority Host** | **Task Host** |
+|---|---|---|
+| What it is | AgentKeys — the operator's master, daemon, and this web UI | The LLM runtime — Hermes (Phase 1.a), later Claude Code / Codex / OpenClaw |
+| Owns | identity, keys (K1–K11), scope, audit, the *policy decision* | the agent loop, the prompt, the tool calls, the *work* |
+| In the demo | the operator's MacBook + parent-control UI | the agent's sandbox |
 
-From the actor-list page, the operator taps "add agent". The screen is similar to stage-1 screen E, but with one important addition: the agent device can be **remote** (a cloud LLM sandbox, a vendor-supplied device) rather than locally-known.
+The thing that makes a scope grant *real* is the distinction in
+[`agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md) §1:
 
-**What the operator sees:**
+- An **IAM tool** is a function in the LLM's tool registry. Whether the policy
+  check runs is decided by the LLM — prompt + sampling. A jailbreak skips it.
+- An **IAM guarantee** is a non-LLM gate in the execution path. The *runtime*
+  fires it deterministically, before the action runs. The LLM's intent is
+  irrelevant. It **fails closed**.
+
+`agentkeys wire <runtime>` is how AgentKeys turns its MCP tools into
+guarantees: it installs runtime **hooks** the LLM cannot bypass. That is the
+single most important thing the agent screens in the web UI exist to convey —
+"you didn't just hand the agent a permission tool it might ignore; you wired a
+gate it physically cannot get around."
+
+This doc has three surfaces:
+
+| § | Surface | What the operator does |
+|--:|---|---|
+| **1** | **Add an agent** (pair → wire → the three acts) | install an agent on a runtime, approve its scope with Touch ID, watch the guarantees come alive |
+| **2** | **Live operations dashboard** | watch the hooks fire — permission blocks, memory injects, audit rows — and manage scope/revoke |
+| **3** | **Isolation health check** (preserved from the prior design) | run the per-actor + per-data-class isolation proof on demand against the real cloud |
+
+---
+
+## §1 — Add an agent
+
+The flow has three phases, mapped 1:1 to the harness's Phase P → Phase 2 → Phase 3/4. The web UI is the **Authority Host's** view of each; the actual agent-side work (keygen, hook scripts) happens in the agent's runtime/sandbox, and the UI observes + drives the master-side gates.
+
+```
+  ┌─ §1.1 choose ─┐   ┌─ §1.2 pair (Phase P) ──────┐   ┌─ §1.3 wire (Phase 2) ─┐   ┌─ §1.4 use (Phase 3/4) ─┐
+  │ runtime       │ → │ device key born in sandbox │ → │ install 3 IAM hooks   │ → │ permissioned memory    │
+  │ + scope       │   │ master binds on-chain      │   │ into runtime config   │   │ deterministic denial   │
+  │ (Real inputs) │   │ master approves (Touch ID) │   │ (LLM can't bypass)    │   │ audit + the surprise   │
+  └───────────────┘   └────────────────────────────┘   └───────────────────────┘   └────────────────────────┘
+```
+
+### §1.1 — Choose runtime + scope
+
+From the actor list, the operator taps **add agent**.
 
 > *Add an agent*
 >
-> *An agent is any device or service that should act on your behalf with bounded permissions.*
+> *An agent is an LLM runtime acting on your behalf with permissions you control and can revoke. You'll install AgentKeys' permission gate into it so the model can't act outside what you grant — even if it's jailbroken.*
 >
-> *How will this agent be set up?*
->
+> **Which runtime does this agent run?**
 > ```
-> [ ● ] this device — I'm holding the device that will run the agent
-> [ ○ ] remote sandbox — agent runs in a cloud LLM (OpenAI / Anthropic / etc.)
-> [ ○ ] vendor hardware — I have a physical device (FoloToy bear, Pluto robot)
+> [ ● ] Hermes          ✅ supported now (Phase 1.a)
+> [ ○ ] Claude Code     ◷ #133 — adapter coming
+> [ ○ ] Codex           ◷ #133 — adapter coming
+> [ ○ ] OpenClaw        ◷ #133 — adapter coming
 > ```
 >
-> `[ Label ]   FoloToy bear`
-> `[ Vendor (optional) ]   FoloToy Inc.`
+> `[ Label ]            e.g. "travel-bot"`
+>
+> **What can it read? (memory namespaces)**
+> ```
+> [x] travel     [ ] family     [ ] work     [ ] personal
+> ```
+>
+> **Can it spend? (payment scope)**
+> ```
+> [x] payment.spend     daily cap [ 500 ] RMB
+> ```
 >
 > `[ Continue → ]`
 
-The "how will this agent be set up" selector determines the next screen — the bootstrap path. Three flavors:
+Every field here is a **Real** operator input ([`input-discipline.md`](input-discipline.md) §1). The runtime list is gated on what `agentkeys wire` actually supports — only Hermes is selectable today (the `RuntimeAdapter` seam in [`wire.rs`](../../../crates/agentkeys-cli/src/wire.rs) is where #133 slots Claude Code / Codex / OpenClaw). The namespaces map to the `--namespaces` wire flag; the payment scope + cap map to `--payment-scope` and the MCP server's `--default-daily-spend-cap-rmb`.
 
-- **this device:** the operator's primary master *is also* the agent's hardware. Rare; mostly for testing. Skip directly to scope grant.
-- **remote sandbox:** the operator gets a pairing URL the agent's sandbox controller fetches. Used for ChatGPT (cloud), Claude (cloud).
-- **vendor hardware:** the agent device displays a code (or scans a QR from the operator's UI); the device boots its own daemon, registers K10 on chain. Used for FoloToy / Pluto / similar.
+**No mock data.** If `agentkeys wire` doesn't yet support the chosen runtime, the option is disabled with the tracking issue, not faked.
 
-The mapping to arch.md §22c.2's four backend kinds:
+### §1.2 — Pair (Phase P): the agent's key is born in the sandbox
 
-| Operator's choice | Backend variant from arch.md §22c.2 |
-|---|---|
-| this device | `DaemonBackend` (co-located) |
-| remote sandbox | `HttpBackend` (talks to remote broker) |
-| vendor hardware | `DaemonBackend` (per-vendor; daemon ships on the device) |
-| (dev only) | `InMemoryBackend` (for fixtures) |
+This is the §10.2 fresh-pairing ceremony. The defining property: **the agent's device key is generated inside the agent's runtime and never touches the master.** The master only ever sees the agent's *public* key, binds it on-chain, and approves its scope.
 
-### §1.2 Bootstrap — "remote sandbox" path (most common)
+The web UI shows a three-step progress card mirroring harness Phase P:
 
-The operator typed "ChatGPT (cloud)" as the label, chose "remote sandbox". UI calls `POST /v1/agents/bootstrap/remote { label, vendor }`. Daemon:
-
-1. Mints a one-time **pair code** (4-word phrase or 8-digit code — operator chooses). The pair code is bound to the operator's session + the agent's about-to-be derivation.
-2. Returns the pair code + a target URL (e.g. `https://sandbox.openai.com/agentkeys/pair?code=<code>`).
-3. UI displays:
-
-> *Configure your ChatGPT sandbox*
->
-> *Paste this code into the AgentKeys plugin / connector inside your ChatGPT sandbox. The sandbox will then talk to your daemon to register itself.*
+> *Pairing "travel-bot" · its key is generated on its own device, never on yours*
 >
 > ```
-> ┌─────────────────────────────────────┐
-> │  ocean · piano · ladder · echo      │   single-use · expires in 10 min
-> └─────────────────────────────────────┘
+> [⟳] P.1  agent generates its device key + session   (in the runtime/sandbox)
+> [ ] P.2  you bind its device on-chain               (registerAgentDevice)
+> [ ] P.3  you approve its [travel] scope             🔐 Touch ID
+> ```
+
+**P.1 — `agentkeys agent device-session`** runs in the agent's runtime. It generates a secp256k1 device key (k256/sha3), derives `actor_omni`, and mints a `wallet_sig` session whose EIP-191 signing matches the broker's `ecrecover`. It emits `{ agent_address, actor_omni, device_key_hash, pop_sig, session_bearer }`. The key file is sandbox-local, `0600`, and never leaves. *(harness `P.1`; [`device_session.rs`](../../../crates/agentkeys-cli/src/device_session.rs).)*
+
+**P.2 — master binds the device on-chain.** The UI calls the daemon to run `heima-agent-create --from-pubkey --agent-address <addr> --actor-omni <omni> --device-key-hash <hash> --pop-sig <sig>` → `registerAgentDevice`. The master signs with its own key; it bound a device whose private key it has never seen, attested by the agent's `pop_sig`. *(harness `P.2`.)*
+
+**P.3 — master approves the scope (Touch ID).** The UI runs the K11 ceremony: `heima-scope-set --webauthn --agent travel-bot --services travel` (or whatever §1.1 selected). The operator's real Touch ID prompt fires. This is the on-chain scope grant — the moment the agent *earns* its permission. *(harness `P.3`.)*
+
+> 🔐 *Approve travel-bot's permissions*
+> *travel-bot is asking to read your **travel** memory. Approve with Touch ID to grant it on-chain.*
+> `[ Approve with Touch ID → ]`
+
+After P.3 the fresh actor exists on-chain with an empty memory and a `travel`-scoped grant. Because the identity is brand-new, the UI offers to **seed** a first memory so the agent has something to recall (harness step `1.5`) — operator-supplied content, or skip.
+
+**Why "born in the sandbox" matters in the UI copy:** the prior design generated the agent key on the laptop and shipped it out — a key-custody smell. The redesign's headline guarantee is that the master holds *no* agent private keys. The pairing card says so explicitly: *"its key is generated on its own device, never on yours."*
+
+### §1.3 — Wire (Phase 2): install the IAM-guarantee hooks
+
+Now the agent has an identity and a scope. Wiring is what makes that scope *unbypassable*. The UI shows what `agentkeys wire <runtime>` installs:
+
+> *Wire travel-bot's runtime · install your permission gate*
+>
+> *This writes AgentKeys' three hooks into Hermes's config. From now on the model **cannot** read memory it isn't granted, **cannot** exceed your spend cap, and every action is logged — no matter what the model decides.*
+>
+> ```
+> hook                         fires on            guarantee
+> ───────────────────────────  ──────────────────  ─────────────────────────────────────
+> agentkeys hook check         pre_tool_call       blocks over-cap / out-of-scope actions
+>                              (pay|order|spend…)   — fails CLOSED if AgentKeys unreachable
+> agentkeys hook audit         post_tool_call       appends an audit row — never blocks
+> agentkeys hook memory-inject pre_llm_call         injects only your granted namespaces
 > ```
 >
-> `[ Copy to clipboard ]`
->
-> *Waiting for your sandbox to pair…*
+> `[ Wire travel-bot → ]`   `[ Preview what gets written ]`
 
-The agent's sandbox controller (the OpenAI / Anthropic side) is responsible for picking up the code, exchanging it for a session-bound JWT, generating K10 in the sandbox's hardware boundary (or KMS-backed key), and calling `registerAgentDevice` on the chain.
+**What the daemon runs:** `agentkeys wire hermes --actor-omni <omni> --operator-omni <omni> --namespaces travel --payment-scope payment.spend --mcp-url <url> --vendor-token <tok> --session-bearer <jwt>`. It writes the three hook scripts to `~/.hermes/agent-hooks/`, merges a **sentinel-managed** `hooks:` block into `~/.hermes/config.yaml` (preserving the operator's other keys, refusing to clobber a foreign `hooks:`), sets `hooks_auto_accept: true`, and verifies via `hermes hooks doctor`. Idempotent: re-runs show `skip … matches`; `--check-only` reports drift without writing. *(harness Phase 2; [`wire.rs`](../../../crates/agentkeys-cli/src/wire.rs); generated block in [`operator-runbook-wire.md`](../../operator-runbook-wire.md) Appendix A.)*
 
-This is exactly what the harness `v2-stage1-demo.sh` step 12 (`heima-agent-create.sh --label demo-agent`) does today, except the harness operator IS the agent — there's no remote sandbox. The web flow generalizes it.
+**"Preview what gets written"** expands the exact managed block (the sentinel-delimited `hooks:` YAML) so the operator sees precisely what AgentKeys owns in their runtime config. This honors the [`user-manual.md`](../../user-manual.md) contract: *"wire takes full ownership of the runtime's hooks block."* The UI must state plainly that wiring **replaces** any existing hooks block.
 
-### §1.3 Bootstrap — "vendor hardware" path
+**Ownership warning.** Per the user manual, a YAML config allows one `hooks:` key, so AgentKeys can't coexist with a hand-authored block — it replaces it. The wire screen surfaces this before applying, and offers `--unwire` (a "remove AgentKeys hooks" affordance) for teardown.
 
-Operator unboxed a FoloToy bear. Powering it on the first time, the bear displays a 4-word phrase on its screen (or generates a QR).
+**Drift detection.** The agent-detail page shows a "hooks: wired ✓ / drifted ⚠ / not wired ✗" badge backed by `agentkeys wire <runtime> --check-only`. A drifted badge (operator hand-edited the managed block, or a host re-serialized it and dropped the sentinels) offers a one-tap re-wire. Nightly `--check-only` is the recommended cron ([`operator-runbook-wire.md`](../../operator-runbook-wire.md) "Drift detection").
 
-UI calls `POST /v1/agents/bootstrap/vendor { label, vendor }`. Daemon returns a "scan or type the code from the bear" prompt:
+### §1.4 — Use it: the three acts + the surprise
 
-> *Pair your FoloToy bear*
->
-> *Your bear should be displaying a 4-word code. Type or scan it.*
->
-> `[ ocean ___ ____ ____ ]`
-> `[ camera scan ]`
+Wiring done, the operator sees the guarantees fire. The agent-detail page has a **"prove it works"** panel mirroring harness Phase 3, plus the optional live "surprise" (Phase 4).
 
-When the operator enters matching codes on both sides, the bear's on-device daemon completes its registration directly with the operator's broker (using the pair-code as bearer authority). From the operator's UI perspective the experience is the same as the remote-sandbox flow.
+| Act | Hook | What the UI shows | Harness |
+|---|---|---|---|
+| **1 — Permissioned Memory** | `pre_llm_call` → `memory-inject` | "travel-bot can read: `## Memory: travel — Chengdu trip, Apr 12–16, hotpot at Yulin`. It cannot see family/work/personal." | `3.1` |
+| **2 — Deterministic Denial** | `pre_tool_call` → `check` | over-cap (600 > 500) → **BLOCKED** `daily_spend_cap_exceeded: cap=500, requested=600`; under-cap (200) → allowed. *"No LLM in this decision. Fails closed if AgentKeys is unreachable."* | `3.3` / `3.4` |
+| **Auto-audit** | `post_tool_call` → `audit` | a row lands in the agent's audit feed; the action is never blocked by logging | `3.5` |
 
-### §1.4 Scope grant (same as stage-1 screen E)
+(Act 3 — Online Revocation — is the §2 revoke flow below; it's out of scope for the wire harness but lives in the live dashboard.)
 
-After bootstrap completes (agent's K10 on chain, agent's daemon running), the operator grants scope. Identical to stage-1's part-2 screen E. The K11 master-mutation runs on the operator's primary.
+**The deterministic verify, surfaced honestly.** The authoritative pass/fail is *not* a chat reply — an LLM can phrase a memory-aware answer many ways, or even disown the injected context as a hallucination ([`operator-runbook-wire.md`](../../operator-runbook-wire.md) "Verifying it worked"). The harness's real check is `hermes hooks test pre_llm_call`, which fires the hook through the runtime's *own* dispatcher and asserts a `{"context": …}` block reaches the LLM request. The UI's Act-1 result must be backed by that deterministic signal (relayed by the daemon), and labeled as such — never by parsing a chat transcript.
 
-### §1.5 First credential use
-
-Once scope is granted, the agent can do work. The operator watches the audit feed:
-
-> ```
-> 14:32:08  FoloToy bear      cap.mint          memory:read scope=family ttl=900s     broker
-> 14:32:08  FoloToy bear      memory.read       family/bedtime-story #14              memory
-> ```
-
-These events are real — they come from the agent's *actual* call to the memory worker, not from a simulated tick. Cap-mint + worker call typically land within ~100 ms of each other.
-
-The agent's first **`cred.fetch`** event is the moment where the operator sees that vault decryption is gated by their on-chain scope:
-
-> ```
-> 14:33:22  FoloToy bear      cred.fetch        family/spotify-token (cap=cred:r ttl=300s)   creds
-> ```
-
-If the operator hadn't granted `family/read` for the credentials class, this call would have been a `cred.fetch.denied` event with `403` — visible in the same feed but red. The trust chain is observable.
+**The surprise (optional live demo).** A "talk to your agent" affordance: the operator opens a fresh agent session and asks *"where am I going this weekend?"* The agent recalls Chengdu — memory it was never told, injected by the `pre_llm_call` hook. The UI frames this as a demo, not the proof: *"the green check above is the guarantee; this is what it feels like."*
 
 ---
 
-## §2 — Live operations dashboard
+## §2 — Live operations dashboard (now hook-aware)
 
-This is the parent-control UI as the operator uses it day to day. It already exists in the codebase (PR #136 + PR-A/B/C) — this section documents what it must do, not what to build new.
+Steady state. The operator opens the UI to watch and manage running agents. The audit feed and actor-detail pages already exist (PR #136 + the daemon read endpoints); the redesign makes them **hook-aware** — every row is tagged by which hook produced it.
 
-### §2.1 The audit feed (`/audit`)
+### §2.1 — The audit feed, tagged by hook
 
-Live SSE from `/v1/audit/stream` (delivered in PR-C). Newest first. Filterable by worker chip. Click any row → modal with full event detail (`actor`, `cap_token_id`, `K10_signer`, `tier-1 vs tier-2 anchor status`).
-
-**The discipline call-out:** the events come from real worker calls, not simulation. The operator should be able to trust that every row maps to a real action by a real agent. The harness `SIM_EVENTS` tick from the earlier prototype is **gone** — see [`input-discipline.md` §4](input-discipline.md).
-
-### §2.2 Actor detail (`/detail/:actor`)
-
-Per-namespace scope toggles, payment cap inputs, time-window editor, cap-tokens list with per-cap revoke, recent-activity panel filtered to this actor.
-
-Every write here is a master-mutation (K11 assertion + chain commit). The triple toggle (`deny / read / read+write`) maps to `setScopeWithWebauthn(actor, namespace, ops_mask)` per arch.md §10.
-
-The `revoke device` button is destructive — all of the actor's caps go to TTL=0 immediately via the SSE drop; the operator's UI flips the actor's status to `revoked`.
-
-### §2.3 Anchor status (`/anchor`)
-
-Countdown to next tier-2 batch (every 2 minutes per arch.md §11). Recent batches table with Merkle root + tx hash + confirmation count + explorer link.
-
-**Why the operator looks at this:** to verify that yes, the audit feed they're watching IS being anchored on chain. Any tier-1 event they see can be cross-referenced against the Merkle root from its 2-min batch via the chain explorer.
-
-### §2.4 Workers (`/workers`)
-
-Five worker cards (memory, credentials, audit, email, payment) with per-actor usage share. Tap a card → detail with trust profile.
-
-**Why the operator looks at this:** to confirm their agents are using the workers they should be using and nothing else. If "FoloToy bear" is suddenly showing payment-worker calls when it's only supposed to read memory, that's an anomaly worth investigating.
-
-The data comes from `GET /v1/workers` (delivered in PR-C). Per-worker stats are aggregations the daemon computes from the audit log.
-
-### §2.5 Cap-tokens panel (within actor detail)
-
-Per actor's live cap-tokens. Each row: `cap_name`, `scope`, `ttl_remaining`, `minted_at`, `[revoke]`. Revoking a single cap doesn't invalidate the actor's other caps; revoking the device invalidates everything.
-
-This is what stage-1 step 14 (`CredentialAudit.append`) exposes — every cap mint event has a row.
-
----
-
-## §3 — Isolation health check (on-demand `/isolation-demo`)
-
-This is where stage-3's 16 steps become a single operator action. The operator visits a new screen — `/isolation-demo` — and taps "run". The UI walks the 16 steps in front of them, against their real cloud, with their real STS creds, and reports green/red per step.
-
-This is **not a unit-test runner.** It's an *operator-facing health check*: the operator should be able to prove, at any moment, that their stage-3 isolation guarantees still hold against their *current* deployment. If something regressed in a worker or in their AWS bucket policy, this surfaces it.
-
-### §3.1 What the operator sees
-
-> *Isolation health check*
->
-> *We run the 4-layer isolation proof against your real cloud — your buckets, your IAM, your workers, your chain. Takes ~30 seconds. Safe to run any time; nothing is mutated.*
->
-> *The 4 layers (see arch.md §17.2):*
-> *  1. broker cap-mint rejects cross-actor requests*
-> *  2. workers chain-verify the cap before any AWS call*
-> *  3. AWS IAM PrincipalTag scopes S3 access to actor_omni*
-> *  4. per-data-class bucket separation*
->
-> `[ Run isolation check → ]`
-
-On "Run": the screen turns into a live progress strip showing all 16 steps from `harness/v2-stage3-demo.sh`:
-
-> ```
-> [✓] step 1  · SIWE wallet auth → session JWT
-> [✓] step 2  · mint OIDC JWT (for AWS STS)
-> [✓] step 3  · AssumeRoleWithWebIdentity → STS creds (vault + memory)
-> [✓] step 4  · POSITIVE — write to own vault prefix
-> [✓] step 5  · NEGATIVE — cross-actor vault write blocked
-> [✓] step 6  · NEGATIVE — cross-actor vault list blocked
-> [✓] step 7  · POSITIVE — write to own memory prefix
-> [⟳] step 8  · NEGATIVE — cross-actor memory write blocked (running…)
-> [ ] step 9  · NEGATIVE — cross-actor memory list blocked
-> [ ] step 10 · cross-bucket isolation (vault creds blocked on memory bucket)
-> [ ] step 11 · worker encrypt/decrypt roundtrip — credentials
-> [ ] step 12 · worker encrypt/decrypt roundtrip — memory
-> [ ] step 13 · broker rejects cross-actor cap-mint
-> [ ] step 14 · cred-class cap rejected by memory worker
-> [ ] step 15 · memory-class cap rejected by cred worker
-> [ ] step 16 · cleanup
-> ```
-
-Each row's status updates live (SSE).
-
-### §3.2 What backs each step
-
-| # | Action | Daemon endpoint |
-|--:|---|---|
-| 1 | mint a fresh session JWT via SIWE (no impact on operator's regular session) | `POST /v1/isolation/siwe` |
-| 2 | mint an OIDC JWT bound to the test session | `POST /v1/isolation/oidc-jwt` |
-| 3 | STS assume-role for vault + memory under the test JWT | `POST /v1/isolation/sts/mint` |
-| 4 | write `bots/<own>/credentials/healthcheck.bin` | `POST /v1/isolation/write { bucket, prefix, content }` |
-| 5 | try to write `bots/<other>/credentials/healthcheck.bin` — expect 403 | same endpoint, `expect: 'deny'` |
-| 6 | try to list `bots/<other>/credentials/` — expect 403 | `POST /v1/isolation/list { bucket, prefix, expect: 'deny' }` |
-| 7 | write `bots/<own>/memory/healthcheck.bin` | `POST /v1/isolation/write` |
-| 8 | try to write `bots/<other>/memory/healthcheck.bin` — expect 403 | same |
-| 9 | try to list `bots/<other>/memory/` — expect 403 | same |
-| 10 | try vault creds on memory bucket (and reverse) — both expect 403 | `POST /v1/isolation/cross-bucket` |
-| 11 | cap-mint `cred-store` + write + cap-mint `cred-fetch` + read → assert plaintext matches | `POST /v1/isolation/worker-roundtrip { class: 'credentials' }` |
-| 12 | same for memory worker | `POST /v1/isolation/worker-roundtrip { class: 'memory' }` |
-| 13 | call cap-mint with cross-actor `operator_omni` — expect HTTP 4xx | `POST /v1/isolation/cap-mint-cross-actor` |
-| 14 | submit a cred-class cap to memory worker — expect `cap_data_class_mismatch` | `POST /v1/isolation/cap-cross-class { from: 'credentials', to: 'memory' }` |
-| 15 | symmetric — memory-class cap to cred worker | same with reversed direction |
-| 16 | delete the test objects | `POST /v1/isolation/cleanup` |
-
-The "cross-actor" target for steps 5/6/8/9 is a *synthetic* `actor_omni` that doesn't exist in the operator's tree — picked deterministically so the test is reproducible. The objects written in steps 4/7/11/12 are tagged with a one-shot health-check prefix that step 16 nukes.
-
-### §3.3 Report
-
-After all 16 steps complete:
-
-> *Isolation check · passed at 14:42:17*
->
-> ```
-> Layer 1 — broker cap-mint:        ✓  cross-actor rejected (step 13)
-> Layer 2 — worker chain-verify:    ✓  cap_data_class_mismatch enforced (steps 14, 15)
-> Layer 3 — AWS IAM PrincipalTag:   ✓  cross-actor prefixes blocked (steps 5, 6, 8, 9)
-> Layer 4 — per-data-class buckets: ✓  cross-bucket creds blocked (step 10)
->
-> All 16 invariants hold against your live deployment.
-> ```
-
-If any step fails:
-
-> *Isolation check · FAILED at step 8*
->
-> *Step 8 expected an `AccessDenied` when writing to `bots/<other-actor>/memory/healthcheck.bin`, but AWS returned `200 OK`.*
->
-> *This means your memory-bucket policy is allowing cross-actor writes — a serious isolation breach. Stop here and investigate before granting any new agent scope.*
->
-> *Likely cause: the memory bucket's policy `Statement[2]` is missing the `s3:ResourceTag/agentkeys_actor_omni = ${aws:PrincipalTag/agentkeys_actor_omni}` condition. See [`docs/arch.md`](../../arch.md) §17.2 layer-3 table.*
->
-> `[ View detailed error ]`  `[ Re-run check ]`
-
-### §3.4 Why the operator runs this themselves
-
-Three reasons:
-1. **Re-deploys are dangerous.** Every time the operator updates a worker / IAM policy / bucket policy, isolation can regress. The CI gate catches it before merge, but the operator's live deployment might be lagging behind CI by hours or days. Running this check after any deploy validates the actual production state.
-2. **Trust is observable.** The operator should be able to *prove* their agents can't read each other's data. This isn't a value statement — it's a one-tap demonstration with green checks.
-3. **Vendor pilots demand it.** When the operator pitches their AgentKeys deployment to a vendor partner, the vendor will want to see proof that their data is isolated from other actors. This screen is the proof.
-
-### §3.5 What this screen is NOT
-
-- **Not a CI replacement.** The harness's `v2-stage3-demo.sh` still runs in CI on every PR per `.github/workflows/harness-ci.yml`. Removing it would mean a regression could land in main between the operator's checks.
-- **Not a chain-deploy validator.** The check runs against the deployed system; it doesn't verify the chain extrinsics or the contract source. That's `forge test` + `cargo test`.
-- **Not safe under load.** The synthetic writes touch the operator's real buckets. If the operator's running production traffic, the test prefixes are isolated (`<actor>/.healthcheck/...`) so they don't collide with real data, but the operator should still run this during a maintenance window if they care.
-
----
-
-## Summary mapping
-
-For the reviewer who wants the harness-step ↔ UI-surface map at a glance:
+The audit-service worker's tier-1 SSE feed now carries hook-origin events. Each row shows the hook that fired:
 
 ```
-stage-1 step 12  (create demo agent)       → §1 agent-create screen + bootstrap path
-stage-1 step 13  (set scope with K11)      → §1.4 + §2.2 actor-detail
-stage-1 step 14  (audit append)            → §2.1 audit feed (live event)
-
-stage-3 steps 1-3   (SIWE → OIDC → STS)    → §3 step 1-3 (in isolation check)
-stage-3 steps 4-9   (positive / negative S3 isolation) → §3 step 4-9
-stage-3 step  10    (cross-bucket)         → §3 step 10
-stage-3 steps 11-12 (worker roundtrips)    → §3 step 11-12
-stage-3 step  13    (cross-actor cap-mint) → §3 step 13
-stage-3 steps 14-15 (cap-class mismatch)   → §3 step 14-15
-stage-3 step  16    (cleanup)              → §3 step 16
-
-(everything else)                           → §2 steady-state dashboard
-                                             — audit feed, actor detail,
-                                               anchor status, workers
+14:32:08  travel-bot   pre_llm_call · memory-inject   travel ns → context injected      memory
+14:33:01  travel-bot   pre_tool_call · check          order_hotpot 600 RMB → BLOCKED    revoke
+                                                       (daily_spend_cap_exceeded)
+14:33:02  travel-bot   post_tool_call · audit         order_hotpot attempt logged        audit
+14:34:10  travel-bot   pre_tool_call · check          order_tea 200 RMB → allowed        broker
 ```
+
+The discipline call-out from [`input-discipline.md`](input-discipline.md) §4 stands: these are **real** events from the agent's wired runtime, relayed by the MCP server's `audit.append`. There is no `SIM_EVENTS` tick. The feed is empty until the agent actually runs.
+
+A `check` **block** is the most important row in the system — it's the guarantee catching something. The UI tints it like a revoke (danger) and lets the operator click through to the full decision: `{scope, requested, cap, period, verdict, actor_omni}`.
+
+### §2.2 — Guarantee-health panel (new)
+
+Per agent, a panel answering "are my guarantees actually live right now?":
+
+```
+── travel-bot · guarantee health
+─────────────────────────────────────────────────────
+hooks wired       ✓ hermes · 3/3 (check, audit, memory-inject)   [re-check]
+last check        14:34:10 · allowed (order_tea 200 RMB)
+last block        14:33:01 · daily_spend_cap_exceeded
+last memory inject 14:32:08 · travel ns
+MCP reachable     ✓ 18088 · fail-closed armed
+scope on-chain    travel (granted 14:30 · Touch ID)
+```
+
+The "fail-closed armed" line is load-bearing: if the MCP server is unreachable, `agentkeys hook check` blocks every gated action (`agentkeys_unreachable`), so the operator should *want* to see the agent stall rather than act ungated. The panel surfaces MCP reachability so a green "wired" badge is never mistaken for a live guarantee when the policy backend is down.
+
+### §2.3 — Scope + revoke (Act 3 live)
+
+Scope changes and revocation are master mutations (K11 + chain commit), unchanged from the master-detail design:
+
+- **Tighten/loosen scope** — toggle a namespace or change the spend cap → Touch ID → `heima-scope-set` re-grant. The next `memory-inject` / `check` reflects it (caveat: the runtime caches the LLM context per session, so a namespace change may need a fresh agent session — surfaced as a hint, per [`operator-runbook-wire.md`](../../operator-runbook-wire.md) troubleshooting).
+- **Revoke the agent** — Touch ID → on-chain revoke → the agent's caps go to TTL 0 and `check` starts denying. The UI also offers **`--unwire`** (remove the managed hooks block from the runtime config) so a revoked agent's runtime is left clean.
+
+Revoking the *device* and un-wiring the *hooks* are distinct and both offered: revoke kills authority on-chain (the agent can't pass `check` anymore even if still wired); unwire removes the gate from the runtime (so the runtime stops calling AgentKeys at all). The UI explains both and recommends doing both at teardown.
+
+---
+
+## §3 — Isolation health check (preserved)
+
+This surface is unchanged by #141 and remains valuable — it proves the per-actor + per-data-class S3 isolation invariants against the operator's *real* cloud, on demand. It complements the wire guarantees (which gate the runtime) by proving the AWS layer (which gates storage) is also intact.
+
+The operator visits `/isolation-demo` and taps "run". The UI walks the [`harness/v2-stage3-demo.sh`](../../../harness/v2-stage3-demo.sh) 16-step proof live, reporting green/red per step against arch.md §17.2's four layers:
+
+1. **broker cap-mint** rejects cross-actor requests
+2. **workers chain-verify** the cap before any AWS call (+ `cap_data_class_mismatch` rejects cross-class caps)
+3. **AWS IAM PrincipalTag** scopes S3 to `bots/<actor>/…`
+4. **per-data-class bucket separation** (vault creds blocked on the memory bucket)
+
+The 16 steps + their daemon endpoints + the green/red report format are as previously specified — see the prior revision's §3 table (steps `1`–`16`, endpoints `/v1/isolation/*`). Nothing in #141 changes this surface; it stays an on-demand operator tool, **not** a CI replacement (`v2-stage3-demo.sh` still runs in CI as the regression gate).
+
+**Relationship to the wire guarantees:** §1–§2 prove *the runtime can't act outside scope*; §3 proves *the storage can't be read across actors*. Both are needed for the full "your agents can't reach each other's data" claim. The isolation-demo page links to it: *"wiring gates what the agent does; this gates where its data lives."*
+
+---
+
+## Summary mapping — harness Phase ↔ UI surface
+
+```
+harness Phase P.1 (device-session in sandbox)     → §1.2 pairing card, step P.1
+harness Phase P.2 (registerAgentDevice)            → §1.2 pairing card, step P.2
+harness Phase P.3 (heima-scope-set --webauthn)     → §1.2 pairing card, step P.3 (Touch ID)
+harness step 1.5  (seed fresh actor's memory)      → §1.2 optional seed-a-memory
+harness Phase 2   (agentkeys wire hermes)          → §1.3 wire screen
+harness Phase 3.1 (Act 1 memory-inject)            → §1.4 Act 1 + §2.1 feed
+harness Phase 3.3/3.4 (Act 2 check block/allow)    → §1.4 Act 2 + §2.1 feed + §2.2 health
+harness Phase 3.5 (auto-audit)                     → §1.4 audit + §2.1 feed
+harness Phase 4   (the surprise + 4.2 verify)      → §1.4 surprise (deterministic-backed)
+(steady state)                                      → §2 dashboard + §2.3 scope/revoke/unwire
+harness v2-stage3-demo.sh (16-step isolation)      → §3 isolation health check (preserved)
+```
+
+## What's deferred
+
+- **Non-Hermes runtimes** (Claude Code / Codex / OpenClaw) — the `RuntimeAdapter` seam exists; adapters are [#133](https://github.com/litentry/agentKeys/issues/133). The UI lists them disabled until each lands.
+- **Full HDKD-literal §10.2 pairing** (broker link-code endpoints + daemon keygen, out-of-process bearer custody) — [#144](https://github.com/litentry/agentKeys/issues/144). The current device-session is the interim shape.
+- **OpenAI-compatible proxy fallback** (for hooks-less hosts — xiaozhi-server, mobile SDKs) — arch.md §22d.3, Phase 3b. The web UI's "add agent → choose runtime" gains a "no hooks? use the proxy" path then.
+- **Daemon endpoints to drive wire/pair from the browser** — see [`data-model.md`](data-model.md). Today wire/device-session are CLI/sandbox; the web UI needs daemon endpoints to trigger + observe them. That wiring is the implementation work this redesign scopes.

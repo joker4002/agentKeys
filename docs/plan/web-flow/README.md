@@ -1,7 +1,9 @@
 # docs/plan/web-flow — parent-control web UI · operator user flow plan
 
 **Status:** plan (not implementation). Pending review.
-**Source of truth this plan defers to:** [`docs/arch.md`](../../arch.md), [`docs/v2-stage1-migration-and-demo.md`](../../v2-stage1-migration-and-demo.md), [`harness/v2-stage1-demo.sh`](../../../harness/v2-stage1-demo.sh), [`harness/v2-stage2-demo.sh`](../../../harness/v2-stage2-demo.sh), [`harness/v2-stage3-demo.sh`](../../../harness/v2-stage3-demo.sh).
+**Source of truth this plan defers to:** [`docs/arch.md`](../../arch.md) (§22c app surface, **§22d IAM-guarantee delivery**), [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md), [`docs/operator-runbook-wire.md`](../../operator-runbook-wire.md), [`docs/user-manual.md`](../../user-manual.md), [`docs/wiki/agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md), and the harness scripts [`harness/v2-stage{1,2,3}-demo.sh`](../../../harness/) (master onboarding) + [`harness/phase1-wire-demo.sh`](../../../harness/phase1-wire-demo.sh) (the agent wire flow).
+
+> **Redesigned 2026-05-31 after PRs [#140](https://github.com/litentry/agentKeys/pull/140) + [#141](https://github.com/litentry/agentKeys/pull/141) merged.** The agent half of the flow ([`stage3-agent-usage.md`](stage3-agent-usage.md)) was rebuilt around the **Authority-Host / Task-Host** model: AgentKeys installs **IAM-guarantee hooks** (`agentkeys wire`) the LLM can't bypass, and the agent's key is **born in its own runtime** (`agentkeys agent device-session`), never on the master. The master-onboarding half ([`stage1`](stage1-first-run.md) / [`stage2`](stage2-second-master.md)) is unchanged.
 
 ## Why this plan exists
 
@@ -21,7 +23,7 @@ This directory contains the design. Implementation lands as separate PRs that re
 | [`overview.md`](overview.md) | End-to-end narrative the first-time operator walks through · state-machine sketch · resumability invariants |
 | [`stage1-first-run.md`](stage1-first-run.md) | Harness `v2-stage1-demo.sh` 16 steps → UI screens. Identity, K10, K11 WebAuthn, AWS infra, chain bring-up, first master register, first agent. |
 | [`stage2-second-master.md`](stage2-second-master.md) | Harness `v2-stage2-demo.sh` 11 steps → UI screens. Companion-device pairing, recoveryThreshold=2, M-of-N quorum revoke ceremony. |
-| [`stage3-agent-usage.md`](stage3-agent-usage.md) | Harness `v2-stage3-demo.sh` 16 steps → UI demonstrations. Per-actor + per-data-class isolation, worker round-trips, agent-driven credential use. |
+| [`stage3-agent-usage.md`](stage3-agent-usage.md) | **(redesigned for #141)** Add an agent: **pair** (`agentkeys agent device-session` — key born in the runtime) → **wire** (`agentkeys wire` installs IAM-guarantee hooks) → the **three acts** (permissioned memory / deterministic denial / audit) + the memory surprise. Plus the hook-aware live dashboard and the preserved 16-step isolation health check. Maps `harness/phase1-wire-demo.sh`. |
 | [`input-discipline.md`](input-discipline.md) | Which inputs the operator types vs the system derives vs the system auto-generates. Resolves the operator-login-email vs agent-inbox-address distinction explicitly. |
 | [`data-model.md`](data-model.md) | The HTTP surface the daemon must expose for the UI to drive these flows. Concrete request/response shapes, persistence boundaries, what's local vs chain-anchored. |
 | [`deferred-and-followups.md`](deferred-and-followups.md) | What stays shell-only forever (operator power-user paths). Open questions for review. Implementation sequencing if approved. |

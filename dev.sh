@@ -12,7 +12,7 @@
 # terminal with colored per-process line prefixes:
 #
 #   [daemon]  magenta  — agentkeys-daemon --ui-bridge   (port 3114)
-#   [mcp]     green    — agentkeys-mcp-server           (port 8088)
+#   [mcp]     green    — agentkeys-mcp-server           (port 18088)
 #   [ui]      cyan     — npx next dev                   (port 3113)
 #   [dev]     yellow   — this script's own status lines
 #
@@ -23,7 +23,7 @@
 # Environment overrides:
 #   UI_PORT           default 3113
 #   DAEMON_PORT       default 3114
-#   MCP_PORT          default 8088
+#   MCP_PORT          default 18088  (8088 collides with the sandbox gem-server, per #141)
 #   DAEMON_ORIGIN     default http://localhost:${UI_PORT}
 #   DAEMON_RP_ID      default localhost
 #   DAEMON_RP_NAME    default AgentKeys
@@ -60,7 +60,7 @@ fi
 
 UI_PORT="${UI_PORT:-3113}"
 DAEMON_PORT="${DAEMON_PORT:-3114}"
-MCP_PORT="${MCP_PORT:-8088}"
+MCP_PORT="${MCP_PORT:-18088}"   # 18088 per #141 — 8088 collides with the sandbox's built-in gem-server
 DAEMON_BIND="127.0.0.1:${DAEMON_PORT}"
 MCP_BIND="127.0.0.1:${MCP_PORT}"
 DAEMON_ORIGIN="${DAEMON_ORIGIN:-http://localhost:${UI_PORT}}"

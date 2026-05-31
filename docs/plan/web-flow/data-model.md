@@ -186,29 +186,81 @@ POST /v1/onboarding/chain/register-master
 
 The daemon delegates to `harness/scripts/heima-bring-up.sh` and `heima-register-first-master.sh` underneath.
 
-### Agent lifecycle (**deferred** — Phase 2)
+### Agent lifecycle — pair + wire (**deferred** — Phase 2; redesigned for #141)
 
-Phase-2 work. Stage-1 screen E, stage-3 §1.
+> **Superseded.** The old `bootstrap/{this-device,remote,vendor}` + `agents/create` paste-a-pair-code shape is gone. The agent lifecycle is now pair (device-session) → wire (install hooks) → observe. These endpoints are the daemon surface the web UI needs to *drive and observe* the CLI flow that [`harness/phase1-wire-demo.sh`](../../../harness/phase1-wire-demo.sh) runs by hand. See [`stage3-agent-usage.md`](stage3-agent-usage.md).
+
+**Pairing (Phase P).** The device-session keygen runs *in the agent's runtime*, not the daemon — the key must never touch the master. So the daemon endpoints here are master-side: they accept the agent's *public* outputs and drive the on-chain bind + scope grant.
 
 ```
-POST /v1/agents/bootstrap/this-device
-POST /v1/agents/bootstrap/remote          — returns pair code + URL
-POST /v1/agents/bootstrap/vendor          — returns pair code
-GET  /v1/agents/pair/status?code=...      — operator polls during pairing
-POST /v1/agents/create                     — finalize: chain registerAgentDevice
-  body: { "label": "...", "vendor": "...", "kind": "this-device|remote|vendor" }
-  → 200 { "agent_id": "agent-folotoy", "agent_omni": "0x...", "derivation": "//folotoy" }
+POST /v1/agents/pair/init
+  body: { "label": "travel-bot", "runtime": "hermes", "namespaces": ["travel"], "payment_scope": "payment.spend", "daily_cap_rmb": 500 }
+  → 200 { "pair_id": "...", "link_code": "...", "broker_url": "...", "instructions": "run `agentkeys agent device-session` in the runtime with this link-code" }
+  # The link_code is what the agent's `device-session --link-code` echoes back for binding.
 
-POST /v1/actors/:id/scope                  — shipped (PR-C)
-POST /v1/actors/:id/payment-cap            — shipped (PR-C)
-POST /v1/actors/:id/revoke                 — shipped (PR-C)
-POST /v1/actors/:id/caps/revoke            — shipped (PR-C)
-GET  /v1/actors                            — shipped (PR-C)
-GET  /v1/actors/:id                        — shipped (PR-C)
-GET  /v1/actors/:id/caps                   — shipped (PR-C)
+POST /v1/agents/pair/bind                  — P.2: master binds the sandbox-generated device on-chain
+  body: { "pair_id": "...", "agent_address": "0x...", "actor_omni": "0x...", "device_key_hash": "0x...", "pop_sig": "0x..." }
+  → 200 { "tx_hash": "0x...", "block": 1234567 }   # heima-agent-create --from-pubkey → registerAgentDevice
+  → 4xx { "error": "pop-sig-invalid" }             # the agent's proof-of-possession didn't verify
+
+POST /v1/agents/pair/approve-scope/begin   — P.3: build the K11 challenge for the scope grant
+  body: { "pair_id": "...", "services": ["travel"] }
+  → 200 { "challenge": "...", "assertion_id": "..." }   # reuses the /v1/k11/assert pattern
+POST /v1/agents/pair/approve-scope/submit  — P.3: submit Touch ID assertion → heima-scope-set --webauthn
+  body: { "assertion_id": "...", "authenticatorData": "...", "clientDataJSON": "...", "signature": "..." }
+  → 200 { "tx_hash": "0x...", "granted": ["travel"] }
+
+POST /v1/agents/:id/seed-memory            — step 1.5: seed a fresh actor's empty namespace
+  body: { "namespace": "travel", "content": "..." }    # operator-supplied; optional
+  → 200 { "ok": true, "s3_key": "bots/<actor>/memory/..." }
 ```
 
-The shipped POSTs from PR-C take an `intent_text`/`intent_fields` pair today; under the new plan they extend to take `k11_assertion_id` so the K11 ceremony is decoupled from the actual mutation.
+**Wire (Phase 2).** The hook scripts install into the *runtime's* config, which for a remote runtime lives in the sandbox — so the daemon drives `agentkeys wire` over the runtime's exec channel and reports the per-step `ok/skip/fail`.
+
+```
+POST /v1/agents/:id/wire
+  body: { "runtime": "hermes", "mcp_url": "...", "vendor_token": "...", "session_bearer": "..." }
+  → 200 { "steps": [ {"step":"scripts","status":"ok"}, {"step":"config","status":"ok"}, {"step":"doctor","status":"ok"} ],
+          "managed_block": "# >>> agentkeys wire …" }   # the exact YAML written, for the "preview" affordance
+
+GET  /v1/agents/:id/wire/status            — drift detection (agentkeys wire --check-only)
+  → 200 { "state": "wired" | "drifted" | "not-wired", "hooks": ["check","audit","memory-inject"], "detail": "..." }
+
+POST /v1/agents/:id/unwire                 — remove the managed hooks block from the runtime config
+  → 200 { "ok": true }
+```
+
+**Verify + observe (Phase 3/4).** The deterministic Act-1 check + the live hook-event feed.
+
+```
+POST /v1/agents/:id/verify/memory-inject   — runs `hermes hooks test pre_llm_call` via the runtime's dispatcher
+  → 200 { "injected": true, "context": "## Memory: travel\nChengdu trip — …" }   # the authoritative Act-1 signal
+  → 200 { "injected": false, "reason": "mcp-unreachable" | "scope-missing" | "session-bad" }
+
+GET  /v1/agents/:id/guarantee-health       — the §2.2 health panel
+  → 200 { "wired": "hermes 3/3", "mcp_reachable": true, "fail_closed_armed": true,
+          "last_check": {...}, "last_block": {...}, "last_memory_inject": {...}, "scope_on_chain": ["travel"] }
+
+GET  /v1/audit/stream?hook=check|audit|memory-inject   — the existing SSE feed (PR-C), now hook-tagged
+  # each event carries { hook: "pre_tool_call|post_tool_call|pre_llm_call", action: "check|audit|memory-inject",
+  #                      decision?: "block|allow", reason?, namespace?, actor_omni, ts }
+```
+
+**Reused, unchanged (shipped PR-C; extend to take `k11_assertion_id`):**
+
+```
+POST /v1/actors/:id/scope                  — tighten/loosen scope (master mutation, K11)
+POST /v1/actors/:id/payment-cap            — change spend cap (master mutation, K11)
+POST /v1/actors/:id/revoke                 — revoke the agent device on-chain (Act 3)
+POST /v1/actors/:id/caps/revoke            — revoke a single cap
+GET  /v1/actors                            — actor list
+GET  /v1/actors/:id                        — actor detail (now includes wire state + scope)
+GET  /v1/actors/:id/caps                   — live cap-tokens
+```
+
+The shipped POSTs from PR-C take an `intent_text`/`intent_fields` pair today; under the new plan they extend to take `k11_assertion_id` so the K11 ceremony is decoupled from the mutation (same pattern the pairing scope-grant uses).
+
+**MCP server config the daemon must thread through** (per #141 — these flow into the wired hook scripts + the MCP server the hooks call): `--vendor-token`, `--session-bearer` / `--agent-session-bearer`, `--memory-role-arn`, `--vault-role-arn`, `--aws-region` (the per-actor STS relay, issue #90), and `--default-daily-spend-cap-rmb` (the deterministic-denial cap). **MCP port is `18088`** by convention (8088 collides with the sandbox's built-in `gem-server`).
 
 ### Second-master pairing (**deferred** — Phase 3)
 

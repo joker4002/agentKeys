@@ -94,6 +94,23 @@ The UI shows:
 
 The agent's *derivation path* (`//folotoy` from `O_master`) is shown explicitly in the actor list — that's a Real-looking detail that's actually Derived from the label.
 
+> **#141 note — fresh-pairing changes where `device_pubkey` comes from.** Under the wire flow ([`stage3-agent-usage.md`](stage3-agent-usage.md) §1.2), the agent's K10 device key is generated **in the agent's own runtime** by `agentkeys agent device-session`, not on the master. So `actor_omni` + `device_key_hash` arrive at the master as **Real outputs of the agent's keygen** — the master receives them, doesn't derive them, and binds them on-chain. They're still Derived *from the agent's side* (deterministic from the agent's key), but from the **master/UI's** vantage they're inbound values to be verified (via `pop_sig`), not computed. The UI must never claim to have generated the agent's key — the whole guarantee is that it didn't.
+
+## §2.5 — The agent's runtime + wire inputs
+
+PR #141 adds new inputs on the agent-onboarding path. Their categories:
+
+| Input | Category | Notes |
+|---|---|---|
+| **runtime** (Hermes / Claude Code / Codex / OpenClaw) | **Real** | Operator-selected. Gated on what `agentkeys wire` supports — only options with a shipped `RuntimeAdapter` are selectable (Hermes today; the rest are disabled with their #133 tracking link, **never faked**). |
+| **memory namespaces** (`travel`, `family`, …) | **Real** | Operator-selected checkboxes → `agentkeys wire --namespaces`. The `pre_llm_call` hook injects *only* these. |
+| **payment scope + daily cap** | **Real** | Operator-typed → `--payment-scope` + the MCP server's `--default-daily-spend-cap-rmb`. The `pre_tool_call` `check` hook enforces the cap deterministically. |
+| **link-code** (pairing) | **Auto-generated** | Minted by `/v1/agents/pair/init`; single-use; the agent's `device-session --link-code` echoes it back for binding. Shown to the operator only as a transient pairing token. |
+| **device key / `pop_sig`** | **Auto-generated, in the agent's runtime** | Born in the sandbox, `0600`, never leaves. The master sees only the public address + proof-of-possession. |
+| **the managed `hooks:` block** | **Auto-generated** | Written by `agentkeys wire` into the runtime config, sentinel-delimited. The "preview what gets written" affordance shows it verbatim; the operator does not hand-author it. |
+
+The discipline that matters most here: **the runtime list reflects real adapter support, and the agent key is never operator- or master-supplied.** Both are honesty guarantees — don't show a runtime the wire CLI can't drive, and don't imply the master holds the agent's private key.
+
 ## §3 — Payment caps, time-windows, scope toggles
 
 All **Real**. Operator-typed. No defaults pre-filled with non-trivial values (defaults are `deny` everywhere on first scope grant, `0` USDC on payment caps, `00:00–24:00` on time-window).

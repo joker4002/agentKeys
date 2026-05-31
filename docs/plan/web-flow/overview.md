@@ -1,5 +1,18 @@
 # overview · operator user flow end-to-end
 
+## The two-host model (read this first — it frames everything)
+
+> **Updated 2026-05-31 after PR [#140](https://github.com/litentry/agentKeys/pull/140) + [#141](https://github.com/litentry/agentKeys/pull/141) merged.**
+
+AgentKeys is the **Authority Host**: the operator's master, the daemon, this web UI. It owns identity, keys, scope, audit — the *policy decision*. The LLM runtime the operator's agents run on (Hermes today; Claude Code / Codex / OpenClaw next) is the **Task Host**: it owns the agent loop and the *work*. AgentKeys never becomes a Task Host (strategy §2.4 zero-orchestration line).
+
+The product's load-bearing claim is the difference between an **IAM tool** and an **IAM guarantee** ([`agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md)):
+
+- An **IAM tool** is a permission function in the LLM's registry — the LLM decides whether to call it. A jailbreak skips it.
+- An **IAM guarantee** is a non-LLM gate the *runtime* fires deterministically before the action runs. It **fails closed**. The LLM's intent is irrelevant.
+
+`agentkeys wire <runtime>` turns AgentKeys' MCP tools into guarantees by installing runtime **hooks the LLM cannot bypass**. Everything the web UI does on the agent side exists to deliver + visualize that: the operator isn't handing the agent a permission tool it might ignore; they're wiring a gate it physically can't get around. See [`stage3-agent-usage.md`](stage3-agent-usage.md) for the full agent flow (pair → wire → the three acts).
+
 ## Phase 1 scope (this review)
 
 **Phase 1 covers Act 1, steps 1–7 only.** This is the *become a master* slice: the operator opens the web app, types an email, enrolls Touch ID, gets their cloud provisioned, and lands on the chain as a registered master. After step 7 the operator's master identity exists end-to-end and the parent-control UI can render the master-detail page with the master's vault + memory listings.
@@ -172,13 +185,22 @@ These were drafted in [`stage1-first-run.md`](stage1-first-run.md) but defer pas
 - Raise `recoveryThreshold` to 2 (2-of-2 quorum on chain)
 - Recovery drill: register a synthetic spare, revoke it via 2-of-2 quorum (proves the gate works)
 
-### Act 3 — normal operation (entire act, currently in [`stage3-agent-usage.md`](stage3-agent-usage.md))
+### Phase 2 — add an agent · the wire flow (redesigned for #141, now in [`stage3-agent-usage.md`](stage3-agent-usage.md))
 
-- Steady-state actor list / audit feed / anchor status / workers dashboards (UI exists; ties to live data)
-- Per-actor cap-token listing + per-cap revoke (UI mostly shipped in PR-C; needs daemon mutation endpoints to drive)
-- Agent bootstrap paths: this-device / remote-sandbox / vendor-hardware
-- On-demand isolation health check (the 16-step v2-stage3 proof against the operator's real cloud)
-- Email worker integration (agent inbox sub-address visibility)
+This is the agent half of the product, fully reframed around the Authority/Task-Host model. It is the next implementation phase after the master onboarding (Phase 1) ships.
+
+- **Choose runtime + scope** — Hermes now; Claude Code / Codex / OpenClaw gated on #133 adapters. Namespaces + payment scope are Real operator inputs.
+- **Pair (Phase P)** — the agent's device key is *born in its own runtime* (`agentkeys agent device-session`) and never touches the master; the master binds it on-chain (`registerAgentDevice`) and approves its scope via Touch ID (`heima-scope-set --webauthn`).
+- **Wire (Phase 2)** — `agentkeys wire <runtime>` installs the three IAM-guarantee hooks (`pre_tool_call`→check, `post_tool_call`→audit, `pre_llm_call`→memory-inject) into the runtime config; the LLM cannot bypass them. Idempotent; drift-detectable via `--check-only`.
+- **The three acts** — Permissioned Memory, Deterministic Denial (fails closed), Auto-audit; plus the memory-aware "surprise" (deterministically backed by `hermes hooks test pre_llm_call`, not a chat reply).
+- **Live dashboard** — audit feed tagged by hook; guarantee-health panel (wired? fail-closed armed? last block?); scope/revoke/**unwire** (Act 3 online revocation, live here).
+- **On-demand isolation health check** (preserved) — the 16-step v2-stage3 proof against the operator's real cloud.
+
+> The prior "agent bootstrap: this-device / remote-sandbox / vendor-hardware (paste-a-pair-code)" design is **superseded** by the wire flow above. The proxy fallback for hooks-less hosts (xiaozhi-server, mobile SDKs) is arch.md §22d.3 / Phase 3b.
+
+### Act 2 — second master · still applies (in [`stage2-second-master.md`](stage2-second-master.md))
+
+Unchanged by #141 — the companion-master + recovery-quorum flow is orthogonal to the agent wire flow.
 
 ### Open questions still pending review
 
