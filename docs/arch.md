@@ -1398,14 +1398,15 @@ S3 bucket names are **globally unique across AWS**. Each operator account picks 
 
 ### 17.5 Per-data-class cap-token binding (issue #90)
 
-The cap-token carries a signed `data_class: Credentials | Memory` field. The broker mints four endpoints, one per (data-class, op-type) pair:
+The cap-token carries a signed `data_class: Credentials | Memory | Audit` field. The broker mints one cap endpoint per (data-class, op-type) pair:
 
 | Endpoint | Mints CapPayload |
 |---|---|
-| `POST /v1/cap/cred-store` | `op: Store, data_class: Credentials` |
-| `POST /v1/cap/cred-fetch` | `op: Fetch, data_class: Credentials` |
-| `POST /v1/cap/memory-put` | `op: Store, data_class: Memory` |
-| `POST /v1/cap/memory-get` | `op: Fetch, data_class: Memory` |
+| `POST /v1/cap/cred-store` | `{ op: Store, data_class: Credentials, ... }` |
+| `POST /v1/cap/cred-fetch` | `{ op: Fetch, data_class: Credentials, ... }` |
+| `POST /v1/cap/memory-put` | `{ op: Store, data_class: Memory, ... }` |
+| `POST /v1/cap/memory-get` | `{ op: Fetch, data_class: Memory, ... }` |
+| `POST /v1/cap/audit-append` | `{ op: Append, data_class: Audit, ... }` |
 
 Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 403 `cap_data_class_mismatch`. This is the cap-layer isolation gate — symmetric with the AWS IAM cross-bucket gate (§17.2) but enforced at the broker-signed capability layer, **before** the worker touches AWS at all.
 
