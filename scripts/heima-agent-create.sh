@@ -34,6 +34,14 @@ LABEL=""
 FUND_HEI="0.05"
 DRY_RUN=0
 REGISTRY=""
+# §10.2 interim (issue #144): when these are supplied — by the harness Phase P,
+# from the in-sandbox `agentkeys agent device-session` — register the
+# SANDBOX-generated device instead of generating a key here. This keeps the
+# agent's private key OFF the master (the master only sees the pubkey + pop_sig).
+FROM_AGENT_ADDR=""
+FROM_ACTOR_OMNI=""
+FROM_DEVICE_KEY_HASH=""
+FROM_POP_SIG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,6 +52,14 @@ while [ $# -gt 0 ]; do
     --registry-address)   [ $# -lt 2 ] && { echo "--registry-address requires a value" >&2; exit 1; }; REGISTRY="$2"; shift 2 ;;
     --registry-address=*) REGISTRY="${1#*=}"; shift ;;
     --dry-run)            DRY_RUN=1; shift ;;
+    --agent-address)      [ $# -lt 2 ] && { echo "--agent-address requires a value" >&2; exit 1; }; FROM_AGENT_ADDR="$2"; shift 2 ;;
+    --agent-address=*)    FROM_AGENT_ADDR="${1#*=}"; shift ;;
+    --actor-omni)         [ $# -lt 2 ] && { echo "--actor-omni requires a value" >&2; exit 1; }; FROM_ACTOR_OMNI="$2"; shift 2 ;;
+    --actor-omni=*)       FROM_ACTOR_OMNI="${1#*=}"; shift ;;
+    --device-key-hash)    [ $# -lt 2 ] && { echo "--device-key-hash requires a value" >&2; exit 1; }; FROM_DEVICE_KEY_HASH="$2"; shift 2 ;;
+    --device-key-hash=*)  FROM_DEVICE_KEY_HASH="${1#*=}"; shift ;;
+    --pop-sig)            [ $# -lt 2 ] && { echo "--pop-sig requires a value" >&2; exit 1; }; FROM_POP_SIG="$2"; shift 2 ;;
+    --pop-sig=*)          FROM_POP_SIG="${1#*=}"; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
     *) echo "unknown flag: $1 (try --help)" >&2; exit 1 ;;
@@ -105,42 +121,69 @@ MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
 
 OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
 
-# Generate or reuse agent wallet. Persisted at ~/.agentkeys/agents/<label>.json
-AGENT_DIR="$HOME/.agentkeys/agents"
-AGENT_FILE="$AGENT_DIR/${LABEL}.json"
-mkdir -p "$AGENT_DIR"
-chmod 700 "$AGENT_DIR" 2>/dev/null || true
-
-if [ -f "$AGENT_FILE" ]; then
-  AGENT_ADDR=$(jq -r .agent_address "$AGENT_FILE")
-  AGENT_KEY=$(jq -r .agent_private_key "$AGENT_FILE")
-  ok "reusing existing agent wallet from $AGENT_FILE → $AGENT_ADDR"
-else
-  log "Generating fresh agent wallet for label '$LABEL' …"
-  WALLET_JSON=$(cast wallet new --json | jq -r '.[0]')
-  AGENT_ADDR=$(echo "$WALLET_JSON" | jq -r .address)
-  AGENT_KEY=$(echo "$WALLET_JSON" | jq -r .private_key)
-  (umask 077 && jq -n \
-    --arg label "$LABEL" \
-    --arg addr  "$AGENT_ADDR" \
-    --arg key   "$AGENT_KEY" \
-    --arg chain "$AGENTKEYS_CHAIN" \
-    --arg ts    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{label:$label, agent_address:$addr, agent_private_key:$key, chain:$chain, created_at:$ts}' \
-    > "$AGENT_FILE")
+AGENT_KEY=""
+if [ -n "$FROM_AGENT_ADDR" ]; then
+  # §10.2 interim (issue #144): the agent key was generated IN THE SANDBOX by
+  # `agentkeys agent device-session`. The master never sees the private key —
+  # so NO keygen, NO agent-file write, NO funding (the agent never sends a tx;
+  # the master submits registerAgentDevice below). We only register the pubkey.
+  [ -n "$FROM_ACTOR_OMNI" ] && [ -n "$FROM_DEVICE_KEY_HASH" ] && [ -n "$FROM_POP_SIG" ] \
+    || die "--agent-address requires --actor-omni, --device-key-hash and --pop-sig"
+  AGENT_ADDR="$FROM_AGENT_ADDR"
+  AGENT_ADDR_LC=$(printf '%s' "$AGENT_ADDR" | tr '[:upper:]' '[:lower:]')
+  ACTOR_OMNI=$(printf '%s' "$FROM_ACTOR_OMNI" | sed 's/^0x//')
+  DEVICE_KEY_HASH=$(printf '%s' "$FROM_DEVICE_KEY_HASH" | tr '[:upper:]' '[:lower:]')
+  # Key-LESS metadata record so heima-scope-set.sh can resolve the actor by
+  # label. The agent's PRIVATE KEY stays in the sandbox and is NEVER written here
+  # (that is the whole point of the §10.2 fix). The post-register block below
+  # then adds actor_omni / operator_omni / device_key_hash / tx_hash.
+  AGENT_DIR="$HOME/.agentkeys/agents"
+  AGENT_FILE="$AGENT_DIR/${LABEL}.json"
+  mkdir -p "$AGENT_DIR"; chmod 700 "$AGENT_DIR" 2>/dev/null || true
+  (umask 077 && jq -n --arg label "$LABEL" --arg addr "$AGENT_ADDR" \
+     --arg chain "$AGENTKEYS_CHAIN" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+     '{label:$label, agent_address:$addr, chain:$chain, created_at:$ts, key_custody:"sandbox-only (§10.2 interim #144)"}' \
+     > "$AGENT_FILE")
   chmod 600 "$AGENT_FILE"
-  ok "created $AGENT_FILE (0600) — address $AGENT_ADDR"
+  ok "from-pubkey: registering SANDBOX-generated device $AGENT_ADDR (key never on master; metadata-only file)"
+else
+  # Generate or reuse agent wallet. Persisted at ~/.agentkeys/agents/<label>.json
+  AGENT_DIR="$HOME/.agentkeys/agents"
+  AGENT_FILE="$AGENT_DIR/${LABEL}.json"
+  mkdir -p "$AGENT_DIR"
+  chmod 700 "$AGENT_DIR" 2>/dev/null || true
+
+  if [ -f "$AGENT_FILE" ]; then
+    AGENT_ADDR=$(jq -r .agent_address "$AGENT_FILE")
+    AGENT_KEY=$(jq -r .agent_private_key "$AGENT_FILE")
+    ok "reusing existing agent wallet from $AGENT_FILE → $AGENT_ADDR"
+  else
+    log "Generating fresh agent wallet for label '$LABEL' …"
+    WALLET_JSON=$(cast wallet new --json | jq -r '.[0]')
+    AGENT_ADDR=$(echo "$WALLET_JSON" | jq -r .address)
+    AGENT_KEY=$(echo "$WALLET_JSON" | jq -r .private_key)
+    (umask 077 && jq -n \
+      --arg label "$LABEL" \
+      --arg addr  "$AGENT_ADDR" \
+      --arg key   "$AGENT_KEY" \
+      --arg chain "$AGENTKEYS_CHAIN" \
+      --arg ts    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{label:$label, agent_address:$addr, agent_private_key:$key, chain:$chain, created_at:$ts}' \
+      > "$AGENT_FILE")
+    chmod 600 "$AGENT_FILE"
+    ok "created $AGENT_FILE (0600) — address $AGENT_ADDR"
+  fi
+  AGENT_ADDR_LC=$(printf '%s' "$AGENT_ADDR" | tr '[:upper:]' '[:lower:]')
+  ACTOR_OMNI=$(printf 'agentkeysevm%s' "$AGENT_ADDR_LC" | shasum -a 256 | awk '{print $1}')
+
+  # Auto-fund the agent wallet (idempotent — skips if already funded).
+  log "Funding agent wallet from operator master (idempotent) …"
+  bash "$REPO_ROOT/scripts/heima-fund-account.sh" --to "$AGENT_ADDR" --amount-hei "$FUND_HEI" >/dev/null \
+    || die "funding agent wallet failed"
+  ok "agent wallet funded (or already had ≥ $FUND_HEI HEI)"
+
+  DEVICE_KEY_HASH=$(cast keccak "$AGENT_ADDR_LC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
 fi
-AGENT_ADDR_LC=$(printf '%s' "$AGENT_ADDR" | tr '[:upper:]' '[:lower:]')
-ACTOR_OMNI=$(printf 'agentkeysevm%s' "$AGENT_ADDR_LC" | shasum -a 256 | awk '{print $1}')
-
-# Auto-fund the agent wallet (idempotent — skips if already funded).
-log "Funding agent wallet from operator master (idempotent) …"
-bash "$REPO_ROOT/scripts/heima-fund-account.sh" --to "$AGENT_ADDR" --amount-hei "$FUND_HEI" >/dev/null \
-  || die "funding agent wallet failed"
-ok "agent wallet funded (or already had ≥ $FUND_HEI HEI)"
-
-DEVICE_KEY_HASH=$(cast keccak "$AGENT_ADDR_LC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
 
 log "Inputs"
 echo "    AGENTKEYS_CHAIN  = $AGENTKEYS_CHAIN (chain_id $LIVE_CHAIN_ID)" >&2
@@ -166,10 +209,16 @@ if [ "$IS_ACTIVE" = "true" ]; then
 fi
 ok "agent device not yet active → proceeding"
 
-# Build the agentPopSig: agent_wallet signs keccak("agentkeys-agent-pop:" || device_key_hash).
-# This is the proof-of-possession: only the holder of agent_private_key can produce this sig.
-POP_PAYLOAD_HEX=$(cast keccak "agentkeys-agent-pop:${DEVICE_KEY_HASH}")
-AGENT_POP_SIG=$(cast wallet sign --private-key "$AGENT_KEY" "$POP_PAYLOAD_HEX")
+# agentPopSig: agent_wallet signs keccak("agentkeys-agent-pop:" || device_key_hash) —
+# proof that the holder of the agent key consents to this device binding.
+if [ -n "$FROM_AGENT_ADDR" ]; then
+  # from-pubkey: the pop_sig was produced IN THE SANDBOX over the same payload
+  # (agentkeys agent device-session). The master never had the key.
+  AGENT_POP_SIG="$FROM_POP_SIG"
+else
+  POP_PAYLOAD_HEX=$(cast keccak "agentkeys-agent-pop:${DEVICE_KEY_HASH}")
+  AGENT_POP_SIG=$(cast wallet sign --private-key "$AGENT_KEY" "$POP_PAYLOAD_HEX")
+fi
 # Random 32-byte link-code-redemption blob (stub for §10.2 ceremony).
 LINK_CODE_REDEMPTION="0x$(openssl rand -hex 32)"
 
