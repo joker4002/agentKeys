@@ -837,12 +837,17 @@ EOSH
     die "aws ssm send-command failed — does $INSTANCE_ID have amazon-ssm-agent + the SSM instance profile? Detail: $_err"
   fi
   rm -f "$_send_err"
-  ok "SSM command $cmd_id queued on $INSTANCE_ID; polling for completion (max 10 min)"
+  ok "SSM command $cmd_id queued on $INSTANCE_ID; polling for completion (up to 25 min)"
 
-  # Poll every 10s for up to 10 min. setup-mcp-host.sh is normally <3 min;
-  # first-time runs with cargo install may take longer.
-  local status="Pending"
-  for i in $(seq 1 60); do
+  # Poll every 10s for up to 25 min. setup-mcp-host.sh runs `cargo install --git`
+  # to build agentkeys-mcp-server FROM SOURCE; a COLD build on a t3.medium can
+  # take 10–20 min. The old 10-min cap timed out mid-build, and the silent poll
+  # (no per-iteration output) looked like a hang. Heartbeat ~every 30s so it's
+  # visibly alive, and on a genuine timeout the build is usually still running on
+  # the broker (not a failure) — re-running --from-step 15 resumes polling and
+  # the cargo cache makes that build finish fast.
+  local status="Pending" last=""
+  for i in $(seq 1 150); do
     sleep 10
     status=$(aws ssm get-command-invocation \
       --region "$REGION" \
@@ -864,10 +869,19 @@ EOSH
           --region "$REGION" --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
           --query "StandardErrorContent" --output text 2>/dev/null \
           | tail -50 | sed 's/^/      /' >&2 || true
-        die "MCP bring-up failed; see SSM command $cmd_id in CloudWatch" ;;
+        die "MCP bring-up failed; inspect: aws ssm get-command-invocation --region $REGION --command-id $cmd_id --instance-id $INSTANCE_ID --query StandardErrorContent --output text" ;;
     esac
+    # Heartbeat on the first tick, on any status change, and ~every 30s, so a long
+    # cold cargo build is visibly alive rather than looking hung.
+    if [ "$status" != "$last" ] || [ $(( i % 3 )) -eq 1 ]; then
+      printf "    … MCP bring-up running: status=%s, ~%ds elapsed (cold cargo build ~10–20 min)\n" "$status" "$(( i * 10 ))" >&2
+      last="$status"
+    fi
   done
-  die "MCP bring-up timed out after 10 min (status=$status); check SSM command $cmd_id"
+  die "MCP bring-up still '$status' after 25 min — the cargo build is most likely STILL RUNNING on the broker (not a failure). Re-run to resume polling (idempotent; the cargo cache makes the build finish fast):
+     bash scripts/setup-cloud.sh --from-step 15$([ "$TEST_MODE" = "1" ] && echo " --test" || echo "")
+   Or watch it directly:
+     aws ssm get-command-invocation --region $REGION --command-id $cmd_id --instance-id $INSTANCE_ID --query Status --output text"
 }
 
 do_step_16() {
