@@ -25,6 +25,26 @@ This is deliberately the *lowest-divergence* path: every real call already exist
 
 ---
 
+## 0.5 Host-model decision (phone-first) — READ FIRST
+
+The seam in §1 below is written **desktop-first**: "browser → `localhost:3114` daemon." That is a dead end for the product's actual future — **most users will have only a phone, no desktop**, and a phone has no localhost daemon to talk to. So the orchestration logic cannot *live in* a local daemon; the client itself must carry it.
+
+**Decision.** Factor the master-plane orchestration (the §9/§10.2 ceremonies, the broker client, cap handling, chain-tx construction) into **one portable Rust core** (extend the existing `agentkeys-core`, which already holds `init_flow`), hosted three ways behind the **same `lib/client` `AgentKeysClient` interface**:
+
+| Host | Shell | Liveness | Chain-signing key custody |
+|---|---|---|---|
+| desktop / server | the daemon binary (§1 below) | long-running process | OS keychain |
+| **mobile (primary future)** | native app embedding the core (Rust→UniFFI) | **push-woken, on-demand** | Keychain w/ biometric ACL (secp256k1 *cannot* be SE-sealed — see §11) |
+| web | the core compiled to **WASM** | active-tab only | **cannot custody the key safely → delegates broadcast** (see §11/§12) |
+
+Consequences that make this the efficient *and* consistent choice:
+- **Consistency is structural** — one Rust crate, so web/mobile/desktop can't drift. Do **not** reimplement ceremony logic in TypeScript; TS stays a dumb UI/transport layer over the core.
+- **The daemon is demoted to "one host," not a requirement.** The always-on daemon requirement belongs to the *agent-side* daemon (gates the runtime, fails closed) — a different process that never runs on the operator's phone. The master plane is **event-driven + biometric-gated**: it only acts on a request + a Touch ID, so it never needs to *run* in the background — only to be *woken* (push), which is native.
+- **The broker is the only always-on component**, and it already is.
+- **§1–§6 below remain valid for the desktop host.** The endpoint contract (`data-model.md`) is unchanged; only *where the core runs* and *how chain writes are signed* differ per host. The phone-first amendments are §11 (the verified gating decision) and §12 (the WASM lift scope).
+
+---
+
 ## 1. The seam (who calls whom)
 
 ```
@@ -231,4 +251,54 @@ Existing daemon ui-bridge Rust unit tests stay; add tests against a mock broker 
 - Second-master pairing, recovery quorum, isolation health-check, email worker → already specced (`data-model.md:265-346`), Phase 3+.
 - Chain genesis / broker-host / cloud bucket provisioning → stay shell-only (`deferred-and-followups.md:5-17`); the UI may *trigger* `cloud/provision` (W-future) but never reimplements them.
 - A native Rust chain client (see §9).
-```
+
+---
+
+## 11. Gating decision (verified)
+
+**Question:** do master-authority chain writes authorize on `msg.sender` (the device must hold a secp256k1 key) or on the embedded K11 (P-256) assertion (a relayer could broadcast → device can be key-free)?
+
+**Read of the contracts (`crates/agentkeys-chain/src/`):**
+
+| Write | Auth check | File:line |
+|---|---|---|
+| `SidecarRegistry.registerFirstMasterDevice` | `operatorMasterWallet[operatorOmni] = msg.sender` — **the tx sender BECOMES the master** (bootstrap binding) | `SidecarRegistry.sol:123` |
+| `SidecarRegistry.registerAgentDevice` | `if (msg.sender != master) revert` (no K11 — agent k11=0) | `SidecarRegistry.sol:216` |
+| `SidecarRegistry.registerMasterDevice` (add a device) | `msg.sender != master` **AND** `_verifyAndConsumeK11` | `:165` + `:177` |
+| `SidecarRegistry.revokeAgentDevice` | `msg.sender != master` | `:248` |
+| `SidecarRegistry.revokeMasterDevice` | M-of-N K11 assertions (`recoveryThreshold`) | `:254+` |
+| `AgentKeysScope.setScopeWithWebauthn` | `msg.sender != master` **AND** `_verifyK11` | `AgentKeysScope.sol:109` + `:127` |
+
+**Verdict: every master write is `msg.sender`-bound to the operator's secp256k1 EVM address.** The K11 P-256 assertion is an *additional* gate on the sensitive ops (scope, master-device add/revoke) — never a substitute for the sender. Bootstrap literally records `master = msg.sender`.
+
+**Implications for phone-first:**
+- **No relayer / key-free path under current contracts** — a relayer's `msg.sender ≠ master` → revert.
+- **Phone-as-master must hold the secp256k1 key in the Keychain** (biometric-gated access control, *software*). It **cannot** be Secure-Enclave / StrongBox-sealed: those are **P-256 only**; EVM is secp256k1. The K11 passkey (P-256) *is* SE-sealed and stays the hardware-backed gate — but it's an add-on, not the sender.
+- **Browser / WASM cannot be a standalone master** — it can't safely custody the secp256k1 sender key. A WASM master can read, call the broker, and produce K11 assertions, but the on-chain broadcast must be **delegated to a key-holding host** (the user's phone or a desktop daemon).
+
+**The fork (decide before the mobile build):**
+- **(A) Keep `msg.sender`-bound.** Phone = full master (Keychain secp256k1 key + SE-sealed K11 passkey). Web = read / manage / authorize, delegates broadcast. **No contract change.** Simplest; web is a secondary surface.
+- **(B) Move contracts to assertion-only auth** — drop `msg.sender == master`, authorize purely on the on-chain-verified K11 assertion; a relayer pays gas + broadcasts. Then the phone needs **no secp256k1 key** (SE passkey alone) and the browser/WASM becomes a full master. Bigger: contract redesign + security review (the `operatorMasterWallet[operatorOmni] = msg.sender` bootstrap binding is load-bearing today), but it's the lever for true key-free / web / gas-sponsored masters.
+
+**Recommendation:** ship **(A)** for the phone-first MVP — the phone holds the key, no contract work — and open an issue to evaluate **(B)** if/when a no-key web master or a gas-sponsored relayer becomes a requirement.
+
+---
+
+## 12. WASM lift scope
+
+The portable core (§0.5) compiles to WASM for the web host. **In scope:** the master-plane orchestration — broker calls, ceremony state machines, cap handling, onboarding-state aggregation. **Out of scope:** chain submission (delegated per §11) and any secp256k1 key custody (the browser can't do it safely).
+
+**Concretely:**
+- **`agentkeys-core` carve-out (X0, prerequisite):** lift the master-plane functions into `agentkeys-core` with a host-agnostic API (no `axum` / daemon deps), so the daemon, WASM, and mobile-UniFFI shells all bind the same surface. `init_flow` already lives there — extend it with pairing + cap + onboarding-state.
+- **`wasm-bindgen` exports (X1):** email auth (`start`/`verify`/`status`), wallet SIWE (`start`/`verify`), pairing (`claim`/`pending`/`ack`), cap-mint, `onboarding/state` aggregation. Build a `pkg` via `wasm-pack`; smoke-test one call (email start) from a throwaway page.
+- **`CoreBackend` (X2):** a new `AgentKeysClient` implementation (next to `empty`/`daemon`) that calls the WASM exports instead of HTTP-to-daemon. `NEXT_PUBLIC_AGENTKEYS_BACKEND=core`. The existing UI works unchanged — same interface.
+- **WebAuthn interop (X3):** the core asks the JS host to run `navigator.credentials.{create,get}`; the assertion flows back into the core (K11 enroll + assert).
+- **Chain-write delegation (X4):** per the §11 fork — (A) web delegates broadcast to a paired phone / daemon; (B) relayer.
+
+**Constraints / risks:**
+- `reqwest` has a WASM target (browser `fetch`) → the **broker must allow CORS for the web origin** (`data-model.md:399` open question — prod origin `https://parent.{operator}.litentry.org`).
+- Async via `wasm-bindgen-futures`.
+- Bundle size: core + `reqwest` + crypto in WASM — measure, lazy-load the WASM chunk, tree-shake.
+- No `cast` / secp256k1 signing in WASM (§11) → chain writes always delegated from the browser.
+
+**Shared investment:** X0–X3 are the *same* core the future mobile UniFFI shell binds — not web-only spend. That is the consistency payoff: build the brain once, host it as WASM (web) now and as a native lib (mobile) later.

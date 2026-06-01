@@ -1981,6 +1981,8 @@ These aren't separate codebases — they're four configurations of the same MCP 
 
 The cryptographic plumbing is shipped; the UX is M3 per [#110](https://github.com/litentry/agentKeys/issues/110)'s phased roadmap.
 
+**Master control-plane host model (phone-first).** Most operators will have **only a phone**, no desktop — so the master control plane (pairing approval + management) cannot depend on a localhost daemon. The decision (full rationale + the verified on-chain gating constraint in [`docs/plan/web-flow/wire-real-paths.md`](plan/web-flow/wire-real-paths.md) §0.5 + §11): factor the orchestration into **one portable `agentkeys-core`** hosted three ways behind the same `lib/client` contract — **WASM** (web), a **native lib** (mobile, primary future, via UniFFI), and the **daemon binary** (desktop/agent). The master plane is event-driven + biometric-gated (push-woken, never always-on); the broker is the only always-on component. Key-custody is the dividing line: every master write is `msg.sender`-bound to the operator's secp256k1 key (`SidecarRegistry`/`AgentKeysScope`), which a phone holds in the Keychain (biometric ACL — secp256k1 can't be Secure-Enclave-sealed; SE is P-256-only, so it holds the K11 passkey) but a browser cannot safely custody — so a WASM master delegates the on-chain broadcast unless the contracts move to assertion-only auth.
+
 ### 22c.4 Vendor device pairing — child device → actor binding
 
 When a user buys a vendor AI device (xiaozhi MagicLick, Doubao smart speaker, future smart glasses), it needs to be bound to one of the user's actors (typically an `O_agent_*` child of the user's `O_master`). The pairing flow:
