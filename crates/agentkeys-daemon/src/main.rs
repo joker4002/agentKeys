@@ -38,12 +38,20 @@ struct Args {
     ui_bridge: bool,
 
     /// Bind address for ui-bridge mode. Default 127.0.0.1:3114.
-    #[arg(long, env = "AGENTKEYS_UI_BRIDGE_BIND", default_value = "127.0.0.1:3114")]
+    #[arg(
+        long,
+        env = "AGENTKEYS_UI_BRIDGE_BIND",
+        default_value = "127.0.0.1:3114"
+    )]
     ui_bridge_bind: String,
 
     /// Origin the web UI is served from (used for CORS + WebAuthn rpOrigin).
     /// Default http://localhost:3113.
-    #[arg(long, env = "AGENTKEYS_UI_BRIDGE_ORIGIN", default_value = "http://localhost:3113")]
+    #[arg(
+        long,
+        env = "AGENTKEYS_UI_BRIDGE_ORIGIN",
+        default_value = "http://localhost:3113"
+    )]
     ui_bridge_origin: String,
 
     /// WebAuthn Relying Party ID. Defaults to "localhost" for dev.

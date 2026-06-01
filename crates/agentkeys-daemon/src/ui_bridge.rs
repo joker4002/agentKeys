@@ -244,8 +244,18 @@ struct ErrorBody {
     reason: &'static str,
 }
 
-fn err(status: StatusCode, error: impl Into<String>, reason: &'static str) -> (StatusCode, Json<ErrorBody>) {
-    (status, Json(ErrorBody { error: error.into(), reason }))
+fn err(
+    status: StatusCode,
+    error: impl Into<String>,
+    reason: &'static str,
+) -> (StatusCode, Json<ErrorBody>) {
+    (
+        status,
+        Json(ErrorBody {
+            error: error.into(),
+            reason,
+        }),
+    )
 }
 
 /// Build the ui-bridge router with CORS open to the configured web-UI origin.
@@ -287,7 +297,11 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 /// Build the bridge state. `rp_id` is the WebAuthn relying-party id —
 /// always "localhost" for dev, "agentkeys.io" (or operator domain) in
 /// production. `rp_origin` is the browser's window.location.origin.
-pub fn build_state(rp_id: &str, rp_origin: &str, rp_name: &str) -> anyhow::Result<SharedUiBridgeState> {
+pub fn build_state(
+    rp_id: &str,
+    rp_origin: &str,
+    rp_name: &str,
+) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
     let webauthn = builder.build()?;
@@ -314,14 +328,24 @@ async fn enroll_begin(
     Json(req): Json<EnrollBeginRequest>,
 ) -> Result<Json<EnrollBeginResponse>, (StatusCode, Json<ErrorBody>)> {
     if req.username.trim().is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "username required", "missing-username"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "username required",
+            "missing-username",
+        ));
     }
     let user_id = Uuid::new_v4();
     let user_id_str = user_id.to_string();
     let (ccr, reg_state) = state
         .webauthn
         .start_passkey_registration(user_id, &req.username, &req.display_name, None)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("webauthn start failed: {e}"), "webauthn-start-failed"))?;
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("webauthn start failed: {e}"),
+                "webauthn-start-failed",
+            )
+        })?;
 
     let mut guard = state.enroll.write().await;
     guard.pending.insert(user_id_str.clone(), reg_state);
@@ -342,21 +366,36 @@ async fn enroll_finish(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<EnrollFinishRequest>,
 ) -> Result<Json<EnrollFinishResponse>, (StatusCode, Json<ErrorBody>)> {
-    let reg = serde_json::from_value::<RegisterPublicKeyCredential>(req.credential)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("malformed credential: {e}"), "credential-malformed"))?;
+    let reg =
+        serde_json::from_value::<RegisterPublicKeyCredential>(req.credential).map_err(|e| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("malformed credential: {e}"),
+                "credential-malformed",
+            )
+        })?;
 
     let reg_state = {
         let mut guard = state.enroll.write().await;
-        guard
-            .pending
-            .remove(&req.user_id)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "no pending enrollment for this user_id", "no-pending"))?
+        guard.pending.remove(&req.user_id).ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "no pending enrollment for this user_id",
+                "no-pending",
+            )
+        })?
     };
 
     let passkey = state
         .webauthn
         .finish_passkey_registration(&reg, &reg_state)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("attestation rejected: {e}"), "attestation-rejected"))?;
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("attestation rejected: {e}"),
+                "attestation-rejected",
+            )
+        })?;
 
     let credential_id_b64 = base64url_encode(passkey.cred_id().as_ref());
     let registered_at_unix = SystemTime::now()
@@ -459,7 +498,13 @@ async fn update_scope(
         .get_mut(&id)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
     let scope = actor.scope.get_or_insert_with(HashMap::new);
-    scope.insert(req.namespace.clone(), ApiScopeBits { read: req.read, write: req.write });
+    scope.insert(
+        req.namespace.clone(),
+        ApiScopeBits {
+            read: req.read,
+            write: req.write,
+        },
+    );
     let snapshot = actor.clone();
     drop(guard);
 
@@ -469,7 +514,10 @@ async fn update_scope(
         actor_id: "master".into(),
         actor: "master".into(),
         kind: "scope.updated".into(),
-        detail: format!("{} · {} · read={} write={}", id, req.namespace, req.read, req.write),
+        detail: format!(
+            "{} · {} · read={} write={}",
+            id, req.namespace, req.read, req.write
+        ),
         chip: "broker".into(),
         sev: "ok".into(),
     };
@@ -548,7 +596,12 @@ async fn revoke_device(
         actor_id: "master".into(),
         actor: "master".into(),
         kind: "device.revoked".into(),
-        detail: format!("{} · intent='{}' · fields={}", id, req.intent_text, req.intent_fields.len()),
+        detail: format!(
+            "{} · intent='{}' · fields={}",
+            id,
+            req.intent_text,
+            req.intent_fields.len()
+        ),
         chip: "revoke".into(),
         sev: "bad".into(),
     };
@@ -570,7 +623,11 @@ async fn revoke_cap(
     {
         let actors = state.actors.read().await;
         if !actors.contains_key(&id) {
-            return Err(err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"));
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "no such actor",
+                "actor-not-found",
+            ));
         }
     }
     let mut caps_guard = state.caps.write().await;
@@ -713,7 +770,11 @@ async fn dev_seed(
     if !req.master_memory.is_empty() {
         let mut mem = state.master_memory.write().await;
         for mut e in req.master_memory {
-            let hash = if e.content_hash.is_empty() { e.compute_hash() } else { e.content_hash.clone() };
+            let hash = if e.content_hash.is_empty() {
+                e.compute_hash()
+            } else {
+                e.content_hash.clone()
+            };
             e.content_hash = hash.clone();
             mem.insert(hash, e);
         }
@@ -766,7 +827,11 @@ async fn plant_master_memory(
     {
         let mut mem = state.master_memory.write().await;
         for mut e in req.entries {
-            let hash = if e.content_hash.is_empty() { e.compute_hash() } else { e.content_hash.clone() };
+            let hash = if e.content_hash.is_empty() {
+                e.compute_hash()
+            } else {
+                e.content_hash.clone()
+            };
             e.content_hash = hash.clone();
             if mem.contains_key(&hash) {
                 skipped += 1;
@@ -790,7 +855,11 @@ async fn plant_master_memory(
         };
         push_audit(&state, evt).await;
     }
-    Json(PlantResponse { planted, skipped, total })
+    Json(PlantResponse {
+        planted,
+        skipped,
+        total,
+    })
 }
 
 async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
@@ -850,7 +919,10 @@ mod tests {
         );
 
         let guard = state.enroll.read().await;
-        assert!(guard.pending.contains_key(&resp.0.user_id), "pending registration must be stored");
+        assert!(
+            guard.pending.contains_key(&resp.0.user_id),
+            "pending registration must be stored"
+        );
     }
 
     #[tokio::test]
@@ -866,7 +938,7 @@ mod tests {
         .await
         .expect_err("empty username must be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1.0.reason, "missing-username");
+        assert_eq!(err.1 .0.reason, "missing-username");
     }
 
     #[tokio::test]
@@ -890,7 +962,7 @@ mod tests {
         .await
         .expect_err("unknown user_id must be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1.0.reason, "no-pending");
+        assert_eq!(err.1 .0.reason, "no-pending");
     }
 
     #[tokio::test]
@@ -906,7 +978,7 @@ mod tests {
         .await
         .expect_err("malformed credential must be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1.0.reason, "credential-malformed");
+        assert_eq!(err.1 .0.reason, "credential-malformed");
     }
 
     #[tokio::test]
@@ -993,7 +1065,7 @@ mod tests {
         )
         .await
         .expect_err("third finish must fail no-pending after consume");
-        assert_eq!(err.1.0.reason, "no-pending");
+        assert_eq!(err.1 .0.reason, "no-pending");
     }
 
     #[tokio::test]
@@ -1051,7 +1123,11 @@ mod tests {
             time_window: None,
             services: None,
         };
-        state.actors.write().await.insert(actor.id.clone(), actor.clone());
+        state
+            .actors
+            .write()
+            .await
+            .insert(actor.id.clone(), actor.clone());
         actor
     }
 
@@ -1127,14 +1203,16 @@ mod tests {
             .await
             .expect_err("must 404");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
-        assert_eq!(err.1.0.reason, "actor-not-found");
+        assert_eq!(err.1 .0.reason, "actor-not-found");
     }
 
     #[tokio::test]
     async fn get_actor_known_returns_payload() {
         let state = make_state();
         seed_actor_async(&state).await;
-        let resp = get_actor(State(state), Path("agent-folotoy".into())).await.unwrap();
+        let resp = get_actor(State(state), Path("agent-folotoy".into()))
+            .await
+            .unwrap();
         assert_eq!(resp.0.label, "FoloToy bear");
     }
 
@@ -1186,7 +1264,10 @@ mod tests {
         let resp = update_payment_cap(
             State(state.clone()),
             Path("agent-folotoy".into()),
-            Json(UpdatePaymentCapRequest { per_tx: 5.0, daily: 25.0 }),
+            Json(UpdatePaymentCapRequest {
+                per_tx: 5.0,
+                daily: 25.0,
+            }),
         )
         .await
         .unwrap();
@@ -1359,7 +1440,13 @@ mod tests {
         ];
 
         // First plant: both land.
-        let r1 = plant_master_memory(State(state.clone()), Json(PlantRequest { entries: entries.clone() })).await;
+        let r1 = plant_master_memory(
+            State(state.clone()),
+            Json(PlantRequest {
+                entries: entries.clone(),
+            }),
+        )
+        .await;
         assert_eq!(r1.0.planted, 2);
         assert_eq!(r1.0.skipped, 0);
         assert_eq!(r1.0.total, 2);
@@ -1370,18 +1457,39 @@ mod tests {
         assert_eq!(r2.0.planted, 0);
         assert_eq!(r2.0.skipped, 2);
         assert_eq!(r2.0.total, 2);
-        assert_eq!(state.master_memory.read().await.len(), 2, "re-plant must not duplicate");
+        assert_eq!(
+            state.master_memory.read().await.len(),
+            2,
+            "re-plant must not duplicate"
+        );
 
         // Plant emits a memory.write audit row (only when something was planted).
-        assert!(state.audit.read().await.iter().any(|e| e.kind == "memory.write"));
+        assert!(state
+            .audit
+            .read()
+            .await
+            .iter()
+            .any(|e| e.kind == "memory.write"));
     }
 
     #[tokio::test]
     async fn plant_changed_body_adds_a_new_entry() {
         let state = make_state();
-        let _ = plant_master_memory(State(state.clone()), Json(PlantRequest { entries: vec![mem_entry("personal", "profile", "v1 body")] })).await;
+        let _ = plant_master_memory(
+            State(state.clone()),
+            Json(PlantRequest {
+                entries: vec![mem_entry("personal", "profile", "v1 body")],
+            }),
+        )
+        .await;
         // Same ns/key but DIFFERENT body → different content_hash → a new entry.
-        let r = plant_master_memory(State(state.clone()), Json(PlantRequest { entries: vec![mem_entry("personal", "profile", "v2 body")] })).await;
+        let r = plant_master_memory(
+            State(state.clone()),
+            Json(PlantRequest {
+                entries: vec![mem_entry("personal", "profile", "v2 body")],
+            }),
+        )
+        .await;
         assert_eq!(r.0.planted, 1);
         assert_eq!(state.master_memory.read().await.len(), 2);
     }
@@ -1400,7 +1508,7 @@ mod tests {
             .await
             .expect_err("must 404");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
-        assert_eq!(err.1.0.reason, "worker-not-found");
+        assert_eq!(err.1 .0.reason, "worker-not-found");
     }
 
     #[tokio::test]
@@ -1420,7 +1528,11 @@ mod tests {
             push_audit(&state, evt).await;
         }
         let buf = state.audit.read().await;
-        assert_eq!(buf.len(), AUDIT_BUFFER_CAP, "ring buffer must cap at AUDIT_BUFFER_CAP");
+        assert_eq!(
+            buf.len(),
+            AUDIT_BUFFER_CAP,
+            "ring buffer must cap at AUDIT_BUFFER_CAP"
+        );
     }
 
     #[tokio::test]
