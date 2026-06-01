@@ -1,0 +1,122 @@
+{
+  "_comment": "蜀汉群英 — the user's lieutenants. NOT bound to tiles; they ride the council bar across the top of the dashboard. Each character maps to a cross-cutting workflow.",
+  "characters": [
+    {
+      "id": "zhugeliang",
+      "name": "诸葛亮",
+      "pinyin": "Zhūgě Liàng",
+      "title": "丞相",
+      "role": "Docs Entry",
+      "tagline": "运筹帷幄，决胜千里",
+      "color": "#3F8C5C",
+      "ink": "#1B4A2D",
+      "domain": "Documentation index — docs/arch.md (single source of truth) + spec/ plan/ research/ wiki/ archived/",
+      "endpoint": "/api/docs",
+      "trigger": "open documentation tree"
+    },
+    {
+      "id": "liubei",
+      "name": "刘备",
+      "pinyin": "Liú Bèi",
+      "title": "汉昭烈帝",
+      "role": ".claude Plans",
+      "tagline": "弘毅宽厚，知人待士",
+      "color": "#7B5FB8",
+      "ink": "#3E2E66",
+      "domain": "All ~/.claude/plans/*.md and project .claude/plans/",
+      "endpoint": "/api/claude-plans",
+      "trigger": "browse .claude/plans (global + project)"
+    },
+    {
+      "id": "zhangfei",
+      "name": "张飞",
+      "pinyin": "Zhāng Fēi",
+      "title": "右将军",
+      "role": "Shell Scripts",
+      "tagline": "豹头环眼，雷霆万钧",
+      "color": "#7A2E1E",
+      "ink": "#3A1308",
+      "domain": "./scripts/ shell ceremonies — setup, heima-*, stage-*, provision-*, deploy",
+      "endpoint": "/api/scripts",
+      "trigger": "browse repo scripts"
+    },
+    {
+      "id": "guanyu",
+      "name": "关羽",
+      "pinyin": "Guān Yǔ",
+      "title": "前将军",
+      "role": "Env · Shell · AWS",
+      "tagline": "义薄云天，丹心如铁",
+      "color": "#B83A3A",
+      "ink": "#5A1818",
+      "domain": "~/.zshenv, ~/.zshrc, ~/.aws, env vars, project CLAUDE.md",
+      "endpoint": "/api/env-settings",
+      "trigger": "shell + env config audit"
+    },
+    {
+      "id": "zhaoyun",
+      "name": "赵云",
+      "pinyin": "Zhào Yún",
+      "title": "虎威将军",
+      "role": "Test Summary",
+      "tagline": "一身是胆，守土护民",
+      "color": "#3A7BC8",
+      "ink": "#1F3F5F",
+      "domain": "Test orchestration, coverage, last-run status",
+      "endpoint": "/api/tests",
+      "trigger": "cargo test / vitest"
+    },
+    {
+      "id": "machao",
+      "name": "马超",
+      "pinyin": "Mǎ Chāo",
+      "title": "骠骑将军",
+      "role": "GitHub Issues & PRs",
+      "tagline": "锦马超腾，西凉铁骑",
+      "color": "#C45B3F",
+      "ink": "#5C2818",
+      "domain": "Open PRs, issues, latest comments — battlefield intel",
+      "endpoint": "/api/gh",
+      "trigger": "gh pr list / gh issue list"
+    },
+    {
+      "id": "huangzhong",
+      "name": "黄忠",
+      "pinyin": "Huáng Zhōng",
+      "title": "后将军",
+      "role": "Cloud · Roles · Users",
+      "tagline": "老当益壮，弓不离手",
+      "color": "#A06A2C",
+      "ink": "#4A2E0F",
+      "domain": "Cloud settings, IAM roles, user accounts",
+      "endpoint": "/api/cloud-settings",
+      "trigger": "browse cloud config"
+    },
+    {
+      "id": "fazheng",
+      "name": "法正",
+      "pinyin": "Fǎ Zhèng",
+      "title": "尚书令",
+      "role": "jj Bookmarks",
+      "tagline": "奇谋务实，文章经世",
+      "color": "#C9842F",
+      "ink": "#5C3A0E",
+      "domain": "Jujutsu bookmarks + recent log graph",
+      "endpoint": "/api/jj",
+      "trigger": "jj log + jj bookmark list"
+    },
+    {
+      "id": "weiyan",
+      "name": "魏延",
+      "pinyin": "Wèi Yán",
+      "title": "镇北将军",
+      "role": "Eng Plans",
+      "tagline": "出奇制胜，险道独行",
+      "color": "#5B6E8C",
+      "ink": "#2D3F4A",
+      "domain": "Engineering plans — file-level diffs, refactors",
+      "endpoint": "/api/plans?kind=eng",
+      "trigger": "/plan-eng-review"
+    }
+  ]
+}

@@ -1,0 +1,181 @@
+{
+  "_comment": "Three Kingdoms regions (state/commandery). Each gets a unique ink/paper palette so the boardgame map stays legible. Ordered by suggested assignment priority for the agentkeys workspace.",
+  "regions": [
+    {
+      "id": "sili",
+      "name": "司隶",
+      "pinyin": "Sīlì",
+      "english": "Imperial Heartland",
+      "subtitle": "Capital province — everyone pays tribute",
+      "color": "#D9534F",
+      "colorSoft": "#F5C6A8",
+      "ink": "#7A2E1E",
+      "suggestedFor": ["agentkeys-types", "shared types/foundation crate"]
+    },
+    {
+      "id": "yan",
+      "name": "兖州",
+      "pinyin": "Yǎnzhōu",
+      "english": "Central Operations",
+      "subtitle": "Central plain — core operations",
+      "color": "#C9842F",
+      "colorSoft": "#F0D9A8",
+      "ink": "#5C3A0E",
+      "suggestedFor": ["agentkeys-core", "auth/session/HMAC core crate"]
+    },
+    {
+      "id": "yi",
+      "name": "益州",
+      "pinyin": "Yìzhōu",
+      "english": "Sichuan Stronghold",
+      "subtitle": "Mountain basin — long-lived stronghold",
+      "color": "#5B9E6E",
+      "colorSoft": "#C4DFCB",
+      "ink": "#2D5A3A",
+      "suggestedFor": ["agentkeys-daemon", "long-running daemons"]
+    },
+    {
+      "id": "jing",
+      "name": "荆州",
+      "pinyin": "Jīngzhōu",
+      "english": "Riverlands",
+      "subtitle": "Yangtze corridor — gateway crate",
+      "color": "#E8A33D",
+      "colorSoft": "#F5DDA8",
+      "ink": "#7A4A0E",
+      "suggestedFor": ["agentkeys-cli", "user-facing entry"]
+    },
+    {
+      "id": "yong",
+      "name": "雍州",
+      "pinyin": "Yōngzhōu",
+      "english": "Protocol Pass",
+      "subtitle": "Western corridor — protocol/IPC",
+      "color": "#7B5FB8",
+      "colorSoft": "#D6CCEA",
+      "ink": "#3E2E66",
+      "suggestedFor": ["agentkeys-mcp", "MCP/wire-protocol crate"]
+    },
+    {
+      "id": "yang",
+      "name": "扬州",
+      "pinyin": "Yángzhōu",
+      "english": "Outward Commerce",
+      "subtitle": "Eastern coast — external orchestration",
+      "color": "#3A7BC8",
+      "colorSoft": "#BFD3E5",
+      "ink": "#1F3F5F",
+      "suggestedFor": ["agentkeys-provisioner", "external/browser orchestrators"]
+    },
+    {
+      "id": "hanzhong",
+      "name": "汉中",
+      "pinyin": "Hànzhōng",
+      "english": "Strategic Pass",
+      "subtitle": "Mountain pass — bridging/broker",
+      "color": "#A06A2C",
+      "colorSoft": "#E0C9A0",
+      "ink": "#4A2E0F",
+      "suggestedFor": ["agentkeys-broker-server", "broker/proxy/auth-router"]
+    },
+    {
+      "id": "nanzhong",
+      "name": "南中",
+      "pinyin": "Nánzhōng",
+      "english": "Southern Frontier",
+      "subtitle": "Frontier — disposable / mock systems",
+      "color": "#8C6F8E",
+      "colorSoft": "#D8C9DA",
+      "ink": "#3F2D40",
+      "suggestedFor": ["agentkeys-mock-server", "test/mock backends, transient"]
+    },
+    {
+      "id": "yu",
+      "name": "豫州",
+      "pinyin": "Yùzhōu",
+      "english": "Heartland Reserve",
+      "subtitle": "Central plain — overflow region",
+      "color": "#6E8C5B",
+      "colorSoft": "#CFE0C4",
+      "ink": "#3A5A2D",
+      "suggestedFor": ["overflow"]
+    },
+    {
+      "id": "ji",
+      "name": "冀州",
+      "pinyin": "Jìzhōu",
+      "english": "Northern Plains",
+      "subtitle": "Yellow River north — overflow",
+      "color": "#3A3F8C",
+      "colorSoft": "#BCC0E0",
+      "ink": "#1B1E5A",
+      "suggestedFor": ["overflow"]
+    },
+    {
+      "id": "qing",
+      "name": "青州",
+      "pinyin": "Qīngzhōu",
+      "english": "Eastern Sea",
+      "subtitle": "Eastern peninsula — overflow",
+      "color": "#2EA39A",
+      "colorSoft": "#BEE0DC",
+      "ink": "#175A55",
+      "suggestedFor": ["overflow"]
+    },
+    {
+      "id": "xu",
+      "name": "徐州",
+      "pinyin": "Xúzhōu",
+      "english": "Salt Coast",
+      "subtitle": "Eastern lowlands — overflow",
+      "color": "#B83A3A",
+      "colorSoft": "#E5BFBF",
+      "ink": "#5A1818",
+      "suggestedFor": ["overflow"]
+    },
+    {
+      "id": "liang",
+      "name": "凉州",
+      "pinyin": "Liángzhōu",
+      "english": "Western Frontier",
+      "subtitle": "Silk-road frontier — overflow",
+      "color": "#8C5B3A",
+      "colorSoft": "#E0CCBC",
+      "ink": "#5A2D18",
+      "suggestedFor": ["overflow"]
+    },
+    {
+      "id": "bing",
+      "name": "并州",
+      "pinyin": "Bīngzhōu",
+      "english": "Northern March",
+      "subtitle": "Northern uplands — overflow",
+      "color": "#5B7A8E",
+      "colorSoft": "#C4D0DA",
+      "ink": "#2D3F4A",
+      "suggestedFor": ["overflow"]
+    },
+    {
+      "id": "you",
+      "name": "幽州",
+      "pinyin": "Yōuzhōu",
+      "english": "Frozen North",
+      "subtitle": "Far north — overflow",
+      "color": "#6E5B8C",
+      "colorSoft": "#D0C4DA",
+      "ink": "#3A2D5A",
+      "suggestedFor": ["overflow"]
+    },
+    {
+      "id": "jiao",
+      "name": "交州",
+      "pinyin": "Jiāozhōu",
+      "english": "Southern Coast",
+      "subtitle": "Tropical south — overflow",
+      "color": "#8C8C3A",
+      "colorSoft": "#E0E0BF",
+      "ink": "#5A5A18",
+      "suggestedFor": ["overflow"]
+    }
+  ]
+}

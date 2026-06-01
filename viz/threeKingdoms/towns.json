@@ -1,0 +1,119 @@
+{
+  "_comment": "Towns/counties per region. The first entry is the regional capital (▼). Names are historically attested commanderies and passes from the Three Kingdoms era.",
+  "towns": {
+    "sili": [
+      { "name": "洛阳", "pinyin": "Luòyáng", "kind": "capital" },
+      { "name": "长安", "pinyin": "Cháng'ān", "kind": "city" },
+      { "name": "弘农", "pinyin": "Hóngnóng", "kind": "commandery" },
+      { "name": "河内", "pinyin": "Hénèi", "kind": "commandery" },
+      { "name": "河南", "pinyin": "Hénán", "kind": "commandery" },
+      { "name": "函谷关", "pinyin": "Hángǔguān", "kind": "pass" }
+    ],
+    "yan": [
+      { "name": "陈留", "pinyin": "Chénliú", "kind": "capital" },
+      { "name": "濮阳", "pinyin": "Púyáng", "kind": "city" },
+      { "name": "东郡", "pinyin": "Dōngjùn", "kind": "commandery" },
+      { "name": "济阴", "pinyin": "Jǐyīn", "kind": "commandery" },
+      { "name": "山阳", "pinyin": "Shānyáng", "kind": "commandery" },
+      { "name": "任城", "pinyin": "Rènchéng", "kind": "city" }
+    ],
+    "yi": [
+      { "name": "成都", "pinyin": "Chéngdū", "kind": "capital" },
+      { "name": "绵竹", "pinyin": "Miánzhú", "kind": "city" },
+      { "name": "梓潼", "pinyin": "Zǐtóng", "kind": "commandery" },
+      { "name": "广汉", "pinyin": "Guǎnghàn", "kind": "commandery" },
+      { "name": "巴郡", "pinyin": "Bājùn", "kind": "commandery" },
+      { "name": "犍为", "pinyin": "Qiánwéi", "kind": "commandery" }
+    ],
+    "jing": [
+      { "name": "襄阳", "pinyin": "Xiāngyáng", "kind": "capital" },
+      { "name": "江陵", "pinyin": "Jiānglíng", "kind": "city" },
+      { "name": "公安", "pinyin": "Gōng'ān", "kind": "city" },
+      { "name": "长沙", "pinyin": "Chángshā", "kind": "commandery" },
+      { "name": "南阳", "pinyin": "Nányáng", "kind": "commandery" },
+      { "name": "武陵", "pinyin": "Wǔlíng", "kind": "commandery" }
+    ],
+    "yong": [
+      { "name": "槐里", "pinyin": "Huáilǐ", "kind": "capital" },
+      { "name": "陇西", "pinyin": "Lǒngxī", "kind": "commandery" },
+      { "name": "天水", "pinyin": "Tiānshuǐ", "kind": "commandery" },
+      { "name": "安定", "pinyin": "Āndìng", "kind": "commandery" },
+      { "name": "扶风", "pinyin": "Fúfēng", "kind": "commandery" },
+      { "name": "陈仓", "pinyin": "Chéncāng", "kind": "city" }
+    ],
+    "yang": [
+      { "name": "建业", "pinyin": "Jiànyè", "kind": "capital" },
+      { "name": "庐江", "pinyin": "Lújiāng", "kind": "commandery" },
+      { "name": "九江", "pinyin": "Jiǔjiāng", "kind": "commandery" },
+      { "name": "丹阳", "pinyin": "Dānyáng", "kind": "commandery" },
+      { "name": "吴郡", "pinyin": "Wújùn", "kind": "commandery" },
+      { "name": "会稽", "pinyin": "Kuàijī", "kind": "commandery" }
+    ],
+    "hanzhong": [
+      { "name": "南郑", "pinyin": "Nánzhèng", "kind": "capital" },
+      { "name": "阳平关", "pinyin": "Yángpíngguān", "kind": "pass" },
+      { "name": "葭萌关", "pinyin": "Jiāméngguān", "kind": "pass" },
+      { "name": "白水关", "pinyin": "Báishuǐguān", "kind": "pass" },
+      { "name": "定军山", "pinyin": "Dìngjūnshān", "kind": "fortress" },
+      { "name": "西县", "pinyin": "Xīxiàn", "kind": "city" }
+    ],
+    "nanzhong": [
+      { "name": "永昌", "pinyin": "Yǒngchāng", "kind": "capital" },
+      { "name": "建宁", "pinyin": "Jiànníng", "kind": "commandery" },
+      { "name": "云南", "pinyin": "Yúnnán", "kind": "commandery" },
+      { "name": "越巂", "pinyin": "Yuèsuǐ", "kind": "commandery" },
+      { "name": "牂柯", "pinyin": "Zāngkē", "kind": "commandery" },
+      { "name": "兴古", "pinyin": "Xīnggǔ", "kind": "commandery" }
+    ],
+    "yu": [
+      { "name": "许昌", "pinyin": "Xǔchāng", "kind": "capital" },
+      { "name": "颍川", "pinyin": "Yǐngchuān", "kind": "commandery" },
+      { "name": "汝南", "pinyin": "Rǔnán", "kind": "commandery" },
+      { "name": "陈郡", "pinyin": "Chénjùn", "kind": "commandery" },
+      { "name": "梁国", "pinyin": "Liángguó", "kind": "kingdom" }
+    ],
+    "ji": [
+      { "name": "邺城", "pinyin": "Yèchéng", "kind": "capital" },
+      { "name": "晋阳", "pinyin": "Jìnyáng", "kind": "city" },
+      { "name": "涿郡", "pinyin": "Zhuōjùn", "kind": "commandery" },
+      { "name": "中山", "pinyin": "Zhōngshān", "kind": "commandery" },
+      { "name": "渤海", "pinyin": "Bóhǎi", "kind": "commandery" }
+    ],
+    "qing": [
+      { "name": "临淄", "pinyin": "Línzī", "kind": "capital" },
+      { "name": "北海", "pinyin": "Běihǎi", "kind": "commandery" },
+      { "name": "平原", "pinyin": "Píngyuán", "kind": "commandery" },
+      { "name": "东莱", "pinyin": "Dōnglái", "kind": "commandery" }
+    ],
+    "xu": [
+      { "name": "下邳", "pinyin": "Xiàpī", "kind": "capital" },
+      { "name": "彭城", "pinyin": "Péngchéng", "kind": "city" },
+      { "name": "琅琊", "pinyin": "Lángyá", "kind": "commandery" },
+      { "name": "广陵", "pinyin": "Guǎnglíng", "kind": "commandery" }
+    ],
+    "liang": [
+      { "name": "武威", "pinyin": "Wǔwēi", "kind": "capital" },
+      { "name": "金城", "pinyin": "Jīnchéng", "kind": "commandery" },
+      { "name": "敦煌", "pinyin": "Dūnhuáng", "kind": "commandery" },
+      { "name": "酒泉", "pinyin": "Jiǔquán", "kind": "commandery" }
+    ],
+    "bing": [
+      { "name": "太原", "pinyin": "Tàiyuán", "kind": "capital" },
+      { "name": "上党", "pinyin": "Shàngdǎng", "kind": "commandery" },
+      { "name": "雁门", "pinyin": "Yànmén", "kind": "commandery" },
+      { "name": "西河", "pinyin": "Xīhé", "kind": "commandery" }
+    ],
+    "you": [
+      { "name": "蓟县", "pinyin": "Jìxiàn", "kind": "capital" },
+      { "name": "渔阳", "pinyin": "Yúyáng", "kind": "commandery" },
+      { "name": "辽东", "pinyin": "Liáodōng", "kind": "commandery" },
+      { "name": "右北平", "pinyin": "Yòuběipíng", "kind": "commandery" }
+    ],
+    "jiao": [
+      { "name": "交趾", "pinyin": "Jiāozhǐ", "kind": "capital" },
+      { "name": "南海", "pinyin": "Nánhǎi", "kind": "commandery" },
+      { "name": "苍梧", "pinyin": "Cāngwú", "kind": "commandery" },
+      { "name": "九真", "pinyin": "Jiǔzhēn", "kind": "commandery" }
+    ]
+  }
+}

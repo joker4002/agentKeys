@@ -1,0 +1,6 @@
+server/target/
+web/dist/
+web/node_modules/
+web/*.tsbuildinfo
+.env
+.DS_Store

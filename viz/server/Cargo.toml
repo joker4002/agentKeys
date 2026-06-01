@@ -1,0 +1,40 @@
+[workspace]
+# Standalone — excludes this crate from the parent agentkeys workspace.
+
+[package]
+name = "agentkeys-viz-server"
+version = "0.1.0"
+edition = "2021"
+description = "Three Kingdoms pixel-art interactive code dashboard backend"
+
+[[bin]]
+name = "agentkeys-viz"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_viz"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["json", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+cargo_metadata = "0.18"
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", features = ["serde"] }
+walkdir = "2"
+regex = "1"
+futures = "0.3"
+async-stream = "0.3"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
