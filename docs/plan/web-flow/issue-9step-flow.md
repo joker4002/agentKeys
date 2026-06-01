@@ -59,6 +59,8 @@ Faithful port of the Claude-design 9-step flow into `apps/parent-control` (Next.
 
 ## Sequencing (after this port lands)
 
+> **Execution plan for P2.1–P2.4:** [`wire-real-paths.md`](wire-real-paths.md) — how each currently-narrated / in-memory-stub path is wired to the real broker / chain / memory-worker calls the agent-side `harness/phase1-wire-demo.sh` already makes (daemon-as-orchestrator: reuse `proxy.rs` broker client + shell to `heima-*.sh` for chain writes).
+
 - **P2.1** Daemon endpoints for steps 1–2 + 8 reads (onboarding state, master memory list + plant, actor tree) — `data-model.md`.
 - **P2.2** Wire pairing to #149: `agent create` (mint code), `GET /v1/agent/pending-bindings` (bell poll), bind + grant on accept. Reconcile direction per pushback #1.
 - **P2.3** Real audit decode ([#153](https://github.com/litentry/agentKeys/issues/153)) — swap the mock `decodeCalldata`.
