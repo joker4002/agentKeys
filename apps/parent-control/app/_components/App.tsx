@@ -118,6 +118,26 @@ export function App() {
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'instant' });
   };
 
+  // Log out: clear the local session flag and reset all in-memory view state so
+  // the next login starts clean. Returns to the §9 onboarding (email) screen.
+  const logout = () => {
+    try { localStorage.removeItem('ak_onboarded'); } catch {}
+    setOnboarded(false);
+    setActors([]);
+    setEvents([]);
+    setMemories([]);
+    setPlanting(false);
+    setPairingRequests([]);
+    setPairingCeremony(null);
+    setJustPaired(null);
+    setMemoryView(null);
+    setPendingAction(null);
+    setEventDetail(null);
+    setActorId(null);
+    setPage('actors');
+    setSideOpen(false);
+  };
+
   const updateActor = (id: string, patch: Partial<Actor>) => {
     setActors((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
     showToast('scope updated · K11 assertion queued for next save');
@@ -255,6 +275,7 @@ export function App() {
             ◉{pairingRequests.length > 0 && <span className="badge">{pairingRequests.length}</span>}
           </button>
           <span className="who"><span className="who-text">{master ? `${master.label} · ${master.omni}` : 'O_master'}</span></span>
+          <button className="btn sm" onClick={logout} title="Clear this session and return to login">log out</button>
         </div>
       </header>
 
@@ -279,9 +300,9 @@ export function App() {
           <span className="marker">[⇔]</span> chain
         </button>
 
-        <div className="nav-section">ceremonies</div>
-        <button className="nav-item" onClick={() => { try { localStorage.removeItem('ak_onboarded'); } catch {} setOnboarded(false); }}>
-          <span className="marker">[◆]</span> replay onboarding
+        <div className="nav-section">account</div>
+        <button className="nav-item" onClick={logout}>
+          <span className="marker">[◆]</span> log out · replay onboarding
         </button>
 
         <div className="nav-section">brand</div>
