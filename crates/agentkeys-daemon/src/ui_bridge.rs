@@ -833,11 +833,11 @@ async fn plant_master_memory(
                 e.content_hash.clone()
             };
             e.content_hash = hash.clone();
-            if mem.contains_key(&hash) {
-                skipped += 1;
-            } else {
-                mem.insert(hash, e);
+            if let std::collections::hash_map::Entry::Vacant(slot) = mem.entry(hash) {
+                slot.insert(e);
                 planted += 1;
+            } else {
+                skipped += 1;
             }
         }
     }
@@ -1231,10 +1231,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            resp.0.scope.as_ref().unwrap().get("family").unwrap().read,
-            true
-        );
+        assert!(resp.0.scope.as_ref().unwrap().get("family").unwrap().read);
         // Audit event landed.
         let audit = state.audit.read().await;
         assert!(audit.iter().any(|e| e.kind == "scope.updated"));
