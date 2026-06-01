@@ -1162,69 +1162,78 @@ You'll see logs of the cap-mint round-trip in the daemon's `--foreground` output
 
 ---
 
-## §7 — Create an agent + grant scope (K11 required)
+## §7 — Pair an agent + grant scope (K11 required)
 
-The full HDKD per-agent omni flow per arch.md §10.2:
+The full HDKD per-agent omni flow per arch.md §10.2 (**method A — agent-initiated**:
+the agent shows a one-time pairing code, the master claims it; the Matter/HomeKit
+IoT model). The broker never writes chain — the **master** submits `registerAgentDevice`.
+
+### §7.1 — The agent opens a pairing request on its sandbox
+
+```bash
+# === ON AGENT SANDBOX (VM / container / CI runner / no-input device) ===
+# Install agentkeys-daemon (same binary as the master; role is decided at init)
+# ... (curl install, package manager, or scp from build host)
+
+# Open an UNBOUND pairing request: keygen IN THE SANDBOX, prove K10 possession,
+# display a one-time pairing code. The device key NEVER leaves this machine.
+agentkeys-daemon --request-pairing --broker-url "https://$BROKER_HOST"
+
+# Output (stdout is JSON; logs go to stderr):
+#   request_id:      <secret retrieval ticket — keep on the agent>
+#   pairing_code:    <high-entropy; SHOW this to your owner (QR / screen)>
+#   agent_address:   0x...   (D_pub_agent)
+#   device_key_hash: 0x...
+# The daemon also wrote ~/.agentkeys/pairing-request.json (0600) so the
+# follow-up --retrieve-pairing can resolve request_id automatically.
+```
+
+### §7.2 — The master claims the code (J1_master-gated; no K11 yet)
 
 ```bash
 # === ON OPERATOR WORKSTATION (master) ===
-# Stage A — mint a link code for agent-A
-agentkeys --session-id alice agent create --label agent-A
-# CLI prompts for K11 (master mutation)
+# Scan / enter the pairing_code the agent displayed; bind it under O_master//agent-A.
+agentkeys --session-id alice agent claim \
+  --pairing-code "<pairing_code>" --label agent-A --services openrouter,anthropic
 # Output:
-#   Generating K11 assertion over (parent_omni, child_label, request_id)...
-#   Submitting /v1/agent/create to broker...
-#   agent_omni:     0x9c1d...    ← HDKD(O_master, "//agent-A")
-#   parent_omni:    0x3a4f...
-#   link_code:      LC-7Y4P-2X9K-...
-#   link_code_ttl:  600s
-```
+#   Submitting /v1/agent/pairing/claim to broker (J1_master-gated)...
+#   child_omni:    0x9c1d...    ← HDKD(O_master, "//agent-A")
+#   operator_omni: 0x3a4f...
+#   device_pubkey: 0x...        ← REVIEW this before binding on-chain
+#   request_id:    <…>
 
-Persist the agent's omni:
-
-```bash
-# === ON OPERATOR WORKSTATION ===
+# Persist the agent's omni:
 export AGENT_A_OMNI=0x9c1d...
 echo "AGENT_A_OMNI=$AGENT_A_OMNI" >> scripts/operator-workstation.env
 ```
 
-### §7.1 — Bootstrap agent-A on its sandbox
+### §7.3 — The agent retrieves J1_agent
 
 ```bash
-# === ON AGENT SANDBOX (VM / container / CI runner) ===
-# Install agentkeys-daemon (same binary as the master; role is decided at init)
-# ... (curl install, package manager, or scp from build host)
-
-# Redeem the link code; the agent inherits its parent operator's chain choice
-# via the same --chain flag (or AGENTKEYS_CHAIN env var)
-agentkeys-daemon --init-link-code "LC-7Y4P-2X9K-..." \
-  --chain "$AGENTKEYS_CHAIN" \
-  --broker-url "https://$BROKER_HOST" \
-  --signer-url "$AGENTKEYS_SIGNER_URL" \
-  --registry-address "$SIDECAR_REGISTRY_ADDRESS" \
-  --proxy-socket /run/agentkeys/agent-a.sock \
-  --foreground
+# === ON AGENT SANDBOX ===
+# Poll until the master claims, then mint + persist J1_agent (re-proves K10 possession).
+agentkeys-daemon --retrieve-pairing --broker-url "https://$BROKER_HOST"
 
 # Output:
-# [INFO] Generating K10 device key...   D_pub_agent = 0x...
-# [INFO] Redeeming link code at broker...   ok
-# [INFO] Broker submitted SidecarRegistry.register_agent_device(...)
-# [INFO] Tx confirmed at block #1,234,890
-# [INFO] Persisting J1_agent at /home/agent/.agentkeys/agent-a/session.json
-# [INFO] Localhost proxy listening at /run/agentkeys/agent-a.sock
+# [INFO] Polling /v1/agent/pairing/poll ... pending ... claimed
+# [INFO] J1_agent minted at retrieval; persisted at ~/.agentkeys/agent-session.jwt (0600)
+# [INFO] Binding artifact emitted on stdout (agent_address, actor_omni, device_key_hash, pop_sig)
 ```
 
-### §7.2 — Grant scope from master (K11 required)
+### §7.4 — The master binds the device on-chain + grants scope (K11 required)
 
 ```bash
 # === ON OPERATOR WORKSTATION (master) ===
-# Grant agent-A access to openrouter
+# The master submits registerAgentDevice for the agent's reviewed device (the
+# broker never writes chain), then grants scope — ONE Touch ID approval covers
+# both (install + permissions, iOS/Android-style).
 agentkeys --session-id alice scope add \
   --agent "$AGENT_A_OMNI" \
   --service openrouter \
   --service anthropic
 
 # CLI prompts for K11 (master mutation):
+#   Submitting SidecarRegistry.register_agent_device(...) [msg.sender == master]...
 #   Generating K11 assertion over (operator_omni, agent_omni, services, read_only=false)...
 #   Submitting ScopeContract.set_scope_with_webauthn(...)...
 #   Tx hash: 0xc3d2f1...
