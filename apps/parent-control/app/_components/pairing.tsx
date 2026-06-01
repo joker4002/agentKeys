@@ -29,10 +29,10 @@ export function PairingPage({
   return (
     <>
       <PageHead
-        crumb="pairing · child-initiates rendezvous · arch §10.2"
+        crumb="pairing · agent-initiated (method A) · arch §10.2"
         title={<><span className="muted serif">/</span> pairing</>}
-        desc="When an agent on another machine redeems a pair-code, it appears here as a pending binding. You approve with Touch ID. Granted scope becomes on-chain cap-tokens."
-        actions={<button className="btn" onClick={onRefresh}>↻ check for requests</button>}
+        desc="An agent on another machine shows a one-time pairing code; you claim it here (J1_master-gated), review the device + requested scope, then approve with one Touch ID — which submits registerAgentDevice + the scope grant. Granted scope becomes on-chain cap-tokens."
+        actions={<button className="btn" onClick={onRefresh}>↻ check for codes</button>}
       />
 
       {requests.length > 0 ? (
@@ -94,8 +94,8 @@ export function PairingPage({
         <div className="banner" style={{ marginBottom: 22 }}>
           <span className="lbl">idle</span>
           <span>
-            No pending pairing requests.{' '}
-            {justPaired ? <><strong>{justPaired}</strong> was just paired and now appears below.</> : 'When an agent redeems a pair-code, it shows up here — hit "check for requests" to poll.'}
+            No pending pairing codes.{' '}
+            {justPaired ? <><strong>{justPaired}</strong> was just paired and now appears below.</> : 'When an agent shows a pairing code, claim it here — hit "check for codes" to poll.'}
           </span>
         </div>
       )}

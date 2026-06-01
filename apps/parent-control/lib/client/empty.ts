@@ -7,6 +7,8 @@ import type {
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
+  MasterMemoryEntry,
+  PlantResult,
   Result,
   RevokeIntent,
 } from './types';
@@ -85,6 +87,14 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async enrollK11Finish(_input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>> {
+    return disconnected();
+  }
+
+  async listMasterMemory(): Promise<Result<MasterMemoryEntry[]>> {
+    return disconnected();
+  }
+
+  async plantMemory(_entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
     return disconnected();
   }
 }

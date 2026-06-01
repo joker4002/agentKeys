@@ -68,6 +68,40 @@ pub struct UiBridgeState {
     pub audit_tx: broadcast::Sender<ApiAuditEvent>,
     pub workers: RwLock<HashMap<String, ApiWorker>>,
     pub anchor: RwLock<ApiAnchorStatus>,
+    /// Master-actor memory entries, keyed by content_hash for idempotent
+    /// plant (re-planting the same entry is a no-op). Maps the §2 "plant
+    /// preserved memory" flow + GH plan issue-9step-flow.md.
+    pub master_memory: RwLock<HashMap<String, ApiMemoryEntry>>,
+}
+
+/// A master-actor memory entry. `content_hash` is the dedup key —
+/// keccak-free sha256 over (ns || key || body) so a re-plant of the same
+/// content is detected and skipped (the "prevent duplicate plant" gate).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiMemoryEntry {
+    pub ns: String,
+    pub key: String,
+    pub title: String,
+    pub bytes: u64,
+    pub version: String,
+    pub updated: String,
+    pub preview: String,
+    pub body: String,
+    #[serde(default)]
+    pub content_hash: String,
+}
+
+impl ApiMemoryEntry {
+    fn compute_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(self.ns.as_bytes());
+        h.update(b"\x1f");
+        h.update(self.key.as_bytes());
+        h.update(b"\x1f");
+        h.update(self.body.as_bytes());
+        hex::encode(h.finalize())
+    }
 }
 
 pub type SharedUiBridgeState = Arc<UiBridgeState>;
@@ -242,6 +276,8 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/anchor/status", get(anchor_status))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/:id", get(get_worker))
+        .route("/v1/master/memory", get(list_master_memory))
+        .route("/v1/master/memory/plant", post(plant_master_memory))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -265,6 +301,7 @@ pub fn build_state(rp_id: &str, rp_origin: &str, rp_name: &str) -> anyhow::Resul
         audit_tx,
         workers: RwLock::new(HashMap::new()),
         anchor: RwLock::new(ApiAnchorStatus::default()),
+        master_memory: RwLock::new(HashMap::new()),
     }))
 }
 
@@ -644,6 +681,8 @@ pub struct DevSeedRequest {
     pub anchor: Option<ApiAnchorStatus>,
     #[serde(default)]
     pub audit: Vec<ApiAuditEvent>,
+    #[serde(default)]
+    pub master_memory: Vec<ApiMemoryEntry>,
 }
 
 async fn dev_seed(
@@ -671,6 +710,14 @@ async fn dev_seed(
     if let Some(a) = req.anchor {
         *state.anchor.write().await = a;
     }
+    if !req.master_memory.is_empty() {
+        let mut mem = state.master_memory.write().await;
+        for mut e in req.master_memory {
+            let hash = if e.content_hash.is_empty() { e.compute_hash() } else { e.content_hash.clone() };
+            e.content_hash = hash.clone();
+            mem.insert(hash, e);
+        }
+    }
     for evt in req.audit {
         push_audit(&state, evt).await;
     }
@@ -683,6 +730,67 @@ async fn dev_emit_event(
 ) -> impl IntoResponse {
     push_audit(&state, evt).await;
     Json(serde_json::json!({ "ok": true }))
+}
+
+// ─── Master memory — list + idempotent plant (§2 "plant preserved memory") ──
+
+async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> impl IntoResponse {
+    let guard = state.master_memory.read().await;
+    let mut entries: Vec<ApiMemoryEntry> = guard.values().cloned().collect();
+    entries.sort_by(|a, b| a.ns.cmp(&b.ns).then_with(|| a.key.cmp(&b.key)));
+    Json(serde_json::json!({ "entries": entries }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlantRequest {
+    pub entries: Vec<ApiMemoryEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlantResponse {
+    pub planted: usize,
+    pub skipped: usize,
+    pub total: usize,
+}
+
+/// Idempotent plant: each entry's content_hash is the dedup key. Re-planting
+/// the same content is a no-op (skipped++), so "prevent duplicate plant" is
+/// enforced server-side, not just in the UI. Returns planted/skipped counts +
+/// the resulting total. An audit row records the plant.
+async fn plant_master_memory(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<PlantRequest>,
+) -> Json<PlantResponse> {
+    let mut planted = 0usize;
+    let mut skipped = 0usize;
+    {
+        let mut mem = state.master_memory.write().await;
+        for mut e in req.entries {
+            let hash = if e.content_hash.is_empty() { e.compute_hash() } else { e.content_hash.clone() };
+            e.content_hash = hash.clone();
+            if mem.contains_key(&hash) {
+                skipped += 1;
+            } else {
+                mem.insert(hash, e);
+                planted += 1;
+            }
+        }
+    }
+    let total = state.master_memory.read().await.len();
+    if planted > 0 {
+        let evt = ApiAuditEvent {
+            id: format!("e-mem-plant-{}", now_unix()),
+            ts: now_ts_hms(),
+            actor_id: "master".into(),
+            actor: "master".into(),
+            kind: "memory.write".into(),
+            detail: format!("planted preserved memory · {planted} entries · {skipped} duplicates"),
+            chip: "memory".into(),
+            sev: "ok".into(),
+        };
+        push_audit(&state, evt).await;
+    }
+    Json(PlantResponse { planted, skipped, total })
 }
 
 async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
@@ -1210,6 +1318,7 @@ mod tests {
                     recent: vec![],
                 }),
                 audit: vec![],
+                master_memory: vec![],
             }),
         )
         .await
@@ -1218,6 +1327,63 @@ mod tests {
         assert_eq!(state.actors.read().await.len(), 1);
         assert_eq!(state.workers.read().await.len(), 1);
         assert_eq!(state.anchor.read().await.last_anchor_at, 100);
+    }
+
+    fn mem_entry(ns: &str, key: &str, body: &str) -> ApiMemoryEntry {
+        ApiMemoryEntry {
+            ns: ns.into(),
+            key: key.into(),
+            title: format!("{key}.md"),
+            bytes: body.len() as u64,
+            version: "v2".into(),
+            updated: "just now".into(),
+            preview: body.chars().take(40).collect(),
+            body: body.into(),
+            content_hash: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn master_memory_empty_by_default() {
+        let state = make_state();
+        let resp = list_master_memory(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn plant_then_replant_is_idempotent_dedup() {
+        let state = make_state();
+        let entries = vec![
+            mem_entry("personal", "profile", "name: Kevin"),
+            mem_entry("travel", "chengdu", "trip May 25-29"),
+        ];
+
+        // First plant: both land.
+        let r1 = plant_master_memory(State(state.clone()), Json(PlantRequest { entries: entries.clone() })).await;
+        assert_eq!(r1.0.planted, 2);
+        assert_eq!(r1.0.skipped, 0);
+        assert_eq!(r1.0.total, 2);
+        assert_eq!(state.master_memory.read().await.len(), 2);
+
+        // Re-plant the SAME content: 0 planted, 2 skipped (dedup by content_hash).
+        let r2 = plant_master_memory(State(state.clone()), Json(PlantRequest { entries })).await;
+        assert_eq!(r2.0.planted, 0);
+        assert_eq!(r2.0.skipped, 2);
+        assert_eq!(r2.0.total, 2);
+        assert_eq!(state.master_memory.read().await.len(), 2, "re-plant must not duplicate");
+
+        // Plant emits a memory.write audit row (only when something was planted).
+        assert!(state.audit.read().await.iter().any(|e| e.kind == "memory.write"));
+    }
+
+    #[tokio::test]
+    async fn plant_changed_body_adds_a_new_entry() {
+        let state = make_state();
+        let _ = plant_master_memory(State(state.clone()), Json(PlantRequest { entries: vec![mem_entry("personal", "profile", "v1 body")] })).await;
+        // Same ns/key but DIFFERENT body → different content_hash → a new entry.
+        let r = plant_master_memory(State(state.clone()), Json(PlantRequest { entries: vec![mem_entry("personal", "profile", "v2 body")] })).await;
+        assert_eq!(r.0.planted, 1);
+        assert_eq!(state.master_memory.read().await.len(), 2);
     }
 
     #[tokio::test]

@@ -63,6 +63,24 @@ export interface RevokeIntent {
   fields: [string, string][];
 }
 
+export interface MasterMemoryEntry {
+  ns: string;
+  key: string;
+  title: string;
+  bytes: number;
+  version: string;
+  updated: string;
+  preview: string;
+  body: string;
+  contentHash?: string;
+}
+
+export interface PlantResult {
+  planted: number;
+  skipped: number;
+  total: number;
+}
+
 export interface AgentKeysClient {
   status(): Promise<ConnectionStatus>;
 
@@ -83,4 +101,8 @@ export interface AgentKeysClient {
 
   enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
   enrollK11Finish(input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>>;
+
+  // §2 — master memory (real list + idempotent plant; server dedups by content-hash)
+  listMasterMemory(): Promise<Result<MasterMemoryEntry[]>>;
+  plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>>;
 }

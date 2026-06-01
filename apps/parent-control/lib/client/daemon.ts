@@ -7,6 +7,8 @@ import type {
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
+  MasterMemoryEntry,
+  PlantResult,
   Result,
   RevokeIntent,
 } from './types';
@@ -287,6 +289,27 @@ export class DaemonBackend implements AgentKeysClient {
       return { ok: false, status: unreachable(`enroll/finish fetch failed: ${(e as Error).message}`) };
     }
   }
+
+  async listMasterMemory(): Promise<Result<MasterMemoryEntry[]>> {
+    const r = await this.getJson<{ entries: ApiMemoryEntry[] }>('/v1/master/memory');
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.entries.map(apiToMemoryEntry) };
+  }
+
+  async plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
+    const r = await this.postJson<{ planted: number; skipped: number; total: number }>(
+      '/v1/master/memory/plant',
+      {
+        entries: entries.map((m) => ({
+          ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
+          version: m.version, updated: m.updated, preview: m.preview, body: m.body,
+          content_hash: m.contentHash ?? '',
+        })),
+      },
+    );
+    if (!r.ok) return r;
+    return { ok: true, data: { planted: r.data.planted, skipped: r.data.skipped, total: r.data.total } };
+  }
 }
 
 // ─── API wire types (snake_case, mirror ui_bridge.rs ApiActor etc.) ────
@@ -407,4 +430,24 @@ function normalizeChip(c: string): ChipKind {
     'revoke',
   ];
   return (allowed as string[]).includes(c) ? (c as ChipKind) : 'default';
+}
+
+interface ApiMemoryEntry {
+  ns: string;
+  key: string;
+  title: string;
+  bytes: number;
+  version: string;
+  updated: string;
+  preview: string;
+  body: string;
+  content_hash?: string;
+}
+
+function apiToMemoryEntry(m: ApiMemoryEntry): MasterMemoryEntry {
+  return {
+    ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
+    version: m.version, updated: m.updated, preview: m.preview, body: m.body,
+    contentHash: m.content_hash,
+  };
 }

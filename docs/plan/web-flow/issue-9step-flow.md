@@ -1,8 +1,15 @@
 # 9-step operator flow — plan, verification, and pushback
 
-**Status:** plan + first implementation (the design port). Source design: Claude Design handoff `agentkeyweb` (onboarding / memory / pairing / permissions / tx-decode).
-**Backend merged into this branch:** #149 (full §10.2 HDKD agent bootstrap — broker link-code + daemon redeem), #146 (memory build-vs-gate Position C), #141 (wire/hook), #137 (AuditEnvelope v1 CBOR vectors), #138 (CI hardening).
+**Status:** plan + implementation (design port + pushback #2 now wired). Source design: Claude Design handoff `agentkeyweb` (onboarding / memory / pairing / permissions / tx-decode).
+**Backend merged into this branch:** #159 (§10.2 **agent-initiated** pairing, method A), #149 (HDKD agent bootstrap — superseded front-half by #159), #146 (memory build-vs-gate Position C), #141 (wire/hook), #137 (AuditEnvelope v1 CBOR vectors), #138 (CI hardening).
 **Defers to:** [`overview.md`](overview.md) (Authority/Task-Host model), [`stage3-agent-usage.md`](stage3-agent-usage.md), [`data-model.md`](data-model.md), [`docs/arch.md`](../../arch.md) §10.2 / §22c / §22d.
+
+> **Update (this PR, after #159 merge):**
+> - **Pushback #1 (pairing direction) — RESOLVED upstream by #159.** §10.2 is now agent-initiated (method A): the agent *shows* a one-time pairing code; the master *claims* it (`POST /v1/agent/pairing/claim`, J1_master-gated) → reviews the device → one Touch ID submits `registerAgentDevice` + `setScopeWithWebauthn`. This matches the design's "agent broadcasts a code" intuition. The pairing-page copy is aligned to this; full daemon-proxy wiring of claim/pending/bind is the next step (broker reachable required).
+> - **Pushback #2 — IMPLEMENTED in this PR (was: narrated).**
+>   - *Onboarding WebAuthn is real.* `OnboardingScreen` runs a genuine `navigator.credentials.create()` via the daemon `POST /v1/k11/enroll/{begin,finish}` (PR-B) through the `lib/client` seam when a daemon is configured; it shows a "K11 enrolled · real WebAuthn" chip. Offline (EmptyBackend) it falls back to the narrated scan so the demo still runs.
+>   - *Memory plant is real + idempotent.* New daemon ui-bridge endpoints `GET /v1/master/memory` + `POST /v1/master/memory/plant` with **server-side content-hash dedup** (re-planting the same content is a no-op; changed body → new entry) + 3 Rust unit tests. The UI auto-detects existing memory on load (`listMasterMemory` → hides the plant button) and plants via `plantMemory` (server dedups), with a seed fallback offline.
+> - **Pushback #3 (audit decode) — still a mock**, tracked in [#153](https://github.com/litentry/agentKeys/issues/153) per the user's scope ("just 2").
 
 ## The 9 steps the user specified
 

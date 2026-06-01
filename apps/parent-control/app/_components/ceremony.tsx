@@ -3,7 +3,42 @@
 import { useEffect, useState } from 'react';
 import { txHash } from '@/lib/demoData';
 import { ONBOARDING_STEPS } from '@/lib/demoData';
+import { useClient } from '@/lib/ClientProvider';
+import type { AgentKeysClient } from '@/lib/client/types';
+import { credentialToFinishPayload, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { CeremonyStep } from './types';
+
+// Real K11 enroll via the daemon ui-bridge (PR-B) — used by onboarding when a
+// daemon is configured. Returns 'real' on a completed browser ceremony,
+// 'fallback' when no daemon / no authenticator / the user dismissed it (the
+// onboarding then runs the narrated ceremony so the offline demo still flows).
+async function tryRealEnroll(client: AgentKeysClient): Promise<'real' | 'fallback'> {
+  if (!webauthnAvailable()) return 'fallback';
+  const begin = await client.enrollK11Begin({ userName: 'sara@local', userDisplayName: 'Sara (master)' });
+  if (!begin.ok) return 'fallback'; // EmptyBackend → disconnected → narrated fallback
+  try {
+    const opts = jsonToCreationOptions({
+      rp: { id: begin.data.rpId, name: begin.data.rpName },
+      user: { id: begin.data.userId, name: begin.data.userName, displayName: begin.data.userDisplayName },
+      challenge: begin.data.challenge,
+      pubKeyCredParams: begin.data.pubKeyCredParams,
+      timeout: begin.data.timeout,
+      authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+    });
+    const cred = (await navigator.credentials.create({ publicKey: opts })) as PublicKeyCredential | null;
+    if (!cred) return 'fallback';
+    const payload = credentialToFinishPayload(cred);
+    const fin = await client.enrollK11Finish({
+      credentialId: payload.credentialId,
+      attestationObject: payload.attestationObject,
+      clientDataJSON: payload.clientDataJSON,
+      bindingNonce: begin.data.userId,
+    });
+    return fin.ok ? 'real' : 'fallback';
+  } catch {
+    return 'fallback';
+  }
+}
 
 // Shared progress-bar ceremony with a live step log + per-step tx hashes.
 export function CeremonyRunner({
@@ -76,11 +111,20 @@ export function CeremonyRunner({
 
 // Full-screen WebAuthn login → onboarding ceremony (workflow 1).
 export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
+  const client = useClient();
   const [phase, setPhase] = useState<'login' | 'scanning' | 'ceremony'>('login');
+  const [enrollMode, setEnrollMode] = useState<'real' | 'demo'>('demo');
 
-  const startLogin = () => {
+  const startLogin = async () => {
     setPhase('scanning');
-    setTimeout(() => setPhase('ceremony'), 1300);
+    // Real browser WebAuthn when a daemon is configured; narrated fallback otherwise.
+    const outcome = await tryRealEnroll(client);
+    setEnrollMode(outcome === 'real' ? 'real' : 'demo');
+    if (outcome === 'real') {
+      setPhase('ceremony');
+    } else {
+      setTimeout(() => setPhase('ceremony'), 1100);
+    }
   };
 
   return (
@@ -139,6 +183,9 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
           <div>
             <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
               Bringing up your trust core
+              {enrollMode === 'real'
+                ? <span className="chip ok" style={{ marginLeft: 8 }}>K11 enrolled · real WebAuthn</span>
+                : <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
             </div>
             <CeremonyRunner steps={ONBOARDING_STEPS} onDone={onComplete} stepMs={620} />
           </div>

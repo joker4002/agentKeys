@@ -21,6 +21,8 @@ import { MemoryPage } from './memory';
 import { PairingPage } from './pairing';
 import { Modal, WebAuthnModal } from './shared';
 import { PAIRING_STEPS } from '@/lib/demoData';
+import { useClient } from '@/lib/ClientProvider';
+import type { MasterMemoryEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory, ScopeBits } from './types';
 
 type Page = 'actors' | 'detail' | 'memory' | 'pairing' | 'audit' | 'chain' | 'logo';
@@ -35,7 +37,19 @@ const nowTs = () => {
   return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`;
 };
 
+// PreservedMemory (UI) ↔ MasterMemoryEntry (client wire). Daemon ns is a free
+// string; clamp to a known namespace for display grouping.
+const KNOWN_NS = new Set<string>(NAMESPACES);
+function toMasterEntry(m: PreservedMemory): MasterMemoryEntry {
+  return { ns: m.ns, key: m.key, title: m.title, bytes: m.bytes, version: m.version, updated: m.updated, preview: m.preview, body: m.body };
+}
+function toPreserved(e: MasterMemoryEntry): PreservedMemory {
+  const ns = (KNOWN_NS.has(e.ns) ? e.ns : 'personal') as Namespace;
+  return { ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body };
+}
+
 export function App() {
+  const client = useClient();
   const [actors, setActors] = useState<Actor[]>(INITIAL_ACTORS);
   const [events, setEvents] = useState<AuditEvent[]>(() => INITIAL_EVENTS.map((e) => ({ ...e })));
   const [page, setPage] = useState<Page>('actors');
@@ -57,6 +71,21 @@ export function App() {
   useEffect(() => {
     try { setOnboarded(localStorage.getItem('ak_onboarded') === '1'); } catch {}
   }, []);
+
+  // §2 auto-detect: list the master's real memory once onboarded. With a daemon
+  // present this shows existing entries (hides the plant button); EmptyBackend
+  // returns disconnected → stays empty → plant button shows → seed fallback.
+  useEffect(() => {
+    if (!onboarded) return;
+    let cancelled = false;
+    (async () => {
+      const r = await client.listMasterMemory();
+      if (!cancelled && r.ok && r.data.length > 0) {
+        setMemories(r.data.map(toPreserved));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [onboarded, client]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -108,14 +137,26 @@ export function App() {
     if (memories.length > 0) return; // dedup guard — already planted
     setPlanting(true);
   };
-  const plantDone = () => {
+  const plantDone = async () => {
     setPlanting(false);
-    setMemories(PRESERVED_MEMORY);
-    pushEvent({
-      actorId: 'master', actor: 'Sara (master)', kind: 'memory.write',
-      detail: `planted preserved memory · ${PRESERVED_MEMORY.length} entries · 0 duplicates`, chip: 'memory', sev: 'ok',
-    });
-    showToast('Preserved memory planted · plant action now disabled.');
+    // Real plant via the daemon (server dedups by content-hash); seed fallback offline.
+    const r = await client.plantMemory(PRESERVED_MEMORY.map(toMasterEntry));
+    if (r.ok) {
+      const listed = await client.listMasterMemory();
+      setMemories(listed.ok ? listed.data.map(toPreserved) : PRESERVED_MEMORY);
+      pushEvent({
+        actorId: 'master', actor: 'Sara (master)', kind: 'memory.write',
+        detail: `planted preserved memory · ${r.data.planted} entries · ${r.data.skipped} duplicates`, chip: 'memory', sev: 'ok',
+      });
+      showToast(`Preserved memory planted · ${r.data.planted} new, ${r.data.skipped} deduped.`);
+    } else {
+      setMemories(PRESERVED_MEMORY);
+      pushEvent({
+        actorId: 'master', actor: 'Sara (master)', kind: 'memory.write',
+        detail: `planted preserved memory · ${PRESERVED_MEMORY.length} entries · 0 duplicates (demo)`, chip: 'memory', sev: 'ok',
+      });
+      showToast('Preserved memory planted · plant action now disabled.');
+    }
   };
 
   // ─── Pairing: accept → K11 → ceremony → bind ───────────────────
