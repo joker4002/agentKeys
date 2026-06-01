@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/assets/brand/agentkeys-logo-512.png" width="140" alt="AgentKeys logo">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/agentkeys-logo-dark-512.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/brand/agentkeys-logo-light-512.png">
+    <img src="docs/assets/brand/agentkeys-logo-light-512.png" width="140" alt="AgentKeys logo">
+  </picture>
 </p>
 
 # AgentKeys
