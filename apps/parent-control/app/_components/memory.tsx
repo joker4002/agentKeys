@@ -1,31 +1,21 @@
 'use client';
 
 import { NAMESPACES } from '@/lib/constants';
-import { PRESERVED_MEMORY } from '@/lib/demoData';
-import { CeremonyRunner } from './ceremony';
-import { PageHead, Panel } from './shared';
-import type { CeremonyStep, PreservedMemory } from './types';
+import type { ConnectionStatus } from '@/lib/client/types';
+import { EmptyState, PageHead, Panel } from './shared';
+import type { PreservedMemory } from './types';
 
-const PLANT_STEPS: CeremonyStep[] = [
-  { label: 'Read preserved archive', sub: 'agentmemory://kevin.zhao · 5 entries · 1.2 KB', onchain: false },
-  { label: 'Dedupe against existing', sub: 'content-hash compare · 0 collisions · safe to write', onchain: false },
-  { label: 'Encrypt envelopes', sub: 'AES-256-GCM under K3 epoch v1 KEK · per (actor, key)', onchain: false },
-  { label: 'Write to memory bucket', sub: 's3://agentkeys-memory-prod/bots/<omni>/<ns>/<key>.enc', onchain: false },
-  { label: 'Index + audit', sub: 'CredentialAudit.append(op=memory.plant) · tier-1 + anchor', onchain: true, fn: 'append(bytes32,bytes32,bytes32)' },
-];
-
-// Workflow 2: see memories; plant preserved memory if none (auto-detect, dedup).
+// Workflow 2: see the master's real memory (read-only). Entries come from the
+// client seam (`listMasterMemory` → daemon → S3); there is no seed fixture and
+// no fixture-plant button. Disconnected → empty state; connected + empty →
+// neutral "no memory yet" copy.
 export function MemoryPage({
   memories,
-  onPlant,
-  planting,
-  onPlantDone,
+  status,
   onView,
 }: {
   memories: PreservedMemory[];
-  onPlant: () => void;
-  planting: boolean;
-  onPlantDone: () => void;
+  status: ConnectionStatus;
   onView: (m: PreservedMemory) => void;
 }) {
   const hasMemory = memories.length > 0;
@@ -40,28 +30,23 @@ export function MemoryPage({
         desc="Your portable memory namespace — the spine agents read from and write to. It follows you across every vendor device. Stored encrypted; agents see only what their scope grants."
       />
 
-      {!hasMemory && !planting && (
-        <div className="empty-memory">
-          <div className="serif" style={{ fontSize: 40, fontStyle: 'italic', color: 'var(--ink-faint)', marginBottom: 4 }}>∅</div>
-          <h2 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 8px' }}>No memory planted yet.</h2>
-          <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', maxWidth: 440, margin: '0 auto 22px' }}>
-            You have a preserved memory archive from agentmemory. Plant it here to give every paired agent the same
-            context — who you are, your routines, your current trip. This is a one-time import; duplicates are detected
-            and skipped automatically.
-          </p>
-          <button className="btn primary" style={{ padding: '12px 22px' }} onClick={onPlant}>
-            ⊕ plant preserved memory
-          </button>
-          <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 14 }}>
-            source · agentmemory://kevin.zhao · {PRESERVED_MEMORY.length} entries · idempotent
+      {!hasMemory && (
+        status.kind === 'connected' ? (
+          <div className="empty-memory">
+            <div className="serif" style={{ fontSize: 40, fontStyle: 'italic', color: 'var(--ink-faint)', marginBottom: 4 }}>∅</div>
+            <h2 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 8px' }}>No memory yet.</h2>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', maxWidth: 440, margin: '0 auto' }}>
+              Your memory namespace is empty. Paired agents write here as they work, and the entries you grant
+              scope to appear in this view — encrypted at rest, decrypted on read.
+            </p>
           </div>
-        </div>
-      )}
-
-      {planting && (
-        <Panel title="── planting preserved memory">
-          <CeremonyRunner steps={PLANT_STEPS} onDone={onPlantDone} stepMs={620} />
-        </Panel>
+        ) : (
+          <EmptyState
+            status={status}
+            title="memory unavailable"
+            hint="Master memory is read from the daemon (GET /v1/master/memory → S3). Connect a daemon to populate this view."
+          />
+        )
       )}
 
       {hasMemory && (
@@ -71,14 +56,6 @@ export function MemoryPage({
             <div className="stat"><div className="v">{byNs.length}</div><div className="k">namespaces</div></div>
             <div className="stat"><div className="v">{(totalBytes / 1024).toFixed(1)}<span style={{ fontSize: 13 }}>KB</span></div><div className="k">total size</div></div>
             <div className="stat"><div className="v">k3 v1</div><div className="k">epoch (kek)</div></div>
-          </div>
-
-          <div className="banner">
-            <span className="lbl">✓ planted</span>
-            <span>
-              Preserved memory is live. The <strong>plant</strong> action is now hidden — re-planting is blocked because all
-              {' '}{PRESERVED_MEMORY.length} entries already exist (content-hash match). Agents read this per their granted scope.
-            </span>
           </div>
 
           {byNs.map((g) => (

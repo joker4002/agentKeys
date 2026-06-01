@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { txHash } from '@/lib/demoData';
-import { ONBOARDING_STEPS } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
 import type { AgentKeysClient } from '@/lib/client/types';
 import { credentialToFinishPayload, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
@@ -60,14 +59,21 @@ export function CeremonyRunner({
       const t = setTimeout(onDone, 700);
       return () => clearTimeout(t);
     }
-    const t = setTimeout(() => {
+    let cancelled = false;
+    const t = setTimeout(async () => {
       const step = steps[done];
+      // Real async work for this step (e.g. the §9 Stage-2 WebAuthn Touch ID)
+      // runs WHILE the row shows "running"; the bar advances when it resolves.
+      if (step.action) {
+        try { await step.action(); } catch { /* fall through — narrated */ }
+      }
+      if (cancelled) return;
       if (step.onchain) {
         setTxs((prev) => ({ ...prev, [done]: txHash(step.label + done) }));
       }
       setDone((d) => d + 1);
     }, stepMs);
-    return () => clearTimeout(t);
+    return () => { cancelled = true; clearTimeout(t); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [done]);
 
@@ -112,20 +118,36 @@ export function CeremonyRunner({
 // Full-screen WebAuthn login → onboarding ceremony (workflow 1).
 export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   const client = useClient();
-  const [phase, setPhase] = useState<'login' | 'scanning' | 'ceremony'>('login');
-  const [enrollMode, setEnrollMode] = useState<'real' | 'demo'>('demo');
+  const [phase, setPhase] = useState<'email' | 'ceremony'>('email');
+  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending'>('pending');
+  const [email, setEmail] = useState('');
+  const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
-  const startLogin = async () => {
-    setPhase('scanning');
-    // Real browser WebAuthn when a daemon is configured; narrated fallback otherwise.
-    const outcome = await tryRealEnroll(client);
-    setEnrollMode(outcome === 'real' ? 'real' : 'demo');
-    if (outcome === 'real') {
-      setPhase('ceremony');
-    } else {
-      setTimeout(() => setPhase('ceremony'), 1100);
-    }
+  // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
+  // email) comes FIRST; the WebAuthn Touch ID is Stage 2 (master binding),
+  // fired automatically MID-ceremony. There is no separate "register" step —
+  // the passkey binding is one stage of the running ceremony.
+  const submitEmail = () => {
+    if (emailValid) setPhase('ceremony');
   };
+
+  // §9 Stages 0–4. The Stage-2 binding step carries the real WebAuthn action;
+  // the runner awaits it (real Touch ID via the daemon ui-bridge, narrated
+  // fallback offline).
+  const stages: CeremonyStep[] = [
+    { label: 'Generate device key (K10)', sub: 'secp256k1 keypair · generated locally · no network · sealed in the OS keychain' },
+    { label: 'Verify your email', sub: `magic link → ${email} · broker returns binding_nonce (single-use, TTL-bound)` },
+    {
+      label: 'Bind passkey (K11) · Touch ID',
+      sub: 'WebAuthn create · challenge = SHA256(binding_nonce ‖ D_pub) · commits the device atomically',
+      action: async () => {
+        const outcome = await tryRealEnroll(client);
+        setEnrollMode(outcome === 'real' ? 'real' : 'demo');
+      },
+    },
+    { label: 'Derive wallet + SIWE → session', sub: 'signer derives initial_master_wallet · SIWE round-trip → J1 · actor_omni freezes here' },
+    { label: 'Register master device on chain', sub: 'SidecarRegistry.register_master_device · roles = CAP_MINT | RECOVERY | SCOPE_MGMT', onchain: true, fn: 'register_master_device(bytes32,bytes32,bytes32,bytes32,bytes,uint8,bytes)' },
+  ];
 
   return (
     <div className="onboard">
@@ -152,42 +174,56 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
 
         <div className="hr-ascii" style={{ margin: '20px 0' }}>{'─'.repeat(220)}</div>
 
-        {phase === 'login' && (
+        {phase === 'email' && (
           <div className="onboard-login">
-            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Welcome back, Sara.</h1>
-            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 22, maxWidth: 380 }}>
-              Your master identity is anchored to this device&apos;s Secure Enclave. No password, no seed phrase — just the
-              passkey you enrolled. Sign in to bring up your dashboard.
+            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your master identity.</h1>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
+              Enter the email you&apos;ll use as your account. We send a one-time magic link there to verify it&apos;s
+              yours — your master identity is anchored to it. No password, no seed phrase.
             </p>
+            <label
+              htmlFor="ak-email"
+              style={{ display: 'block', fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}
+            >
+              email address
+            </label>
+            <input
+              id="ak-email"
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              autoFocus
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitEmail(); }}
+              placeholder="you@example.com"
+              style={{
+                width: '100%', padding: '11px 12px', fontFamily: 'inherit', fontSize: 14,
+                border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', marginBottom: 14,
+              }}
+            />
             <button
               className="btn primary"
               style={{ width: '100%', justifyContent: 'center', padding: '12px' }}
-              onClick={startLogin}
+              disabled={!emailValid}
+              onClick={submitEmail}
             >
-              ◐ Sign in with passkey · Touch ID
+              Continue →
             </button>
             <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 14, textAlign: 'center' }}>
-              rp_id = localhost · O_master · 0xa3f1…c92e
+              first login creates O_master · HDKD root at /
             </div>
-          </div>
-        )}
-
-        {phase === 'scanning' && (
-          <div className="wa-fingerprint" style={{ padding: '30px 0' }}>
-            <div className="fp-ring scanning"><span className="glyph">fp</span></div>
-            <div className="fp-msg">Verifying passkey assertion…</div>
           </div>
         )}
 
         {phase === 'ceremony' && (
           <div>
             <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
-              Bringing up your trust core
-              {enrollMode === 'real'
-                ? <span className="chip ok" style={{ marginLeft: 8 }}>K11 enrolled · real WebAuthn</span>
-                : <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
+              Bringing up your trust core · {email}
+              {enrollMode === 'real' && <span className="chip ok" style={{ marginLeft: 8 }}>K11 bound · real WebAuthn</span>}
+              {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
             </div>
-            <CeremonyRunner steps={ONBOARDING_STEPS} onDone={onComplete} stepMs={620} />
+            <CeremonyRunner steps={stages} onDone={onComplete} stepMs={760} />
           </div>
         )}
       </div>

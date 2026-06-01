@@ -2,15 +2,33 @@
 
 import { useState } from 'react';
 import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
+import type { ConnectionStatus } from '@/lib/client/types';
 import { PermissionList } from './permissions';
-import { ActorTree, Chip, Dot, PageHead, Panel } from './shared';
+import { ActorTree, Chip, Dot, EmptyState, PageHead, Panel } from './shared';
 import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
 
 // ─── Actors list ─────────────────────────────────────────────────
-export function ActorsList({ actors, onPick }: { actors: Actor[]; onPick: (id: string) => void }) {
+export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status: ConnectionStatus; onPick: (id: string) => void }) {
   const master = actors.find((a) => a.role === 'master');
   const agents = actors.filter((a) => a.role === 'agent');
   const active = agents.filter((a) => a.lastActive === 'now' || a.lastActive.endsWith('m ago')).length;
+
+  if (actors.length === 0) {
+    return (
+      <>
+        <PageHead
+          crumb="actor tree · O_master"
+          title={<><span className="muted serif">/</span> actors</>}
+          desc="Devices and agents bound to your actor tree. Each row is an HDKD child of your master — its own omni, its own scope, its own wallet."
+        />
+        <EmptyState
+          status={status}
+          title="no actors yet"
+          hint="Actors load from the daemon (GET /v1/actors). Your master device and any paired agents appear here once a daemon is connected."
+        />
+      </>
+    );
+  }
 
   return (
     <>
@@ -22,8 +40,6 @@ export function ActorsList({ actors, onPick }: { actors: Actor[]; onPick: (id: s
       <div className="stats">
         <div className="stat"><div className="v">{agents.length}</div><div className="k">agents bound</div></div>
         <div className="stat"><div className="v">{active}</div><div className="k">active now</div></div>
-        <div className="stat"><div className="v">128</div><div className="k">events / 2-min batch</div></div>
-        <div className="stat"><div className="v">0</div><div className="k">pending approvals</div></div>
       </div>
 
       <Panel title="── actor tree" flush>
@@ -156,11 +172,13 @@ export function ActorDetail({
 // ─── Audit feed — click any row → tx-decode modal (step 9) ────────
 export function AuditFeed({
   events,
+  status,
   onPick,
   paused,
   onPause,
 }: {
   events: AuditEvent[];
+  status: ConnectionStatus;
   onPick: (e: AuditEvent) => void;
   paused: boolean;
   onPause: () => void;
@@ -168,6 +186,23 @@ export function AuditFeed({
   const [filter, setFilter] = useState<string>('all');
   const filtered = filter === 'all' ? events : events.filter((e) => e.chip === filter);
   const filters: (ChipKind | 'all')[] = ['all', 'memory', 'creds', 'payment', 'audit', 'chain', 'broker'];
+
+  if (events.length === 0) {
+    return (
+      <>
+        <PageHead
+          crumb="tier-1 · sse · audit-service · decodable on click"
+          title={<><span className="muted serif">/</span> audit feed</>}
+          desc="Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its Heima transaction."
+        />
+        <EmptyState
+          status={status}
+          title="no audit events"
+          hint="The feed streams from the daemon (GET /v1/audit + SSE). Events appear here once a daemon is connected and actors are active."
+        />
+      </>
+    );
+  }
 
   return (
     <>

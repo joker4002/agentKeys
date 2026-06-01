@@ -2,9 +2,8 @@
 
 import { useState, type ReactNode } from 'react';
 import { NAMESPACES } from '@/lib/constants';
-import { VAULT_ITEMS } from '@/lib/demoData';
 import { Dot } from './shared';
-import type { Actor, Namespace, ScopeBits } from './types';
+import type { Actor, Namespace, ScopeBits, VaultItem } from './types';
 
 // Segmented control: deny | read | read+write
 export function PermSeg({
@@ -95,20 +94,22 @@ const NS_WHY: Record<Namespace, string> = {
 export function PermissionList({
   actor,
   editable,
+  vaultItems = [],
   onScopeChange,
   onPaymentTap,
   onCredTap,
 }: {
   actor: Actor;
   editable: boolean;
+  vaultItems?: VaultItem[];
   onScopeChange?: (ns: Namespace | '__email', v: ScopeBits | boolean) => void;
   onPaymentTap?: () => void;
-  onCredTap?: (v: (typeof VAULT_ITEMS)[number]) => void;
+  onCredTap?: (v: VaultItem) => void;
 }) {
   const scope = actor.scope ?? ({} as Record<Namespace, ScopeBits>);
   const services = actor.services ?? [];
   const memGranted = NAMESPACES.filter((ns) => scope[ns] && (scope[ns].read || scope[ns].write));
-  const vaultForActor = VAULT_ITEMS.filter((v) => v.actor === actor.id);
+  const vaultForActor = vaultItems.filter((v) => v.actor === actor.id);
   const hasEmail = services.includes('email');
   const hasPay = (actor.paymentCap?.perTx ?? 0) > 0;
 

@@ -49,6 +49,9 @@ export interface CeremonyStep {
   sub: string;
   onchain?: boolean;
   fn?: string;
+  /** Optional real async work the runner awaits while this step is "running"
+   *  (e.g. the WebAuthn Touch ID at the §9 Stage-2 binding step). */
+  action?: () => Promise<void>;
 }
 
 export interface PreservedMemory {
@@ -60,6 +63,17 @@ export interface PreservedMemory {
   updated: string;
   preview: string;
   body: string;
+}
+
+// A vaulted credential envelope for an actor (Class-B bearer token). Populated
+// from the client seam (real daemon) — no seed fixture; defaults to empty.
+export interface VaultItem {
+  service: string;
+  actor: string;
+  version: string;
+  bytes: number;
+  readCount: number;
+  status: 'ok' | 'stale';
 }
 
 export interface RequestedPerm {

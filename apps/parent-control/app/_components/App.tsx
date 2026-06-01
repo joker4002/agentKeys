@@ -1,14 +1,10 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   CHAIN_PROFILE,
-  INCOMING_PAIRING,
-  INITIAL_ACTORS,
-  INITIAL_EVENTS,
   ONCHAIN_KINDS,
-  PRESERVED_MEMORY,
-  SIM_EVENTS,
+  PAIRING_STEPS,
   contractFor,
   decodeCalldata,
   txHash,
@@ -19,11 +15,10 @@ import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
 import { MemoryPage } from './memory';
 import { PairingPage } from './pairing';
-import { Modal, WebAuthnModal } from './shared';
-import { PAIRING_STEPS } from '@/lib/demoData';
-import { useClient } from '@/lib/ClientProvider';
+import { EmptyState, Modal, WebAuthnModal } from './shared';
+import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import type { MasterMemoryEntry } from '@/lib/client/types';
-import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory, ScopeBits } from './types';
+import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
 type Page = 'actors' | 'detail' | 'memory' | 'pairing' | 'audit' | 'chain' | 'logo';
 
@@ -32,17 +27,9 @@ type PendingAction =
   | { kind: 'pair-accept'; req: PairingRequest; intent: Intent };
 interface Intent { text: string; fields: [string, string][] }
 
-const nowTs = () => {
-  const n = new Date();
-  return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`;
-};
-
-// PreservedMemory (UI) ↔ MasterMemoryEntry (client wire). Daemon ns is a free
+// MasterMemoryEntry (client wire) → PreservedMemory (UI). Daemon ns is a free
 // string; clamp to a known namespace for display grouping.
 const KNOWN_NS = new Set<string>(NAMESPACES);
-function toMasterEntry(m: PreservedMemory): MasterMemoryEntry {
-  return { ns: m.ns, key: m.key, title: m.title, bytes: m.bytes, version: m.version, updated: m.updated, preview: m.preview, body: m.body };
-}
 function toPreserved(e: MasterMemoryEntry): PreservedMemory {
   const ns = (KNOWN_NS.has(e.ns) ? e.ns : 'personal') as Namespace;
   return { ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body };
@@ -50,8 +37,9 @@ function toPreserved(e: MasterMemoryEntry): PreservedMemory {
 
 export function App() {
   const client = useClient();
-  const [actors, setActors] = useState<Actor[]>(INITIAL_ACTORS);
-  const [events, setEvents] = useState<AuditEvent[]>(() => INITIAL_EVENTS.map((e) => ({ ...e })));
+  const status = useConnectionStatus();
+  const [actors, setActors] = useState<Actor[]>([]);
+  const [events, setEvents] = useState<AuditEvent[]>([]);
   const [page, setPage] = useState<Page>('actors');
   const [actorId, setActorId] = useState<string | null>(null);
   const [sideOpen, setSideOpen] = useState(false);
@@ -62,7 +50,6 @@ export function App() {
 
   const [onboarded, setOnboarded] = useState(false);
   const [memories, setMemories] = useState<PreservedMemory[]>([]);
-  const [planting, setPlanting] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
   const [justPaired, setJustPaired] = useState<string | null>(null);
@@ -72,53 +59,55 @@ export function App() {
     try { setOnboarded(localStorage.getItem('ak_onboarded') === '1'); } catch {}
   }, []);
 
-  // §2 auto-detect: list the master's real memory once onboarded. With a daemon
-  // present this shows existing entries (hides the plant button); EmptyBackend
-  // returns disconnected → stays empty → plant button shows → seed fallback.
+  // §2: list the master's real memory once onboarded. EmptyBackend returns
+  // disconnected → stays empty → the memory page renders its empty state.
   useEffect(() => {
     if (!onboarded) return;
     let cancelled = false;
     (async () => {
       const r = await client.listMasterMemory();
-      if (!cancelled && r.ok && r.data.length > 0) {
-        setMemories(r.data.map(toPreserved));
-      }
+      if (!cancelled && r.ok) setMemories(r.data.map(toPreserved));
     })();
     return () => { cancelled = true; };
   }, [onboarded, client]);
+
+  // Actor tree + recent audit history from the client seam. Real daemon data;
+  // empty with EmptyBackend → the pages render their empty states.
+  useEffect(() => {
+    if (!onboarded) return;
+    let cancelled = false;
+    (async () => {
+      const [a, e] = await Promise.all([
+        client.listActors(),
+        client.listRecentAuditEvents({ limit: 80 }),
+      ]);
+      if (cancelled) return;
+      if (a.ok) setActors(a.data);
+      if (e.ok) setEvents(e.data.map((x) => ({ ...x })));
+    })();
+    return () => { cancelled = true; };
+  }, [onboarded, client]);
+
+  // Live audit stream (tier-1 SSE) — real events only, no synthetic feed.
+  useEffect(() => {
+    if (!onboarded || paused) return;
+    const stop = client.streamAudit(
+      (e) => {
+        setEvents((prev) => [{ ...e, _isNew: true }, ...prev].slice(0, 90));
+        setTimeout(
+          () => setEvents((prev) => prev.map((x) => (x.id === e.id ? { ...x, _isNew: false } : x))),
+          1500,
+        );
+      },
+      () => {},
+    );
+    return stop;
+  }, [onboarded, paused, client]);
 
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2600);
   };
-
-  const pushEvent = (ev: Omit<AuditEvent, 'id' | 'ts' | '_isNew'>) => {
-    const e: AuditEvent = { id: `e-live-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, ts: nowTs(), _isNew: true, ...ev };
-    setEvents((prev) => [e, ...prev].slice(0, 90));
-    setTimeout(() => setEvents((prev) => prev.map((x) => (x.id === e.id ? { ...x, _isNew: false } : x))), 1500);
-  };
-
-  // Workflow 3-4: a pairing request arrives ~9s after onboarding (the Hermes agent on another machine).
-  useEffect(() => {
-    if (!onboarded || justPaired) return;
-    const t = setTimeout(() => setPairingRequests((prev) => (prev.length ? prev : [INCOMING_PAIRING])), 9000);
-    return () => clearTimeout(t);
-  }, [onboarded, justPaired]);
-
-  // SSE sim — live audit feed.
-  const simIdx = useRef(0);
-  useEffect(() => {
-    if (paused) return;
-    const tick = () => {
-      simIdx.current = (simIdx.current + 1) % SIM_EVENTS.length;
-      const template = SIM_EVENTS[simIdx.current];
-      const e: AuditEvent = { ...template, id: `e-live-${Date.now()}`, ts: nowTs(), _isNew: true };
-      setEvents((prev) => [e, ...prev].slice(0, 80));
-      setTimeout(() => setEvents((prev) => prev.map((x) => (x.id === e.id ? { ...x, _isNew: false } : x))), 1500);
-    };
-    const intv = setInterval(tick, 4200);
-    return () => clearInterval(intv);
-  }, [paused]);
 
   const go = (p: Page, id: string | null = null) => {
     setPage(p);
@@ -130,33 +119,6 @@ export function App() {
   const updateActor = (id: string, patch: Partial<Actor>) => {
     setActors((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
     showToast('scope updated · K11 assertion queued for next save');
-  };
-
-  // ─── Memory: plant preserved memory (idempotent / dedup) ───────
-  const plantMemory = () => {
-    if (memories.length > 0) return; // dedup guard — already planted
-    setPlanting(true);
-  };
-  const plantDone = async () => {
-    setPlanting(false);
-    // Real plant via the daemon (server dedups by content-hash); seed fallback offline.
-    const r = await client.plantMemory(PRESERVED_MEMORY.map(toMasterEntry));
-    if (r.ok) {
-      const listed = await client.listMasterMemory();
-      setMemories(listed.ok ? listed.data.map(toPreserved) : PRESERVED_MEMORY);
-      pushEvent({
-        actorId: 'master', actor: 'Sara (master)', kind: 'memory.write',
-        detail: `planted preserved memory · ${r.data.planted} entries · ${r.data.skipped} duplicates`, chip: 'memory', sev: 'ok',
-      });
-      showToast(`Preserved memory planted · ${r.data.planted} new, ${r.data.skipped} deduped.`);
-    } else {
-      setMemories(PRESERVED_MEMORY);
-      pushEvent({
-        actorId: 'master', actor: 'Sara (master)', kind: 'memory.write',
-        detail: `planted preserved memory · ${PRESERVED_MEMORY.length} entries · 0 duplicates (demo)`, chip: 'memory', sev: 'ok',
-      });
-      showToast('Preserved memory planted · plant action now disabled.');
-    }
   };
 
   // ─── Pairing: accept → K11 → ceremony → bind ───────────────────
@@ -178,13 +140,14 @@ export function App() {
   };
   const declinePairing = (id: string) => {
     setPairingRequests((prev) => prev.filter((r) => r.id !== id));
-    pushEvent({ actorId: 'master', actor: 'Sara (master)', kind: 'audit.append', detail: 'pairing request declined · hermes', chip: 'audit', sev: 'ok' });
     showToast('Pairing request declined.');
   };
   const refreshPairing = () => {
-    if (justPaired) { showToast('No new requests.'); return; }
-    setPairingRequests((prev) => (prev.length ? prev : [INCOMING_PAIRING]));
-    showToast('Polled rendezvous · 1 request found.');
+    showToast(
+      status.kind === 'connected'
+        ? 'Polled rendezvous · no pending pairing codes.'
+        : 'Connect a daemon to poll for agent pairing codes.',
+    );
   };
 
   const handleRevokeDevice = (actor: Actor) => {
@@ -213,42 +176,29 @@ export function App() {
       setPairingCeremony(action.req);
     }
     if (action.kind === 'revoke-device') {
-      setActors((prev) => prev.map((a) => (a.id === action.actor.id ? { ...a, status: 'bad', lastActive: 'revoked', label: a.label + ' (revoked)' } : a)));
-      pushEvent({ actorId: 'master', actor: 'Sara (master)', kind: 'device.revoked', detail: `${action.actor.label} · ${action.actor.devicePubkey.slice(0, 18)}… · K11 ok`, chip: 'revoke', sev: 'bad' });
-      showToast(`${action.actor.label} revoked. SSE drop event broadcast.`);
+      const actor = action.actor;
+      void client.revokeDevice(actor.id, action.intent);
+      setActors((prev) => prev.map((a) => (a.id === actor.id ? { ...a, status: 'bad', lastActive: 'revoked', label: a.label + ' (revoked)' } : a)));
+      showToast(`${actor.label} revoked. SSE drop event broadcast.`);
       go('audit');
     }
   };
 
-  // Workflow 7-8: pairing ceremony completes → new Hermes actor appears with granted scope.
-  const finishPairingCeremony = () => {
+  // Workflow 7-8: pairing ceremony completes → re-fetch the actor tree so a
+  // newly-bound agent (if the daemon bound one) appears. No fabricated actor.
+  const finishPairingCeremony = async () => {
     const req = pairingCeremony;
     setPairingCeremony(null);
     if (!req) return;
-    const grantNs = {} as Record<Namespace, ScopeBits>;
-    NAMESPACES.forEach((ns) => {
-      const canR = req.requested.some((p) => p.cap.startsWith('memory:read') && p.ns.includes(ns));
-      const canW = req.requested.some((p) => p.cap.startsWith('memory:write') && p.ns.includes(ns));
-      grantNs[ns] = { read: canR || canW, write: canW };
-    });
-    const hermes: Actor = {
-      id: 'agent-hermes', omni: 'O_master//hermes', omniHex: '0x3f9c…8e15', label: 'Hermes (research)',
-      role: 'agent', parent: 'master', derivation: '//hermes', device: req.device, devicePubkey: req.dpub,
-      lastActive: 'now', status: 'ok', vendor: req.vendor, k11: false, justPaired: true, scope: grantNs,
-      paymentCap: { perTx: 0, daily: 0, currency: 'USDC' }, timeWindow: { start: '00:00', end: '24:00', tz: 'local' },
-      services: ['memory', 'audit'],
-    };
-    setActors((prev) => (prev.find((a) => a.id === 'agent-hermes') ? prev : [...prev, hermes]));
-    setJustPaired('Hermes');
-    pushEvent({ actorId: 'master', actor: 'Sara (master)', kind: 'cap.pair', detail: 'O_master//hermes · tier=2 · D_pub_hermes · registerDevice', chip: 'broker', sev: 'ok' });
-    pushEvent({ actorId: 'master', actor: 'Sara (master)', kind: 'scope.grant', detail: 'hermes · memory:rw personal,travel · audit:append', chip: 'broker', sev: 'ok' });
-    pushEvent({ actorId: 'agent-hermes', actor: 'Hermes', kind: 'cap.mint', detail: 'memory:read scope=personal,travel ttl=900s', chip: 'broker', sev: 'ok' });
-    pushEvent({ actorId: 'agent-hermes', actor: 'Hermes', kind: 'memory.read', detail: 'personal/profile.md · injected at session start', chip: 'memory', sev: 'ok' });
-    showToast('Hermes paired · cap-tokens minted · session key handed off.');
+    setJustPaired(req.agent);
+    const a = await client.listActors();
+    if (a.ok) setActors(a.data);
+    showToast(`${req.agent} paired · cap-tokens minted · session key handed off.`);
     go('pairing');
   };
 
   const currentActor = actorId ? actors.find((a) => a.id === actorId) : null;
+  const master = actors.find((a) => a.role === 'master');
   const sectionAttr = (['audit', 'memory', 'pairing', 'chain', 'logo'] as string[]).includes(page) ? page : undefined;
 
   // ─── Onboarding gate (workflow 1) ──────────────────────────────
@@ -275,7 +225,7 @@ export function App() {
           </div>
         </div>
         <div className="head-right">
-          <span style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>chain · heima · block 4 821 022</span>
+          <span style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{CHAIN_PROFILE.name} · {status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
           <button
             className={`bell ${pairingRequests.length ? 'has-req' : ''}`}
             onClick={() => go('pairing')}
@@ -284,7 +234,7 @@ export function App() {
           >
             ◉{pairingRequests.length > 0 && <span className="badge">{pairingRequests.length}</span>}
           </button>
-          <span className="who"><span className="who-text">Sara · O_master · iPhone 17 Pro</span></span>
+          <span className="who"><span className="who-text">{master ? `${master.label} · ${master.omni}` : 'O_master'}</span></span>
         </div>
       </header>
 
@@ -336,22 +286,22 @@ export function App() {
 
         <div className="nav-section">session</div>
         <div style={{ padding: '6px 22px', fontSize: 11, color: 'var(--ink-faint)', lineHeight: 1.7 }}>
-          K6 · session JWT<br />ttl 04h 47m<br />K11 · iOS SE · ok
+          K6 · session JWT<br />{status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device
         </div>
       </aside>
 
       <main className="app-main" data-section={sectionAttr}>
-        {page === 'actors' && <ActorsList actors={actors} onPick={(id) => go('detail', id)} />}
+        {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} />
         )}
         {page === 'memory' && (
-          <MemoryPage memories={memories} onPlant={plantMemory} planting={planting} onPlantDone={plantDone} onView={setMemoryView} />
+          <MemoryPage memories={memories} status={status} onView={setMemoryView} />
         )}
         {page === 'pairing' && (
           <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />
         )}
-        {page === 'audit' && <AuditFeed events={events} onPick={setEventDetail} paused={paused} onPause={() => setPaused((p) => !p)} />}
+        {page === 'audit' && <AuditFeed events={events} status={status} onPick={setEventDetail} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'chain' && <ChainPage />}
         {page === 'logo' && <LogoPage />}
       </main>
