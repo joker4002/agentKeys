@@ -133,15 +133,6 @@ export interface AuditEvent {
   _isNew?: boolean;
 }
 
-export interface SimEvent {
-  actorId: string;
-  actor: string;
-  kind: string;
-  detail: string;
-  chip: ChipKind;
-  sev: StatusKind;
-}
-
 export interface Worker {
   id: 'memory' | 'credentials' | 'audit' | 'email' | 'payment';
   title: string;
@@ -167,17 +158,3 @@ export type PendingAction =
       capName: string;
       intent: { text: string; fields: [string, string][] };
     };
-
-export type Route =
-  | { page: 'actors'; actorId: null }
-  | { page: 'detail'; actorId: string }
-  | { page: 'audit'; actorId: null }
-  | { page: 'anchor'; actorId: null }
-  | { page: 'workers'; actorId: null }
-  | { page: 'memory'; actorId: null }
-  | { page: 'pairing'; actorId: null }
-  | { page: 'chain'; actorId: null }
-  | { page: 'onboarding'; actorId: null }
-  | { page: 'onboarding-mobile'; actorId: null }
-  | { page: 'harness'; actorId: null }
-  | { page: 'logo'; actorId: null };

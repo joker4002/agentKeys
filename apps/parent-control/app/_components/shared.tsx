@@ -3,7 +3,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { CHIP_STYLES } from '@/lib/constants';
 import type { ConnectionStatus } from '@/lib/client/types';
-import type { Actor, ChipKind, ScopeBits, StatusKind } from './types';
+import type { Actor, ChipKind, StatusKind } from './types';
 
 export function Chip({ children, kind = 'default' }: { children: ReactNode; kind?: ChipKind }) {
   const cls = CHIP_STYLES[kind] || 'chip';
@@ -13,10 +13,6 @@ export function Chip({ children, kind = 'default' }: { children: ReactNode; kind
 export function Dot({ status = 'ok', pulse = false }: { status?: StatusKind; pulse?: boolean }) {
   const cls = `dot ${status === 'ok' ? '' : status} ${pulse ? 'pulse' : ''}`.trim();
   return <span className={cls}></span>;
-}
-
-export function AsciiRule({ glyph = '─' }: { glyph?: string }) {
-  return <div className="hr-ascii">{glyph.repeat(220)}</div>;
 }
 
 export function PageHead({
@@ -62,34 +58,6 @@ export function Panel({
         </div>
       )}
       <div className={`panel-body ${flush ? 'flush' : ''}`}>{children}</div>
-    </div>
-  );
-}
-
-export function TripleToggle({
-  value,
-  onChange,
-}: {
-  value: ScopeBits;
-  onChange: (v: ScopeBits) => void;
-}) {
-  const state = value.write ? 'rw' : value.read ? 'r' : 'off';
-  const set = (s: 'off' | 'r' | 'rw') => {
-    if (s === 'off') onChange({ read: false, write: false });
-    else if (s === 'r') onChange({ read: true, write: false });
-    else onChange({ read: true, write: true });
-  };
-  return (
-    <div className="tswitch">
-      <button className={`deny ${state === 'off' ? 'on' : ''}`} onClick={() => set('off')}>
-        deny
-      </button>
-      <button className={state === 'r' ? 'on' : ''} onClick={() => set('r')}>
-        read
-      </button>
-      <button className={state === 'rw' ? 'on' : ''} onClick={() => set('rw')}>
-        read+write
-      </button>
     </div>
   );
 }
