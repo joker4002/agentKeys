@@ -282,6 +282,16 @@ Existing daemon ui-bridge Rust unit tests stay; add tests against a mock broker 
 
 **Recommendation:** ship **(A)** for the phone-first MVP — the phone holds the key, no contract work — and open an issue to evaluate **(B)** if/when a no-key web master or a gas-sponsored relayer becomes a requirement.
 
+> ⚠️ **Adversarial security review (codex, 2026-06-02) — (A) is the right direction but NOT sound as written.** Full findings + a required-changes checklist: [`wire-real-paths-security-review.md`](wire-real-paths-security-review.md). The `msg.sender`-bound claim holds for *post-bootstrap* writes, but the review found:
+> - **[CRITICAL]** `registerFirstMasterDevice` is unauthenticated first-call-wins → **front-runnable operator lockout** (`SidecarRegistry.sol:100-123`). Needs an on-chain first-master authorization proof.
+> - **[HIGH]** `registerAgentDevice` / `revokeAgentDevice` are `msg.sender`-only — **no K11** (`SidecarRegistry.sol:214-251`). A compromised master EVM key binds rogue agents with no biometric, contradicting `arch.md:608-612`.
+> - **[HIGH]** add-master K11 challenge **omits** `newActorOmni` + K11 cred/pubkey/attestation (`SidecarRegistry.sol:167-193`) → assertion reuse with substituted params.
+> - **[HIGH]** "the phone holds the key" = a **software secp256k1 root** (Keychain/biometric-ACL, not SE-sealed) — weaker than the K11 hardware promise; must be modelled as a first-class key.
+> - **[HIGH]** single global `operatorMasterWallet` (`SidecarRegistry.sol:66`) ⇒ the **multi-device + recovery story is incomplete**.
+> - **[HIGH]** browser→host **delegation needs a native confirmation** that re-derives the K11 challenge + renders calldata (confused-deputy otherwise).
+>
+> Net: **"no contract work" is wrong** — (A) requires the review's hardening (bootstrap auth, K11 on agent bind, full-intent challenges, a precise multi-device sender model, a native delegation-confirmation protocol) before it ships. (B) stays unsafe until the same full-intent K11 binding lands on **every** path. A non-custodial relayer under (A) is impossible without meta-tx/ERC-4337 (EIP-2771 sponsors gas but still needs the secp key).
+
 ---
 
 ## 12. WASM lift scope
