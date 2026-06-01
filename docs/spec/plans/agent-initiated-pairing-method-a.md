@@ -1,6 +1,6 @@
 # Method A — agent-initiated pairing (replaces #149's master-initiated front-half)
 
-Status: plan / in-progress. Branch `claude/agent-initiated-pairing` off `main` (post-#149).
+Status: **implemented** (broker + daemon + CLI + harness + docs). Branch `claude/agent-initiated-pairing` off `main` (post-#149). Agent-side unbind / factory-reset re-pair is intentionally **deferred** → #156 (client) + #155 (on-chain self-revoke); everything else in this doc landed.
 
 ## Decision + rationale
 §10.2 agent bootstrap flips from **master-initiated** (#149: master mints a link code → agent redeems) to **agent-initiated** (A: the agent submits a pairing request → the master claims it by scanning/entering the code). Reasons:
