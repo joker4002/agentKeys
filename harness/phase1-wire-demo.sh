@@ -235,8 +235,9 @@ resolve_sbx_paths() {
   [[ -n "$SBX_HOME" ]] || { fail "1.0 sandbox home" "could not resolve \$HOME in the sandbox"; return 1; }
   AGENT_BIN_DST="$SBX_HOME/.local/bin/agentkeys"
   MCP_BIN_DST="$SBX_HOME/.local/bin/agentkeys-mcp-server"
-  # §10.2 agent bootstrap (issue #144): the daemon's --init-link-code one-shot
-  # generates K10 + redeems the master link code IN THE SANDBOX (Phase P.1).
+  # §10.2 agent bootstrap (issue #144, method A): the daemon's --request-pairing /
+  # --retrieve-pairing one-shots generate K10 + open + retrieve the pairing IN THE
+  # SANDBOX (Phases P.0 + P.1b).
   DAEMON_BIN_DST="$SBX_HOME/.local/bin/agentkeys-daemon"
   sbx_exec "mkdir -p \"$SBX_HOME/.local/bin\"" >/dev/null
 }
@@ -485,21 +486,24 @@ phase1_sandbox() {
   done
 
   # ─── Phase P — install (pair) ────────────────────────────────────────────────
-  # Fresh §10.2 HDKD pairing (issue #144) — the "install an app + approve its
-  # permissions" story, four steps:
-  #   P.0 create  — the MASTER mints a one-time link code bound to the HDKD child
-  #                 omni  O_agent = SHA256(.. || O_master || "//label")  (real
-  #                 broker /v1/agent/create; replaces the old openssl stub).
-  #   P.1 install — the AGENT generates its OWN K10 device key IN THE SANDBOX (the
-  #                 daemon's --init-link-code one-shot; key never on the master),
-  #                 proves possession, redeems the code → J1_agent + binding artifact.
-  #   P.1b pending— the MASTER pulls the rendezvous (`agentkeys agent pending`) and
+  # Fresh §10.2 HDKD pairing (issue #144, method A — agent-INITIATED, the Matter/
+  # HomeKit IoT model: the device shows a code, the owner claims it). Steps:
+  #   P.0 request — the AGENT generates its OWN K10 device key IN THE SANDBOX and
+  #                 opens an UNBOUND pairing request (daemon --request-pairing; key
+  #                 never on the master), displaying a one-time pairing_code.
+  #   P.1 claim   — the MASTER claims that code (`agentkeys agent claim`), binding
+  #                 the agent under the HDKD child omni
+  #                 O_agent = SHA256(.. || O_master || "//label") and declaring scope.
+  #   P.1b retrieve— the AGENT polls + retrieves J1_agent IN THE SANDBOX (daemon
+  #                 --retrieve-pairing; re-proves K10 possession).
+  #   P.1c pending— the MASTER pulls the rendezvous (`agentkeys agent pending`) and
   #                 sees this agent awaiting approval.
   #   P.2 bind    — the MASTER submits registerAgentDevice (no biometric) + acks the
-  #                 broker (clears the binding from pending).
+  #                 broker by request_id (clears the binding from pending).
   #   P.3 grant   — the MASTER grants the requested scope (one Touch ID).
   # P.2+P.3 are ONE product approval conceptually; kept as two steps so the test
   # drives + verifies each deterministically. Skipped under --reuse-agent + --light.
+  # (Agent-side unbind / factory-reset re-pair is deferred → #156.)
   #
   # GENUINE FRESH PAIRING: AGENT_LABEL (default `demo-agent`) is stable and the
   # child omni is a deterministic HDKD of (O_master, label). The persisted sandbox
@@ -543,110 +547,122 @@ phase1_sandbox() {
     fi
     ok "P.depair" "clean slate — prior device revoked + sandbox K10 wiped (confirmed); P.1 mints a fresh key"
     if [[ -z "$SESSION_BEARER" ]]; then
-      fail "P.0 create" "no operator session bearer (0.7) — cannot mint a link code"
+      fail "P.1 claim" "no operator session bearer (0.7) — the master cannot claim the agent's pairing request"
     else
-      # P.0 master mints a real one-time link code bound to the child omni via the
-      # `agentkeys agent create` CLI (the operator command we ship). Resolve a LOCAL
-      # host binary (same release→debug→PATH order as the chain helpers); fall back
-      # to a raw broker POST only if no local binary exists, so a --real run without
-      # a host build still works.
-      local cr link_code child_omni la
+      # P.0 the AGENT opens an UNBOUND pairing request IN THE SANDBOX (daemon
+      # --request-pairing; the K10 is minted here, never on the master) and
+      # displays a one-time pairing_code. 2>/dev/null drops the daemon's stderr
+      # logs so stdout is clean artifact JSON for jq. Resolve a LOCAL host binary
+      # (release→debug→PATH order) for the MASTER's claim step below.
+      local la rq pairing_code request_id rq_addr rq_dkh
       if [[ -x "$REPO_ROOT/target/release/agentkeys" ]]; then la="$REPO_ROOT/target/release/agentkeys"
       elif [[ -x "$REPO_ROOT/target/debug/agentkeys" ]]; then la="$REPO_ROOT/target/debug/agentkeys"
       else la="$(command -v agentkeys 2>/dev/null || true)"; fi
-      if [[ -n "$la" ]]; then
-        cr="$("$la" agent create --label "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" \
-          --broker-url "${BROKER_URL%/}" --session-bearer "$SESSION_BEARER" 2>&1)"
-      else
-        log "    P.0 create: no local agentkeys binary — raw POST fallback (build the host CLI to exercise it: cargo build --release -p agentkeys-cli)"
-        cr="$(curl -sS --max-time 30 -X POST "${BROKER_URL%/}/v1/agent/create" \
-          -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
-          -d "$(jq -n --arg label "$AGENT_LABEL" --arg scope "${SEED_SCOPE_SERVICES:-memory}" '{label:$label, requested_scope:$scope}')" 2>&1)"
-      fi
-      link_code="$(echo "$cr" | jq -r '.link_code // empty' 2>/dev/null)"
-      child_omni="$(echo "$cr" | jq -r '.child_omni // empty' 2>/dev/null)"
-      if [[ -z "$link_code" || -z "$child_omni" ]]; then
-        if echo "$cr" | grep -q '404'; then
-          # The #1 P.0 trap: the DEPLOYED broker predates #144, so the §10.2
-          # routes (/v1/agent/create, /v1/auth/link-code/redeem,
-          # /v1/agent/pending-bindings) 404. The harness code is fine — the
-          # broker host just needs the #144/#149 binary. Name the fix loudly.
-          fail "P.0 create" "broker has NO §10.2 routes (HTTP 404) — the DEPLOYED broker predates #144. Redeploy it with the #144/#149 code FIRST: reach the broker with 'bash scripts/ssh-broker.sh', then on the host run 'sudo bash scripts/setup-broker-host.sh --ref claude/impl-144-hdkd-bootstrap'. Verify before re-running: a no-bearer 'POST ${BROKER_URL%/}/v1/agent/create' must return 401, not 404. (1.4 MCP + 1.5 seed below are cascades of this — they clear once P.0 works.)"
+      rq="$(sbx_exec "$DAEMON_BIN_DST --request-pairing --broker-url ${BROKER_URL:-} 2>/dev/null")"
+      pairing_code="$(echo "$rq" | jq -r '.pairing_code // empty' 2>/dev/null)"
+      request_id="$(echo "$rq" | jq -r '.request_id // empty' 2>/dev/null)"
+      rq_addr="$(echo "$rq" | jq -r '.agent_address // empty' 2>/dev/null)"
+      rq_dkh="$(echo "$rq" | jq -r '.device_key_hash // empty' 2>/dev/null)"
+      if [[ -z "$pairing_code" || -z "$request_id" || -z "$rq_addr" || -z "$rq_dkh" ]]; then
+        if echo "$rq" | grep -q '404'; then
+          # The #1 P.0 trap: the DEPLOYED broker predates this PR, so the §10.2
+          # method-A routes (/v1/agent/pairing/{request,claim,poll}) 404. The
+          # harness code is fine — the broker host just needs the method-A binary.
+          fail "P.0 request" "broker has NO §10.2 method-A routes (HTTP 404) — the DEPLOYED broker predates this PR. Redeploy it with the method-A binary FIRST: reach the broker with 'bash scripts/ssh-broker.sh', then on the host run 'sudo bash scripts/setup-broker-host.sh' (it pulls origin/<this branch>). Verify before re-running: a no-bearer 'POST ${BROKER_URL%/}/v1/agent/pairing/claim' must return 401, not 404. (1.4 MCP + 1.5 seed below are cascades of this — they clear once P.0 works.)"
         else
-          fail "P.0 create" "agent/create returned no link code: $(echo "$cr" | tr '\n' ' ' | cut -c1-200)"
+          fail "P.0 request" "in-sandbox daemon --request-pairing returned no pairing_code: $(echo "$rq" | tr '\n' ' ' | cut -c1-200)"
         fi
+      elif [[ -n "$prior_dkh" && "$rq_dkh" == "$prior_dkh" ]]; then
+        fail "P.0 request" "fresh pairing produced the SAME device_key_hash as the prior run ($rq_dkh) — the P.depair K10 wipe did not take; this is NOT a genuine re-pair"
       else
-        ok "P.0 create" "📇 master minted link code → child omni ${child_omni:0:14}… (label $AGENT_LABEL)"
-        # P.1 agent generates K10 + redeems IN THE SANDBOX (daemon one-shot; key
-        # never on the master). 2>/dev/null drops the daemon's stderr logs so
-        # stdout is clean artifact JSON for jq.
-        local ds ds_addr ds_actor ds_dkh ds_pop ds_session_file
-        ds="$(sbx_exec "$DAEMON_BIN_DST --init-link-code $link_code --broker-url ${BROKER_URL:-} 2>/dev/null")"
-        ds_addr="$(echo "$ds" | jq -r '.agent_address // empty' 2>/dev/null)"
-        ds_actor="$(echo "$ds" | jq -r '.actor_omni // empty' 2>/dev/null)"
-        ds_dkh="$(echo "$ds" | jq -r '.device_key_hash // empty' 2>/dev/null)"
-        ds_pop="$(echo "$ds" | jq -r '.pop_sig // empty' 2>/dev/null)"
-        ds_session_file="$(echo "$ds" | jq -r '.session_file // empty' 2>/dev/null)"
-        if [[ -z "$ds_session_file" || -z "$ds_actor" || -z "$ds_addr" || -z "$ds_dkh" || -z "$ds_pop" ]]; then
-          fail "P.1 install" "in-sandbox daemon redeem failed: $(echo "$ds" | tr '\n' ' ' | cut -c1-200)"
-        elif [[ "$ds_actor" != "$child_omni" ]]; then
-          fail "P.1 install" "redeemed omni ${ds_actor:0:14}… != created child ${child_omni:0:14}… (broker/derivation mismatch)"
-        elif [[ -n "$prior_dkh" && "$ds_dkh" == "$prior_dkh" ]]; then
-          fail "P.1 install" "fresh pairing produced the SAME device_key_hash as the prior run ($ds_dkh) — the P.depair K10 wipe did not take; this is NOT a genuine re-pair"
+        ok "P.0 request" "📲 agent opened pairing request in-sandbox — code ${pairing_code:0:8}…, addr ${rq_addr:0:12}… (K10 SANDBOX-only)"
+        # P.1 the MASTER claims the displayed code (`agentkeys agent claim` — the
+        # operator command we ship), binding the agent under the HDKD child omni +
+        # declaring scope. Raw POST fallback so a --real run without a host build works.
+        local cl child_omni
+        if [[ -n "$la" ]]; then
+          cl="$("$la" agent claim --pairing-code "$pairing_code" --label "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" \
+            --broker-url "${BROKER_URL%/}" --session-bearer "$SESSION_BEARER" 2>&1)"
         else
-          # cap-mint (validate_hex32) requires 0x-prefixed omnis, like OPERATOR_OMNI.
-          # The §10.2 child omni is un-prefixed by design, so normalize to exactly
-          # one 0x for --default-actor (else memory.put → cap_mint 400 "actor_omni
-          # must start with 0x"). ds_actor stays un-prefixed for the chain helpers.
-          ACTOR_OMNI="0x${ds_actor#0x}"; AGENT_SESSION_FILE="$ds_session_file"; DEVICE_KEY_HASH="$ds_dkh"
-          # Record the (public) device hash in a sandbox sidecar so the NEXT fresh
-          # run can depair THIS exact device (P.depair). It's the on-chain id, not
-          # the key — custody is unaffected.
-          sbx_exec "printf '%s' '$ds_dkh' > ~/.agentkeys/agent-device.hash" >/dev/null 2>&1 || true
-          ok "P.1 install" "📲 agent redeemed in-sandbox — addr ${ds_addr:0:12}…, omni ${ds_actor:0:14}… (K10 SANDBOX-only, J1_agent minted)"
-          # P.1b master pulls the pending binding via `agentkeys agent pending` (the
-          # rendezvous we built) and confirms THIS agent is awaiting approval.
-          # Read-only + idempotent; best-effort (needs the local CLI).
-          if [[ -n "$la" ]]; then
-            local pend; pend="$("$la" agent pending --broker-url "${BROKER_URL%/}" --session-bearer "$SESSION_BEARER" 2>&1)"
-            if echo "$pend" | jq -e --arg c "$ds_actor" '.pending[]? | select(.child_omni==$c)' >/dev/null 2>&1; then
-              ok "P.1b pending" "🔔 master sees agent ${ds_actor:0:14}… awaiting approval (agent pending)"
-            else
-              skip "P.1b pending" "agent pending did not list ${ds_actor:0:14}… (non-fatal): $(echo "$pend" | tr '\n' ' ' | cut -c1-120)"
+          log "    P.1 claim: no local agentkeys binary — raw POST fallback (build the host CLI to exercise it: cargo build --release -p agentkeys-cli)"
+          cl="$(curl -sS --max-time 30 -X POST "${BROKER_URL%/}/v1/agent/pairing/claim" \
+            -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
+            -d "$(jq -n --arg code "$pairing_code" --arg label "$AGENT_LABEL" --arg scope "${SEED_SCOPE_SERVICES:-memory}" '{pairing_code:$code, label:$label, requested_scope:$scope}')" 2>&1)"
+        fi
+        child_omni="$(echo "$cl" | jq -r '.child_omni // empty' 2>/dev/null)"
+        if [[ -z "$child_omni" ]]; then
+          fail "P.1 claim" "agent claim returned no child omni: $(echo "$cl" | tr '\n' ' ' | cut -c1-200)"
+        else
+          ok "P.1 claim" "📇 master claimed code → child omni ${child_omni:0:14}… (label $AGENT_LABEL)"
+          # P.1b the AGENT retrieves J1_agent IN THE SANDBOX (daemon --retrieve-pairing;
+          # re-proves K10 possession, polls until the master's claim lands). 2>/dev/null
+          # drops stderr logs so stdout is clean artifact JSON for jq.
+          local ds ds_addr ds_actor ds_dkh ds_pop ds_session_file
+          ds="$(sbx_exec "$DAEMON_BIN_DST --retrieve-pairing --request-id $request_id --broker-url ${BROKER_URL:-} 2>/dev/null")"
+          ds_addr="$(echo "$ds" | jq -r '.agent_address // empty' 2>/dev/null)"
+          ds_actor="$(echo "$ds" | jq -r '.actor_omni // empty' 2>/dev/null)"
+          ds_dkh="$(echo "$ds" | jq -r '.device_key_hash // empty' 2>/dev/null)"
+          ds_pop="$(echo "$ds" | jq -r '.pop_sig // empty' 2>/dev/null)"
+          ds_session_file="$(echo "$ds" | jq -r '.session_file // empty' 2>/dev/null)"
+          if [[ -z "$ds_session_file" || -z "$ds_actor" || -z "$ds_addr" || -z "$ds_dkh" || -z "$ds_pop" ]]; then
+            fail "P.1b retrieve" "in-sandbox daemon --retrieve-pairing failed: $(echo "$ds" | tr '\n' ' ' | cut -c1-200)"
+          elif [[ "$ds_actor" != "$child_omni" ]]; then
+            fail "P.1b retrieve" "retrieved omni ${ds_actor:0:14}… != claimed child ${child_omni:0:14}… (broker/derivation mismatch)"
+          else
+            # cap-mint (validate_hex32) requires 0x-prefixed omnis, like OPERATOR_OMNI.
+            # The §10.2 child omni is un-prefixed by design, so normalize to exactly
+            # one 0x for --default-actor (else memory.put → cap_mint 400 "actor_omni
+            # must start with 0x"). ds_actor stays un-prefixed for the chain helpers.
+            ACTOR_OMNI="0x${ds_actor#0x}"; AGENT_SESSION_FILE="$ds_session_file"; DEVICE_KEY_HASH="$ds_dkh"
+            # Record the (public) device hash in a sandbox sidecar so the NEXT fresh
+            # run can depair THIS exact device (P.depair). It's the on-chain id, not
+            # the key — custody is unaffected.
+            sbx_exec "printf '%s' '$ds_dkh' > ~/.agentkeys/agent-device.hash" >/dev/null 2>&1 || true
+            ok "P.1b retrieve" "📲 agent retrieved J1_agent in-sandbox — addr ${ds_addr:0:12}…, omni ${ds_actor:0:14}… (J1_agent minted at retrieval)"
+            # P.1c master pulls the pending binding via `agentkeys agent pending` (the
+            # rendezvous we built) and confirms THIS agent is awaiting approval.
+            # Read-only + idempotent; best-effort (needs the local CLI).
+            if [[ -n "$la" ]]; then
+              local pend; pend="$("$la" agent pending --broker-url "${BROKER_URL%/}" --session-bearer "$SESSION_BEARER" 2>&1)"
+              if echo "$pend" | jq -e --arg c "$ds_actor" '.pending[]? | select(.child_omni==$c)' >/dev/null 2>&1; then
+                ok "P.1c pending" "🔔 master sees agent ${ds_actor:0:14}… awaiting approval (agent pending)"
+              else
+                skip "P.1c pending" "agent pending did not list ${ds_actor:0:14}… (non-fatal): $(echo "$pend" | tr '\n' ' ' | cut -c1-120)"
+              fi
             fi
-          fi
-          # P.2 master binds the SANDBOX-generated device on-chain (it never saw the key).
-          local reg; reg="$(bash "$REPO_ROOT/scripts/heima-agent-create.sh" --label "$AGENT_LABEL" \
-            --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
-          echo "$reg" | sed 's/^/        /' >&2
-          # heima-agent-create.sh prints stderr logs + a final JSON line; $reg is
-          # BOTH (2>&1), so extract the JSON line before jq — jq on the mixed text
-          # silently fails and would false-FAIL a real registration. The JSON
-          # discriminates a real tx_hash from the already-registered skip.
-          local reg_json; reg_json="$(echo "$reg" | grep -oE '\{.*\}' | tail -1)"
-          if echo "$reg_json" | jq -e '.skipped=="already-registered"' >/dev/null 2>&1; then
-            fail "P.2 bind" "registerAgentDevice was SKIPPED (already-registered) — P.depair/P.1 did NOT yield a fresh device, so the pairing path was NOT exercised (check P.depair revoke + sandbox wipe): $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
-          elif echo "$reg_json" | jq -e '.ok==true and ((.tx_hash // "") != "")' >/dev/null 2>&1; then
-            ok "P.2 bind" "on-chain registerAgentDevice — REAL tx $(echo "$reg_json" | jq -r '.tx_hash' 2>/dev/null | cut -c1-18)… (fresh K10 from P.depair)"
-            # Ack the rendezvous: tell the broker the master bound this device so it
-            # drops out of pending-bindings (self-cleaning → idempotent re-runs).
-            curl -sS --max-time 15 -X POST "${BROKER_URL%/}/v1/agent/pending-bindings/ack" \
-              -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
-              -d "$(jq -n --arg lc "$link_code" '{link_code:$lc}')" >/dev/null 2>&1 \
-              && log "    P.2 ack: binding acked — cleared from pending (idempotent)" || true
-          else
-            fail "P.2 bind" "registerAgentDevice failed: $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
-          fi
-          # P.3 master grants the requested scope (one Touch ID).
-          if [[ "$WEBAUTHN" == true ]]; then
-            log "    P.3 grant: heima-scope-set --webauthn --agent $AGENT_LABEL --services ${SEED_SCOPE_SERVICES:-memory} (expect Touch ID)"
-            local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" 2>&1)"
-            echo "$grant" | sed 's/^/        /' >&2
-            echo "$grant" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true' \
-              && ok "P.3 grant" "🔐 master granted [${SEED_SCOPE_SERVICES:-memory}] to ${ds_actor:0:14}… (Touch ID)" \
-              || fail "P.3 grant" "scope grant failed: $(echo "$grant" | tr '\n' ' ' | cut -c1-160)"
-          else
-            skip "P.3 grant" "no --webauthn — re-run with --real --webauthn so the master can grant the fresh actor's scope (Touch ID)"
+            # P.2 master binds the SANDBOX-generated device on-chain (it never saw the key).
+            local reg; reg="$(bash "$REPO_ROOT/scripts/heima-agent-create.sh" --label "$AGENT_LABEL" \
+              --agent-address "$ds_addr" --actor-omni "$ds_actor" --device-key-hash "$ds_dkh" --pop-sig "$ds_pop" 2>&1)"
+            echo "$reg" | sed 's/^/        /' >&2
+            # heima-agent-create.sh prints stderr logs + a final JSON line; $reg is
+            # BOTH (2>&1), so extract the JSON line before jq — jq on the mixed text
+            # silently fails and would false-FAIL a real registration. The JSON
+            # discriminates a real tx_hash from the already-registered skip.
+            local reg_json; reg_json="$(echo "$reg" | grep -oE '\{.*\}' | tail -1)"
+            if echo "$reg_json" | jq -e '.skipped=="already-registered"' >/dev/null 2>&1; then
+              fail "P.2 bind" "registerAgentDevice was SKIPPED (already-registered) — P.depair/P.0 did NOT yield a fresh device, so the pairing path was NOT exercised (check P.depair revoke + sandbox wipe): $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
+            elif echo "$reg_json" | jq -e '.ok==true and ((.tx_hash // "") != "")' >/dev/null 2>&1; then
+              ok "P.2 bind" "on-chain registerAgentDevice — REAL tx $(echo "$reg_json" | jq -r '.tx_hash' 2>/dev/null | cut -c1-18)… (fresh K10 from P.depair)"
+              # Ack the rendezvous BY request_id: tell the broker the master bound this
+              # device so it drops out of pending-bindings (self-cleaning → idempotent).
+              curl -sS --max-time 15 -X POST "${BROKER_URL%/}/v1/agent/pending-bindings/ack" \
+                -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
+                -d "$(jq -n --arg rid "$request_id" '{request_id:$rid}')" >/dev/null 2>&1 \
+                && log "    P.2 ack: binding acked — cleared from pending (idempotent)" || true
+            else
+              fail "P.2 bind" "registerAgentDevice failed: $(echo "$reg" | tr '\n' ' ' | cut -c1-160)"
+            fi
+            # P.3 master grants the requested scope (one Touch ID).
+            if [[ "$WEBAUTHN" == true ]]; then
+              log "    P.3 grant: heima-scope-set --webauthn --agent $AGENT_LABEL --services ${SEED_SCOPE_SERVICES:-memory} (expect Touch ID)"
+              local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" 2>&1)"
+              echo "$grant" | sed 's/^/        /' >&2
+              echo "$grant" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true' \
+                && ok "P.3 grant" "🔐 master granted [${SEED_SCOPE_SERVICES:-memory}] to ${ds_actor:0:14}… (Touch ID)" \
+                || fail "P.3 grant" "scope grant failed: $(echo "$grant" | tr '\n' ' ' | cut -c1-160)"
+            else
+              skip "P.3 grant" "no --webauthn — re-run with --real --webauthn so the master can grant the fresh actor's scope (Touch ID)"
+            fi
           fi
         fi
       fi
@@ -882,8 +898,8 @@ DOCKERFILE
 build_linux_binaries() {
   local agent_bin="$LINUX_TARGET_DIR/release/agentkeys"
   local mcp_bin="$LINUX_TARGET_DIR/release/agentkeys-mcp-server"
-  # §10.2 agent bootstrap (issue #144): the daemon does the in-sandbox
-  # keygen + link-code redeem (Phase P.1).
+  # §10.2 agent bootstrap (issue #144, method A): the daemon does the in-sandbox
+  # keygen + pairing request/retrieve (Phases P.0 + P.1b).
   local daemon_bin="$LINUX_TARGET_DIR/release/agentkeys-daemon"
   # Idempotent + source-aware: skip when ALL binaries exist and no tracked
   # source is newer; otherwise (re)build incrementally (caches persist).

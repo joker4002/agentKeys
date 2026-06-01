@@ -288,8 +288,15 @@ if [[ -n "$PULL_REF" ]]; then
   fi
   log "git fetch origin"
   ( cd "$REPO_ROOT" && git fetch origin )
-  log "git checkout $PULL_REF"
-  ( cd "$REPO_ROOT" && git checkout "$PULL_REF" )
+  # -f: the broker host is a DEPLOY TARGET, not a dev checkout. A plain `git
+  # checkout` ABORTS when an untracked working-tree file shadows a file the
+  # target ref tracks ("untracked working tree files would be overwritten by
+  # checkout" — e.g. a docs/wiki/*.md left over from a prior branch). -f
+  # overwrites those colliding files with the tracked version + discards local
+  # edits to TRACKED files (not expected on a deploy host), while LEAVING
+  # unrelated untracked files (env files, keys, certs — all gitignored) intact.
+  log "git checkout -f $PULL_REF"
+  ( cd "$REPO_ROOT" && git checkout -f "$PULL_REF" )
   log "git pull --ff-only"
   ( cd "$REPO_ROOT" && git pull --ff-only )
 fi
@@ -648,17 +655,17 @@ if command -v nm >/dev/null 2>&1; then
     warn "nm sees 0 email-link symbols, but cargo claims the feature is on."
     warn "Continuing — the post-restart /healthz probe will catch any real boot failure."
   fi
-  # Issue #144: confirm the §10.2 agent-bootstrap surface is linked (link-code
-  # endpoints + store). WARN-only; the post-restart route smoke below is the
-  # authoritative runtime gate.
+  # Issue #144 (method A): confirm the §10.2 agent-initiated pairing surface is
+  # linked (pairing request/claim/poll handlers + store). WARN-only; the post-
+  # restart route smoke below is the authoritative runtime gate.
   agent_symbols=$(nm "$REPO_ROOT/target/release/agentkeys-broker-server" 2>/dev/null \
-    | grep -cE "link_code_redeem|agent_create|pending_bindings|link_codes" \
+    | grep -cE "pairing_request|pairing_claim|pairing_poll|pending_bindings" \
     || true)
   if (( agent_symbols > 0 )); then
-    log "  nm sees $agent_symbols §10.2 agent-bootstrap symbol(s) — issue #144 code is linked in"
+    log "  nm sees $agent_symbols §10.2 agent-pairing symbol(s) — issue #144 (method A) code is linked in"
   else
-    warn "nm sees 0 §10.2 agent-bootstrap symbols (issue #144). The binary may predate #144."
-    warn "Continuing — the post-restart /v1/agent/create route smoke will catch a stale binary."
+    warn "nm sees 0 §10.2 agent-pairing symbols (issue #144 method A). The binary may predate this PR."
+    warn "Continuing — the post-restart /v1/agent/pairing/claim route smoke will catch a stale binary."
   fi
 else
   log "  (nm not installed — skipping symbol-table sanity check)"
@@ -1562,20 +1569,20 @@ probe_or_die() {
 }
 probe_or_die broker  8091 agentkeys-broker
 
-# Issue #144 — §10.2 agent-bootstrap route smoke. A no-bearer POST to
-# /v1/agent/create MUST return 401 (route registered, rejects unauth), NOT 404
-# (a stale binary predating #144 has no such route). Deterministic — no operator
-# session / keygen needed — so it can't flake; it's the authoritative "is the
-# #144 code actually serving on this host" gate that the nm check above hints at.
-agent_create_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-  -X POST -H 'content-type: application/json' -d '{"label":"smoke"}' \
-  "http://127.0.0.1:8091/v1/agent/create" 2>/dev/null || echo 000)"
-case "$agent_create_code" in
-  401) log "  §10.2 /v1/agent/create live (401 unauth as expected — issue #144 routes deployed)" ;;
-  404) die "POST /v1/agent/create → 404: the running broker binary predates issue #144 (§10.2 routes missing).
+# Issue #144 (method A) — §10.2 agent-pairing route smoke. A no-bearer POST to
+# /v1/agent/pairing/claim MUST return 401 (master-gated route registered, rejects
+# unauth), NOT 404 (a stale binary predating this PR has no such route).
+# Deterministic — no operator session / keygen needed — so it can't flake; it's
+# the authoritative "is the method-A code actually serving on this host" gate.
+agent_claim_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+  -X POST -H 'content-type: application/json' -d '{"pairing_code":"smoke","label":"smoke"}' \
+  "http://127.0.0.1:8091/v1/agent/pairing/claim" 2>/dev/null || echo 000)"
+case "$agent_claim_code" in
+  401) log "  §10.2 /v1/agent/pairing/claim live (401 unauth as expected — method-A routes deployed)" ;;
+  404) die "POST /v1/agent/pairing/claim → 404: the running broker binary predates this PR (§10.2 method-A routes missing).
    The build/install did not deploy the new code. Fix:
      rm -rf $REPO_ROOT/target/release/agentkeys-broker-server && re-run this script (it self-heals with a clean rebuild when the feature is missing)." ;;
-  *)   warn "POST /v1/agent/create → HTTP $agent_create_code (expected 401). Route appears present; continuing (the /healthz probe already passed)." ;;
+  *)   warn "POST /v1/agent/pairing/claim → HTTP $agent_claim_code (expected 401). Route appears present; continuing (the /healthz probe already passed)." ;;
 esac
 
 probe_or_die backend 8090 agentkeys-backend
