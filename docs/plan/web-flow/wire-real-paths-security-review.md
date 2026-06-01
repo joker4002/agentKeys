@@ -4,6 +4,8 @@
 
 **Verdict:** Recommendation **(A)** (keep `msg.sender`-bound) is *safer than* (B) because the current contracts are **not** assertion-only-safe — but **(A) is NOT sound as written.** The core `msg.sender`-bound claim holds for *post-bootstrap* writes, but the plan obscures a software secp256k1 root key, leaves first-master bootstrap front-runnable, leaves agent bind/revoke K11-free, and lacks a safe browser→host delegation protocol. (A) cannot ship until the items below are fixed.
 
+> **Decision (2026-06-02): adopt ERC-4337 P-256 smart-account master** (see `wire-real-paths.md` §11). It **resolves**: the software-secp256k1 root [HIGH #4] (clients sign UserOps with the SE-sealed passkey only), the relayer / key-free / gas question (bundler + paymaster, no custodial relayer), and the multi-device/recovery gap [HIGH #5] (account address is the stable master; multiple passkeys + quorum recovery). It does **NOT** resolve and these remain **required** (now folded into the ERC-4337 migration): the **CRITICAL** authenticated first-master bootstrap, **full-intent binding** in `validateUserOp` (items 2/3 below), and the Heima EntryPoint + Solidity-P-256 infra. The browser→host delegation finding [HIGH #6] dissolves — each host signs its own UserOp, no delegation hop.
+
 ## Required changes before fork (A) ships (action items)
 
 1. **[CRITICAL] Authenticate first-master bootstrap.** Add an on-chain authorization proof to `registerFirstMasterDevice` (bind operatorOmni, actorOmni, deviceKeyHash, K11 cred/rp/pubkey, roles, chainId, contract, nonce, expiry, expected sender). Today it's first-call-wins → front-runnable lockout.

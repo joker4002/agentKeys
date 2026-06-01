@@ -34,8 +34,10 @@ The seam in §1 below is written **desktop-first**: "browser → `localhost:3114
 | Host | Shell | Liveness | Chain-signing key custody |
 |---|---|---|---|
 | desktop / server | the daemon binary (§1 below) | long-running process | OS keychain |
-| **mobile (primary future)** | native app embedding the core (Rust→UniFFI) | **push-woken, on-demand** | Keychain w/ biometric ACL (secp256k1 *cannot* be SE-sealed — see §11) |
-| web | the core compiled to **WASM** | active-tab only | **cannot custody the key safely → delegates broadcast** (see §11/§12) |
+| **mobile (primary future)** | native app embedding the core (Rust→UniFFI) | **push-woken, on-demand** | SE-sealed **K11/P-256 passkey** signs UserOps (ERC-4337 — §11); no secp256k1 key on device |
+| web | the core compiled to **WASM** | active-tab only | registered **P-256 passkey** signs UserOps; a **bundler** broadcasts (ERC-4337 — §11) |
+
+> **Chain-write mechanism — ERC-4337 (confirmed; see §11):** every host signs UserOps with its registered P-256 passkey and a bundler broadcasts; **no host holds a secp256k1 key.** This supersedes the "delegate broadcast" framing in §11/§12's *pre-decision* analysis below.
 
 Consequences that make this the efficient *and* consistent choice:
 - **Consistency is structural** — one Rust crate, so web/mobile/desktop can't drift. Do **not** reimplement ceremony logic in TypeScript; TS stays a dumb UI/transport layer over the core.
@@ -292,23 +294,39 @@ Existing daemon ui-bridge Rust unit tests stay; add tests against a mock broker 
 >
 > Net: **"no contract work" is wrong** — (A) requires the review's hardening (bootstrap auth, K11 on agent bind, full-intent challenges, a precise multi-device sender model, a native delegation-confirmation protocol) before it ships. (B) stays unsafe until the same full-intent K11 binding lands on **every** path. A non-custodial relayer under (A) is impossible without meta-tx/ERC-4337 (EIP-2771 sponsors gas but still needs the secp key).
 
+### Decision (2026-06-02): ERC-4337 P-256 smart-account master — CONFIRMED
+
+Neither plain (A) nor plain (B). The master becomes an **ERC-4337 smart-contract account** whose `validateUserOp` verifies a **P-256 (K11/passkey) signature**; a **bundler** broadcasts UserOps and an optional **paymaster** sponsors gas. Why this is the chosen path:
+
+- **Removes the software-secp256k1 root** (the HIGH finding): every client authenticates UserOps with the **SE-sealed K11/P-256 passkey alone** — no exportable secp256k1 key on phone, browser, or desktop. The hardware-sealed promise the rest of arch.md makes actually holds.
+- **Key-free + relayer in one** (settles the relayer question): a bundler broadcasts and a paymaster can pay gas → no HEI on device, and **no custodial relayer** (the only relayer that worked under (A)).
+- **`SidecarRegistry.master` = the smart-account address** — stable across device swaps; the account natively supports **multiple authorized passkeys + quorum / social recovery**, which fixes the single-`operatorMasterWallet` multi-device gap (HIGH finding).
+- **Web and mobile are symmetric full masters** — each registers its own passkey as an account signer and signs UserOps directly. The browser→host "delegate broadcast" hop (and its confused-deputy risk) **disappears**.
+- **Reuses existing crypto** — AgentKeys already verifies P-256 on chain (`K11Verifier.sol` + its P256 verifier), so the account's validation reuses it; no new primitive.
+
+**ERC-4337 does NOT auto-fix these (still required, tracked in the contract-hardening issue):**
+- **Authenticated first-master bootstrap** (CRITICAL) — registering the account as master still needs an on-chain authorization proof; "first-call-wins" stays front-runnable otherwise.
+- **Full-intent binding in `validateUserOp`** — the signed UserOp (and any K11 challenge) must commit the *entire* intent (op + target omni + scope bits + device hash) so a bundler/MITM cannot substitute args.
+- **Heima infra** — deploy an **EntryPoint**; and since Heima is **London-level EVM** (no RIP-7212 P-256 precompile, no PUSH0) the P-256 verify is a **gas-heavy Solidity verifier**, and the account/EntryPoint must avoid post-London opcodes.
+- Agent bind/revoke must route through the account (so they inherit passkey gating), and signCount/replay is handled by the EntryPoint nonce.
+
 ---
 
 ## 12. WASM lift scope
 
-The portable core (§0.5) compiles to WASM for the web host. **In scope:** the master-plane orchestration — broker calls, ceremony state machines, cap handling, onboarding-state aggregation. **Out of scope:** chain submission (delegated per §11) and any secp256k1 key custody (the browser can't do it safely).
+The portable core (§0.5) compiles to WASM for the web host. **In scope:** the master-plane orchestration — broker calls, ceremony state machines, cap handling, onboarding-state aggregation, and **building + passkey-signing the ERC-4337 UserOp**. **Out of scope:** the ERC-4337 account/EntryPoint/bundler infra (separate contract-hardening work per §11) and any secp256k1 key custody.
 
 **Concretely:**
 - **`agentkeys-core` carve-out (X0, prerequisite):** lift the master-plane functions into `agentkeys-core` with a host-agnostic API (no `axum` / daemon deps), so the daemon, WASM, and mobile-UniFFI shells all bind the same surface. `init_flow` already lives there — extend it with pairing + cap + onboarding-state.
 - **`wasm-bindgen` exports (X1):** email auth (`start`/`verify`/`status`), wallet SIWE (`start`/`verify`), pairing (`claim`/`pending`/`ack`), cap-mint, `onboarding/state` aggregation. Build a `pkg` via `wasm-pack`; smoke-test one call (email start) from a throwaway page.
 - **`CoreBackend` (X2):** a new `AgentKeysClient` implementation (next to `empty`/`daemon`) that calls the WASM exports instead of HTTP-to-daemon. `NEXT_PUBLIC_AGENTKEYS_BACKEND=core`. The existing UI works unchanged — same interface.
 - **WebAuthn interop (X3):** the core asks the JS host to run `navigator.credentials.{create,get}`; the assertion flows back into the core (K11 enroll + assert).
-- **Chain-write delegation (X4):** per the §11 fork — (A) web delegates broadcast to a paired phone / daemon; (B) relayer.
+- **Chain-write submission (X4):** per the §11 decision (**ERC-4337**) — the web host signs a UserOp with its registered P-256 passkey; a **bundler** broadcasts (no secp256k1 key, no delegated-broadcast hop). Gated on the ERC-4337 account + EntryPoint landing on Heima (contract-hardening issue).
 
 **Constraints / risks:**
 - `reqwest` has a WASM target (browser `fetch`) → the **broker must allow CORS for the web origin** (`data-model.md:399` open question — prod origin `https://parent.{operator}.litentry.org`).
 - Async via `wasm-bindgen-futures`.
 - Bundle size: core + `reqwest` + crypto in WASM — measure, lazy-load the WASM chunk, tree-shake.
-- No `cast` / secp256k1 signing in WASM (§11) → chain writes always delegated from the browser.
+- No `cast` / secp256k1 signing in WASM (§11) → chain writes go out as **ERC-4337 UserOps** signed by the P-256 passkey and broadcast by a bundler.
 
 **Shared investment:** X0–X3 are the *same* core the future mobile UniFFI shell binds — not web-only spend. That is the consistency payoff: build the brain once, host it as WASM (web) now and as a native lib (mobile) later.
