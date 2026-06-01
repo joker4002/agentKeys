@@ -288,8 +288,15 @@ if [[ -n "$PULL_REF" ]]; then
   fi
   log "git fetch origin"
   ( cd "$REPO_ROOT" && git fetch origin )
-  log "git checkout $PULL_REF"
-  ( cd "$REPO_ROOT" && git checkout "$PULL_REF" )
+  # -f: the broker host is a DEPLOY TARGET, not a dev checkout. A plain `git
+  # checkout` ABORTS when an untracked working-tree file shadows a file the
+  # target ref tracks ("untracked working tree files would be overwritten by
+  # checkout" — e.g. a docs/wiki/*.md left over from a prior branch). -f
+  # overwrites those colliding files with the tracked version + discards local
+  # edits to TRACKED files (not expected on a deploy host), while LEAVING
+  # unrelated untracked files (env files, keys, certs — all gitignored) intact.
+  log "git checkout -f $PULL_REF"
+  ( cd "$REPO_ROOT" && git checkout -f "$PULL_REF" )
   log "git pull --ff-only"
   ( cd "$REPO_ROOT" && git pull --ff-only )
 fi
