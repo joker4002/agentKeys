@@ -17,6 +17,7 @@ import { MemoryPage } from './memory';
 import { PairingPage } from './pairing';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
+import { PREPARED_MEMORY } from '@/lib/preparedMemory';
 import type { MasterMemoryEntry } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
@@ -50,6 +51,7 @@ export function App() {
 
   const [onboarded, setOnboarded] = useState(false);
   const [memories, setMemories] = useState<PreservedMemory[]>([]);
+  const [planting, setPlanting] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
   const [justPaired, setJustPaired] = useState<string | null>(null);
@@ -119,6 +121,24 @@ export function App() {
   const updateActor = (id: string, patch: Partial<Actor>) => {
     setActors((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
     showToast('scope updated · K11 assertion queued for next save');
+  };
+
+  // §2 plant: import the PREPARED archive through the real client seam
+  // (daemon content-hash dedup). Gated in the UI to connected + empty.
+  const plantMemory = () => {
+    if (memories.length > 0) return; // dedup guard — already planted
+    setPlanting(true);
+  };
+  const plantDone = async () => {
+    setPlanting(false);
+    const r = await client.plantMemory(PREPARED_MEMORY);
+    if (r.ok) {
+      const listed = await client.listMasterMemory();
+      if (listed.ok) setMemories(listed.data.map(toPreserved));
+      showToast(`Prepared memory planted · ${r.data.planted} new, ${r.data.skipped} deduped.`);
+    } else {
+      showToast('Connect a daemon to plant prepared memory.');
+    }
   };
 
   // ─── Pairing: accept → K11 → ceremony → bind ───────────────────
@@ -296,7 +316,7 @@ export function App() {
           <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} />
         )}
         {page === 'memory' && (
-          <MemoryPage memories={memories} status={status} onView={setMemoryView} />
+          <MemoryPage memories={memories} status={status} planting={planting} onPlant={plantMemory} onPlantDone={plantDone} onView={setMemoryView} />
         )}
         {page === 'pairing' && (
           <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />

@@ -2,23 +2,40 @@
 
 import { NAMESPACES } from '@/lib/constants';
 import type { ConnectionStatus } from '@/lib/client/types';
+import { PREPARED_MEMORY } from '@/lib/preparedMemory';
+import { CeremonyRunner } from './ceremony';
 import { EmptyState, PageHead, Panel } from './shared';
-import type { PreservedMemory } from './types';
+import type { CeremonyStep, PreservedMemory } from './types';
 
-// Workflow 2: see the master's real memory (read-only). Entries come from the
-// client seam (`listMasterMemory` → daemon → S3); there is no seed fixture and
-// no fixture-plant button. Disconnected → empty state; connected + empty →
-// neutral "no memory yet" copy.
+const PLANT_STEPS: CeremonyStep[] = [
+  { label: 'Read prepared archive', sub: `${PREPARED_MEMORY.length} entries · travel / personal / family`, onchain: false },
+  { label: 'Dedupe against existing', sub: 'content-hash compare · server-side (re-plant is a no-op)', onchain: false },
+  { label: 'Encrypt envelopes', sub: 'AES-256-GCM under K3 epoch v1 KEK · per (actor, key)', onchain: false },
+  { label: 'Write to memory store', sub: 'POST /v1/master/memory/plant → master memory store', onchain: false },
+  { label: 'Index + audit', sub: 'CredentialAudit.append(op=memory.plant) · tier-1 + anchor', onchain: true, fn: 'append(bytes32,bytes32,bytes32)' },
+];
+
+// Workflow 2: see the master's real memory. Entries come from the client seam
+// (`listMasterMemory`). When connected + empty, the operator can plant the
+// PREPARED archive (real data, through `plantMemory` → daemon, content-hash
+// dedup). Disconnected → empty state (no daemon to plant into).
 export function MemoryPage({
   memories,
   status,
+  planting,
+  onPlant,
+  onPlantDone,
   onView,
 }: {
   memories: PreservedMemory[];
   status: ConnectionStatus;
+  planting: boolean;
+  onPlant: () => void;
+  onPlantDone: () => void;
   onView: (m: PreservedMemory) => void;
 }) {
   const hasMemory = memories.length > 0;
+  const connected = status.kind === 'connected';
   const byNs = NAMESPACES.map((ns) => ({ ns, items: memories.filter((m) => m.ns === ns) })).filter((g) => g.items.length > 0);
   const totalBytes = memories.reduce((a, m) => a + m.bytes, 0);
 
@@ -30,23 +47,36 @@ export function MemoryPage({
         desc="Your portable memory namespace — the spine agents read from and write to. It follows you across every vendor device. Stored encrypted; agents see only what their scope grants."
       />
 
-      {!hasMemory && (
-        status.kind === 'connected' ? (
+      {!hasMemory && !planting && (
+        connected ? (
           <div className="empty-memory">
             <div className="serif" style={{ fontSize: 40, fontStyle: 'italic', color: 'var(--ink-faint)', marginBottom: 4 }}>∅</div>
-            <h2 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 8px' }}>No memory yet.</h2>
-            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', maxWidth: 440, margin: '0 auto' }}>
-              Your memory namespace is empty. Paired agents write here as they work, and the entries you grant
-              scope to appear in this view — encrypted at rest, decrypted on read.
+            <h2 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 8px' }}>No memory planted yet.</h2>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', maxWidth: 440, margin: '0 auto 22px' }}>
+              Plant your prepared memory archive to give every paired agent the same context — your trip, your
+              profile, your routines. This is a one-time import through the real memory store; duplicates are detected
+              by content-hash and skipped automatically.
             </p>
+            <button className="btn primary" style={{ padding: '12px 22px' }} onClick={onPlant}>
+              ⊕ plant prepared memory
+            </button>
+            <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 14 }}>
+              prepared archive · {PREPARED_MEMORY.length} entries · idempotent (content-hash dedup)
+            </div>
           </div>
         ) : (
           <EmptyState
             status={status}
             title="memory unavailable"
-            hint="Master memory is read from the daemon (GET /v1/master/memory → S3). Connect a daemon to populate this view."
+            hint="Master memory is read + planted through the daemon (GET / POST /v1/master/memory). Connect a daemon to plant the prepared archive and populate this view."
           />
         )
+      )}
+
+      {planting && (
+        <Panel title="── planting prepared memory">
+          <CeremonyRunner steps={PLANT_STEPS} onDone={onPlantDone} stepMs={620} />
+        </Panel>
       )}
 
       {hasMemory && (
@@ -56,6 +86,14 @@ export function MemoryPage({
             <div className="stat"><div className="v">{byNs.length}</div><div className="k">namespaces</div></div>
             <div className="stat"><div className="v">{(totalBytes / 1024).toFixed(1)}<span style={{ fontSize: 13 }}>KB</span></div><div className="k">total size</div></div>
             <div className="stat"><div className="v">k3 v1</div><div className="k">epoch (kek)</div></div>
+          </div>
+
+          <div className="banner">
+            <span className="lbl">✓ planted</span>
+            <span>
+              Prepared memory is live. The <strong>plant</strong> action is hidden — re-planting is a server-side no-op
+              (content-hash match). Agents read this per their granted scope.
+            </span>
           </div>
 
           {byNs.map((g) => (
