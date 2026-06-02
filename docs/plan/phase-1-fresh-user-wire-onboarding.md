@@ -2,12 +2,12 @@
 
 **Status:** DRAFT 2026-05-28
 **Tracking issue:** TBD (to be filed)
-**Strategic anchor:** [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md) §4 (Revised Phase 1)
-**Architecture record:** [`docs/arch.md`](../../arch.md) §22d (IAM-guarantee delivery — hooks-first, proxy-fallback) — to be extended with §22d.6 once this plan lands
+**Strategic anchor:** [`docs/agent-iam-strategy.md`](../agent-iam-strategy.md) §4 (Revised Phase 1)
+**Architecture record:** [`docs/arch.md`](../arch.md) §22d (IAM-guarantee delivery — hooks-first, proxy-fallback) — to be extended with §22d.6 once this plan lands
 **Replaces:** the C4/C5/C6 Rust-runtime sections of [`issue-103-aiosandbox-hermes-esp32-demo.md`](issue-103-aiosandbox-hermes-esp32-demo.md), now superseded by real Hermes + AgentKeys hooks
 **Companions:**
-- [`docs/wiki/agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md) — IAM guarantee architecture (the previous operator-facing summary at `docs/demo-aiosandbox-runbook.md` §6 was archived 2026-05-28; a new lean runbook lands with this plan's Phase 1.a implementation)
-- [`docs/wiki/agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md) — terminology (IAM tool vs IAM guarantee, hooks vs proxy)
+- [`docs/wiki/agent-iam-guarantee-glossary.md`](../wiki/agent-iam-guarantee-glossary.md) — IAM guarantee architecture (the previous operator-facing summary at `docs/demo-aiosandbox-runbook.md` §6 was archived 2026-05-28; a new lean runbook lands with this plan's Phase 1.a implementation)
+- [`docs/wiki/agent-iam-guarantee-glossary.md`](../wiki/agent-iam-guarantee-glossary.md) — terminology (IAM tool vs IAM guarantee, hooks vs proxy)
 - [Issue #133](https://github.com/litentry/agentKeys/issues/133) — the canonical track for hook reference configs (this plan delivers it as `agentkeys wire`)
 
 ## 1. Goal — the 7-step user journey
@@ -173,7 +173,7 @@ Each adapter lives in a separate file under `crates/agentkeys-cli/src/wire/adapt
 
 | Runtime | Hooks system | Adapter writes | LLM-key flow | Manual steps user must do |
 |---|---|---|---|---|
-| **Hermes** | Shell hooks in `~/.hermes/config.yaml` (verified via [`agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md) §3) | `hooks:` block + scripts in `~/.hermes/agent-hooks/` + `hooks_auto_accept: true`. Bootstrap: `hermes config set model.provider …` etc. | Fetched from broker; written into `~/.hermes/config.yaml` under `model.api_key` | None for default flow; Nous Portal OAuth only if user wants Portal-routed inference |
+| **Hermes** | Shell hooks in `~/.hermes/config.yaml` (verified via [`agent-iam-guarantee-glossary.md`](../wiki/agent-iam-guarantee-glossary.md) §3) | `hooks:` block + scripts in `~/.hermes/agent-hooks/` + `hooks_auto_accept: true`. Bootstrap: `hermes config set model.provider …` etc. | Fetched from broker; written into `~/.hermes/config.yaml` under `model.api_key` | None for default flow; Nous Portal OAuth only if user wants Portal-routed inference |
 | **OpenClaw** | Likely shell hooks (inferred from Hermes lineage; **verify before locking in**) | Likely same as Hermes; verify with live install | Same as Hermes | TBD pending verification |
 | **Claude Code** | Hooks via `~/.claude/settings.json` (24+ events) | `hooks.PreToolUse/PostToolUse/Stop/etc.` blocks; scripts in `~/.claude/hooks/` | Anthropic API key via `claude config set` OR Claude account OAuth | `claude login` if using account auth |
 | **Codex** | Hooks via `~/.codex/hooks.json` or `~/.codex/config.toml` (10 events) | Hook bindings via the `[hooks]` table; scripts in `~/.codex/hooks/` | OpenAI API key via `codex auth login` OR ChatGPT account | `codex auth login` |
@@ -277,10 +277,10 @@ Artifacts archived 2026-05-28 (moved to `docs/archived/` per CLAUDE.md "Move sta
 
 | Artifact (pre-archive path) | Disposition | Archived location |
 |---|---|---|
-| `docs/demo-aiosandbox-runbook.md` | Moved (entire file — including the §6 architecture content, now duplicated in [arch.md §22d](../../arch.md) + [wiki glossary](../../wiki/agent-iam-guarantee-glossary.md)) | [`docs/archived/demo-aiosandbox-runbook-rust-runtime-2026-05.md`](../../archived/demo-aiosandbox-runbook-rust-runtime-2026-05.md) |
-| `docs/verify-issue-103.md` | Moved (tested the obsolete Rust crate); replaced by per-step verification in the future wire-flow runbook | [`docs/archived/verify-issue-103-rust-runtime-2026-05.md`](../../archived/verify-issue-103-rust-runtime-2026-05.md) |
-| `scripts/setup-demo-aiosandbox.sh` | Moved (provisioned the Rust runtime image); replaced by `agentkeys wire hermes` | [`docs/archived/setup-demo-aiosandbox-rust-runtime-2026-05.sh`](../../archived/setup-demo-aiosandbox-rust-runtime-2026-05.sh) |
-| `docker/aiosandbox-demo/` (directory: Dockerfile + supervisord configs + nginx fragment) | Moved; Hermes install goes via `agentkeys wire hermes` against a stock sandbox container | [`docs/archived/aiosandbox-demo-rust-runtime-2026-05/`](../../archived/aiosandbox-demo-rust-runtime-2026-05/) |
+| `docs/demo-aiosandbox-runbook.md` | Moved (entire file — including the §6 architecture content, now duplicated in [arch.md §22d](../arch.md) + [wiki glossary](../wiki/agent-iam-guarantee-glossary.md)) | [`docs/archived/demo-aiosandbox-runbook-rust-runtime-2026-05.md`](../archived/demo-aiosandbox-runbook-rust-runtime-2026-05.md) |
+| `docs/verify-issue-103.md` | Moved (tested the obsolete Rust crate); replaced by per-step verification in the future wire-flow runbook | [`docs/archived/verify-issue-103-rust-runtime-2026-05.md`](../archived/verify-issue-103-rust-runtime-2026-05.md) |
+| `scripts/setup-demo-aiosandbox.sh` | Moved (provisioned the Rust runtime image); replaced by `agentkeys wire hermes` | [`docs/archived/setup-demo-aiosandbox-rust-runtime-2026-05.sh`](../archived/setup-demo-aiosandbox-rust-runtime-2026-05.sh) |
+| `docker/aiosandbox-demo/` (directory: Dockerfile + supervisord configs + nginx fragment) | Moved; Hermes install goes via `agentkeys wire hermes` against a stock sandbox container | [`docs/archived/aiosandbox-demo-rust-runtime-2026-05/`](../archived/aiosandbox-demo-rust-runtime-2026-05/) |
 
 Code-side contradictions still requiring disposition (await operator confirmation before removing):
 
@@ -288,29 +288,29 @@ Code-side contradictions still requiring disposition (await operator confirmatio
 |---|---|---|
 | [`crates/agentkeys-hermes-runtime/`](../../../crates/agentkeys-hermes-runtime/) (entire crate, ~600 lines of Rust + tests) | Remove from `Cargo.toml` workspace `members`; delete crate dir (git history preserves) | The crate's role is now played by real Hermes inside aiosandbox; the wire CLI replaces the HTTP runtime. No follow-up needs this code. |
 | [`crates/agentkeys-daemon/src/demo_memory.rs`](../../../crates/agentkeys-daemon/src/demo_memory.rs) + `--demo-memory` daemon flag + the `run_demo_memory_mode()` function in `main.rs` | Remove the module, the flag, and the dispatch path | Replaced by `agentkeys.memory.get` MCP tool calling the production memory worker; demo memory ingest is via `agentkeys creds add` / `agentkeys memory put` from the master CLI instead. |
-| [`tests/fixtures/demo-profile.md`](../../../tests/fixtures/demo-profile.md) | **Keep** — re-used as the seed profile content loaded into S3 by the Phase 1 demo bootstrap | Still the canonical demo-user profile; new role is "S3 seed", not "compile-time include" |
+| [`tests/fixtures/demo-profile.md`](../../tests/fixtures/demo-profile.md) | **Keep** — re-used as the seed profile content loaded into S3 by the Phase 1 demo bootstrap | Still the canonical demo-user profile; new role is "S3 seed", not "compile-time include" |
 
-The fixture [`tests/fixtures/demo-profile.md`](../../../tests/fixtures/demo-profile.md) STAYS — it's still the demo profile content, just loaded into S3 (via the real memory worker path) instead of bundled into a Rust binary.
+The fixture [`tests/fixtures/demo-profile.md`](../../tests/fixtures/demo-profile.md) STAYS — it's still the demo profile content, just loaded into S3 (via the real memory worker path) instead of bundled into a Rust binary.
 
 ## 10. Cross-references
 
-- [strategy doc §4](../../agent-iam-strategy.md) — Phase 1 demo storyboard (three acts) that this plan operationalizes
-- [strategy doc §3.6](../../agent-iam-strategy.md) — IAM tool vs IAM guarantee distinction; this plan delivers the guarantee layer
-- [arch.md §22d](../../arch.md) — IAM-guarantee delivery (hooks-first, proxy-fallback) at the architecture level
-- [wiki glossary](../../wiki/agent-iam-guarantee-glossary.md) — standalone terminology + hook availability table across runtimes
+- [strategy doc §4](../agent-iam-strategy.md) — Phase 1 demo storyboard (three acts) that this plan operationalizes
+- [strategy doc §3.6](../agent-iam-strategy.md) — IAM tool vs IAM guarantee distinction; this plan delivers the guarantee layer
+- [arch.md §22d](../arch.md) — IAM-guarantee delivery (hooks-first, proxy-fallback) at the architecture level
+- [wiki glossary](../wiki/agent-iam-guarantee-glossary.md) — standalone terminology + hook availability table across runtimes
 - [issue #107](https://github.com/litentry/agentKeys/issues/107) — AgentKeys MCP server (prerequisite for this plan)
 - [issue #133](https://github.com/litentry/agentKeys/issues/133) — Phase 3 hook integration; this plan ships Phase 1's hook-driven IAM guarantees as `agentkeys wire`
 
-## 11. What landed / What did NOT land (per [CLAUDE.md plan-completion policy](../../../CLAUDE.md))
+## 11. What landed / What did NOT land (per [CLAUDE.md plan-completion policy](../../CLAUDE.md))
 
 ### What landed (Phase 1.a, this PR)
 
-1. **`agentkeys hook` helpers** — [`crates/agentkeys-cli/src/hook.rs`](../../../crates/agentkeys-cli/src/hook.rs). Three subcommands (`check`, `audit`, `memory-inject`) that read host stdin JSON, call AgentKeys MCP tools over HTTP (`tools/call` → `result.structuredContent`), and emit host-shaped stdout JSON. `check` fails CLOSED. 6 unit tests.
-2. **`agentkeys wire hermes`** — [`crates/agentkeys-cli/src/wire.rs`](../../../crates/agentkeys-cli/src/wire.rs). `RuntimeAdapter` trait + `HermesAdapter`: detects Hermes, writes 3 hook scripts to `~/.hermes/agent-hooks/` (identity baked in, absolute `agentkeys` path), merges a sentinel-delimited managed `hooks:` block into `~/.hermes/config.yaml` (preserves other keys, refuses to clobber foreign `hooks:`), sets `hooks_auto_accept: true`, verifies via `hermes hooks doctor`. Idempotent (`ok proceeding / skip / fail` per step); `--check-only` reports drift without writing. 7 unit tests.
-3. **CLI wiring** — `Commands::Wire` + `Commands::Hook` + `HookAction` in [`main.rs`](../../../crates/agentkeys-cli/src/main.rs); `pub mod hook; pub mod wire;` in [`lib.rs`](../../../crates/agentkeys-cli/src/lib.rs).
+1. **`agentkeys hook` helpers** — [`crates/agentkeys-cli/src/hook.rs`](../../crates/agentkeys-cli/src/hook.rs). Three subcommands (`check`, `audit`, `memory-inject`) that read host stdin JSON, call AgentKeys MCP tools over HTTP (`tools/call` → `result.structuredContent`), and emit host-shaped stdout JSON. `check` fails CLOSED. 6 unit tests.
+2. **`agentkeys wire hermes`** — [`crates/agentkeys-cli/src/wire.rs`](../../crates/agentkeys-cli/src/wire.rs). `RuntimeAdapter` trait + `HermesAdapter`: detects Hermes, writes 3 hook scripts to `~/.hermes/agent-hooks/` (identity baked in, absolute `agentkeys` path), merges a sentinel-delimited managed `hooks:` block into `~/.hermes/config.yaml` (preserves other keys, refuses to clobber foreign `hooks:`), sets `hooks_auto_accept: true`, verifies via `hermes hooks doctor`. Idempotent (`ok proceeding / skip / fail` per step); `--check-only` reports drift without writing. 7 unit tests.
+3. **CLI wiring** — `Commands::Wire` + `Commands::Hook` + `HookAction` in [`main.rs`](../../crates/agentkeys-cli/src/main.rs); `pub mod hook; pub mod wire;` in [`lib.rs`](../../crates/agentkeys-cli/src/lib.rs).
 4. **MCP server 7 tools** — already shipped under [#107](https://github.com/litentry/agentKeys/issues/107); verified the hook helpers call them correctly.
 5. **Drift detection** — `agentkeys wire hermes --check-only` (single-invocation; the nightly cron wrapper is deferred — see below).
-6. **Operator runbook** — [`docs/operator-runbook-wire.md`](../../operator-runbook-wire.md) — the 7-step flow + the three-act demo verification, with commands verified end-to-end.
+6. **Operator runbook** — [`docs/operator-runbook-wire.md`](../operator-runbook-wire.md) — the 7-step flow + the three-act demo verification, with commands verified end-to-end.
 7. **End-to-end smoke test verified** (against the in-memory MCP backend on the host):
    - Act 1 Permissioned Memory: `memory-inject travel` → `{"context":"## Memory: travel\nChengdu trip — Apr 12 to 16, hotpot at Yulin."}`
    - Act 2 Deterministic Denial: `check --scope payment.spend` over-cap → `{"decision":"block","reason":"daily_spend_cap_exceeded: cap=500, requested=600, period=daily"}`; under-cap → `{}`

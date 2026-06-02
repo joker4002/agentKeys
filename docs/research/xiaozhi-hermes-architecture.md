@@ -221,4 +221,4 @@ This sits inside the "1.5–2.0s realistic floor" called out in [office-hours de
 - [`xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) — risk verification + mitigations
 - [`ai-hardware-companion-office-hours.md`](./ai-hardware-companion-office-hours.md) — wedge strategy (Approach D)
 - [`ai-hardware-companion-wedge.md`](./ai-hardware-companion-wedge.md) — market + competitive landscape
-- [issue #103 plan](../spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) — implementation plan (sections C4/C5/C6 superseded by this direction)
+- [issue #103 plan](../plan/issue-103-aiosandbox-hermes-esp32-demo.md) — implementation plan (sections C4/C5/C6 superseded by this direction)

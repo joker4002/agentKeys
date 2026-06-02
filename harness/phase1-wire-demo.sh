@@ -4,7 +4,7 @@
 # container (actor). Idempotent: every step pre-checks + short-circuits
 # (`ok proceeding` / `skip <reason>` / `fail <reason>`).
 #
-# Spec: docs/spec/plans/phase1-wire-harness-test-plan.md
+# Spec: docs/plan/phase1-wire-harness-test-plan.md
 #
 # Two modes — you MUST pick ONE explicitly (there is NO default; running real
 # mode by accident flips the sandbox MCP to the live broker and loses the demo):

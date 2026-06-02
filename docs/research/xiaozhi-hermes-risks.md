@@ -199,7 +199,7 @@ The fork-local hack is cheaper but creates a maintenance fork burden. The upstre
 
 ## Net effect on the v0 plan
 
-The original [issue #103 plan](../spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) estimated 3 weeks for the demo. With these risk findings the integration is substantially smaller:
+The original [issue #103 plan](../plan/issue-103-aiosandbox-hermes-esp32-demo.md) estimated 3 weeks for the demo. With these risk findings the integration is substantially smaller:
 
 | Bridge work | Effort |
 |---|---|
@@ -247,4 +247,4 @@ The biggest remaining unknown is **the actual streaming-SSE flow from Hermes thr
 - [`xiaozhi-esp32-magiclink.md`](./xiaozhi-esp32-magiclink.md) — hardware research + Option 1 vs 2 decision
 - [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) — architecture diagrams
 - [`ai-hardware-companion-office-hours.md`](./ai-hardware-companion-office-hours.md) — wedge strategy
-- [issue #103 plan](../spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) — implementation plan
+- [issue #103 plan](../plan/issue-103-aiosandbox-hermes-esp32-demo.md) — implementation plan

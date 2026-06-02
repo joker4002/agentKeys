@@ -341,7 +341,7 @@ bash pm/scripts/audit.sh             # verify state
 
 ## Things the project board is NOT for
 
-- **Source of truth for scope / requirements**: that's the issue body + linked design doc (`docs/research/*` or `docs/spec/plans/*`)
+- **Source of truth for scope / requirements**: that's the issue body + linked design doc (`docs/research/*` or `docs/plan/*`)
 - **Real-time chat / debate**: use issue comments; project board is a queue, not a discussion forum
 - **Roadmap planning**: the milestones (`pm/milestones.json` + the GitHub Milestones page) are the roadmap; the board reflects them, doesn't define them
 - **Burndown charts / velocity metrics**: GitHub Projects has some basic insights but if you want real burndown, use a dedicated tool (Linear, Jira). For us, the milestone progress view + the audit script are sufficient.

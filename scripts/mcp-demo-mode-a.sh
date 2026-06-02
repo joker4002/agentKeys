@@ -3,7 +3,7 @@
 #
 # Boots `agentkeys-mcp-server --backend in-memory`, walks Acts 1/2/3,
 # asserts each act's expected JSON shape, then cleans up. Use this as
-# the regression check for `docs/spec/plans/issue-107-mcp-demo-runbook.md`
+# the regression check for `docs/plan/issue-107-mcp-demo-runbook.md`
 # §A — if any assertion fails, the runbook drifted from reality.
 #
 # Hardened per /codex:adversarial-review (2026-05-25):
@@ -261,4 +261,4 @@ assert_eq "$(jread "$STUB" '.error.data.scheduled_for')" "M4" "scheduled_for: M4
 
 echo
 echo "ALL ASSERTIONS PASSED."
-echo "  see docs/spec/plans/issue-107-mcp-demo-runbook.md for the full walkthrough."
+echo "  see docs/plan/issue-107-mcp-demo-runbook.md for the full walkthrough."

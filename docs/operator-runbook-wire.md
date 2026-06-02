@@ -11,7 +11,7 @@ reads only its permitted memory, is deterministically denied an over-cap action
 > **hooks** into Hermes's config so the LLM cannot bypass `permission.check` /
 > `audit.append` / memory injection. Background: [`docs/agent-iam-strategy.md`](agent-iam-strategy.md)
 > §3.6–3.7, [`docs/arch.md`](arch.md) §22d, [`docs/wiki/agent-iam-guarantee-glossary.md`](wiki/agent-iam-guarantee-glossary.md).
-> Full action table + automation decisions: [`docs/spec/plans/phase1-wire-harness-test-plan.md`](spec/plans/phase1-wire-harness-test-plan.md).
+> Full action table + automation decisions: [`docs/plan/phase1-wire-harness-test-plan.md`](plan/phase1-wire-harness-test-plan.md).
 
 ## TL;DR — pick a mode and run one command
 
@@ -208,7 +208,7 @@ key signs anything. `ok …` / `fail …` per step.
 **Prereqs:** `cast` (Foundry) on PATH; the deployer key (`~/.agentkeys/heima-deployer.key`
 — funds the deposit + gas); Python 3 (the script auto-provisions a `cryptography`
 venv at `~/.agentkeys/erc4337-venv`). The live EntryPoint + factory addresses are in
-[`docs/contracts.md`](contracts.md). **Append-only:** each run mints a fresh account
+[`docs/spec/deployed-contracts.md`](spec/deployed-contracts.md). **Append-only:** each run mints a fresh account
 (it is NOT idempotent in the resource sense). The bundler is not required — the demo
 calls `EntryPoint.handleOps` directly. Full design + cutover status:
 [`docs/plan/chain/erc4337-master-account.md`](plan/chain/erc4337-master-account.md).
@@ -371,7 +371,7 @@ echo '{"tool_name":"x"}'                  | agentkeys hook audit                
 ## Cross-references
 
 - [`harness/phase1-wire-demo.sh`](../harness/phase1-wire-demo.sh) — the harness this runbook drives
-- [`docs/spec/plans/phase1-wire-harness-test-plan.md`](spec/plans/phase1-wire-harness-test-plan.md) — the action table + automation decisions
+- [`docs/plan/phase1-wire-harness-test-plan.md`](plan/phase1-wire-harness-test-plan.md) — the action table + automation decisions
 - [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.6/§3.7/§4.3 · [`docs/arch.md`](arch.md) §22d · [`docs/wiki/agent-iam-guarantee-glossary.md`](wiki/agent-iam-guarantee-glossary.md)
 - [Issue #133](https://github.com/litentry/agentKeys/issues/133) — multi-runtime hook reference configs (Phase 1.b)
 - [Issue #152](https://github.com/litentry/agentKeys/issues/152) — **scope:** this runbook covers the **Local-LLM / Task-agent** path only (stdio MCP server built + run *in the sandbox*). The **Hosted-LLM** path (xiaozhi / vendor-cloud — a broker-hosted `mcp-endpoint` the remote LLM connects *into*, per arch.md §22c.2 / §22d.3) is deferred to #152.

@@ -7,7 +7,7 @@
 gh issue create \
   --title "v2 stage 1 — Foundation: sovereign sidecar + on-chain identity + credentials-service worker" \
   --label "documentation,enhancement" \
-  --body-file docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md
+  --body-file docs/plan/v2-issues/issue-v2-stage-1-foundation.md
 ```
 
 ---

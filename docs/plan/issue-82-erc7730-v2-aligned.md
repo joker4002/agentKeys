@@ -20,7 +20,7 @@ This plan re-targets all four phases against v2 surfaces. **It also adds K11-bin
 
 ## Phase 1 — EIP-712 typed-data signing
 
-**Wire shape** (extends [`signer-protocol.md`](../signer-protocol.md)):
+**Wire shape** (extends [`signer-protocol.md`](../spec/signer-protocol.md)):
 
 ```
 POST /dev/sign-typed-data

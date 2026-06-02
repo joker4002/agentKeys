@@ -7,7 +7,7 @@
 gh issue create \
   --title "v2 stage 2 — Hardening: K11 WebAuthn + multi-device recovery + audit/memory/email workers" \
   --label "documentation,enhancement" \
-  --body-file docs/spec/plans/v2-issues/issue-v2-stage-2-hardening.md
+  --body-file docs/plan/v2-issues/issue-v2-stage-2-hardening.md
 ```
 
 ---
