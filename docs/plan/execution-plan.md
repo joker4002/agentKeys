@@ -34,7 +34,7 @@ Then create `CLAUDE.md` in the repo root encoding the harness workflow (read pro
 
 **Invoke:**
 ```
-/oh-my-claudecode:ralph "Implement Stage 0 per docs/spec/plans/development-stages.md: create Cargo workspace skeleton (7 crates), harness artifacts (init.sh, progress.json, features.json, stage-0-done.sh), agentkeys-types crate (all types from docs/spec/credential-backend-interface.md), agentkeys-core crate (CredentialBackend trait with 15 methods, PaymentRail trait, canonical CBOR serialization, OTP derivation, test vectors). 8 tests must pass. Tag stage-0-done when done."
+/oh-my-claudecode:ralph "Implement Stage 0 per docs/archived/development-stages-v2-2026-04.md: create Cargo workspace skeleton (7 crates), harness artifacts (init.sh, progress.json, features.json, stage-0-done.sh), agentkeys-types crate (all types from docs/spec/credential-backend-interface.md), agentkeys-core crate (CredentialBackend trait with 15 methods, PaymentRail trait, canonical CBOR serialization, OTP derivation, test vectors). 8 tests must pass. Tag stage-0-done when done."
 ```
 
 **Deliverables:** Cargo workspace compiles, 8 tests pass, harness artifacts exist, `bash harness/stage-0-done.sh` exits 0.
@@ -47,7 +47,7 @@ The largest stage: 37 tests, 10 stories. Ralph loops through them.
 
 **Invoke:**
 ```
-/oh-my-claudecode:ralph "Implement Stage 1 per docs/spec/plans/development-stages.md: agentkeys-mock-server (axum + rusqlite) with 7 SQLite tables, 15 REST endpoints implementing every CredentialBackend method, identity linking, master key custody, TTL/single-use enforcement, MockHttpClient connection. 37 tests must pass. See docs/archived/eng-review-test-plan.md for the full test matrix including property tests (pair-code collision, nonce uniqueness) and integrity tests (tamper detection, OTP replay). Tag stage-1-done when done."
+/oh-my-claudecode:ralph "Implement Stage 1 per docs/archived/development-stages-v2-2026-04.md: agentkeys-mock-server (axum + rusqlite) with 7 SQLite tables, 15 REST endpoints implementing every CredentialBackend method, identity linking, master key custody, TTL/single-use enforcement, MockHttpClient connection. 37 tests must pass. See docs/archived/eng-review-test-plan.md for the full test matrix including property tests (pair-code collision, nonce uniqueness) and integrity tests (tamper detection, OTP replay). Tag stage-1-done when done."
 ```
 
 **Deliverables:** Mock server starts on port 8090, all 37 tests pass, curl smoke test works, `bash harness/stage-1-done.sh` exits 0.
@@ -60,7 +60,7 @@ The one parallelization opportunity. Stages 2 (CLI, 14 tests) and 3 (Daemon+MCP,
 
 **Invoke:**
 ```
-/oh-my-claudecode:team 2:executor "Two parallel stages for AgentKeys. AGENT 1: Implement Stage 2 (CLI Core) per docs/spec/plans/development-stages.md — 10 CLI commands in agentkeys-cli, 14 tests, keyring session storage, error messaging spec, --help with examples. AGENT 2: Implement Stage 3 (Daemon + MCP) per docs/spec/plans/development-stages.md — agentkeys-daemon binary with MCP tools (get_credential, list_credentials), kernel hardening (memfd_secret, seccomp, caps), 13 tests. Use AGENTKEYS_SESSION env var as test seam (NOT the production bootstrap). Both agents: read harness/progress.json first, commit per deliverable, tag stage-N-done when complete."
+/oh-my-claudecode:team 2:executor "Two parallel stages for AgentKeys. AGENT 1: Implement Stage 2 (CLI Core) per docs/archived/development-stages-v2-2026-04.md — 10 CLI commands in agentkeys-cli, 14 tests, keyring session storage, error messaging spec, --help with examples. AGENT 2: Implement Stage 3 (Daemon + MCP) per docs/archived/development-stages-v2-2026-04.md — agentkeys-daemon binary with MCP tools (get_credential, list_credentials), kernel hardening (memfd_secret, seccomp, caps), 13 tests. Use AGENTKEYS_SESSION env var as test seam (NOT the production bootstrap). Both agents: read harness/progress.json first, commit per deliverable, tag stage-N-done when complete."
 ```
 
 **Deliverables:** Both `stage-2-done.sh` and `stage-3-done.sh` exit 0. `cargo test --workspace` passes all 72 tests (8+37+14+13).
@@ -73,7 +73,7 @@ The cross-component integration stage. Modifies both daemon (pair-on-startup) an
 
 **Invoke:**
 ```
-/oh-my-claudecode:ralph "Implement Stage 4 per docs/spec/plans/development-stages.md: child-initiates rendezvous pairing (daemon generates keypair → open_auth_request → register_rendezvous → display pair code → long-poll), CLI approve command (fetch_auth_request → display OTP → user confirms → approve_auth_request), recovery flow (--recover with AgentIdentity resolution via identity graph). 11 tests must pass. Two-terminal pair E2E must work. Tag stage-4-done."
+/oh-my-claudecode:ralph "Implement Stage 4 per docs/archived/development-stages-v2-2026-04.md: child-initiates rendezvous pairing (daemon generates keypair → open_auth_request → register_rendezvous → display pair code → long-poll), CLI approve command (fetch_auth_request → display OTP → user confirms → approve_auth_request), recovery flow (--recover with AgentIdentity resolution via identity graph). 11 tests must pass. Two-terminal pair E2E must work. Tag stage-4-done."
 ```
 
 **Deliverables:** Pair flow works across two terminals, recovery preserves credentials, 11 tests pass.
@@ -86,7 +86,7 @@ Mixed Rust+TypeScript stage. Playwright browser automation for OpenRouter signup
 
 **Invoke:**
 ```
-/oh-my-claudecode:ralph "Implement Stage 5 per docs/spec/plans/development-stages.md: agentkeys-provisioner Rust orchestrator (spawn TS subprocess, IPC via stdin/stdout JSON, encrypt API key to shielding key, store_credential), provisioner-scripts/lib/email.ts (Gmail IMAP plus-addressing for verification codes), provisioner-scripts/scrapers/openrouter.ts (Playwright signup flow using email.ts). MCP tool: agentkeys.provision(service). 9 tests must pass. Tag stage-5-done."
+/oh-my-claudecode:ralph "Implement Stage 5 per docs/archived/development-stages-v2-2026-04.md: agentkeys-provisioner Rust orchestrator (spawn TS subprocess, IPC via stdin/stdout JSON, encrypt API key to shielding key, store_credential), provisioner-scripts/lib/email.ts (Gmail IMAP plus-addressing for verification codes), provisioner-scripts/scrapers/openrouter.ts (Playwright signup flow using email.ts). MCP tool: agentkeys.provision(service). 9 tests must pass. Tag stage-5-done."
 ```
 
 **Deliverables:** Orchestrator IPC tests pass, email client tests pass, live OpenRouter provision works (manual verification by human).
@@ -99,7 +99,7 @@ Packaging and documentation polish.
 
 **Invoke:**
 ```
-/oh-my-claudecode:ralph "Implement Stage 6 per docs/spec/plans/development-stages.md: @agentkeys/daemon npm package with postinstall binary selection (linux-x64, linux-arm64, darwin-x64, darwin-arm64), install.sh curl script, README with quickstart, docs/how-it-works.md, docs/security-model.md, CHANGELOG, LICENSE (MIT OR Apache-2.0), per-subcommand --help with examples. 7 tests must pass. Tag stage-6-done."
+/oh-my-claudecode:ralph "Implement Stage 6 per docs/archived/development-stages-v2-2026-04.md: @agentkeys/daemon npm package with postinstall binary selection (linux-x64, linux-arm64, darwin-x64, darwin-arm64), install.sh curl script, README with quickstart, docs/how-it-works.md, docs/security-model.md, CHANGELOG, LICENSE (MIT OR Apache-2.0), per-subcommand --help with examples. 7 tests must pass. Tag stage-6-done."
 ```
 
 **Advance:** `bash harness/advance-stage.sh 6 7`
@@ -133,7 +133,7 @@ bash harness/advance-stage.sh N N+1   # advance to next stage
 |---|---|
 | Ralph session dies mid-story | Re-invoke `/ralph` with same PRD. Ralph reads progress.json + git log and resumes from last completed story. |
 | One team agent fails, other succeeds | Invoke `/ralph` individually for the failed stage. The successful stage's work is already committed. |
-| Test seems like a spec bug | `credential-backend-interface.md` > `development-stages.md` > `eng-review-test-plan.md` (priority order). Fix spec if genuinely wrong, then re-run. |
+| Test seems like a spec bug | `credential-backend-interface.md` > `development-stages-v2-2026-04.md` > `eng-review-test-plan.md` (priority order). Fix spec if genuinely wrong, then re-run. |
 | Playwright breaks on live site | Update selectors in `openrouter.ts`. Rust IPC tests still pass (mock subprocess). |
 | Stage 7 E2E keeps failing after 5 ultraqa cycles | Human diagnoses root cause. Likely a cross-component integration issue that needs manual architectural judgment. |
 
