@@ -87,7 +87,7 @@
 - Stay backward-compatible with the current `memory_put` / `memory_get` blob primitive (one operator's "service" might genuinely want raw blob KV).
 - Land **zero** changes to: broker cap-mint protocol, the data_class isolation gate (`DataClass::Memory`), the per-data-class IAM bucket separation (arch.md §17.5), K3-derived KEK, AES-256-GCM envelope format.
 
-**Explicitly delegated (NOT an AgentKeys goal, per decision record Position C):** the memory *engine* — embeddings, vector/BM25/graph ranking, extraction, consolidation, decay. These run in a pluggable external engine in front of the store, or in the optional E1/E2 stages (§9) only if an operator demands in-worker ranking.
+**Explicitly delegated (NOT an AgentKeys goal, per decision record Position C):** the memory *engine* — embeddings, vector/BM25/graph ranking, extraction, consolidation, decay. These run in a pluggable external engine in front of the store, or in the optional E1/E2 stages (§9) only if an operator demands in-worker ranking. **How an external engine plugs in — the adapter seam, the canonical engine pick (OpenViking), and Hermes-provider compatibility — is specified in §6a.**
 
 **Non-goals (v0):**
 
@@ -494,6 +494,78 @@ The reference implementation ships §6.1; §6.2 is a documented hook with the sc
 
 ---
 
+## 6a. Engine integration — Hermes providers + the adapter seam
+
+> **🔌 ENGINE — pluggable, not built in v0.** This section specifies *how* an external engine plugs onto the store+gate, using the [Hermes runtime's memory-provider ecosystem](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers) as the worked example. It adds nothing to the v0 build; it defines the adapter contract the first engine milestone (§9 stage **E0**) implements. This is the answer to "Hermes lists many memory providers — which do we pick, and how do we stay compatible with the rest?"
+
+### 6a.1 The reframe: Hermes "memory providers" are *engines*, not peers
+
+Hermes ships ~9 memory providers — Honcho, Mem0, Hindsight, Holographic, OpenViking, RetainDB, ByteRover, Supermemory, Memori. **Each bundles three things this design deliberately splits**: an *engine* (extract / rank / synthesize), a *store* (where the bytes live), and a *delivery* path (how memory reaches the LLM). AgentKeys owns the **store** (K3-encrypted per-actor S3) and the **gate** (cap + scope + namespace + audit). So a Hermes provider is not a peer of AgentKeys — it slots into AgentKeys' **engine** axis. The integration question is "which engine ranks the lines our store holds and our gate authorizes," never "which provider replaces AgentKeys."
+
+### 6a.2 Delivery stays at the hook layer, NOT the provider interface
+
+The Hermes provider lifecycle's step 6 is *"adds provider-specific tools for memory management"* — it hands the LLM tools to query/enumerate memory. That breaks invariant #2 (LLM never sees the whole memory) and weakens invariant #3 (LLM pluggable). So AgentKeys delivers memory through the **`pre_llm_call` hook** (`agentkeys wire hermes`, issue #141), **not** by registering as a Hermes `memory.provider`. The hook (`crates/agentkeys-cli/src/hook.rs` → `memory-inject`) *injects* a namespaced block into the prompt and deliberately exposes no query tool to the model (it does not even read the host's prompt from stdin). The privacy thesis, in code:
+
+| Integration surface | Who controls retrieval | LLM gets memory tools? | Verdict |
+|---|---|---|---|
+| Hermes `memory.provider: <name>` | the provider | **yes** (lifecycle step 6) | ✗ violates invariant #2 / #3 |
+| AgentKeys `pre_llm_call` hook (#141) | the gate + engine, off-LLM | no — passive injection only | ✓ canonical delivery |
+
+**Coexistence rule:** a wired AgentKeys runtime keeps `memory.provider` unset (or `none`) — the AgentKeys hook is the *sole* memory delivery. A Hermes provider running in addition would double-inject from a second source of truth. `agentkeys wire` already owns the `hooks:` block (see [`../user-manual.md`](../user-manual.md)); it intentionally leaves `memory.provider` untouched.
+
+### 6a.3 How to start: pick a canonical engine by one axis
+
+The axis that protects the two load-bearing properties (own-the-bytes + LLM-pluggable) is **store-locality + determinism + zero third-party egress**:
+
+| Tier | Providers | Why this tier | Action |
+|---|---|---|---|
+| **1 — canonical** | **OpenViking** (self-hosted, `OPENVIKING_ENDPOINT`, tiered retrieval over a hierarchy); **Holographic** (local SQLite, HRR algebra — no LLM in the loop) | bytes stay on operator infra; ranking is deterministic; config is one endpoint/path we control. OpenViking's "filesystem hierarchy + tiered retrieval" is ~1:1 with our namespaced S3 store. | **Build the adapter against OpenViking first.** Holographic second — it proves the no-LLM-call ranking property. |
+| **2 — extraction-local** | ByteRover (local pre-compression extraction); Hindsight (local mode) | local-ish; useful for the `extract` call, not just `rank` | after Tier 1 |
+| **3 — gate-the-egress only** | Mem0, Honcho, Supermemory, RetainDB, Memori (cloud-bundled store) | their cloud sees the bytes — fights own-store. We cannot *store*, but the gate still controls the *call*. | support as "operator accepts egress"; the cap authorizes whether the egress happens, audit records it |
+
+**Recommendation: OpenViking is the canonical engine to test.** Self-hosted single endpoint, no cloud account, maps onto the store, privacy thesis intact out of the box. Confirm its exact interface with a ½–1 day spike before writing the adapter (the provider doc is a summary, not a contract).
+
+### 6a.4 The adapter seam — one trait, three calls
+
+Compatibility does **not** mean matching Hermes' provider API. It means normalizing every engine onto **AgentKeys' own narrow seam**, with store + gate + delivery held invariant and only the engine swapping:
+
+```rust
+trait MemoryEngine {
+    // optional — many engines extract server-side; deterministic engines skip it
+    fn extract(&self, turn: &Turn) -> Vec<Fact>;
+    // the load-bearing call: order gate-authorized line IDs for this query
+    fn rank(&self, query: &Query, candidates: &[LineId], budget: Budget) -> Vec<LineId>;
+    // optional — summary/consolidation, when the engine offers it
+    fn synthesize(&self, facts: &[Fact]) -> Option<Summary>;
+}
+```
+
+`rank` is load-bearing: the engine sees only **line IDs + metadata** from `/v1/memory/list` (already namespace-filtered by the gate), orders them, then the caller reads the winners via `/v1/memory/get`. The engine never holds the plaintext store — it ranks references the gate already authorized. `extract` / `synthesize` are optional (cloud engines extract server-side; Holographic skips extraction entirely).
+
+### 6a.5 Compatibility = one conformance test, engine swapped
+
+An engine **"is compatible"** iff it passes a single golden-path conformance test with store / gate / delivery constant and only the engine swapped:
+
+> seed the Chengdu fixture → gated `append` → engine `rank` over `list` output → `pre_llm_call` injects the top-K block → assert the injected text.
+
+Same test, swap the `MemoryEngine` impl. That is the testable definition of "fits the others" — behavioral conformance over a fixed store+gate+delivery, not API-shape matching.
+
+### 6a.6 Two compatibility tiers, one gate
+
+| Engine class | Store posture | Gate posture | What the cap authorizes |
+|---|---|---|---|
+| **Local** (OpenViking, Holographic, ByteRover-local) | own-the-store (S3) | gate-the-read | which actor / namespace may `get` / `list` |
+| **Cloud** (Mem0, Honcho, …) | can't own (egress) | gate-the-egress + audit | *whether* actor / namespace may call out at all |
+
+The same cap-token + scope contract drives both; only the enforcement point moves (read-time vs. call-time). This is the [universal gate pattern](../research/universal-gate-pattern.md) applied to the engine axis — the gate stays deterministic and policy-carrying whether or not we hold the bytes.
+
+### 6a.7 Relationship to existing sections
+
+- **§7.4 (Mem0 / Letta / LangMem export adapter)** is the *data-portability* bridge — move bytes between runtimes at rest. **This section** is the *live-ranking* bridge — let an external engine rank our at-rest store per turn. Same delegation philosophy, different verb (migrate vs. rank).
+- **§5 / §6** describe an engine's *internal* concerns (index, extraction) if one is ever built in-worker (stages E1 / E2). This section describes the *boundary* to an engine running outside the worker — the common case under Position C.
+
+---
+
 ## 7. Portability — `agentkeys memory export` / `import`
 
 ### 7.1 Export bundle format
@@ -628,7 +700,8 @@ Core path: **M-1 → M0 → M1 → M1.5 → M2** is the v0 gated-backend ship (~
 
 | Stage | Deliverable | Status |
 |---|---|---|
-| **E1** | `/v1/memory/rebuild-index` + `/v1/memory/search` (caller embeds, worker scores cosine; optionally BM25 + RRF per the agentmemory-followup research). Index format per §5. Microbench at 10K/100K/1M. Adds the `search`/`rebuild_index` handler modules deferred in M0. | **Deferred / pluggable.** Most operators use an external engine (mem0-self-hosted / Claude memory tool / Hermes-native) instead. Build E1 only if "ranking inside the AgentKeys worker, no external engine" is an explicit operator requirement. |
+| **E0** | **External-engine adapter seam** (§6a): the `MemoryEngine` trait (`extract` / `rank` / `synthesize`) + an **OpenViking** reference adapter + the swap-the-engine conformance test (Chengdu golden path over a fixed store+gate+`pre_llm_call` delivery). Depends on the core gate (M1.5 namespaces) being green so `rank` operates over gate-authorized `list` output. | **First engine milestone — the recommended start.** Proves "external engine ranks, AgentKeys store+gate holds + authorizes, hook injects." No in-worker ranking; delivery stays at the hook layer, never the runtime's `memory.provider` interface. |
+| **E1** | `/v1/memory/rebuild-index` + `/v1/memory/search` (caller embeds, worker scores cosine; optionally BM25 + RRF per the agentmemory-followup research). Index format per §5. Microbench at 10K/100K/1M. Adds the `search`/`rebuild_index` handler modules deferred in M0. | **Deferred / pluggable.** Most operators use an external engine (mem0-self-hosted / Claude memory tool / Hermes-native) instead. Build E1 only if "ranking *inside* the AgentKeys worker, no external engine" is an explicit operator requirement — i.e. the in-worker alternative to E0. |
 | **E2** | Extractor sidecar reference (§6.2) — client-side extraction, never in the worker. | **Deferred / pluggable.** External engines bring their own extraction. |
 
 The engine stages are the part the decision record says the ecosystem already does well — buildable fallback, not the plan of record. E1/E2 fork independently of the core trunk if ever taken.

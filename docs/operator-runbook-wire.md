@@ -273,6 +273,7 @@ Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `BUILDER_IMAGE` / `CARGO_REGISTRY_VOL` / `CARGO_GIT_VOL` / `RUSTUP_VOL` (build cache),
 `SBX_EXEC_MAXTIME` (per-sandbox-call ceiling, default 600s),
 `SEED_MEMORY_CONTENT` / `SEED_SCOPE_SERVICES` (real-mode 1.5 seed),
+`MEMORY_ENGINE` (default `passthrough`; set `lexical` for deterministic recency/relevance selection) / `MEMORY_MAX_LINES` (cap injected lines) — the engine is baked into the wired `pre_llm_call` hook and runs over the **real worker's** lines (plan §6a); a multi-line `SEED_MEMORY_CONTENT` makes the selection visible,
 `OPERATOR_KEY_FILE` (master key for the 0.7 operator-session mint),
 `AGENTKEYS_REUSE_AGENT=1` (skip Phase P fresh pairing; reuse a master-side agent) ·
 `AGENTKEYS_AGENT_SESSION_BEARER` (override the agent session) ·

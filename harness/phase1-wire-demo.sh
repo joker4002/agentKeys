@@ -48,6 +48,12 @@ LLM_API_KEY="${LLM_API_KEY:-${OPENROUTER_API_KEY:-}}"
 LLM_BASE_URL="${LLM_BASE_URL:-https://openrouter.ai/api/v1}"
 LLM_MODEL="${LLM_MODEL:-deepseek/deepseek-v4-flash}"   # OpenRouter slug; ':free' tier is 429-throttled
 MEMORY_NS="${MEMORY_NS:-travel}"
+# Memory engine baked into the wired pre_llm_call hook (plan §6a / arch.md §22).
+# Default `passthrough` injects the whole namespace (demo unchanged). Set
+# MEMORY_ENGINE=lexical (+ optional MEMORY_MAX_LINES, + a multi-line
+# SEED_MEMORY_CONTENT) to demo deterministic selection over the REAL worker.
+MEMORY_ENGINE="${MEMORY_ENGINE:-passthrough}"
+MEMORY_MAX_LINES="${MEMORY_MAX_LINES:-}"
 PAYMENT_SCOPE="${PAYMENT_SCOPE:-payment.spend}"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 AGENT_FILE="${AGENT_FILE:-$HOME/.agentkeys/agents/${AGENT_LABEL}.json}"
@@ -996,8 +1002,9 @@ phase2_wire() {
   skip_phase 2 && { log "Phase 2 — wire: skip (--skip-2)"; return; }
   log "Phase 2 — wire (#141 core)"
   resolve_sbx_paths || return
-  local wire_args="hermes --actor-omni $ACTOR_OMNI --operator-omni $OPERATOR_OMNI --namespaces $MEMORY_NS --payment-scope $PAYMENT_SCOPE --mcp-url $MCP_URL_IN_SANDBOX --vendor-token $VENDOR_TOKEN"
+  local wire_args="hermes --actor-omni $ACTOR_OMNI --operator-omni $OPERATOR_OMNI --namespaces $MEMORY_NS --payment-scope $PAYMENT_SCOPE --mcp-url $MCP_URL_IN_SANDBOX --vendor-token $VENDOR_TOKEN --memory-engine $MEMORY_ENGINE"
   [[ -n "$SESSION_BEARER" ]] && wire_args="$wire_args --session-bearer $SESSION_BEARER"
+  [[ -n "$MEMORY_MAX_LINES" ]] && wire_args="$wire_args --memory-max-lines $MEMORY_MAX_LINES"
 
   # 2.1 check-only (read-only)
   sbx_exec "$AGENT_BIN_DST wire $wire_args --check-only" | sed 's/^/    /'
@@ -1029,7 +1036,8 @@ phase3_acts() {
   # 3.1 Act 1 — memory inject (pre_llm_call)
   local a1; a1="$(sbx_hook 'agentkeys-prellm-memory-inject.sh' '{"hook_event_name":"pre_llm_call"}')"
   if echo "$a1" | jq -e '.context' >/dev/null 2>&1; then
-    ok "3.1 Act1 memory" "$(echo "$a1" | jq -r '.context' | tr '\n' ' ' | cut -c1-60)…"
+    local mem_src; mem_src="$([[ "$MODE" == real ]] && echo 'REAL worker' || echo 'in-mem fixture')"
+    ok "3.1 Act1 memory" "engine=$MEMORY_ENGINE via $mem_src → $(echo "$a1" | jq -r '.context' | tr '\n' ' ' | cut -c1-44)…"
   else
     fail "3.1 Act1 memory" "no context returned: $a1"
   fi
