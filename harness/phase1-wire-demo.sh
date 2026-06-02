@@ -26,7 +26,9 @@
 #
 # Usage:
 #   bash harness/phase1-wire-demo.sh {--light | --real} [--webauthn] [--unwire]
-#                                    [--yes] [--skip-N ...] [--help]
+#                                    [--openviking] [--yes] [--skip-N ...] [--help]
+#   --openviking : after the acts, test the OpenViking engine behind the gate
+#                  (needs openviking-server up — see docs/operator-runbook-openviking.md).
 #   (--light or --real is REQUIRED — the harness refuses to guess.)
 
 set -uo pipefail
@@ -75,7 +77,7 @@ MCP_BIN_DST=""
 DEMO_ACTOR="0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7"
 DEMO_OPERATOR="0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8"
 
-WEBAUTHN=false; UNWIRE=false; ASSUME_YES=false
+WEBAUTHN=false; UNWIRE=false; ASSUME_YES=false; OPENVIKING=false
 SKIP_PHASES=""   # space-separated phase numbers (bash 3.2 — no assoc arrays)
 
 # Resolved at runtime (Mode R from account; Mode L from demo constants):
@@ -109,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --webauthn)  WEBAUTHN=true; shift ;;
     --reuse-agent) REUSE_AGENT=true; shift ;;
     --unwire)    UNWIRE=true; shift ;;
+    --openviking) OPENVIKING=true; shift ;;
     --yes)       ASSUME_YES=true; shift ;;
     --skip-*)    SKIP_PHASES="$SKIP_PHASES ${1#--skip-}"; shift ;;
     --help|-h)   sed -n '2,29p' "$0"; exit 0 ;;
@@ -1163,6 +1166,46 @@ phase5_teardown() {
 # Until then, harness/erc4337-master-e8.sh is a standalone *mechanism smoke* (run
 # it directly), not part of this agent-side e2e. See docs/operator-runbook-wire.md.
 
+# ─── Phase OV — OpenViking engine behind the gate (--openviking) ─────────────
+# Optional. Proves the AgentKeys-SIDE OpenViking integration: `wire` bakes the
+# openviking engine + endpoint into the hook, and the query-aware pre_llm_call
+# hook runs against the live server. Installing/configuring openviking-server +
+# the deep ranking proof are operator steps — see
+# docs/operator-runbook-openviking.md. Skips gracefully if the server is down,
+# so a normal run is unaffected unless --openviking is passed.
+phase_openviking() {
+  [[ "$OPENVIKING" == true ]] || return 0
+  log "Phase OV — OpenViking engine behind the gate (#147 §6a)"
+  resolve_sbx_paths || return
+  local ovurl="${OPENVIKING_ENDPOINT:-http://localhost:1933}"
+
+  if [[ "$(sbx_rc "curl -fsS -m 4 $ovurl/health")" != "0" ]]; then
+    skip "OV.1 server" "openviking-server not reachable at $ovurl — install+start it (docs/operator-runbook-openviking.md steps 1-3), then re-run --openviking"
+    return
+  fi
+  ok "OV.1 server" "openviking-server up at $ovurl"
+
+  local args="hermes --actor-omni $ACTOR_OMNI --operator-omni $OPERATOR_OMNI --namespaces $MEMORY_NS --payment-scope $PAYMENT_SCOPE --mcp-url $MCP_URL_IN_SANDBOX --vendor-token $VENDOR_TOKEN --memory-engine openviking --openviking-endpoint $ovurl"
+  [[ -n "$SESSION_BEARER" ]] && args="$args --session-bearer $SESSION_BEARER"
+  sbx_exec "$AGENT_BIN_DST wire $args" >/dev/null 2>&1
+  if [[ "$(sbx_rc "grep -q OPENVIKING_ENDPOINT \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh")" == "0" ]]; then
+    ok "OV.2 wire" "hook baked AGENTKEYS_MEMORY_ENGINE=openviking + OPENVIKING_ENDPOINT"
+  else
+    fail "OV.2 wire" "wire did not bake OPENVIKING_ENDPOINT into the hook"
+    return
+  fi
+
+  local out
+  out="$(sbx_exec "printf '%s' '{\"query\":\"what about my peanut allergy?\"}' | bash \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh 2>/dev/null")"
+  if echo "$out" | jq -e '.context' >/dev/null 2>&1; then
+    ok "OV.3 query inject" "query-aware inject OK → $(echo "$out" | jq -r '.context' | tr '\n' ' ' | cut -c1-46)…"
+  elif [[ "$(echo "$out" | tr -d '[:space:]')" == "{}" ]]; then
+    skip "OV.3 query inject" "empty {} — mirror the namespace lines into OpenViking first (runbook step 4)"
+  else
+    fail "OV.3 query inject" "unexpected: $(echo "$out" | tr '\n' ' ' | cut -c1-100)"
+  fi
+}
+
 # ─── main ────────────────────────────────────────────────────────────────────
 main() {
   for t in curl jq docker; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 2; }; done
@@ -1175,6 +1218,7 @@ main() {
   phase1_sandbox
   phase2_wire
   phase3_acts
+  phase_openviking
   phase4_surprise
   phase5_teardown
 
