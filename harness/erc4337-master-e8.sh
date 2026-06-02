@@ -121,8 +121,8 @@ erc4337_master_e8() {
   # 9. Assert the master mutation landed: active-signer count went up by exactly 1
   #    (works for both fresh [1→2] and reuse [N→N+1]).
   local AFTER; AFTER="$(cast call "$ACCT" "activeSignerCount()(uint256)" --rpc-url "$RPC" | awk '{print $1}')"
-  [ "$AFTER" = "$((BEFORE + 1))" ] || { fail "UserOp did not execute (activeSignerCount $BEFORE→$AFTER, want $((BEFORE + 1)))"; return 1; }
-  ok "UserOp executed: passkey-signed addSigner landed, activeSignerCount $BEFORE→$AFTER — passkey-only master ✓"
+  [ "$AFTER" = "$((BEFORE + 1))" ] || { fail "UserOp did not execute (activeSignerCount ${BEFORE}->${AFTER}, want $((BEFORE + 1)))"; return 1; }
+  ok "UserOp executed: passkey-signed addSigner landed, activeSignerCount ${BEFORE}->${AFTER} - passkey-only master (no secp256k1 key)"
   echo "  account=$ACCT  mode=$MODE_E8  (no secp256k1 key authorized the mutation)"
 }
 
