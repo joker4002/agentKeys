@@ -23,7 +23,7 @@ That's it. The script builds the binary, allocates an ephemeral port, boots
 the server with `--backend in-memory`, walks all three acts of the storyboard
 with JSON-RPC assertions, exercises the auth negative paths, and cleans up.
 Expected output ends with `ALL ASSERTIONS PASSED.` (19 checks). This is the
-same one-liner the CI workflow runs (see [`.github/workflows/mcp-server.yml`](../../../.github/workflows/mcp-server.yml)) — copy-paste-equivalent in CI and on
+same one-liner the CI workflow runs (see [`.github/workflows/mcp-server.yml`](../../.github/workflows/mcp-server.yml)) — copy-paste-equivalent in CI and on
 your laptop.
 
 If you want to walk the demo manually instead of running the script, the
@@ -115,7 +115,7 @@ Expected `structuredContent`:
 }
 ```
 
-**Why this matters — and what's M1 vs M4:** in this dev demo the MCP server forwards `namespace` to the in-memory backend, which honors it as a storage key. That makes the dev demo visibly namespace-scoped. **In M1 production**, the real memory worker today does NOT enforce `namespace` cryptographically — the wire field flows through but the S3 key derivation only uses `(actor, service)`. Lifting `namespace` into the SIGNED `CapPayload` so the worker can enforce it is M4 follow-up to #108 ([plan §6](issue-107-mcp-server-phase1.md#6-what-did-not-land-deferred)). The dev demo demonstrates the wire shape; cryptographic enforcement lands later.
+**Why this matters — and what's M1 vs M4:** in this dev demo the MCP server forwards `namespace` to the in-memory backend, which honors it as a storage key. That makes the dev demo visibly namespace-scoped. **In M1 production**, the real memory worker today does NOT enforce `namespace` cryptographically — the wire field flows through but the S3 key derivation only uses `(actor, service)`. Lifting `namespace` into the SIGNED `CapPayload` so the worker can enforce it is M4 follow-up to #108 ([plan §6](../archived/issue-107-mcp-server-phase1.md#6-what-did-not-land-deferred)). The dev demo demonstrates the wire shape; cryptographic enforcement lands later.
 
 ### 4. Act 2 — Deterministic Denial
 
@@ -215,7 +215,7 @@ curl -sS -X POST http://127.0.0.1:8088/mcp \
 
 Expected: 5b succeeds (`"revocation":"in_memory"`), 5c returns a JSON-RPC error with body `unknown cap_id: this-cap-was-never-minted`, 5d returns `{"ok": true, "envelope_hash": "0x<32-byte sha256>"}`. The `envelope_hash` is a SHA-256 over the audit input — two different appends produce two different hashes.
 
-**Why this matters:** revoke + audit are decoupled by design. The dev backend tracks minted nonces and refuses to revoke unknown ones — so a typo or a stale cap surfaces immediately. In M1 production, broker-side revocation is still a follow-up (`cap.revoke` is a graceful stub against the real backend per [plan §6](issue-107-mcp-server-phase1.md#6-what-did-not-land-deferred)); the dev demo shows the contract the broker will honor in M4.
+**Why this matters:** revoke + audit are decoupled by design. The dev backend tracks minted nonces and refuses to revoke unknown ones — so a typo or a stale cap surfaces immediately. In M1 production, broker-side revocation is still a follow-up (`cap.revoke` is a graceful stub against the real backend per [plan §6](../archived/issue-107-mcp-server-phase1.md#6-what-did-not-land-deferred)); the dev demo shows the contract the broker will honor in M4.
 
 ### 6. Acceptance-criterion #3 — auth negative paths
 
@@ -271,7 +271,7 @@ Expected error body:
     "data": {
       "error": "not_implemented_in_v1",
       "scheduled_for": "M4",
-      "spec_url": "https://github.com/litentry/agentKeys/blob/main/docs/spec/plans/milestones-roadmap.md#m4"
+      "spec_url": "https://github.com/litentry/agentKeys/blob/main/docs/plan/milestones-roadmap.md#m4"
     }
   },
   "id": 1
@@ -405,7 +405,7 @@ AGENTKEYS_CHAIN=heima bash scripts/verify-heima-contracts.sh
 > reads contract addresses from `scripts/operator-workstation.env` (the
 > default `$ENV_FILE`). With `AGENTKEYS_CHAIN=heima` it verifies the
 > **live v2 stage-1 contracts on Heima mainnet** (the addresses in
-> [`docs/spec/deployed-contracts.md`](deployed-contracts.md)) — there is no
+> [`docs/spec/deployed-contracts.md`](../spec/deployed-contracts.md)) — there is no
 > separate "test" set of contracts. Demo isolation is per-actor (fresh
 > `operator_omni` / `actor_omni` / `device_key_hash` per run, cap-mint
 > enforces device binding on chain). For an off-prod env file (e.g. a
@@ -423,7 +423,7 @@ Capture for the next step:
 
 ### B.5 Deploy the MCP server on the broker (hosted-LLM path — issue #152, deferred)
 
-> **Moved.** The broker-hosted MCP endpoint is the **Hosted-LLM** path (a remote vendor LLM connects *inward* over WSS) — tracked in [#152](https://github.com/litentry/agentKeys/issues/152) and **deferred**. It is a broker-host concern, so it no longer lives in `setup-cloud.sh` (which is IAM/permission-only). The old `setup-cloud.sh --only-step 15` SSM-ran `setup-mcp-host.sh`, cloning `main` and cold-building via `cargo install --git` (~10–20 min EVERY run). Enable it on the broker with [`setup-mcp-host.sh`](../../../scripts/setup-mcp-host.sh) (cached incremental `cargo build -p` against the checkout); thereafter `setup-broker-host.sh` re-converges it automatically — **no flag to remember**:
+> **Moved.** The broker-hosted MCP endpoint is the **Hosted-LLM** path (a remote vendor LLM connects *inward* over WSS) — tracked in [#152](https://github.com/litentry/agentKeys/issues/152) and **deferred**. It is a broker-host concern, so it no longer lives in `setup-cloud.sh` (which is IAM/permission-only). The old `setup-cloud.sh --only-step 15` SSM-ran `setup-mcp-host.sh`, cloning `main` and cold-building via `cargo install --git` (~10–20 min EVERY run). Enable it on the broker with [`setup-mcp-host.sh`](../../scripts/setup-mcp-host.sh) (cached incremental `cargo build -p` against the checkout); thereafter `setup-broker-host.sh` re-converges it automatically — **no flag to remember**:
 
 ```bash
 # On the broker (reach it via scripts/ssh-broker.sh), from the /opt/agentkeys-src checkout:
@@ -431,7 +431,7 @@ sudo bash /opt/agentkeys-src/scripts/setup-mcp-host.sh            # prod  → mc
 sudo bash /opt/agentkeys-src/scripts/setup-mcp-host.sh --test     # test → test-mcp.${ZONE}
 ```
 
-Once the MCP binary is installed, every `setup-broker-host.sh` run keeps it converged (idempotent), so routine broker setups need nothing extra. **The Local-LLM / Task-agent wire demo does NOT need this** — that MCP server runs in the agent's own sandbox (see [`docs/operator-runbook-wire.md`](../../operator-runbook-wire.md) + `harness/phase1-wire-demo.sh`).
+Once the MCP binary is installed, every `setup-broker-host.sh` run keeps it converged (idempotent), so routine broker setups need nothing extra. **The Local-LLM / Task-agent wire demo does NOT need this** — that MCP server runs in the agent's own sandbox (see [`docs/operator-runbook-wire.md`](../operator-runbook-wire.md) + `harness/phase1-wire-demo.sh`).
 
 **Local development install (laptop / Claude Code / Codex CLI / Claude Desktop):**
 
@@ -670,7 +670,7 @@ sudo systemctl disable --now agentkeys-mcp-server mcp-endpoint-server
 
 ## See also
 
-- [`docs/spec/plans/issue-107-mcp-server-phase1.md`](issue-107-mcp-server-phase1.md) — the canonical plan + landed-vs-deferred table for #107.
-- [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md) §4.3 — the three-act demo storyboard.
-- [`docs/research/xiaozhi-hermes-architecture.md`](../../research/xiaozhi-hermes-architecture.md) — why xiaozhi-server's stock MCP support means no fork needed.
-- [`crates/agentkeys-mcp-server/README.md`](../../../crates/agentkeys-mcp-server/README.md) — server-side ops reference.
+- [`docs/archived/issue-107-mcp-server-phase1.md`](../archived/issue-107-mcp-server-phase1.md) — the canonical plan + landed-vs-deferred table for #107.
+- [`docs/agent-iam-strategy.md`](../agent-iam-strategy.md) §4.3 — the three-act demo storyboard.
+- [`docs/research/xiaozhi-hermes-architecture.md`](../research/xiaozhi-hermes-architecture.md) — why xiaozhi-server's stock MCP support means no fork needed.
+- [`crates/agentkeys-mcp-server/README.md`](../../crates/agentkeys-mcp-server/README.md) — server-side ops reference.

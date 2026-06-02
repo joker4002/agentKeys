@@ -79,7 +79,7 @@ Each phase is independently shippable, idempotent where it mutates chain state (
 
 - **E0** ✅ threat-model drafted → [`erc4337-threat-model.md`](erc4337-threat-model.md).
 - **E2** ✅ `IERC4337.sol`, `P256Account.sol`, `P256AccountFactory.sol` — **codex-reviewed** (1 P2 fixed: verifier/`abi.decode` reverts now map to `SIG_VALIDATION_FAILED` via a try/catch self-call); **17 account tests green**.
-- **E1** ✅ **deployed live on Heima mainnet 2026-06-02** (recorded in [`contracts.md`](../../contracts.md)):
+- **E1** ✅ **deployed live on Heima mainnet 2026-06-02** (recorded in [`deployed-contracts.md`](../../spec/deployed-contracts.md)):
   - `EntryPoint` v0.7 = `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` (canonical bytecode; landed a UserOp in the spike).
   - `P256AccountFactory` = `0x1ccCe65b22De81aDA4F378FeAf7503d93f5d27a3` (CREATE2 determinism smoke-verified on mainnet: `getAddress` == `createAccount`).
 - **E3** ✅ `AgentKeysScope` thinned to account-auth (in-contract K11 + `scopeNonce` retired; `setScopeWithWebauthn`→`setScope`); registry agent-bind closed structurally (master = account).

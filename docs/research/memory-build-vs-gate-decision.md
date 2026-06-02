@@ -1,7 +1,7 @@
 # Memory: build vs. gate — decision record
 
 **Status:** DECIDED — **Position C (gated store, pluggable engine)**. 2026-05.
-**Question owner:** Hanwen. **Supersedes the framing of** [`../plan/agentkeys-memory-design.md`](../plan/agentkeys-memory-design.md) (which reads as "build a memory system"); reconciles it with [`agent-iam-strategy.md`](./agent-iam-strategy.md) and [`../spec/plans/milestones-roadmap.md`](../spec/plans/milestones-roadmap.md) M1.
+**Question owner:** Hanwen. **Supersedes the framing of** [`../plan/agentkeys-memory-design.md`](../plan/agentkeys-memory-design.md) (which reads as "build a memory system"); reconciles it with [`agent-iam-strategy.md`](./agent-iam-strategy.md) and [`../plan/milestones-roadmap.md`](../plan/milestones-roadmap.md) M1.
 
 ---
 
@@ -133,7 +133,7 @@ The repo currently holds three positions that look inconsistent; C reconciles th
 | Doc | What it says today | Under Position C |
 |---|---|---|
 | [`agent-iam-strategy.md`](./agent-iam-strategy.md) | "Memory MCP server is too narrow; we're the authority/control plane" (gate-leaning) | ✅ Correct — we gate. Add: we also own the *store*, not the engine. |
-| [`milestones-roadmap.md`](../spec/plans/milestones-roadmap.md) M1 | `memory.get`/`memory.put` MCP tools + `namespaces_allowed` cap claim (gated store) | ✅ This **is** Position C already — a gated store exposed as tool calls. Keep as-is. |
+| [`milestones-roadmap.md`](../plan/milestones-roadmap.md) M1 | `memory.get`/`memory.put` MCP tools + `namespaces_allowed` cap claim (gated store) | ✅ This **is** Position C already — a gated store exposed as tool calls. Keep as-is. |
 | [`memory-design.md`](../plan/agentkeys-memory-design.md) | Full worker: vault + vector index + BM25 + rebuild-index ("build a system") | ⚠️ Over-scoped. The **store** half (cap-gated get/put, K3 envelope, per-actor S3, namespaces, audit) is Position C and stays. The **engine** half (vector index, BM25, `/rebuild-index`, embedding rotation) becomes *optional / pluggable* — not core, not the default ship. |
 
 The roadmap (M1) was already at Position C. `memory-design.md` is the outlier that drifted toward A. This record pins the intent; a future edit to `memory-design.md` should reframe it from "memory system" to "gated memory backend" and move §4.2/§5 (search + index engine) into an explicit "pluggable engine — not built by us in v0" section.
@@ -186,7 +186,7 @@ Delegating any of these three = giving up the differentiator and re-importing th
 
 **In-repo:**
 - [`agent-iam-strategy.md`](./agent-iam-strategy.md) — authority-host thesis; line 46 "memory MCP server too narrow."
-- [`../spec/plans/milestones-roadmap.md`](../spec/plans/milestones-roadmap.md) — M1 `memory.get`/`memory.put` + namespaces (already Position C).
+- [`../plan/milestones-roadmap.md`](../plan/milestones-roadmap.md) — M1 `memory.get`/`memory.put` + namespaces (already Position C).
 - [`../plan/agentkeys-memory-design.md`](../plan/agentkeys-memory-design.md) — the store design (keep) + engine design (now pluggable).
 - [`ai-memory-systems-survey.md`](./ai-memory-systems-survey.md), [`agentmemory-and-claw-code-followup.md`](./agentmemory-and-claw-code-followup.md), [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) — engine survey + Hermes provider/hook model.
 

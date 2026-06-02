@@ -20,9 +20,9 @@ cd ~/Projects/agentkeys
 git init
 
 # Copy spec docs so agents have them without leaving the repo
-mkdir -p docs/spec/plans docs/research/aiosandbox
+mkdir -p docs/plan docs/research/aiosandbox
 cp ~/Projects/project-life/projects/idea/agentkeys/v2/*.md docs/spec/
-cp ~/Projects/project-life/projects/idea/agentkeys/v2/plans/*.md docs/spec/plans/
+cp ~/Projects/project-life/projects/idea/agentkeys/v2/plans/*.md docs/plan/
 cp ~/Projects/project-life/projects/idea/agentkeys/v2/aiosandbox/*.md docs/research/aiosandbox/
 
 git add -A && git commit -m "docs: seed spec documents from project-life"
@@ -47,7 +47,7 @@ The largest stage: 37 tests, 10 stories. Ralph loops through them.
 
 **Invoke:**
 ```
-/oh-my-claudecode:ralph "Implement Stage 1 per docs/spec/plans/development-stages.md: agentkeys-mock-server (axum + rusqlite) with 7 SQLite tables, 15 REST endpoints implementing every CredentialBackend method, identity linking, master key custody, TTL/single-use enforcement, MockHttpClient connection. 37 tests must pass. See docs/spec/plans/eng-review-test-plan.md for the full test matrix including property tests (pair-code collision, nonce uniqueness) and integrity tests (tamper detection, OTP replay). Tag stage-1-done when done."
+/oh-my-claudecode:ralph "Implement Stage 1 per docs/spec/plans/development-stages.md: agentkeys-mock-server (axum + rusqlite) with 7 SQLite tables, 15 REST endpoints implementing every CredentialBackend method, identity linking, master key custody, TTL/single-use enforcement, MockHttpClient connection. 37 tests must pass. See docs/archived/eng-review-test-plan.md for the full test matrix including property tests (pair-code collision, nonce uniqueness) and integrity tests (tamper detection, OTP replay). Tag stage-1-done when done."
 ```
 
 **Deliverables:** Mock server starts on port 8090, all 37 tests pass, curl smoke test works, `bash harness/stage-1-done.sh` exits 0.

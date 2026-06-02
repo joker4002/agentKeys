@@ -6,18 +6,18 @@ _Draft body for a new GitHub issue on `litentry/agentKeys`. Filed via:_
 gh issue create --repo litentry/agentKeys \
   --title "Replace mock-server /credential/* with S3-backed encrypted storage (OIDC-scoped, PrincipalTag-isolated)" \
   --label "stage-7+,architecture,credential-storage" \
-  --body-file docs/spec/plans/issue-credential-storage-s3-oidc.md
+  --body-file docs/plan/issue-credential-storage-s3-oidc.md
 ```
 
 ---
 
 ## Context
 
-[arch.md §9 #10](../../docs/arch.md#L608) flags the mock-server backend (`agentkeys-backend.service` on `127.0.0.1:8090` on the deployed broker host) as **legacy and pending deprecation**:
+[arch.md §9 #10](../arch.md#L608) flags the mock-server backend (`agentkeys-backend.service` on `127.0.0.1:8090` on the deployed broker host) as **legacy and pending deprecation**:
 
 > Backend (mock-server) — Legacy `/session/*` + `/credential/*` + `/audit/*` (broker's Tier-2 reachability target; **will be deprecated as callers migrate to the new flow**)
 
-[arch.md §11](../../docs/arch.md#L670) explicitly forbids exposing this backend publicly:
+[arch.md §11](../arch.md#L670) explicitly forbids exposing this backend publicly:
 
 > The legacy backend at `:8090` is **never** publicly exposed; only the broker on the same host reaches it.
 
@@ -99,4 +99,4 @@ Extend the existing bucket policy (already grants PrincipalTag-scoped read on `b
 
 - Forced by [issue #83](https://github.com/litentry/agentKeys/issues/83) follow-up: the auto-provision pipeline now succeeds through key mint but fails at storage because the legacy backend isn't reachable.
 - Reuses infra from [SES routing Lambda](../../infra/ses-routing-lambda/) (issue #83 follow-up).
-- See [arch.md §9 #10](../../docs/arch.md#L608), [§11](../../docs/arch.md#L636), [cloud-setup.md §4.5](../../docs/cloud-setup.md).
+- See [arch.md §9 #10](../arch.md#L608), [§11](../arch.md#L636), [cloud-setup.md §4.5](../../docs/cloud-setup.md).

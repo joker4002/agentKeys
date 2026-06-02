@@ -343,4 +343,4 @@ Both terminate at the same AgentKeys backend. Both honor the same cross-vendor c
 - [`xiaozhi-hermes-architecture.md`](./xiaozhi-hermes-architecture.md) — sibling adapter architecture (xiaozhi path)
 - [`xiaozhi-hermes-risks.md`](./xiaozhi-hermes-risks.md) — risk-verification pattern that informed this doc's risk section
 - [`ai-hardware-companion-office-hours.md`](./ai-hardware-companion-office-hours.md) — original Approach D + cross-vendor consent model
-- [issue #103 plan](../spec/plans/issue-103-aiosandbox-hermes-esp32-demo.md) — xiaozhi-side implementation
+- [issue #103 plan](../plan/issue-103-aiosandbox-hermes-esp32-demo.md) — xiaozhi-side implementation

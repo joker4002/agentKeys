@@ -8,20 +8,20 @@
 >
 > The integration architecture is **Option B** (vendor surface → Task Host runtime → both MCPs: aiosandbox loopback + AgentKeys over network), with **hooks as the primary IAM-guarantee mechanism** and the OpenAI-compatible proxy as a **lower-priority fallback** for hosts without a hook surface.
 >
-> Full reasoning and the IAM-tool-vs-IAM-guarantee distinction live in [`docs/wiki/agent-iam-guarantee-glossary.md`](../../wiki/agent-iam-guarantee-glossary.md); strategic anchor in [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md) §3.6 + §3.7; execution plan in [`docs/spec/plans/phase-1-fresh-user-wire-onboarding.md`](phase-1-fresh-user-wire-onboarding.md). The previous Rust-runtime runbook + verification + setup script were archived 2026-05-28 under `docs/archived/*-rust-runtime-2026-05*`.
+> Full reasoning and the IAM-tool-vs-IAM-guarantee distinction live in [`docs/wiki/agent-iam-guarantee-glossary.md`](../wiki/agent-iam-guarantee-glossary.md); strategic anchor in [`docs/agent-iam-strategy.md`](../agent-iam-strategy.md) §3.6 + §3.7; execution plan in [`docs/plan/phase-1-fresh-user-wire-onboarding.md`](phase-1-fresh-user-wire-onboarding.md). The previous Rust-runtime runbook + verification + setup script were archived 2026-05-28 under `docs/archived/*-rust-runtime-2026-05*`.
 >
 > Phase split:
 > - **Phase 1** (this PR + immediate follow-up): AgentKeys MCP server (7 tools per strategy §4.2), Hermes MCP registration inside aiosandbox.
 > - **Phase 3** ([issue #133](https://github.com/litentry/agentKeys/issues/133)): reference hook configs for Tier-1 hosts (Claude Code, Codex, Hermes, OpenClaw), `agentkeys hook check` CLI helper, cap-mint pre-warming.
 > - **Phase 3b** (after #133 ships): proxy fallback for Tier-2 hosts (xiaozhi-server, vendor mobile SDKs, plain `openai.ChatCompletion` scripts).
 >
-> ## ⚠ PIVOT 2026-05-24 (multiple rounds) — read strategic anchor FIRST: [`docs/agent-iam-strategy.md`](../../agent-iam-strategy.md)
+> ## ⚠ PIVOT 2026-05-24 (multiple rounds) — read strategic anchor FIRST: [`docs/agent-iam-strategy.md`](../agent-iam-strategy.md)
 >
 > **Strategic frame**: AgentKeys is the **Agent IAM and memory control plane** for the AI device era. This issue ships Phase 1 from the strategy doc — a three-act demo that proves AgentKeys is Agent IAM, not chatbot infrastructure.
 >
-> **Hardware** (verified): MagicLick 2.5 (ESP32-S3 + ES8311 + 128×128 LCD + WiFi/4G) running xiaozhi-esp32 v1.9.4. See [`docs/research/xiaozhi-esp32-magiclink.md`](../../research/xiaozhi-esp32-magiclink.md).
+> **Hardware** (verified): MagicLick 2.5 (ESP32-S3 + ES8311 + 128×128 LCD + WiFi/4G) running xiaozhi-esp32 v1.9.4. See [`docs/research/xiaozhi-esp32-magiclink.md`](../research/xiaozhi-esp32-magiclink.md).
 >
-> **Architecture** (MCP-direct, NOT Hermes-bridge): xiaozhi-server has first-class MCP support (`core/providers/tools/server_mcp/`). We register the AgentKeys MCP server in `mcp_server_settings.json`; the LLM (Qwen/Kimi/Doubao/Claude) calls our tools directly. No fork, no Hermes middleman. Hermes joins Phase 3 as a callable MCP tool (`hermes.execute_task`) the LLM can invoke for complex agentic work — not as the LLM-caller replacement. See [`docs/research/xiaozhi-hermes-architecture.md`](../../research/xiaozhi-hermes-architecture.md).
+> **Architecture** (MCP-direct, NOT Hermes-bridge): xiaozhi-server has first-class MCP support (`core/providers/tools/server_mcp/`). We register the AgentKeys MCP server in `mcp_server_settings.json`; the LLM (Qwen/Kimi/Doubao/Claude) calls our tools directly. No fork, no Hermes middleman. Hermes joins Phase 3 as a callable MCP tool (`hermes.execute_task`) the LLM can invoke for complex agentic work — not as the LLM-caller replacement. See [`docs/research/xiaozhi-hermes-architecture.md`](../research/xiaozhi-hermes-architecture.md).
 >
 > **Phase 1 demo (three acts)** — replaces the single-act memory injection demo described below. Goal: <5-minute vendor pitch that reads as Agent IAM, not chatbot.
 > - **Act 1 — Permissioned Memory**: device reads ONLY the memory namespace it's allowed to read (not "the device knows you" — "the device knows what it's allowed to know about you")
@@ -30,13 +30,13 @@
 >
 > **Four architecture commitments** (corrected from earlier loose framing):
 > 1. **Revocation**: *immediate online, bounded TTL/cache offline*. Not "no propagation delay." High-risk actions always online; low-risk reads use short-lived cached caps; offline mode denies sensitive actions by default.
-> 2. **Audit (two-tier)**: real-time off-chain feed in parent-control UI + **2-min batched Merkle root anchored on-chain** (chain choice is deployment config; the strategy stays chain-agnostic per [`agent-iam-strategy.md`](../../agent-iam-strategy.md) §3.2). NOT real-time on-chain. The chain explorer is tamper-evidence proof, not the UX surface.
+> 2. **Audit (two-tier)**: real-time off-chain feed in parent-control UI + **2-min batched Merkle root anchored on-chain** (chain choice is deployment config; the strategy stays chain-agnostic per [`agent-iam-strategy.md`](../agent-iam-strategy.md) §3.2). NOT real-time on-chain. The chain explorer is tamper-evidence proof, not the UX surface.
 > 3. **Delegation**: `agentkeys.delegation.grant` is **schema-documented but not active** in v1. Returns `not_implemented_in_v1`. Active delegation lands in Phase 4.
 > 4. **Zero orchestration in v1** — hard line. If a vendor needs orchestration, they pick a runtime (Hermes/OpenClaw/their own) via Phase 3 MCP tools.
 >
 > **What's NEW vs what's shipped**: cap-token machinery (broker, signer, K3/K10 HDKD, memory/cred/audit workers, per-actor isolation per issue #90) is already shipped via Stage 7+. New work for Phase 1: MCP server wrapper around existing backend RPCs (~1 week), parent-control web UI (mobile-responsive, ~3-4 days), two-tier audit wiring (~1 day), demo runbook (~half day). Total ~2 weeks.
 >
-> **Sections below**: §C3 (mock memory + daemon endpoint) still useful as backend context. §C4 (custom Hermes runtime as Rust crate) is **SUPERSEDED** — use the AgentKeys MCP server pattern from [`docs/research/volcano-ark-mcp-integration.md`](../../research/volcano-ark-mcp-integration.md). §C5 (Dockerfile with hermes-runtime) is **SUPERSEDED**. §C6 (custom ESP32 firmware) **SUPERSEDED for MagicLick demo** — firmware is unchanged. §C7 (deploy script) needs rework to provision the MCP server + xiaozhi-server stock + parent web UI instead of the bridge. The "Implementation order" and "Effort estimate" sections below reflect the older bridge-fork plan and should be read as historical context, not current spec.
+> **Sections below**: §C3 (mock memory + daemon endpoint) still useful as backend context. §C4 (custom Hermes runtime as Rust crate) is **SUPERSEDED** — use the AgentKeys MCP server pattern from [`docs/research/volcano-ark-mcp-integration.md`](../research/volcano-ark-mcp-integration.md). §C5 (Dockerfile with hermes-runtime) is **SUPERSEDED**. §C6 (custom ESP32 firmware) **SUPERSEDED for MagicLick demo** — firmware is unchanged. §C7 (deploy script) needs rework to provision the MCP server + xiaozhi-server stock + parent web UI instead of the bridge. The "Implementation order" and "Effort estimate" sections below reflect the older bridge-fork plan and should be read as historical context, not current spec.
 >
 > **What this means for the original plan sections:**
 > - §C3 (mock memory + daemon endpoint) — **STILL VALID**, no changes
@@ -46,12 +46,12 @@
 > - §C7 (deploy script) — **PARTIALLY VALID**. Update to provision the bridge instead of a custom hermes-runtime.
 > - §Implementation order — **SUPERSEDED** by the 6-step "Specific next steps" list in the research doc.
 >
-> Full rationale, hardware specs, communication protocols, four candidate reference server implementations, and hardware verification procedures live in [`docs/research/xiaozhi-esp32-magiclink.md`](../../research/xiaozhi-esp32-magiclink.md). A follow-up commit will rewrite the C-sections below to match the pivoted direction. Until then, read the research doc as the source of truth.
+> Full rationale, hardware specs, communication protocols, four candidate reference server implementations, and hardware verification procedures live in [`docs/research/xiaozhi-esp32-magiclink.md`](../research/xiaozhi-esp32-magiclink.md). A follow-up commit will rewrite the C-sections below to match the pivoted direction. Until then, read the research doc as the source of truth.
 **Related research:**
-- [`docs/research/aiosandbox/agent-infra-sandbox-analysis.md`](../../research/aiosandbox/agent-infra-sandbox-analysis.md)
-- [`docs/research/aiosandbox/agent-infra-sandbox-runtime-probe.md`](../../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)
-- [`docs/research/ai-hardware-companion-office-hours.md`](../../research/ai-hardware-companion-office-hours.md) (Approach D)
-- [`docs/arch.md`](../../arch.md) (agent-infra/sandbox is the canonical agent runtime; memory-service at `bots/<actor_omni_hex>/memory/*`)
+- [`docs/research/aiosandbox/agent-infra-sandbox-analysis.md`](../research/aiosandbox/agent-infra-sandbox-analysis.md)
+- [`docs/research/aiosandbox/agent-infra-sandbox-runtime-probe.md`](../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)
+- [`docs/research/ai-hardware-companion-office-hours.md`](../research/ai-hardware-companion-office-hours.md) (Approach D)
+- [`docs/arch.md`](../arch.md) (agent-infra/sandbox is the canonical agent runtime; memory-service at `bots/<actor_omni_hex>/memory/*`)
 
 ## Goal
 
@@ -59,7 +59,7 @@ Ship a working end-to-end demo for the AgentKeys hardware-vendor wedge:
 
 > An ESP32 hardware device, configured with one URL and one actor token, talks to a cloud-hosted `agent-infra/sandbox` running a Hermes agent runtime + `agentkeys-daemon`. The agent auto-injects a mock user-memory MD file from S3 at boot, so the device sounds personalized from the very first conversation.
 
-This is the v0 buyer-pitch demo that the [office-hours design doc §9.6 Storyboard](../../research/ai-hardware-companion-office-hours.md) calls for, scoped down to **single device, single sandbox, single mock memory blob**. Cross-vendor portability, cap-token enforcement, multi-tenant orchestration, payment rails, and the parent-control app are out of scope for v0 demo.
+This is the v0 buyer-pitch demo that the [office-hours design doc §9.6 Storyboard](../research/ai-hardware-companion-office-hours.md) calls for, scoped down to **single device, single sandbox, single mock memory blob**. Cross-vendor portability, cap-token enforcement, multi-tenant orchestration, payment rails, and the parent-control app are out of scope for v0 demo.
 
 ## Why now
 
@@ -75,7 +75,7 @@ The office-hours diagnostic surfaced that the next critical step is a working de
 - Text-mode interaction (button press → text payload → agent → text response → serial-print or BLE-companion-app display); voice mode deferred to a follow-up issue
 - Subsidized LLM (Qwen-class via DashScope or OpenRouter) for the agent
 - Public-facing demo URL (`https://demo.aiosandbox.litentry.org` or similar)
-- One-command setup script (idempotent per [CLAUDE.md "Idempotent remote-setup rule"](../../../CLAUDE.md))
+- One-command setup script (idempotent per [CLAUDE.md "Idempotent remote-setup rule"](../../CLAUDE.md))
 - Demo runbook for live walk-throughs
 
 **NOT in scope (deferred to follow-ups):**
@@ -139,13 +139,13 @@ The office-hours diagnostic surfaced that the next critical step is a working de
 └────────────────────────────────────────────┘
 ```
 
-Reuse of canonical AgentKeys primitives ([`docs/arch.md`](../../arch.md)):
+Reuse of canonical AgentKeys primitives ([`docs/arch.md`](../arch.md)):
 
 - **Sandbox**: `agent-infra/sandbox` is already arch.md's chosen agent runtime substrate (§3.3a, §10.4)
 - **Actor model**: `O_demo_001` is a fixed HDKD-derived actor omni for v0 demo (single actor; production binds per device)
 - **Memory bucket layout**: `bots/<actor_omni_hex>/memory/<path>` matches arch.md §15.2 — we use the same layout with a demo prefix so the path stays canonical
 - **Daemon**: `agentkeys-daemon` extends with one new GET endpoint `/v1/memory/<actor>/profile.md`; no new K-key infra needed
-- **supervisord**: stock sandbox ships supervisord at PID 1 (per [runtime probe finding 3 in §1](../../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)) — we register `agentkeys-daemon` + `hermes-runtime` as new programs in `/opt/gem/supervisord.conf`
+- **supervisord**: stock sandbox ships supervisord at PID 1 (per [runtime probe finding 3 in §1](../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)) — we register `agentkeys-daemon` + `hermes-runtime` as new programs in `/opt/gem/supervisord.conf`
 
 ## Components
 
@@ -195,7 +195,7 @@ last_updated: 2026-05-23T10:00:00Z
 
 ### C3 — `agentkeys-daemon` new endpoint
 
-Add handler to [`crates/agentkeys-daemon/src/handlers/`](../../../crates/agentkeys-daemon):
+Add handler to [`crates/agentkeys-daemon/src/handlers/`](../../crates/agentkeys-daemon):
 
 ```rust
 // GET /v1/memory/{actor_omni}/profile.md
@@ -257,7 +257,7 @@ NEW crate at `crates/agentkeys-hermes-runtime/`:
   Response: {"response": "string", "memory_loaded": true, "tokens_used": N}
   ```
 
-**Naming note**: "Hermes" in this issue refers to the lightweight AgentKeys-native runtime we're shipping for this demo, NOT NousResearch's Hermes LLM and NOT an existing third-party project. We picked the name in [office-hours §Approach D](../../research/ai-hardware-companion-office-hours.md). A 1-week research spike (open question §1 below) should confirm whether a public OSS project named "Hermes" already occupies this namespace and we need to rename — best candidates if rename needed: `agentkeys-companion`, `agentkeys-runtime`, `agentkeys-shell`.
+**Naming note**: "Hermes" in this issue refers to the lightweight AgentKeys-native runtime we're shipping for this demo, NOT NousResearch's Hermes LLM and NOT an existing third-party project. We picked the name in [office-hours §Approach D](../research/ai-hardware-companion-office-hours.md). A 1-week research spike (open question §1 below) should confirm whether a public OSS project named "Hermes" already occupies this namespace and we need to rename — best candidates if rename needed: `agentkeys-companion`, `agentkeys-runtime`, `agentkeys-shell`.
 
 ### C5 — Extended sandbox image
 
@@ -281,7 +281,7 @@ RUN mkdir -p /home/gem/.agentkeys && chown gem:gem /home/gem/.agentkeys
 EXPOSE 8080 8089 8090
 ```
 
-Supervisord programs (per [runtime probe §4 B10](../../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)):
+Supervisord programs (per [runtime probe §4 B10](../research/aiosandbox/agent-infra-sandbox-runtime-probe.md)):
 
 ```ini
 # /opt/gem/supervisord.d/agentkeys-daemon.conf
@@ -383,7 +383,7 @@ Token is validated by hermes-runtime against `AGENTKEYS_DEMO_ACTOR_TOKEN` env va
 
 NEW: `scripts/setup-demo-aiosandbox.sh`
 
-Idempotent per [CLAUDE.md "Idempotent remote-setup rule"](../../../CLAUDE.md) — every step pre-checks state and short-circuits if already done.
+Idempotent per [CLAUDE.md "Idempotent remote-setup rule"](../../CLAUDE.md) — every step pre-checks state and short-circuits if already done.
 
 Step inventory:
 
@@ -466,14 +466,14 @@ A reviewer takes the demo runbook, runs `bash scripts/setup-demo-aiosandbox.sh` 
 - Step 12 (runbook): **~2 days**
 - **Total: ~1-2 weeks for a working v0 demo** (revised 2026-05-24 from original ~3 week estimate)
 
-**The revision happened because** the [risk-verification research](../../research/xiaozhi-hermes-risks.md) showed all three identified risks were either built-in-mitigated (R1: Hermes session headers, 2-4 hrs), mostly-not-real (R2: learning loop is background-off-turn-path), or fine-for-v0 (R3: gateway is multi-tenant by design). A newly discovered fourth risk (R4: cold agent construction per request adds 50-300ms) needs 1 day of fork-local pooling work. Net effect: bridge work ~3-4 days, parallel tracks (AgentKeys daemon endpoint, S3 mock, device config, runbook) ~3-4 days. Calendar time ~1-2 weeks depending on engineer concurrency.
+**The revision happened because** the [risk-verification research](../research/xiaozhi-hermes-risks.md) showed all three identified risks were either built-in-mitigated (R1: Hermes session headers, 2-4 hrs), mostly-not-real (R2: learning loop is background-off-turn-path), or fine-for-v0 (R3: gateway is multi-tenant by design). A newly discovered fourth risk (R4: cold agent construction per request adds 50-300ms) needs 1 day of fork-local pooling work. Net effect: bridge work ~3-4 days, parallel tracks (AgentKeys daemon endpoint, S3 mock, device config, runbook) ~3-4 days. Calendar time ~1-2 weeks depending on engineer concurrency.
 
 This fits the office-hours §9.7 next-moves timeline: demo ready in 1-2 weeks, vendor outreach happens in parallel (the assignment from §The Assignment).
 
 ## What landed (to fill at PR time)
 
-*To be completed by the implementing engineer at PR time per [CLAUDE.md plan-completion policy](../../../CLAUDE.md).*
+*To be completed by the implementing engineer at PR time per [CLAUDE.md plan-completion policy](../../CLAUDE.md).*
 
 ## What did NOT land (to fill at PR time)
 
-*To be completed by the implementing engineer at PR time per [CLAUDE.md plan-completion policy](../../../CLAUDE.md). If empty, state "All plan steps shipped."*
+*To be completed by the implementing engineer at PR time per [CLAUDE.md plan-completion policy](../../CLAUDE.md). If empty, state "All plan steps shipped."*

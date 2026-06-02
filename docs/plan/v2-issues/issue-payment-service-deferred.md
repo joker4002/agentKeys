@@ -7,7 +7,7 @@
 gh issue create \
   --title "payment-service worker — deferred from v2 main scope" \
   --label "documentation,enhancement" \
-  --body-file docs/spec/plans/v2-issues/issue-payment-service-deferred.md
+  --body-file docs/plan/v2-issues/issue-payment-service-deferred.md
 ```
 
 ---

@@ -1,6 +1,6 @@
 # v2 stage 1 — fresh-start demo (Litentry/Heima EVM backbone)
 
-**Status (2026-05-24)**: this doc is transitional. The v1/v2 staging name retires after v2-stage3 ships green; M1-M7 ([`docs/spec/plans/milestones-roadmap.md`](spec/plans/milestones-roadmap.md)) is the forward-facing framing. Until then, this remains the operator runbook for stage-1 bring-up.
+**Status (2026-05-24)**: this doc is transitional. The v1/v2 staging name retires after v2-stage3 ships green; M1-M7 ([`docs/plan/milestones-roadmap.md`](plan/milestones-roadmap.md)) is the forward-facing framing. Until then, this remains the operator runbook for stage-1 bring-up.
 
 **Audience**: operators bringing up a **brand new** v2 stage-1 deployment from scratch. Everything previously inherited from the stage-7 demo is called out explicitly — that demo doc is now archived; inline pointers below go to the archive when the historical step is still relevant.
 
@@ -9,7 +9,7 @@
 **Chain backbone**: Litentry's parachain (rebranded to **Heima Network** in 2026) is the EVM L1 we deploy all stage-1 contracts on. Heima is Substrate + Frontier — `pallet_evm` + `pallet_ethereum` give native EVM compatibility with first-class EVM account addresses as `msg.sender`. Stage-1's four contracts (`AgentKeysScope`, `SidecarRegistry`, `K3EpochCounter`, `CredentialAudit`) are plain Solidity, deployed via Foundry or Hardhat using the operator's `current_master_wallet`.
 
 **Reference docs**:
-- Stage 1 deliverable inventory — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
+- Stage 1 deliverable inventory — [docs/plan/v2-issues/issue-v2-stage-1-foundation.md](plan/v2-issues/issue-v2-stage-1-foundation.md)
 - Stage 7 demo (parent for §0 prereqs, §1 init, §2 SIWE, §3 OIDC+STS, §4 isolation proof, §5 provision) — [docs/archived/stage7-demo-and-verification-2026-04.md](archived/stage7-demo-and-verification-2026-04.md)
 - Architecture v2 (single source of truth) — [docs/arch.md](arch.md)
 
@@ -1363,7 +1363,7 @@ Per-iteration error → fix log: [`docs/v2-stage1-iteration-log.md`](v2-stage1-i
 
 ## Cross-references
 
-- **Stage 1 deliverable inventory** — [docs/spec/plans/v2-issues/issue-v2-stage-1-foundation.md](spec/plans/v2-issues/issue-v2-stage-1-foundation.md)
+- **Stage 1 deliverable inventory** — [docs/plan/v2-issues/issue-v2-stage-1-foundation.md](plan/v2-issues/issue-v2-stage-1-foundation.md)
 - **Architecture v2 (single source of truth)** — [docs/arch.md](arch.md)
 - **Stage 7 demo (parent for inherited §0 prereqs + §1 init + §3 OIDC/STS)** — [docs/archived/stage7-demo-and-verification-2026-04.md](archived/stage7-demo-and-verification-2026-04.md)
 - **Cloud setup (parent for AWS IAM, OIDC provider, bucket policy)** — [docs/cloud-bootstrap.md](cloud-bootstrap.md)

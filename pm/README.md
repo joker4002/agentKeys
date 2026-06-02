@@ -10,7 +10,7 @@ Avoid hand-clicking the GitHub UI for **declarative** PM state. Milestones + lab
 
 The associated GitHub Project (private) is [`litentry/projects/19`](https://github.com/orgs/litentry/projects/19) — see [`PROJECT-DASHBOARD-GUIDE.md`](./PROJECT-DASHBOARD-GUIDE.md) for board usage.
 
-The 7-milestone roadmap detail (M1-M7 + post-M7 horizons + strategic risks) lives in [`docs/spec/plans/milestones-roadmap.md`](../docs/spec/plans/milestones-roadmap.md) — the operational companion to [`docs/arch.md`](../docs/arch.md) (architecture) and [`docs/research/agent-iam-strategy.md`](../docs/research/agent-iam-strategy.md) (positioning).
+The 7-milestone roadmap detail (M1-M7 + post-M7 horizons + strategic risks) lives in [`docs/plan/milestones-roadmap.md`](../docs/plan/milestones-roadmap.md) — the operational companion to [`docs/arch.md`](../docs/arch.md) (architecture) and [`docs/research/agent-iam-strategy.md`](../docs/research/agent-iam-strategy.md) (positioning).
 
 ## Files
 
@@ -102,7 +102,7 @@ Repo labels are LEAN. Most categorization moved to project fields. Remaining lab
 | M6 | TEE integration + enhanced security | Phase 6 — production crypto hardening, key rotation depth |
 | M7 | Standards + ecosystem | Phase 7 — MCP extensions, OAuth-for-Agents, partnerships |
 
-Full per-milestone detail in [`docs/spec/plans/milestones-roadmap.md`](../docs/spec/plans/milestones-roadmap.md).
+Full per-milestone detail in [`docs/plan/milestones-roadmap.md`](../docs/plan/milestones-roadmap.md).
 
 ## Why JSON not YAML
 
