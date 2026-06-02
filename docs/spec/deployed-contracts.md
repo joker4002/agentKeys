@@ -17,6 +17,13 @@ Same addresses are mirrored into [`scripts/operator-workstation.env`](../../scri
 | `P256Verifier` | `0xda5b772f9d6c09abe80414eea908612df9b54749` | (pre-deployed verifier) |
 | `K11Verifier` | `0x5a441431f08e0f5f5ed10659620cb4e0e814e627` | (pre-deployed verifier) |
 
+**ERC-4337 master infra (#164 E1, deployed 2026-06-02)** — foundation plumbing for the P-256 smart-account master ([plan](../plan/chain/erc4337-master-account.md)). **NOT yet the live master-auth:** the registry/scope cutover to account-authorization (#164 E3/E7) is a later coordinated redeploy; these are inert until masters are registered as accounts. Deployer `0xdE64…63Bc`.
+
+| Contract | Address | Notes |
+|---|---|---|
+| `EntryPoint` (ERC-4337 v0.7) | `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` | canonical eth-infinitism v0.7 bytecode; landed a UserOp end-to-end in the spike |
+| `P256AccountFactory` | `0x1ccCe65b22De81aDA4F378FeAf7503d93f5d27a3` | CREATE2 factory; `constructor(entryPoint, k11Verifier)`; wired to the live `K11Verifier` |
+
 **Historical v1 deploy** (superseded by v2 above; preserved for cross-reference of old txs):
 
 | Contract | Address | Bytecode |

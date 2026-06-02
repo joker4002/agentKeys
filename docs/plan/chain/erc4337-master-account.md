@@ -78,10 +78,13 @@ Each phase is independently shippable, idempotent where it mutates chain state (
 ## 3.1 Build status (2026-06-02)
 
 - **E0** ✅ threat-model drafted → [`erc4337-threat-model.md`](erc4337-threat-model.md).
-- **E1/E2** ✅ contracts written — `IERC4337.sol`, `P256Account.sol`, `P256AccountFactory.sol` — **codex-reviewed** (1 P2 fixed: verifier/`abi.decode` reverts now map to `SIG_VALIDATION_FAILED` via a try/catch self-call); **17 forge tests green, 0 regressions** (58 total in the crate).
-- EntryPoint **v0.7 verified live** on Heima mainnet: `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` (canonical bytecode, landed a UserOp in the spike).
-- ⏸️ **E1 mainnet factory deploy is gated** on explicit production-deploy authorization + the §9 review checklist of the threat model. The spike's mainnet contracts were throwaway; the factory is production infra, so it does not auto-deploy.
-- **E3 design** below; **E4–E8** pending.
+- **E2** ✅ `IERC4337.sol`, `P256Account.sol`, `P256AccountFactory.sol` — **codex-reviewed** (1 P2 fixed: verifier/`abi.decode` reverts now map to `SIG_VALIDATION_FAILED` via a try/catch self-call); **17 account tests green**.
+- **E1** ✅ **deployed live on Heima mainnet 2026-06-02** (recorded in [`deployed-contracts.md`](../../spec/deployed-contracts.md)):
+  - `EntryPoint` v0.7 = `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` (canonical bytecode; landed a UserOp in the spike).
+  - `P256AccountFactory` = `0x1ccCe65b22De81aDA4F378FeAf7503d93f5d27a3` (CREATE2 determinism smoke-verified on mainnet: `getAddress` == `createAccount`).
+- **E3** ✅ **implemented** — `AgentKeysScope` thinned to account-auth (in-contract K11 + `scopeNonce` retired; `setScopeWithWebauthn`→`setScope`); registry agent-bind closed structurally (master = account); master-device/recovery K11 retained pending E5. **59 crate tests green** (net −91 lines).
+- ⏭️ **Cutover ripples (not yet done):** the broker's scope-mint call + `harness/scripts/heima-scope-set.sh` use `setScopeWithWebauthn(... assertion)` — update to `setScope(...)` (no assertion) at redeploy; `AgentKeysScope` now deploys with 1 constructor arg; `operator-workstation.env` gets `ENTRYPOINT_ADDRESS_HEIMA` + `P256_ACCOUNT_FACTORY_ADDRESS_HEIMA` via `heima-bring-up.sh env_set`; `verify-heima-contracts.sh` extended to check the EntryPoint + factory. arch.md §10/§12 update lands at cutover (registry/scope redeploy).
+- **E4** folded into E3 (structural). **E5–E8** pending.
 
 ## 3.2 E3 design — registry thinning + migration
 
