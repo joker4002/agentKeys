@@ -11,6 +11,23 @@
 #
 # Reads primary master K11 pubkey + cred-id from
 # `~/.agentkeys/k11/<omni>.json` (must be `mode: "webauthn"`).
+#
+# ⚠️ ANTI-FRONT-RUN (issue #165) — REDEPLOY-COORDINATED CHANGE PENDING.
+# The hardened SidecarRegistry now requires a K11 *self-attestation* at
+# bootstrap, bound to msg.sender (defeats the mempool front-run). The new ABI is:
+#   registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,
+#     uint256,uint8,(bytes32,bytes,bytes,uint256,uint256,uint256))
+# where the trailing tuple is the K11Assertion (attestingDeviceKeyHash,
+# authenticatorData, clientDataJSON, challengeLocation, r, s) signed over
+#   keccak256(abi.encode(OP_REGISTER_1ST_MASTER, operatorOmni, actorOmni,
+#     deviceKeyHash, k11PubX, k11PubY, roles, msg.sender, block.chainid, registry))
+# Generate the assertion exactly like scripts/heima-scope-set.sh --webauthn
+# (cast abi-encode → cast keccak → `agentkeys k11 assert`).
+# The `cast send` below still targets the OLD (pre-#165) deployed registry ABI.
+# Flip it to the new ABI + self-attestation IN THE SAME CHANGE that REDEPLOYS
+# SidecarRegistry (then update docs/spec/deployed-contracts.md +
+# scripts/operator-workstation.env + re-run verify-heima-contracts.sh). Until
+# that coordinated redeploy, this script bootstraps against the old contract.
 
 set -euo pipefail
 
