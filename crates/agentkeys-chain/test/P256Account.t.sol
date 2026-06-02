@@ -19,9 +19,14 @@ contract Counter {
 ///      mainnet spike (#164 plan §1); here we exercise the account's LOGIC.
 contract MockK11Verifier {
     bool public result = true;
+    bool public doRevert;
 
     function setResult(bool r) external {
         result = r;
+    }
+
+    function setRevert(bool r) external {
+        doRevert = r;
     }
 
     function verifyAssertion(
@@ -35,6 +40,8 @@ contract MockK11Verifier {
         uint256,
         uint256
     ) external view returns (bool) {
+        // The real K11Verifier reverts on malformed/mismatched assertions; mimic it.
+        require(!doRevert, "K11: malformed/mismatched");
         return result;
     }
 }
@@ -115,6 +122,29 @@ contract P256AccountTest is Test {
         P256Account acct = _deploy();
         vm.expectRevert(P256Account.NotEntryPoint.selector);
         acct.validateUserOp(_op(CRED), bytes32(uint256(0x1234)), 0);
+    }
+
+    // codex P2: a reverting verifier (malformed/mismatched assertion) must map
+    // to SIG_VALIDATION_FAILED, not bubble a revert out of validateUserOp.
+    function test_ValidateUserOp_VerifierRevert_MapsToFail() public {
+        P256Account acct = _deploy();
+        k11.setRevert(true);
+        vm.prank(ENTRYPOINT);
+        assertEq(acct.validateUserOp(_op(CRED), bytes32(uint256(1)), 0), 1, "verifier revert -> SIG_FAIL");
+    }
+
+    function test_ValidateUserOp_MalformedSig_MapsToFail() public {
+        P256Account acct = _deploy();
+        PackedUserOperation memory op;
+        op.signature = hex"1234"; // not a valid abi.encode tuple -> decode reverts
+        vm.prank(ENTRYPOINT);
+        assertEq(acct.validateUserOp(op, bytes32(uint256(1)), 0), 1, "malformed sig -> SIG_FAIL");
+    }
+
+    function test_CheckUserOpSignature_OnlySelf() public {
+        P256Account acct = _deploy();
+        vm.expectRevert(P256Account.NotSelf.selector);
+        acct.checkUserOpSignature(_op(CRED).signature, bytes32(uint256(1)));
     }
 
     function test_Execute_FromEntryPoint() public {

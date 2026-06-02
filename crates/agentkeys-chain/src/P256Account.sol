@@ -56,6 +56,7 @@ contract P256Account is IAccount {
 
     error NotEntryPoint();
     error NotEntryPointOrSelf();
+    error NotSelf();
     error SignerExists(bytes32 credIdHash);
     error UnknownSigner(bytes32 credIdHash);
     error LastSigner();
@@ -83,18 +84,31 @@ contract P256Account is IAccount {
         uint256 missingAccountFunds
     ) external returns (uint256 validationData) {
         if (msg.sender != entryPoint) revert NotEntryPoint();
-        validationData = _validateSignature(userOp.signature, userOpHash);
+        // ERC-4337: a bad signature must return SIG_VALIDATION_FAILED, never
+        // revert, so the EntryPoint/bundler reject the op cleanly. The on-chain
+        // K11Verifier REVERTS on malformed/mismatched assertions (wrong
+        // challenge/RP, missing UP/UV flags, bad clientDataJSON), and abi.decode
+        // reverts on a malformed blob — so run decode+verify via an external
+        // self-call wrapped in try/catch and map any failure to SIG_FAIL.
+        try this.checkUserOpSignature(userOp.signature, userOpHash) returns (bool ok) {
+            validationData = ok ? SIG_OK : SIG_FAIL;
+        } catch {
+            validationData = SIG_FAIL;
+        }
         _payPrefund(missingAccountFunds);
     }
 
     /// @dev signature = abi.encode(credIdHash, authenticatorData, clientDataJSON,
     ///      challengeLocation, r, s). The pubkey/rpIdHash come from the stored
     ///      signer; the challenge is the userOpHash (full-intent commitment).
-    function _validateSignature(bytes calldata signature, bytes32 userOpHash)
-        internal
+    ///      External + self-only so validateUserOp can try/catch its reverts and
+    ///      map them to SIG_VALIDATION_FAILED. View — no state change.
+    function checkUserOpSignature(bytes calldata signature, bytes32 userOpHash)
+        external
         view
-        returns (uint256)
+        returns (bool)
     {
+        if (msg.sender != address(this)) revert NotSelf();
         (
             bytes32 credIdHash,
             bytes memory authenticatorData,
@@ -105,9 +119,9 @@ contract P256Account is IAccount {
         ) = abi.decode(signature, (bytes32, bytes, bytes, uint256, uint256, uint256));
 
         Signer storage signer = signers[credIdHash];
-        if (!signer.active) return SIG_FAIL;
+        if (!signer.active) return false;
 
-        bool ok = IK11Verifier(k11Verifier).verifyAssertion(
+        return IK11Verifier(k11Verifier).verifyAssertion(
             userOpHash,
             signer.rpIdHash,
             authenticatorData,
@@ -118,7 +132,6 @@ contract P256Account is IAccount {
             signer.pubX,
             signer.pubY
         );
-        return ok ? SIG_OK : SIG_FAIL;
     }
 
     function _payPrefund(uint256 missingAccountFunds) internal {
