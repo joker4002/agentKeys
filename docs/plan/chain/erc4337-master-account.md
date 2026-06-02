@@ -75,6 +75,25 @@ Each phase is independently shippable, idempotent where it mutates chain state (
 
 ---
 
+## 3.1 Build status (2026-06-02)
+
+- **E0** ✅ threat-model drafted → [`erc4337-threat-model.md`](erc4337-threat-model.md).
+- **E1/E2** ✅ contracts written — `IERC4337.sol`, `P256Account.sol`, `P256AccountFactory.sol` — **codex-reviewed** (1 P2 fixed: verifier/`abi.decode` reverts now map to `SIG_VALIDATION_FAILED` via a try/catch self-call); **17 forge tests green, 0 regressions** (58 total in the crate).
+- EntryPoint **v0.7 verified live** on Heima mainnet: `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` (canonical bytecode, landed a UserOp in the spike).
+- ⏸️ **E1 mainnet factory deploy is gated** on explicit production-deploy authorization + the §9 review checklist of the threat model. The spike's mainnet contracts were throwaway; the factory is production infra, so it does not auto-deploy.
+- **E3 design** below; **E4–E8** pending.
+
+## 3.2 E3 design — registry thinning + migration
+
+- **Auth change.** Every `SidecarRegistry`/`AgentKeysScope` master-write changes its guard to `msg.sender == operatorMasterWallet[omni]` where the stored value is now the **account address** (was an EOA). Function signatures **drop the `K11Assertion` param**; `_verifyK11*` / `_verifyAndConsumeK11` / `_verifyQuorum` and `operatorNonce` / `scopeNonce` are **deleted**. The passkey check now happens once, upstream, in the account's `validateUserOp` (which commits the full calldata via `userOpHash`).
+- **Functions affected:** `registerAdditionalMasterDevice`, `registerAgentDevice`, `revokeAgentDevice`, `setScopeWithWebauthn`, `revokeScope`, `setRecoveryThreshold`. E4 (agent bind/revoke via account) is the *same* `msg.sender==account` guard — no new code.
+- **Bootstrap subtlety — keep an authenticated `operatorOmni`↔passkey binding.** Under the account model the account's `validateUserOp` already commits the `registerFirstMasterDevice(operatorOmni,…)` calldata, so the call proves *the passkey authorized registering this operatorOmni*. But first-call-wins on `operatorOmni` stays front-runnable unless `operatorOmni` is bound to the passkey: #166 relies on "an attacker using their own K11 key yields a different operatorOmni" — i.e. the broker derives `operatorOmni` from the operator identity/key (HDKD). **Decision:** keep #166's self-attestation (or an equivalent on-chain proof tying `operatorOmni` ↔ the registering passkey) in `registerFirstMasterDevice`. The account gate proves "this passkey signed"; it does **not** prove "this passkey owns operatorOmni." Needs its own front-run negative test (E7).
+- **Recovery.** `revokeMasterDevice` / `recoveryThreshold` quorum is superseded by the account recovery module (E5, independent guardian path per threat-model §7). **Do not delete it in E3** — keep the existing quorum as the recovery path until E5 lands.
+- **Migration.** Existing `operatorMasterWallet[omni]` are cast-bootstrapped EOAs. Cutover = coordinated registry redeploy + re-register each operator's master as their account address via an authenticated ceremony (per #166's activation note) — an operator action, not a silent migration. CI skips first-master, so nothing breaks meanwhile.
+- **Test rewrite.** `AgentKeysV1.t.sol` (24 tests) asserts the K11-challenge model; E3 rewrites them to the account-sender model (drop master-write verifier mocks; assert `msg.sender==account` gating + the retained bootstrap binding). This is why E3 ships as its own reviewed increment, with the front-run negative test — not a drive-by edit.
+
+---
+
 ## 4. How #164 interacts with the existing invariants
 
 - **#166 survives** (the CRITICAL bootstrap item is already satisfied). The self-attestation binds `msg.sender`, which becomes the account address; under 4337 the front-run property *strengthens* (account is CREATE2-bound to the passkey pubkey, so an attacker can deploy the account but cannot make it call the registry without the operator's passkey). E7 revisits whether the explicit self-attestation is still needed once the account model lands, or is subsumed.

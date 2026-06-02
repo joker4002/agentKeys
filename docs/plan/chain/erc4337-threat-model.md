@@ -52,13 +52,28 @@ Therefore one passkey signature authorizes **exactly** this call (`callData` = t
 
 ---
 
-## 5. ExistentialDeposit (~0.1 HEI) as a security constraint
+## 5. ExistentialDeposit, funding model, and Sybil resistance
 
-Heima rejects EVM value transfers that would leave an account below ED (verified: a 0.05 HEI `depositTo` to a zero-balance EntryPoint failed `OutOfFund`; ≥ ED succeeded). Security implications:
+Heima rejects EVM value transfers that would leave an account below the ExistentialDeposit (~0.1 HEI — verified: a 0.05 HEI `depositTo` to a zero-balance EntryPoint failed `OutOfFund`; ≥ ED succeeded; topping an existing account showed the ~0.1 is a one-time creation cost, not a per-tx tax).
 
-- **Funding discipline:** pre-deposit each account's EntryPoint balance generously so `missingAccountFunds == 0` (no per-op transfer in validation — this is what made the spike UserOp pass). Keep EntryPoint + paymaster ≥ ED at all times.
-- **Griefing surface:** an attacker cannot drain via dust, but a poorly-funded account/paymaster self-DoSes (txs fail `OutOfFund`). The factory + onboarding must budget the one-time ~0.1 HEI per new account.
-- **Action (E1):** read the exact `Balances::ExistentialDeposit` and encode it as the minimum deposit/funding floor.
+### Do we fund every new account? No.
+
+- **A master account never needs its own ED-balance.** ERC-4337 gas is paid from the account's *EntryPoint deposit* — an entry in the EntryPoint's `deposits[account]` mapping (funded via `depositTo(account)`). That HEI lands in the **EntryPoint's** balance, not the account's. The master account exists as a **code-only contract with 0 balance** (verified in the spike). ED only bites an account that *holds native value*; the master never needs to. A new master costs **deploy-gas, not ED**.
+- **ED is a one-time infra cost, not per-master.** Only the *first* `depositTo` to a fresh EntryPoint must be ≥ ED. After that, per-account deposits are any size and don't re-trigger ED. Same for the paymaster account (funded once).
+
+→ **Funding model:** fund the EntryPoint + paymaster once (≥ ED); a **paymaster** then sponsors every master's gas → **zero per-account funding, key-free + gasless.** (Without a paymaster: a small per-master gas deposit — still no ED.)
+
+### Sybil resistance
+
+The attack is spamming sponsored UserOps / account creations to drain the paymaster. Defense in depth:
+
+1. **Sponsorship is gated by the broker's existing operator auth.** The VerifyingPaymaster only sponsors a UserOp the **broker co-signs**, and the broker co-signs only for an **authenticated operator** (valid J1 from email + SIWE + OIDC onboarding). A Sybil with no operator session gets no sponsorship → must self-fund → no drain. Reuses the auth gate we already have; sponsorship is not open to the world.
+2. **Becoming a *recognized* master requires authenticated bootstrap (#166/E7).** Anyone can permissionlessly deploy a junk `P256Account` at *their own* gas cost, but it is **inert** — not a registered master, no omni, no scope, no sponsorship. Sybil accounts are harmless noise, not authority.
+3. **Per-operator paymaster budgets + rate limits** (broker-enforced) bound abuse by any single (even compromised) operator.
+
+**Net: Sybil resistance is the broker's operator-auth gate on sponsorship — ED is a one-time liveness cost, not the defense.**
+
+- **Funding discipline (E1/E6):** pre-deposit generously so `missingAccountFunds == 0` (no per-op transfer in validation — what made the spike UserOp pass); keep EntryPoint + paymaster ≥ ED. Read the exact `Balances::ExistentialDeposit` and encode it as the funding floor.
 
 ---
 
