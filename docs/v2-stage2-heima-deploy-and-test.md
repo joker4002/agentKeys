@@ -67,7 +67,7 @@ cd -
 
 ## 2. Deploy the stage-2 contract set to Heima Mainnet
 
-Heima EVM is at London level (no EIP-7212 P-256 precompile — see [CLAUDE.md](../CLAUDE.md)), so we deploy `P256Verifier` ourselves. The deploy script writes all 6 addresses to stdout in the same stable format the stage-1 bring-up parses.
+Heima has no EIP-7212 / RIP-7212 P-256 precompile (`0x100`) registered in its Frontier precompile set, so we deploy the pure-Solidity `P256Verifier` ourselves. (This is independent of EVM version — Heima's EVM execution level is actually **Cancun**, not London; see [CLAUDE.md "Heima EVM compatibility level"](../CLAUDE.md). The `evm_version = "london"` pin is a `forge script` header-validation workaround, not an opcode limit.) The deploy script writes all 6 addresses to stdout in the same stable format the stage-1 bring-up parses.
 
 ```bash
 export AGENTKEYS_CHAIN=heima
@@ -251,7 +251,7 @@ All five are tracked under [#90](https://github.com/litentry/agentKeys/issues/90
 | Symptom | Diagnosis | Fix |
 |---|---|---|
 | `forge test` errors `Stack too deep` | `via_ir` not enabled | Already set in [`foundry.toml`](../crates/agentkeys-chain/foundry.toml) — re-pull, the via_ir = true line should be present |
-| Forge broadcast errors `prevrandao not set` | Foundry default `evm_version=paris` rejects Heima's London header | Pass `--evm-version london` to forge script |
+| Forge broadcast errors `prevrandao not set` | `forge script`'s simulator validates Heima's Substrate/Aura header (no `prevrandao` field) against the target revision; `paris`+ requires it | Pass `--evm-version london` to forge script (header workaround — Heima's EVM execution level is actually Cancun, this is not an opcode limit) |
 | `agentkeys k11 enroll --rp-id companion.localhost` fails with "no credential available" in browser | macOS / Safari may not resolve `*.localhost` automatically | Add `127.0.0.1 companion.localhost` to `/etc/hosts`, then retry |
 | Companion daemon starts but `/v1/companion/whoami` returns 500 | `--companion-operator-omni` not passed | Re-run with `--companion-operator-omni 0x<omni>` |
 | `cast call recoveryThreshold` returns `Error: ... reverted` | You're calling the OLD SidecarRegistry (PR #87 address) | Make sure `SIDECAR_REGISTRY_ADDRESS_HEIMA` in operator-workstation.env points to the NEW instance from §2 |

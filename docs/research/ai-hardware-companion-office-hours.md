@@ -63,7 +63,7 @@ Skip in v1: ACP/AMP payment rails, MCP marketplace, full LLM resale tier (only s
 ## Constraints
 
 - **Existing AgentKeys infrastructure**: Stage 7+ shipped (broker, OIDC issuer, credential/memory/audit workers, ERC-7730 EIP-712 signing, Heima EVM live). Don't rebuild what exists.
-- **Heima EVM**: pinned to `london` per `foundry.toml`. Any on-chain audit anchor must use Heima testnet or Substrate-style cheap anchoring.
+- **Heima EVM**: `foundry.toml` pins `evm_version = "london"` as a `forge script` header-validation workaround, but Heima's actual EVM execution level is **Cancun** (see CLAUDE.md "Heima EVM compatibility level"). Any on-chain audit anchor must use Heima testnet or Substrate-style cheap anchoring.
 - **AWS profile mapping**: `agentkeys-admin` defaults to us-west-2 but operational region is us-east-1. Region-explicit calls only.
 - **No raw `git`**: all version control via `jj`.
 - **Idempotency**: every remote-setup script must short-circuit on re-run (per `CLAUDE.md`).

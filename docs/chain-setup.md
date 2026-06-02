@@ -95,7 +95,7 @@ The JSON shape is documented in [`docs/arch.md`](arch.md) §22a. Add a new chain
 
 ## EVM version pin (Heima-specific)
 
-Heima Frontier runs at London EVM level (pre-Merge). [`crates/agentkeys-chain/foundry.toml`](../crates/agentkeys-chain/foundry.toml) pins `evm_version = "london"` so Foundry's simulator doesn't reject `prevrandao`-less block headers. **Don't change this** without re-verifying against a live Heima block header — see [CLAUDE.md "Heima EVM compatibility level"](../CLAUDE.md) for the verification recipe.
+Heima's EVM *execution* level is **Cancun** (Frontier `stable2412` `pallet_evm` `config()` returns `CANCUN_CONFIG`; PUSH0 + TSTORE/TLOAD verified executing on a dev chain 2026-06-01). We still pin `evm_version = "london"` in [`crates/agentkeys-chain/foundry.toml`](../crates/agentkeys-chain/foundry.toml), but **only** because `forge script ... --broadcast` validates Heima's `prevrandao`-less Substrate/Aura block header against the target revision and rejects `paris`+ — it is a simulator workaround, not an opcode ceiling. **Don't change the pin** for the `forge script` deploy path — see [CLAUDE.md "Heima EVM compatibility level"](../CLAUDE.md) for the full diagnosis and the (header-introspection-is-misleading) caveat.
 
 Other EVM targets (Ethereum, Base, etc.) are post-Merge and accept `paris` / `shanghai` / `cancun`. For those, override per-deploy:
 
