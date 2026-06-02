@@ -91,11 +91,12 @@ contract P256AccountTest is Test {
     function test_InitialSigner() public {
         P256Account acct = _deploy();
         assertEq(acct.activeSignerCount(), 1);
-        (uint256 x, uint256 y, bytes32 rp, bool active) = acct.signers(CRED);
+        (uint256 x, uint256 y, bytes32 rp, bool active, uint64 gen) = acct.signers(CRED);
         assertEq(x, PUBX);
         assertEq(y, PUBY);
         assertEq(rp, RPID);
         assertTrue(active);
+        assertEq(gen, 0);
     }
 
     function test_ValidateUserOp_Success() public {
@@ -214,5 +215,90 @@ contract P256AccountTest is Test {
         vm.prank(ENTRYPOINT);
         acct.validateUserOp(_op(CRED), bytes32(uint256(1)), 0.1 ether);
         assertEq(ENTRYPOINT.balance, epBefore + 0.1 ether, "prefund forwarded to EntryPoint");
+    }
+
+    // ─── E5: guardian social recovery ────────────────────────────────────
+    bytes32 constant GCRED = keccak256("guardian-1");
+    bytes32 constant GCRED2 = keccak256("guardian-2");
+    bytes32 constant NEWCRED = keccak256("recovered-signer");
+
+    function _gAssertion(bytes32 gid) internal pure returns (P256Account.GuardianAssertion memory a) {
+        a.guardianCredIdHash = gid;
+        a.authenticatorData = hex"aa";
+        a.clientDataJSON = hex"bb";
+        a.challengeLocation = 0;
+        a.r = 1;
+        a.s = 2;
+    }
+
+    function test_Guardian_Gating() public {
+        P256Account acct = _deploy();
+        vm.expectRevert(P256Account.NotEntryPointOrSelf.selector);
+        acct.addGuardian(GCRED, PUBX, PUBY, RPID);
+        vm.prank(ENTRYPOINT);
+        acct.addGuardian(GCRED, PUBX, PUBY, RPID);
+        assertEq(acct.activeGuardianCount(), 1);
+    }
+
+    function test_SetRecoveryThreshold_RejectsTooHigh() public {
+        P256Account acct = _deploy();
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert(abi.encodeWithSelector(P256Account.ThresholdTooHigh.selector, 1, 0));
+        acct.setRecoveryThreshold(1);
+    }
+
+    function test_Recover_RejectsWhenDisabled() public {
+        P256Account acct = _deploy();
+        P256Account.GuardianAssertion[] memory a = new P256Account.GuardianAssertion[](0);
+        vm.expectRevert(P256Account.RecoveryDisabled.selector);
+        acct.recover(NEWCRED, PUBX, PUBY, RPID, a);
+    }
+
+    function test_Recover_RotatesAndInvalidatesOld() public {
+        P256Account acct = _deploy();
+        vm.startPrank(ENTRYPOINT);
+        acct.addGuardian(GCRED, PUBX, PUBY, RPID);
+        acct.setRecoveryThreshold(1);
+        vm.stopPrank();
+
+        k11.setResult(true); // guardian assertion verifies
+        P256Account.GuardianAssertion[] memory a = new P256Account.GuardianAssertion[](1);
+        a[0] = _gAssertion(GCRED);
+        acct.recover(NEWCRED, PUBX, PUBY, RPID, a); // permissionless submit
+
+        assertEq(acct.signerGeneration(), 1);
+        assertEq(acct.activeSignerCount(), 1);
+        // new signer validates; the old one is invalidated by the generation bump
+        vm.prank(ENTRYPOINT);
+        assertEq(acct.validateUserOp(_op(NEWCRED), bytes32(uint256(1)), 0), 0, "new signer live");
+        vm.prank(ENTRYPOINT);
+        assertEq(acct.validateUserOp(_op(CRED), bytes32(uint256(1)), 0), 1, "old signer dead");
+    }
+
+    function test_Recover_RejectsBelowThreshold() public {
+        P256Account acct = _deploy();
+        vm.startPrank(ENTRYPOINT);
+        acct.addGuardian(GCRED, PUBX, PUBY, RPID);
+        acct.addGuardian(GCRED2, PUBX, PUBY, RPID);
+        acct.setRecoveryThreshold(2);
+        vm.stopPrank();
+        P256Account.GuardianAssertion[] memory a = new P256Account.GuardianAssertion[](1);
+        a[0] = _gAssertion(GCRED);
+        vm.expectRevert(abi.encodeWithSelector(P256Account.InsufficientGuardians.selector, 1, 2));
+        acct.recover(NEWCRED, PUBX, PUBY, RPID, a);
+    }
+
+    function test_Recover_RejectsDuplicateGuardian() public {
+        P256Account acct = _deploy();
+        vm.startPrank(ENTRYPOINT);
+        acct.addGuardian(GCRED, PUBX, PUBY, RPID);
+        acct.setRecoveryThreshold(1);
+        vm.stopPrank();
+        k11.setResult(true);
+        P256Account.GuardianAssertion[] memory a = new P256Account.GuardianAssertion[](2);
+        a[0] = _gAssertion(GCRED);
+        a[1] = _gAssertion(GCRED);
+        vm.expectRevert(abi.encodeWithSelector(P256Account.DuplicateGuardian.selector, GCRED));
+        acct.recover(NEWCRED, PUBX, PUBY, RPID, a);
     }
 }
