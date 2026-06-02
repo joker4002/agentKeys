@@ -149,6 +149,7 @@ All three are **idempotent + unattended by default** — re-running converges an
 - **Hermes** in the sandbox — the harness installs it (guarded `curl|bash`) if absent; needs GitHub reachable.
 
 **Real mode only:**
+- **The master-side `agentkeys` CLI must have the `agent` subcommand** (Phase P §10.2 pairing calls `agentkeys agent claim/pending`). Step **0.2b builds it for you** — `cargo build --release -p agentkeys-cli` → `target/release/agentkeys`, which the harness prefers (release → debug → PATH). If you opt out (`AGENTKEYS_SKIP_CLI_BUILD=1`) or run `agentkeys agent …` by hand, install a current binary first: `cargo build --release -p agentkeys-cli && cp target/release/agentkeys ~/.local/bin/agentkeys`. A **stale** CLI fails `P.1 claim` with `unrecognized subcommand 'agent'` and cascades into the MCP/wire/Acts steps.
 - **The broker must be running the issue-#144 (method A) code** — the §10.2 endpoints (`/v1/agent/pairing/request`, `/v1/agent/pairing/claim`, `/v1/agent/pairing/poll`, `/v1/agent/pending-bindings`). If your broker predates this PR, run `bash scripts/setup-broker-host.sh --ref main` (or `--test --yes` for the test host) FIRST, or Phase P `P.0 request` fails with HTTP **404**. The deploy self-checks this — a no-bearer `POST /v1/agent/pairing/claim` must return **401** (route live), not 404 (stale binary).
 - The `setup-heima.sh` account already created (master device registered + contracts deployed; the harness verifies, never rebuilds). `OPERATOR_OMNI` is derived from your master key (`OPERATOR_KEY_FILE`); the **agent** identity is generated fresh in the sandbox by Phase P (no pre-existing agent file needed in the default fresh-pairing mode).
 - An **operator session JWT** for cap-mint. The harness now mints this **automatically and non-interactively**: step `0.7` decodes the on-disk session, and if it's missing, expired, **or for the wrong operator** (its `agentkeys.omni_account` ≠ the agent's `operator_omni`), it SIWE-signs a fresh one with `OPERATOR_KEY_FILE` (default `~/.agentkeys/heima-deployer.key` — the master key whose broker omni == `operator_omni`) via the broker's `wallet_sig` plugin. Requires `cast` (Foundry) on PATH. **Note:** the old `alice` email session is a *different* omni and is no longer used for cap-mint — set `OPERATOR_KEY_FILE` to the master key for your operator if the default isn't it. (Pass `AGENTKEYS_SESSION_BEARER` to override entirely.)
@@ -175,6 +176,46 @@ Pass `--yes` to auto-confirm the non-secret prompts.
 | **Auto-audit** | `post_tool_call` → `audit` | `{}` — a row lands in the off-chain feed; never blocks the agent loop. |
 
 (Act 3 — Online Revocation — is out of scope for this harness; tested elsewhere.)
+
+## ERC-4337 passkey-only master — standalone mechanism smoke (#164 E8)
+
+**Not a wire-demo phase.** The 4337 account is the *master*, so it belongs in the
+**master-onboarding ceremony** (arch.md §9 — K11 generated at stage 2, the account
+registered at stage 4), tracked as **#164 E7** and landing with the registry
+**cutover**. Until that ships, this is a **standalone mechanism smoke**: it proves
+the on-chain path works (EntryPoint v0.7 + on-chain P-256 verify + a WebAuthn-signed
+UserOp on Heima mainnet) using a **throwaway software passkey** — it is **not** the
+real ceremony (the real master K11 lives in the platform authenticator, so a real
+UserOp needs a Touch ID assert + the cutover).
+
+```bash
+# Run the mechanism smoke directly (pure chain — no sandbox/Hermes). ~0.22 HEI:
+bash harness/erc4337-master-e8.sh
+```
+
+**Two modes (auto-selected):**
+- **fresh** (default locally) — a NEW account + ephemeral passkey + fresh deposit each run (**~0.22 HEI/run**, append-only). HEI cost doesn't matter for local testing.
+- **reuse** (default when `$CI` is set; or force with `ERC4337_E8_MODE=reuse`) — **one persistent account** (fixed passkey at `ERC4337_E8_KEY_FILE` + fixed salt → deterministic address), created once and funded only when its deposit drops below ~0.05 HEI, so CI doesn't mint a new account each run. **CI must persist the key file** (Actions cache, or a secret written to `ERC4337_E8_KEY_FILE`); otherwise each run keygens a new key → a new account.
+
+What it does: keygen a P-256 passkey → `P256AccountFactory.createAccount` (CREATE2)
+→ fund the account's EntryPoint deposit (≥ the ~0.1 HEI ExistentialDeposit, so
+`missingAccountFunds == 0`) → build a UserOp whose callData is a master mutation
+(`addSigner`) → **WebAuthn-sign the `userOpHash`** → pre-check against the live
+`K11Verifier` (zero gas) → `EntryPoint.handleOps` → assert the account's
+active-signer count went up by exactly 1 (fresh `1→2`; reuse `N→N+1`). No secp256k1
+key signs anything. `ok …` / `fail …` per step.
+
+**Prereqs:** `cast` (Foundry) on PATH; the deployer key (`~/.agentkeys/heima-deployer.key`
+— funds the deposit + gas); Python 3 (the script auto-provisions a `cryptography`
+venv at `~/.agentkeys/erc4337-venv`). The live EntryPoint + factory addresses are in
+[`docs/contracts.md`](contracts.md). **Append-only:** each run mints a fresh account
+(it is NOT idempotent in the resource sense). The bundler is not required — the demo
+calls `EntryPoint.handleOps` directly. Full design + cutover status:
+[`docs/plan/chain/erc4337-master-account.md`](plan/chain/erc4337-master-account.md).
+
+> Note: the **live factory** currently embeds the E2-era account (deployed before the
+> E5 recovery work), so on-chain accounts have `addSigner` (what E8 exercises) but not
+> yet `recover()`; the E3/E5-complete account ships at the coordinated cutover redeploy.
 
 ## Verifying it worked — deterministically (no LLM inference)
 
@@ -266,6 +307,7 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | Phase 1 `1.3 … upload failed` | sandbox upload API runs non-root → can't write `/usr/local/bin` (`Errno 13`) | fixed: binaries now upload to the writable `~/.local/bin` (on PATH); just re-run |
 | Phase 4 surprise → "No inference provider configured" | key not in `~/.hermes/.env`, or wrong provider | 4.0 writes `OPENROUTER_API_KEY` to `~/.hermes/.env` + sets `provider: openrouter`; confirm `0.6 LLM key` shows `ok` |
 | `agentkeys memory put` → `error: unrecognized subcommand 'memory'` (run by hand) | a **stale** `agentkeys` on your PATH predates the `memory` command | rebuild + reinstall: `cargo build --release -p agentkeys-cli && cp target/release/agentkeys ~/.local/bin/agentkeys`. The harness itself uses the freshly cross-built **sandbox** binary, so 1.5 is unaffected |
+| `P.1 claim` → `unrecognized subcommand 'agent'` (then `1.4 mcp` / wire / Acts cascade) | a **stale** master-side `agentkeys` (predates #144) — Phase P §10.2 needs the `agent` subcommand | step **0.2b** now builds + verifies it automatically (`cargo build --release -p agentkeys-cli` → `target/release/agentkeys`, which the harness prefers). If you set `AGENTKEYS_SKIP_CLI_BUILD=1`, build it yourself or `cp` a current binary onto your PATH. The MCP/wire/Acts failures are cascades — they clear once P.1 works |
 | `1.5a scope grant` → `grant SKIPPED` | the master's primary K11 isn't enrolled in webauthn mode | `agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x<operator>`, then re-run (the failure prints this exact command) |
 | `1.5b seed memory` fails after the grant (`memory.put` failed) | (a) the operator session was stale/wrong-omni — now auto-minted at `0.7`; (b) the worker 502'd because the per-actor STS relay wasn't wired — now fixed (the MCP backend forwards `X-Aws-*` creds; see the 502 row) | confirm `0.7` shows "operator session ready" AND `0.8 agent session` shows "minted (omni == actor_omni)"; the `{:#}` CLI error now prints the full chain if it still fails |
 | Phase 4 `4.1 model smoke` / surprise → HTTP 429 | OpenRouter throttling a `:free` model | retry, or use the paid default `LLM_MODEL=deepseek/deepseek-v4-flash` |

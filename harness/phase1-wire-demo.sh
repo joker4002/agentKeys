@@ -281,6 +281,34 @@ phase0_prereqs() {
     fail "0.2 broker healthz" "broker not reachable (BACKEND_URL=$broker) — run scripts/setup-broker-host.sh"
   fi
 
+  # 0.2b — build + verify the MASTER-side agentkeys CLI. Phase P (§10.2 pairing)
+  # calls `agentkeys agent claim/pending` from the host; the harness prefers
+  # $REPO_ROOT/target/release/agentkeys (see P.0/P.1 below, release→debug→PATH).
+  # We BUILD it from the repo source so P.1 runs CURRENT code — not a stale binary
+  # on PATH (the "unrecognized subcommand 'agent'" cascade into MCP/wire/Acts).
+  # cargo build is incremental (a no-op when up-to-date); opt out with
+  # AGENTKEYS_SKIP_CLI_BUILD=1 (then your PATH agentkeys must already have `agent`).
+  if [[ "$MODE" == "real" ]]; then
+    if [[ "${AGENTKEYS_SKIP_CLI_BUILD:-0}" != "1" ]] && command -v cargo >/dev/null 2>&1; then
+      log "  0.2b building host agentkeys (cargo build --release -p agentkeys-cli; first build ~1 min)…"
+      if ( cd "$REPO_ROOT" && cargo build --release -p agentkeys-cli ) >/dev/null 2>&1; then
+        ok "0.2b agentkeys cli" "built $REPO_ROOT/target/release/agentkeys from current source"
+      else
+        skip "0.2b agentkeys cli" "cargo build failed — falling back to an existing binary (verified next)"
+      fi
+    fi
+    # Verify the exact binary Phase P will use (release→debug→PATH) has `agent`.
+    local _la=""
+    if [[ -x "$REPO_ROOT/target/release/agentkeys" ]]; then _la="$REPO_ROOT/target/release/agentkeys"
+    elif [[ -x "$REPO_ROOT/target/debug/agentkeys" ]]; then _la="$REPO_ROOT/target/debug/agentkeys"
+    else _la="$(command -v agentkeys 2>/dev/null || true)"; fi
+    if [[ -n "$_la" ]] && "$_la" agent --help >/dev/null 2>&1; then
+      ok "0.2b agent subcommand" "present in $_la"
+    else
+      fail "0.2b agent subcommand" "the agentkeys Phase P will use ($_la) lacks 'agent' — build it: cargo build --release -p agentkeys-cli (then it lands at target/release/, which the harness prefers; or cp it onto your PATH)"
+    fi
+  fi
+
   # Resolve operator_omni + actor_omni. OPERATOR_OMNI is the MASTER's omni
   # (sha256("agentkeys"||"evm"||master_addr_lc)) — derive it from OPERATOR_KEY_FILE
   # so it NEVER depends on the (key-less, fresh-each-run) agent file. In fresh
@@ -1120,6 +1148,12 @@ phase5_teardown() {
   fi
   ok "5.2 account" "kept (no Act 3 → nothing to restore)"
 }
+
+# Note: the ERC-4337 passkey-master (#164 E8) is NOT a wire-demo phase. It binds
+# to the MASTER ONBOARDING ceremony (arch.md §9 — K11 at stage 2, register the
+# account at stage 4), tracked as #164 E7 and landing with the registry cutover.
+# Until then, harness/erc4337-master-e8.sh is a standalone *mechanism smoke* (run
+# it directly), not part of this agent-side e2e. See docs/operator-runbook-wire.md.
 
 # ─── main ────────────────────────────────────────────────────────────────────
 main() {
