@@ -14,6 +14,9 @@
 #   --real    Live broker + workers + Heima mainnet, REUSING the account
 #             `setup-heima.sh` created (master `alice`, agent `demo-agent`).
 #             NO in-memory fixture. Live-env steps fail-loud if a prereq missing.
+#             Ends with Phase 6 (#164 E8) by default: an ERC-4337 passkey-only
+#             master UserOp on mainnet (~0.22 HEI); opt out --skip-6 /
+#             AGENTKEYS_ERC4337_E8=0.
 #
 # The agent binary must be aarch64-linux (the sandbox is aarch64 Linux); the
 # harness cross-builds it in an arm64 Linux rust container and uploads it via
@@ -1122,17 +1125,23 @@ phase5_teardown() {
 }
 
 # ─── Phase 6 — ERC-4337 passkey-only master (#164 E8) ─────────────────────────
-# Opt-in (AGENTKEYS_ERC4337_E8=1): proves a master with NO secp256k1 key lands a
-# real master mutation via an ERC-4337 UserOp on Heima mainnet (factory → account
-# → WebAuthn-signed UserOp via the live K11Verifier → handleOps → addSigner). The
-# heavy lifting is in harness/erc4337-master-e8.sh (run as a subprocess so its
-# helper names don't clobber this harness's ok/skip/fail).
+# DEFAULT in --real (skipped in --light, which never touches mainnet). Proves a
+# master with NO secp256k1 key lands a real master mutation via an ERC-4337 UserOp
+# on Heima mainnet (factory → account → WebAuthn-signed UserOp via the live
+# K11Verifier → handleOps → addSigner), ~0.22 HEI/run. Opt out with --skip-6 or
+# AGENTKEYS_ERC4337_E8=0. Heavy lifting in harness/erc4337-master-e8.sh (run as a
+# subprocess so its helper names don't clobber this harness's ok/skip/fail).
 phase6_erc4337_master() {
-  if [[ "${AGENTKEYS_ERC4337_E8:-0}" != "1" ]]; then
-    log "Phase 6 — ERC-4337 passkey-master (E8): skip (set AGENTKEYS_ERC4337_E8=1 to run on Heima mainnet, ~0.22 HEI)"
+  skip_phase 6 && { log "Phase 6 — ERC-4337 passkey-master (E8): skip (--skip-6)"; return; }
+  if [[ "$MODE" != "real" ]]; then
+    log "Phase 6 — ERC-4337 passkey-master (E8): skip (--light; needs --real + Heima mainnet)"
     return
   fi
-  log "Phase 6 — ERC-4337 passkey-only master via UserOp (#164 E8, Heima mainnet)"
+  if [[ "${AGENTKEYS_ERC4337_E8:-1}" == "0" ]]; then
+    log "Phase 6 — ERC-4337 passkey-master (E8): skip (AGENTKEYS_ERC4337_E8=0)"
+    return
+  fi
+  log "Phase 6 — ERC-4337 passkey-only master via UserOp (#164 E8, Heima mainnet, ~0.22 HEI)"
   if bash "$(dirname "${BASH_SOURCE[0]}")/erc4337-master-e8.sh"; then
     ok "6.1 erc4337-e8" "passkey-only master landed a UserOp mutation (no secp256k1 key)"
   else

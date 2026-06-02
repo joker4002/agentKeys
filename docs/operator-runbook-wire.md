@@ -25,7 +25,9 @@ bash harness/phase1-wire-demo.sh --light
 # IN THE SANDBOX (never on the master), the master binds it on-chain, and
 # --webauthn "approves" the memory scope via Touch ID. Then it seeds + recalls
 # the Chengdu memory. Each run DEPAIRS the prior device (revoke) + re-pairs a fresh
-# K10 (register), so expect ONE Touch ID + ~2 on-chain txs per run.
+# K10 (register), so expect ONE Touch ID + ~2 on-chain txs per run. It also ends
+# with Phase 6 (#164 E8): an ERC-4337 passkey-only master UserOp on mainnet
+# (~0.22 HEI) — pass --skip-6 (or AGENTKEYS_ERC4337_E8=0) to skip that spend.
 bash harness/phase1-wire-demo.sh --real --webauthn
 
 # VERIFY — deterministic, no LLM. Run IN THE SANDBOX after setup (the harness
@@ -178,16 +180,21 @@ Pass `--yes` to auto-confirm the non-secret prompts.
 
 ## Optional — Phase 6: ERC-4337 passkey-only master (#164 E8)
 
-An **opt-in** phase (off by default) that proves the #164 master model: a master
-with **no secp256k1 key** lands a real on-chain master mutation via an **ERC-4337
-UserOp**. It runs on Heima **mainnet** and spends **~0.22 HEI** per run (account
-deposit + gas), so it only runs when you ask for it.
+Runs by **default at the end of every `--real` run** (skipped in `--light`, which
+never touches mainnet). Proves the #164 master model: a master with **no secp256k1
+key** lands a real on-chain master mutation via an **ERC-4337 UserOp**. It spends
+**~0.22 HEI** on Heima mainnet per run (account deposit + gas) and mints a fresh
+account each time, so **opt out** when you don't want the spend: `--skip-6` or
+`AGENTKEYS_ERC4337_E8=0`.
 
 ```bash
-# As part of the wire demo (appends Phase 6 after teardown):
-AGENTKEYS_ERC4337_E8=1 bash harness/phase1-wire-demo.sh --real --webauthn
+# Default — Phase 6 runs automatically at the end of a --real run:
+bash harness/phase1-wire-demo.sh --real --webauthn
 
-# …or standalone — pure chain flow, no sandbox/Hermes needed:
+# Skip it (no mainnet spend):
+bash harness/phase1-wire-demo.sh --real --webauthn --skip-6
+
+# …or run JUST the E8 flow standalone — pure chain, no sandbox/Hermes:
 bash harness/erc4337-master-e8.sh
 ```
 
@@ -255,7 +262,7 @@ optional live demo; run it **while the gate is open** (Phase 5 stops the MCP).
 --reuse-agent     skip fresh pairing; reuse one master-side agent (fast iterate)
 --unwire          remove the managed hooks block at teardown
 --yes             auto-confirm non-secret prompts
---skip-N          skip phase N (0–5); e.g. --skip-4 to skip the surprise
+--skip-N          skip phase N (0–6); e.g. --skip-6 to skip the ERC-4337 master (Phase 6)
 --help
 ```
 
@@ -271,7 +278,7 @@ Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `AGENTKEYS_AGENT_SESSION_BEARER` (override the agent session) ·
 `MEMORY_ROLE_ARN` / `VAULT_ROLE_ARN` / `REGION` (per-actor STS relay; sourced from `operator-workstation.env`),
 `AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER` ·
-`AGENTKEYS_ERC4337_E8=1` (opt-in Phase 6 — ERC-4337 passkey-only master on Heima mainnet, ~0.22 HEI; see the Phase 6 section).
+`AGENTKEYS_ERC4337_E8=0` (opt OUT of the default Phase 6 — ERC-4337 passkey-only master; runs by default in `--real`, ~0.22 HEI; see the Phase 6 section).
 
 ## Drift detection
 
