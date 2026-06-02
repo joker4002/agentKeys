@@ -301,4 +301,21 @@ contract P256AccountTest is Test {
         vm.expectRevert(abi.encodeWithSelector(P256Account.DuplicateGuardian.selector, GCRED));
         acct.recover(NEWCRED, PUBX, PUBY, RPID, a);
     }
+
+    // codex #3: the same physical key registered under two credIds must not satisfy
+    // an M>=2 quorum — recover() dedups by (pubX,pubY), not just credIdHash.
+    function test_Recover_RejectsDuplicateGuardianPubkey() public {
+        P256Account acct = _deploy();
+        vm.startPrank(ENTRYPOINT);
+        acct.addGuardian(GCRED, PUBX, PUBY, RPID);
+        acct.addGuardian(GCRED2, PUBX, PUBY, RPID); // distinct credId, SAME physical key
+        acct.setRecoveryThreshold(2);
+        vm.stopPrank();
+        k11.setResult(true);
+        P256Account.GuardianAssertion[] memory a = new P256Account.GuardianAssertion[](2);
+        a[0] = _gAssertion(GCRED);
+        a[1] = _gAssertion(GCRED2);
+        vm.expectRevert(abi.encodeWithSelector(P256Account.DuplicateGuardian.selector, GCRED2));
+        acct.recover(NEWCRED, PUBX, PUBY, RPID, a);
+    }
 }

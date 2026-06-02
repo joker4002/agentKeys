@@ -118,6 +118,12 @@ contract VerifyingPaymaster is IPaymaster {
                 userOp.accountGasLimits,
                 userOp.preVerificationGas,
                 userOp.gasFees,
+                // codex #1: bind the paymaster gas limits the broker approved
+                // (paymasterAndData[20:52]) so a bundler can't inflate them while
+                // reusing a valid sponsorship signature.
+                userOp.paymasterAndData.length >= 52
+                    ? bytes32(userOp.paymasterAndData[20:52])
+                    : bytes32(0),
                 block.chainid,
                 address(this),
                 brokerSigner,

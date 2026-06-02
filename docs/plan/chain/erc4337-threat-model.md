@@ -108,3 +108,15 @@ A lost primary device means no `validateUserOp` from that key. Recovery (M-of-N 
 - [ ] E3: prove the registry rewrite keeps the #90 negative tests green + adds account-only positive/negative tests.
 - [ ] E7: front-run negative test under the account model.
 - [ ] Only deploy production EntryPoint + factory to mainnet **after** the above.
+
+## 10. Adversarial review findings (codex, 2026-06-02) + dispositions
+
+Adversarial pass over `P256Account` / `P256AccountFactory` / `VerifyingPaymaster` / the thinned `AgentKeysScope`. No ERC-7562 opcode bypass found.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | HIGH | `VerifyingPaymaster.getHash` omitted the paymaster gas limits (`paymasterAndData[20:52]`) → a valid broker sig could be reused with inflated limits (drain/grief). | **Fixed** — `getHash` now binds `[20:52]`; test `test_RejectsTamperedGasLimits`. |
+| 2 | HIGH | Thinned `AgentKeysScope` (`msg.sender == operatorMasterWallet`, in-contract K11 retired) + an **un-migrated EOA master** ⇒ scope writes with no biometric. | **Deployment-ordering invariant** — the contract can't tell an EOA from a 4337 account, so there is no clean in-contract guard. The thinned scope MUST be deployed **only together with the registry cutover** that stores account-masters (so `msg.sender == account`, which is passkey-gated). Warned in `AgentKeysScope.sol` @dev + the E3/cutover notes. **Never deploy E3 pre-cutover.** |
+| 3 | MED | Guardian quorum bypass — one physical key registered under two credIds satisfies an M≥2 quorum. | **Fixed** — `recover()` dedups by `(pubX,pubY)`, not just credIdHash; test `test_Recover_RejectsDuplicateGuardianPubkey`. |
+| 4 | MED | P-256 malleability — `P256Verifier` accepts high-s, so `(r, n-s)` also verifies. | **Mitigated, not replay-exploitable**: the EntryPoint 2D nonce (`validateUserOp`) and `recoveryNonce` (`recover`) consume the op regardless of sig form. Follow-up: enforce low-s in `P256Verifier` — deferred because it is the **live, shared** verifier (also used by `SidecarRegistry`), so it needs its own change + redeploy. |
+| 5 | LOW | `recover()` can install an unusable signer (caller supplies a bad new pubkey). | **Accepted** — operator/relayer error, not an attacker path; guardians can recover again. An on-chain check cannot distinguish a valid-looking-but-wrong P-256 point. |

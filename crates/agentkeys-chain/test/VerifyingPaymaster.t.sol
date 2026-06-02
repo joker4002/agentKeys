@@ -30,14 +30,23 @@ contract VerifyingPaymasterTest is Test {
         op.gasFees = bytes32(uint256(2));
     }
 
+    uint128 constant PM_VER_GAS = 1_000_000;
+    uint128 constant PM_POST_GAS = 50_000;
+
     function _sign(uint256 pk, PackedUserOperation memory op) internal view returns (bytes memory pad) {
-        bytes32 h = pm.getHash(op, VALID_UNTIL, VALID_AFTER);
-        bytes32 ethH = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", h));
+        // getHash now binds paymasterAndData[20:52] (the gas limits), so set them
+        // before hashing (placeholder 65-byte sig — getHash ignores the sig bytes).
+        op.paymasterAndData = abi.encodePacked(
+            address(pm), PM_VER_GAS, PM_POST_GAS, VALID_UNTIL, VALID_AFTER, new bytes(65)
+        );
+        bytes32 ethH = keccak256(
+            abi.encodePacked(
+                "\x19Ethereum Signed Message:\n32", pm.getHash(op, VALID_UNTIL, VALID_AFTER)
+            )
+        );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, ethH);
-        bytes memory sig = abi.encodePacked(r, s, v);
-        // prefix: 20 paymaster + 16 vGasLimit + 16 postOpGasLimit, then vu|va|sig
         pad = abi.encodePacked(
-            address(pm), uint128(0), uint128(0), VALID_UNTIL, VALID_AFTER, sig
+            address(pm), PM_VER_GAS, PM_POST_GAS, VALID_UNTIL, VALID_AFTER, abi.encodePacked(r, s, v)
         );
     }
 
@@ -89,5 +98,23 @@ contract VerifyingPaymasterTest is Test {
         vm.prank(ENTRYPOINT);
         vm.expectRevert(VerifyingPaymaster.BadPaymasterDataLength.selector);
         pm.validatePaymasterUserOp(op, bytes32(0), 1 ether);
+    }
+
+    // codex #1: a bundler/attacker inflates the paymaster gas limits ([20:52]) while
+    // reusing a valid broker signature → must be rejected (the limits are now signed).
+    function test_RejectsTamperedGasLimits() public {
+        PackedUserOperation memory op = _op();
+        bytes memory pad = _sign(brokerPk, op); // signed over PM_VER_GAS / PM_POST_GAS
+        bytes memory sig = new bytes(65);
+        for (uint256 i = 0; i < 65; ++i) {
+            sig[i] = pad[64 + i];
+        }
+        // same sig, inflated gas limits:
+        op.paymasterAndData = abi.encodePacked(
+            address(pm), uint128(9_000_000), uint128(9_000_000), VALID_UNTIL, VALID_AFTER, sig
+        );
+        vm.prank(ENTRYPOINT);
+        (, uint256 vd) = pm.validatePaymasterUserOp(op, bytes32(0), 1 ether);
+        assertEq(vd & 1, 1, "inflated paymaster gas limits -> sigFailed");
     }
 }

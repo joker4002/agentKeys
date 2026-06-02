@@ -11,6 +11,12 @@ interface ISidecarRegistry {
 ///         Read by the broker on cap-mint AND by workers on cap-verify
 ///         (arch.md §12.4, §13.1, §19).
 ///
+/// @dev    ⚠ DEPLOYMENT ORDER (codex #2): deploy this thinned scope ONLY together
+///         with the registry cutover that stores the operator's 4337 ACCOUNT as
+///         `operatorMasterWallet`. If deployed while a master is still a raw EOA,
+///         that EOA key alone could setScope/revokeScope with NO biometric (the
+///         in-contract K11 gate is gone). Never deploy E3 before the cutover.
+///
 /// @dev    #164 E3 (Solution A — ERC-4337 P-256 master). Scope mutations are
 ///         authorized by `msg.sender == operatorMasterWallet(operator)`, where
 ///         the master is now an ERC-4337 P-256 smart account. The passkey check

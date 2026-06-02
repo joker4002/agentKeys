@@ -312,11 +312,19 @@ contract P256Account is IAccount {
         uint256 nValid;
         for (uint256 i = 0; i < assertions.length; ++i) {
             bytes32 gid = assertions[i].guardianCredIdHash;
-            for (uint256 j = 0; j < i; ++j) {
-                if (assertions[j].guardianCredIdHash == gid) revert DuplicateGuardian(gid);
-            }
             Guardian storage g = guardians[gid];
             if (!g.active) revert UnknownGuardian(gid);
+            // codex #3: reject the same credId AND the same physical key registered
+            // under a second credId — one guardian must not satisfy an M>=2 quorum.
+            for (uint256 j = 0; j < i; ++j) {
+                Guardian storage pg = guardians[assertions[j].guardianCredIdHash];
+                if (
+                    assertions[j].guardianCredIdHash == gid
+                        || (pg.pubX == g.pubX && pg.pubY == g.pubY)
+                ) {
+                    revert DuplicateGuardian(gid);
+                }
+            }
             // A malformed/mismatched assertion reverts in the verifier; try/catch
             // so one bad guardian envelope doesn't grief the whole recovery.
             try IK11Verifier(k11Verifier).verifyAssertion(
