@@ -11,11 +11,14 @@ way K11Verifier.verifyAssertion parses it:
   - msgHash = sha256(authData || sha256(clientDataJSON)); P-256 sign (low-s)
 
 Modes:
-  keygen <keyfile> <rpId>            -> PUBX=, PUBY=, RPIDHASH=
+  keygen <keyfile> <rpId>              -> PUBX=, PUBY=, RPIDHASH=
+      Idempotent: if <keyfile> exists, loads + prints its pubkey (does NOT
+      overwrite — so a reused account keeps its address); else generates + saves.
   sign   <keyfile> <userOpHash> <rpId> -> AUTHDATA=, CDJ=, CHALLENGE_LOC=, R=, S=
 """
 import base64
 import hashlib
+import os
 import sys
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -30,13 +33,20 @@ def _rp_id_hash(rp_id: str) -> bytes:
 
 
 def keygen(keyfile: str, rp_id: str) -> None:
-    priv = ec.generate_private_key(ec.SECP256R1())
-    with open(keyfile, "wb") as f:
-        f.write(priv.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        ))
+    if os.path.exists(keyfile):
+        with open(keyfile, "rb") as f:
+            priv = serialization.load_pem_private_key(f.read(), password=None)
+    else:
+        priv = ec.generate_private_key(ec.SECP256R1())
+        d = os.path.dirname(keyfile)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(keyfile, "wb") as f:
+            f.write(priv.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ))
     n = priv.public_key().public_numbers()
     print(f"PUBX=0x{n.x:064x}")
     print(f"PUBY=0x{n.y:064x}")

@@ -284,6 +284,18 @@ phase0_prereqs() {
     fail "0.2 broker healthz" "broker not reachable (BACKEND_URL=$broker) — run scripts/setup-broker-host.sh"
   fi
 
+  # 0.2b — the agentkeys CLI must have the `agent` subcommand. Phase P (§10.2
+  # pairing) calls `agentkeys agent claim/pending`; a STALE CLI on PATH (predates
+  # #144) fails P.1 with "unrecognized subcommand 'agent'" and cascades into the
+  # MCP/wire/Acts steps. Catch it here in one line instead of mid-run.
+  if [[ "$MODE" == "real" ]]; then
+    if agentkeys agent --help >/dev/null 2>&1; then
+      ok "0.2b agentkeys cli" "'agent' subcommand present ($(command -v agentkeys))"
+    else
+      fail "0.2b agentkeys cli" "agentkeys CLI missing or stale (no 'agent' subcommand) — rebuild: cargo build --release -p agentkeys-cli && cp target/release/agentkeys ~/.local/bin/agentkeys"
+    fi
+  fi
+
   # Resolve operator_omni + actor_omni. OPERATOR_OMNI is the MASTER's omni
   # (sha256("agentkeys"||"evm"||master_addr_lc)) — derive it from OPERATOR_KEY_FILE
   # so it NEVER depends on the (key-less, fresh-each-run) agent file. In fresh
