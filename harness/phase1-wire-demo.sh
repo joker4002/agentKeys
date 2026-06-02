@@ -1121,6 +1121,25 @@ phase5_teardown() {
   ok "5.2 account" "kept (no Act 3 → nothing to restore)"
 }
 
+# ─── Phase 6 — ERC-4337 passkey-only master (#164 E8) ─────────────────────────
+# Opt-in (AGENTKEYS_ERC4337_E8=1): proves a master with NO secp256k1 key lands a
+# real master mutation via an ERC-4337 UserOp on Heima mainnet (factory → account
+# → WebAuthn-signed UserOp via the live K11Verifier → handleOps → addSigner). The
+# heavy lifting is in harness/erc4337-master-e8.sh (run as a subprocess so its
+# helper names don't clobber this harness's ok/skip/fail).
+phase6_erc4337_master() {
+  if [[ "${AGENTKEYS_ERC4337_E8:-0}" != "1" ]]; then
+    log "Phase 6 — ERC-4337 passkey-master (E8): skip (set AGENTKEYS_ERC4337_E8=1 to run on Heima mainnet, ~0.22 HEI)"
+    return
+  fi
+  log "Phase 6 — ERC-4337 passkey-only master via UserOp (#164 E8, Heima mainnet)"
+  if bash "$(dirname "${BASH_SOURCE[0]}")/erc4337-master-e8.sh"; then
+    ok "6.1 erc4337-e8" "passkey-only master landed a UserOp mutation (no secp256k1 key)"
+  else
+    fail "6.1 erc4337-e8" "see erc4337-master-e8.sh output above"
+  fi
+}
+
 # ─── main ────────────────────────────────────────────────────────────────────
 main() {
   for t in curl jq docker; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 2; }; done
@@ -1135,6 +1154,7 @@ main() {
   phase3_acts
   phase4_surprise
   phase5_teardown
+  phase6_erc4337_master
 
   log "summary"
   if [[ "$FAILED" -eq 0 ]]; then
