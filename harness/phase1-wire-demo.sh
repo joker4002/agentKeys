@@ -284,15 +284,31 @@ phase0_prereqs() {
     fail "0.2 broker healthz" "broker not reachable (BACKEND_URL=$broker) — run scripts/setup-broker-host.sh"
   fi
 
-  # 0.2b — the agentkeys CLI must have the `agent` subcommand. Phase P (§10.2
-  # pairing) calls `agentkeys agent claim/pending`; a STALE CLI on PATH (predates
-  # #144) fails P.1 with "unrecognized subcommand 'agent'" and cascades into the
-  # MCP/wire/Acts steps. Catch it here in one line instead of mid-run.
+  # 0.2b — build + verify the MASTER-side agentkeys CLI. Phase P (§10.2 pairing)
+  # calls `agentkeys agent claim/pending` from the host; the harness prefers
+  # $REPO_ROOT/target/release/agentkeys (see P.0/P.1 below, release→debug→PATH).
+  # We BUILD it from the repo source so P.1 runs CURRENT code — not a stale binary
+  # on PATH (the "unrecognized subcommand 'agent'" cascade into MCP/wire/Acts).
+  # cargo build is incremental (a no-op when up-to-date); opt out with
+  # AGENTKEYS_SKIP_CLI_BUILD=1 (then your PATH agentkeys must already have `agent`).
   if [[ "$MODE" == "real" ]]; then
-    if agentkeys agent --help >/dev/null 2>&1; then
-      ok "0.2b agentkeys cli" "'agent' subcommand present ($(command -v agentkeys))"
+    if [[ "${AGENTKEYS_SKIP_CLI_BUILD:-0}" != "1" ]] && command -v cargo >/dev/null 2>&1; then
+      log "  0.2b building host agentkeys (cargo build --release -p agentkeys-cli; first build ~1 min)…"
+      if ( cd "$REPO_ROOT" && cargo build --release -p agentkeys-cli ) >/dev/null 2>&1; then
+        ok "0.2b agentkeys cli" "built $REPO_ROOT/target/release/agentkeys from current source"
+      else
+        skip "0.2b agentkeys cli" "cargo build failed — falling back to an existing binary (verified next)"
+      fi
+    fi
+    # Verify the exact binary Phase P will use (release→debug→PATH) has `agent`.
+    local _la=""
+    if [[ -x "$REPO_ROOT/target/release/agentkeys" ]]; then _la="$REPO_ROOT/target/release/agentkeys"
+    elif [[ -x "$REPO_ROOT/target/debug/agentkeys" ]]; then _la="$REPO_ROOT/target/debug/agentkeys"
+    else _la="$(command -v agentkeys 2>/dev/null || true)"; fi
+    if [[ -n "$_la" ]] && "$_la" agent --help >/dev/null 2>&1; then
+      ok "0.2b agent subcommand" "present in $_la"
     else
-      fail "0.2b agentkeys cli" "agentkeys CLI missing or stale (no 'agent' subcommand) — rebuild: cargo build --release -p agentkeys-cli && cp target/release/agentkeys ~/.local/bin/agentkeys"
+      fail "0.2b agent subcommand" "the agentkeys Phase P will use ($_la) lacks 'agent' — build it: cargo build --release -p agentkeys-cli (then it lands at target/release/, which the harness prefers; or cp it onto your PATH)"
     fi
   fi
 
