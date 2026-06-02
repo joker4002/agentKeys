@@ -79,12 +79,17 @@ Each phase is independently shippable, idempotent where it mutates chain state (
 
 - **E0** ✅ threat-model drafted → [`erc4337-threat-model.md`](erc4337-threat-model.md).
 - **E2** ✅ `IERC4337.sol`, `P256Account.sol`, `P256AccountFactory.sol` — **codex-reviewed** (1 P2 fixed: verifier/`abi.decode` reverts now map to `SIG_VALIDATION_FAILED` via a try/catch self-call); **17 account tests green**.
-- **E1** ✅ **deployed live on Heima mainnet 2026-06-02** (recorded in [`deployed-contracts.md`](../../spec/deployed-contracts.md)):
+- **E1** ✅ **deployed live on Heima mainnet 2026-06-02** (recorded in [`contracts.md`](../../contracts.md)):
   - `EntryPoint` v0.7 = `0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9` (canonical bytecode; landed a UserOp in the spike).
   - `P256AccountFactory` = `0x1ccCe65b22De81aDA4F378FeAf7503d93f5d27a3` (CREATE2 determinism smoke-verified on mainnet: `getAddress` == `createAccount`).
-- **E3** ✅ **implemented** — `AgentKeysScope` thinned to account-auth (in-contract K11 + `scopeNonce` retired; `setScopeWithWebauthn`→`setScope`); registry agent-bind closed structurally (master = account); master-device/recovery K11 retained pending E5. **59 crate tests green** (net −91 lines).
-- ⏭️ **Cutover ripples (not yet done):** the broker's scope-mint call + `harness/scripts/heima-scope-set.sh` use `setScopeWithWebauthn(... assertion)` — update to `setScope(...)` (no assertion) at redeploy; `AgentKeysScope` now deploys with 1 constructor arg; `operator-workstation.env` gets `ENTRYPOINT_ADDRESS_HEIMA` + `P256_ACCOUNT_FACTORY_ADDRESS_HEIMA` via `heima-bring-up.sh env_set`; `verify-heima-contracts.sh` extended to check the EntryPoint + factory. arch.md §10/§12 update lands at cutover (registry/scope redeploy).
-- **E4** folded into E3 (structural). **E5–E8** pending.
+- **E3** ✅ `AgentKeysScope` thinned to account-auth (in-contract K11 + `scopeNonce` retired; `setScopeWithWebauthn`→`setScope`); registry agent-bind closed structurally (master = account).
+- **E4** ✅ folded into E3 (agent bind/revoke passkey-gated structurally, no new code).
+- **E5** ✅ guardian **M-of-N social recovery** in `P256Account` (generation-rotation; independent of the lost primary passkey, per threat-model §7); **+6 tests**.
+- **E6** ✅ `VerifyingPaymaster` (broker-co-signed sponsorship = the Sybil gate; ED-aware funding) **+6 tests**; `scripts/erc4337-bundler.sh` unsafe-mode runner (off-chain — not stood up live; direct `handleOps` proves the path).
+- **E7** ✅ `harness/scripts/erc4337-webauthn-sign.py` WebAuthn UserOp signer — **validated against the live mainnet K11Verifier** (`verifyAssertion → true`, zero gas).
+- **E8** ✅ **ran green on Heima mainnet** — `harness/erc4337-master-e8.sh`, landed on `harness/phase1-wire-demo.sh` as opt-in `phase6` (`AGENTKEYS_ERC4337_E8=1`): a **passkey-only master (no secp256k1 key)** deployed an account via the factory + landed a real master mutation (`addSigner`) via a WebAuthn-signed UserOp through `handleOps`. Acct `0x3e79925F41E46CA87DD1103a572af7449CCd25a9`, `activeSignerCount 1→2`.
+- **Crate tests: 71 green** (AgentKeysV1 25 · P256Account 23 · VerifyingPaymaster 6 · K11Verifier 9 · P256Verifier 8).
+- ⏭️ **Cutover (coordinated redeploy, not yet done):** the **live E1 factory embeds the E2-era account** (deployed before E5) — so on-chain accounts have no `recover()` yet; the E8 mainnet run exercised `addSigner` (present since E2). Cutover **redeploys the factory** (E3/E5-complete account), the **registry + scope** (account-auth), and updates the broker scope-mint + `heima-scope-set.sh` (`setScopeWithWebauthn`→`setScope`), `operator-workstation.env` (`env_set` the EntryPoint/factory), `verify-heima-contracts.sh`, and arch.md §10/§12. CI skips first-master, so nothing breaks meanwhile.
 
 ## 3.2 E3 design — registry thinning + migration
 
