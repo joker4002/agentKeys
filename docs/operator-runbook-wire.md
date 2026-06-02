@@ -25,9 +25,7 @@ bash harness/phase1-wire-demo.sh --light
 # IN THE SANDBOX (never on the master), the master binds it on-chain, and
 # --webauthn "approves" the memory scope via Touch ID. Then it seeds + recalls
 # the Chengdu memory. Each run DEPAIRS the prior device (revoke) + re-pairs a fresh
-# K10 (register), so expect ONE Touch ID + ~2 on-chain txs per run. It also ends
-# with Phase 6 (#164 E8): an ERC-4337 passkey-only master UserOp on mainnet
-# (~0.22 HEI) — pass --skip-6 (or AGENTKEYS_ERC4337_E8=0) to skip that spend.
+# K10 (register), so expect ONE Touch ID + ~2 on-chain txs per run.
 bash harness/phase1-wire-demo.sh --real --webauthn
 
 # VERIFY — deterministic, no LLM. Run IN THE SANDBOX after setup (the harness
@@ -179,27 +177,25 @@ Pass `--yes` to auto-confirm the non-secret prompts.
 
 (Act 3 — Online Revocation — is out of scope for this harness; tested elsewhere.)
 
-## Optional — Phase 6: ERC-4337 passkey-only master (#164 E8)
+## ERC-4337 passkey-only master — standalone mechanism smoke (#164 E8)
 
-Runs by **default at the end of every `--real` run** (skipped in `--light`, which
-never touches mainnet). Proves the #164 master model: a master with **no secp256k1
-key** lands a real on-chain master mutation via an **ERC-4337 UserOp**. **Opt out**
-with `--skip-6` or `AGENTKEYS_ERC4337_E8=0`.
+**Not a wire-demo phase.** The 4337 account is the *master*, so it belongs in the
+**master-onboarding ceremony** (arch.md §9 — K11 generated at stage 2, the account
+registered at stage 4), tracked as **#164 E7** and landing with the registry
+**cutover**. Until that ships, this is a **standalone mechanism smoke**: it proves
+the on-chain path works (EntryPoint v0.7 + on-chain P-256 verify + a WebAuthn-signed
+UserOp on Heima mainnet) using a **throwaway software passkey** — it is **not** the
+real ceremony (the real master K11 lives in the platform authenticator, so a real
+UserOp needs a Touch ID assert + the cutover).
+
+```bash
+# Run the mechanism smoke directly (pure chain — no sandbox/Hermes). ~0.22 HEI:
+bash harness/erc4337-master-e8.sh
+```
 
 **Two modes (auto-selected):**
 - **fresh** (default locally) — a NEW account + ephemeral passkey + fresh deposit each run (**~0.22 HEI/run**, append-only). HEI cost doesn't matter for local testing.
-- **reuse** (default when `$CI` is set; or force with `ERC4337_E8_MODE=reuse`) — **one persistent account** (fixed passkey at `ERC4337_E8_KEY_FILE` + fixed salt → deterministic address), created once and funded only when its deposit drops below ~0.05 HEI. So CI does **not** mint a new account / spend a full deposit every run. **CI must persist the key file** (Actions cache, or a secret written to `ERC4337_E8_KEY_FILE`) for the account to actually be reused across runs; otherwise each run keygens a new key → a new account.
-
-```bash
-# Default — Phase 6 runs automatically at the end of a --real run:
-bash harness/phase1-wire-demo.sh --real --webauthn
-
-# Skip it (no mainnet spend):
-bash harness/phase1-wire-demo.sh --real --webauthn --skip-6
-
-# …or run JUST the E8 flow standalone — pure chain, no sandbox/Hermes:
-bash harness/erc4337-master-e8.sh
-```
+- **reuse** (default when `$CI` is set; or force with `ERC4337_E8_MODE=reuse`) — **one persistent account** (fixed passkey at `ERC4337_E8_KEY_FILE` + fixed salt → deterministic address), created once and funded only when its deposit drops below ~0.05 HEI, so CI doesn't mint a new account each run. **CI must persist the key file** (Actions cache, or a secret written to `ERC4337_E8_KEY_FILE`); otherwise each run keygens a new key → a new account.
 
 What it does: keygen a P-256 passkey → `P256AccountFactory.createAccount` (CREATE2)
 → fund the account's EntryPoint deposit (≥ the ~0.1 HEI ExistentialDeposit, so
@@ -266,7 +262,7 @@ optional live demo; run it **while the gate is open** (Phase 5 stops the MCP).
 --reuse-agent     skip fresh pairing; reuse one master-side agent (fast iterate)
 --unwire          remove the managed hooks block at teardown
 --yes             auto-confirm non-secret prompts
---skip-N          skip phase N (0–6); e.g. --skip-6 to skip the ERC-4337 master (Phase 6)
+--skip-N          skip phase N (0–5); e.g. --skip-4 to skip the surprise
 --help
 ```
 
@@ -281,9 +277,7 @@ Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `AGENTKEYS_REUSE_AGENT=1` (skip Phase P fresh pairing; reuse a master-side agent) ·
 `AGENTKEYS_AGENT_SESSION_BEARER` (override the agent session) ·
 `MEMORY_ROLE_ARN` / `VAULT_ROLE_ARN` / `REGION` (per-actor STS relay; sourced from `operator-workstation.env`),
-`AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER` ·
-`AGENTKEYS_ERC4337_E8=0` (opt OUT of the default Phase 6 — ERC-4337 passkey-only master; runs by default in `--real`, ~0.22 HEI; see the Phase 6 section) ·
-`ERC4337_E8_MODE` (`fresh` | `reuse`; auto = `reuse` when `$CI` is set) · `ERC4337_E8_KEY_FILE` (persistent passkey for reuse-mode; CI must cache/secret it).
+`AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER`.
 
 ## Drift detection
 

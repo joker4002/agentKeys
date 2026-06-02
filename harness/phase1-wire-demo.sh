@@ -14,9 +14,6 @@
 #   --real    Live broker + workers + Heima mainnet, REUSING the account
 #             `setup-heima.sh` created (master `alice`, agent `demo-agent`).
 #             NO in-memory fixture. Live-env steps fail-loud if a prereq missing.
-#             Ends with Phase 6 (#164 E8) by default: an ERC-4337 passkey-only
-#             master UserOp on mainnet (~0.22 HEI); opt out --skip-6 /
-#             AGENTKEYS_ERC4337_E8=0.
 #
 # The agent binary must be aarch64-linux (the sandbox is aarch64 Linux); the
 # harness cross-builds it in an arm64 Linux rust container and uploads it via
@@ -1152,30 +1149,11 @@ phase5_teardown() {
   ok "5.2 account" "kept (no Act 3 → nothing to restore)"
 }
 
-# ─── Phase 6 — ERC-4337 passkey-only master (#164 E8) ─────────────────────────
-# DEFAULT in --real (skipped in --light, which never touches mainnet). Proves a
-# master with NO secp256k1 key lands a real master mutation via an ERC-4337 UserOp
-# on Heima mainnet (factory → account → WebAuthn-signed UserOp via the live
-# K11Verifier → handleOps → addSigner), ~0.22 HEI/run. Opt out with --skip-6 or
-# AGENTKEYS_ERC4337_E8=0. Heavy lifting in harness/erc4337-master-e8.sh (run as a
-# subprocess so its helper names don't clobber this harness's ok/skip/fail).
-phase6_erc4337_master() {
-  skip_phase 6 && { log "Phase 6 — ERC-4337 passkey-master (E8): skip (--skip-6)"; return; }
-  if [[ "$MODE" != "real" ]]; then
-    log "Phase 6 — ERC-4337 passkey-master (E8): skip (--light; needs --real + Heima mainnet)"
-    return
-  fi
-  if [[ "${AGENTKEYS_ERC4337_E8:-1}" == "0" ]]; then
-    log "Phase 6 — ERC-4337 passkey-master (E8): skip (AGENTKEYS_ERC4337_E8=0)"
-    return
-  fi
-  log "Phase 6 — ERC-4337 passkey-only master via UserOp (#164 E8, Heima mainnet, ~0.22 HEI)"
-  if bash "$(dirname "${BASH_SOURCE[0]}")/erc4337-master-e8.sh"; then
-    ok "6.1 erc4337-e8" "passkey-only master landed a UserOp mutation (no secp256k1 key)"
-  else
-    fail "6.1 erc4337-e8" "see erc4337-master-e8.sh output above"
-  fi
-}
+# Note: the ERC-4337 passkey-master (#164 E8) is NOT a wire-demo phase. It binds
+# to the MASTER ONBOARDING ceremony (arch.md §9 — K11 at stage 2, register the
+# account at stage 4), tracked as #164 E7 and landing with the registry cutover.
+# Until then, harness/erc4337-master-e8.sh is a standalone *mechanism smoke* (run
+# it directly), not part of this agent-side e2e. See docs/operator-runbook-wire.md.
 
 # ─── main ────────────────────────────────────────────────────────────────────
 main() {
@@ -1191,7 +1169,6 @@ main() {
   phase3_acts
   phase4_surprise
   phase5_teardown
-  phase6_erc4337_master
 
   log "summary"
   if [[ "$FAILED" -eq 0 ]]; then
