@@ -255,12 +255,14 @@ build_wasm() {
     return 0
   fi
 
-  # Version key: every .rs under src/ + Cargo.toml + the wasm-pack version. Any
-  # change ⇒ rebuild; otherwise reuse the cached pkg (the "verify same version").
+  # Version key: every .rs under src/ (sorted, so the filesystem walk order can't
+  # change the hash) + this crate's Cargo.toml + the workspace Cargo.toml &
+  # Cargo.lock (so a transitive-dep bump busts the cache) + the rustc & wasm-pack
+  # versions. Any change ⇒ rebuild; otherwise reuse the cached pkg.
   local cur
-  cur="$( { find "$crate_dir/src" -type f -name '*.rs' -exec shasum -a 256 {} +;
-            shasum -a 256 "$crate_dir/Cargo.toml";
-            wasm-pack --version; } | shasum -a 256 | awk '{print $1}' )"
+  cur="$( { find "$crate_dir/src" -type f -name '*.rs' -exec shasum -a 256 {} + | sort;
+            shasum -a 256 "$crate_dir/Cargo.toml" "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Cargo.lock";
+            rustc -Vv; wasm-pack --version; } | shasum -a 256 | awk '{print $1}' )"
 
   if [ -f "$out_dir/agentkeys_web_core_bg.wasm" ] && [ -f "$pub_dir/agentkeys_web_core_bg.wasm" ] \
      && [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$cur" ]; then

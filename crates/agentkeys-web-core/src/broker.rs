@@ -43,9 +43,26 @@ pub struct BrokerClient {
     base_url: String,
 }
 
+/// Default `reqwest::Client`. Native hosts (daemon/CLI/mobile) get a request
+/// timeout so a stalled broker can't hang a worker thread forever; the
+/// wasm/browser host uses the `fetch` backend (per-request timeouts there need
+/// an `AbortController`, wired in the web host — not the `ClientBuilder`).
+#[cfg(not(target_arch = "wasm32"))]
+fn default_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
 impl BrokerClient {
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), base_url)
+        Self::with_client(default_client(), base_url)
     }
 
     /// Reuse a pre-built `reqwest::Client` (connection pooling, timeouts, or a
@@ -149,7 +166,12 @@ impl BrokerClient {
     async fn decode<T: DeserializeOwned>(path: &str, resp: reqwest::Response) -> R<T> {
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            // Bound the echoed body: it's our own broker, reached over the
+            // operator's own session (no cross-tenant data; the bearer is never
+            // echoed back), but an unbounded error string shouldn't flow into a
+            // JS rejection / log line. 512 chars preserves the broker error code.
+            let raw = resp.text().await.unwrap_or_default();
+            let body: String = raw.chars().take(512).collect();
             return Err(BrokerError::Rejected {
                 endpoint: path.to_string(),
                 status: status.as_u16(),
@@ -292,6 +314,11 @@ mod tests {
             .route(
                 "/v1/cap/cred-store",
                 post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            )
+            .route(
+                // Returns an oversized body so the truncation guard can be tested.
+                "/v1/cap/cred-fetch",
+                post(|| async { (StatusCode::BAD_REQUEST, "x".repeat(1000)) }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -330,6 +357,25 @@ mod tests {
             } => {
                 assert_eq!(status, 500);
                 assert_eq!(endpoint, "/v1/cap/cred-store");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_body_is_bounded() {
+        // A broker error body longer than the cap is truncated to 512 chars so it
+        // can't bloat a JS rejection / log line (status + endpoint preserved).
+        let c = BrokerClient::new(stub().await);
+        let err = c.cap_cred_fetch("J1", &cap_req()).await.unwrap_err();
+        match err {
+            BrokerError::Rejected { status, body, .. } => {
+                assert_eq!(status, 400);
+                assert_eq!(
+                    body.chars().count(),
+                    512,
+                    "body should be capped at 512 chars"
+                );
             }
             other => panic!("expected Rejected, got {other:?}"),
         }

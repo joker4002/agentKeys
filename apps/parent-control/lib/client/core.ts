@@ -3,19 +3,26 @@
 import { EmptyBackend } from './empty';
 import type { ConnectionStatus } from './types';
 
-// Lazy, client-only load of the WASM master-plane core (agentkeys-web-core).
-// The dynamic import keeps the wasm glue out of the server bundle; init() fetches
-// the .wasm from /wasm/ (served from public/, written by dev.sh's build_wasm).
-let coreP: Promise<import('@/lib/wasm/agentkeys-web-core/agentkeys_web_core').WebCore> | null = null;
-async function loadCore(brokerUrl: string) {
-  if (!coreP) {
-    coreP = (async () => {
+// Lazy, client-only load of the WASM master-plane core (agentkeys-web-core),
+// memoized per broker URL. The dynamic import keeps the wasm glue out of the
+// server bundle; init() fetches the .wasm from /wasm/ (served from public/,
+// written by dev.sh's build_wasm). Keying by URL means a second CoreBackend with
+// a different broker gets its own instance; on failure the entry is evicted so
+// the next call retries (a transient load/broker failure must not poison it).
+type LoadedCore = import('@/lib/wasm/agentkeys-web-core/agentkeys_web_core').WebCore;
+const coreByUrl = new Map<string, Promise<LoadedCore>>();
+function loadCore(brokerUrl: string): Promise<LoadedCore> {
+  let p = coreByUrl.get(brokerUrl);
+  if (!p) {
+    p = (async () => {
       const wasm = await import('@/lib/wasm/agentkeys-web-core/agentkeys_web_core.js');
       await wasm.default('/wasm/agentkeys_web_core_bg.wasm');
       return new wasm.WebCore(brokerUrl);
     })();
+    coreByUrl.set(brokerUrl, p);
+    void p.catch(() => coreByUrl.delete(brokerUrl));
   }
-  return coreP;
+  return p;
 }
 
 /**
