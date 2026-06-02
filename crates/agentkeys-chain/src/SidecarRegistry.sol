@@ -18,6 +18,20 @@ import {K11Verifier} from "./K11Verifier.sol";
 ///           device requires >= recoveryThreshold[operator] valid K11 sigs
 ///           from distinct registered masters with the RECOVERY role.
 ///         - DeviceEntry stores K11 P-256 pubkey (x, y) for on-chain verify.
+///
+///         #164 E3 (Solution A): `operatorMasterWallet` now holds the operator's
+///         ERC-4337 P-256 master **account** address (was an EOA). Every
+///         `msg.sender == master` check therefore means "a passkey authorized
+///         this call" (the account's validateUserOp verified the passkey over
+///         the userOpHash, which commits this calldata). This structurally
+///         closes the agent-bind/revoke biometric gap — `registerAgentDevice` /
+///         `revokeAgentDevice` keep their `msg.sender == master` guard, now
+///         passkey-gated via the account (no new K11 code needed). The
+///         multi-master + recovery functions (`registerAdditionalMasterDevice`,
+///         `revokeMasterDevice`, `setRecoveryThreshold`) and their per-op K11 +
+///         `operatorNonce` machinery are RETAINED here pending #164 E5, which
+///         folds multi-passkey + quorum recovery into the account itself. See
+///         docs/plan/chain/erc4337-master-account.md §3.2.
 contract SidecarRegistry {
     // ─── Role bitfield (per device, per arch.md §6.3) ────────────────────
     uint8 public constant ROLE_CAP_MINT = 1 << 0;
