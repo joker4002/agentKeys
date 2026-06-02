@@ -176,6 +176,40 @@ Pass `--yes` to auto-confirm the non-secret prompts.
 
 (Act 3 — Online Revocation — is out of scope for this harness; tested elsewhere.)
 
+## Optional — Phase 6: ERC-4337 passkey-only master (#164 E8)
+
+An **opt-in** phase (off by default) that proves the #164 master model: a master
+with **no secp256k1 key** lands a real on-chain master mutation via an **ERC-4337
+UserOp**. It runs on Heima **mainnet** and spends **~0.22 HEI** per run (account
+deposit + gas), so it only runs when you ask for it.
+
+```bash
+# As part of the wire demo (appends Phase 6 after teardown):
+AGENTKEYS_ERC4337_E8=1 bash harness/phase1-wire-demo.sh --real --webauthn
+
+# …or standalone — pure chain flow, no sandbox/Hermes needed:
+bash harness/erc4337-master-e8.sh
+```
+
+What it does: keygen a P-256 passkey → `P256AccountFactory.createAccount` (CREATE2)
+→ fund the account's EntryPoint deposit (≥ the ~0.1 HEI ExistentialDeposit, so
+`missingAccountFunds == 0`) → build a UserOp whose callData is a master mutation
+(`addSigner`) → **WebAuthn-sign the `userOpHash`** → pre-check against the live
+`K11Verifier` (zero gas) → `EntryPoint.handleOps` → assert `activeSignerCount 1→2`.
+No secp256k1 key signs anything. `ok …` / `fail …` per step.
+
+**Prereqs:** `cast` (Foundry) on PATH; the deployer key (`~/.agentkeys/heima-deployer.key`
+— funds the deposit + gas); Python 3 (the script auto-provisions a `cryptography`
+venv at `~/.agentkeys/erc4337-venv`). The live EntryPoint + factory addresses are in
+[`docs/contracts.md`](contracts.md). **Append-only:** each run mints a fresh account
+(it is NOT idempotent in the resource sense). The bundler is not required — the demo
+calls `EntryPoint.handleOps` directly. Full design + cutover status:
+[`docs/plan/chain/erc4337-master-account.md`](plan/chain/erc4337-master-account.md).
+
+> Note: the **live factory** currently embeds the E2-era account (deployed before the
+> E5 recovery work), so on-chain accounts have `addSigner` (what E8 exercises) but not
+> yet `recover()`; the E3/E5-complete account ships at the coordinated cutover redeploy.
+
 ## Verifying it worked — deterministically (no LLM inference)
 
 **Do NOT judge success by the chat reply.** An LLM may phrase a memory-aware
@@ -236,7 +270,8 @@ Env overrides: `SANDBOX_URL`, `MCP_PORT`, `SESSION_ID` (default `alice`),
 `AGENTKEYS_REUSE_AGENT=1` (skip Phase P fresh pairing; reuse a master-side agent) ·
 `AGENTKEYS_AGENT_SESSION_BEARER` (override the agent session) ·
 `MEMORY_ROLE_ARN` / `VAULT_ROLE_ARN` / `REGION` (per-actor STS relay; sourced from `operator-workstation.env`),
-`AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER`.
+`AGENTKEYS_ACTOR_OMNI` / `AGENTKEYS_OPERATOR_OMNI` / `AGENTKEYS_SESSION_BEARER` ·
+`AGENTKEYS_ERC4337_E8=1` (opt-in Phase 6 — ERC-4337 passkey-only master on Heima mainnet, ~0.22 HEI; see the Phase 6 section).
 
 ## Drift detection
 
