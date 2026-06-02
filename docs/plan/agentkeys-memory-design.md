@@ -515,15 +515,29 @@ The Hermes provider lifecycle's step 6 is *"adds provider-specific tools for mem
 
 ### 6a.3 How to start: pick a canonical engine by one axis
 
-The axis that protects the two load-bearing properties (own-the-bytes + LLM-pluggable) is **store-locality + determinism + zero third-party egress**:
+The axis that protects the two load-bearing properties (own-the-bytes + LLM-pluggable) is **store-locality + LLM-in-the-loop + third-party egress**:
 
-| Tier | Providers | Why this tier | Action |
+| Tier | Engine | Store | Ranking | Notes |
+|---|---|---|---|---|
+| **1a — deterministic** | **Holographic** | local SQLite | HRR algebra, **no LLM** | the true zero-egress, deterministic engine — keeps the gate LLM-free |
+| **1b — self-hosted, LLM-backed** | **OpenViking** | self-hosted `openviking-server` (operator infra) | `search/find` semantic, **requires a VLM + embedding model** | self-hosted so bytes stay on operator infra, but its VLM reads content — use a LOCAL VLM/embeddings (vLLM/Ollama) to keep egress zero |
+| **2 — extraction-local** | ByteRover, Hindsight (local mode) | local-ish | LLM extraction | useful for `extract`, not just rank |
+| **3 — gate-the-egress only** | Mem0, Honcho, Supermemory, RetainDB, Memori | cloud-bundled | their cloud | can't own bytes; gate authorizes the call + audits |
+
+> **Correction (spike, 2026-06):** an earlier draft put OpenViking in a single "deterministic, zero-egress" Tier 1. That was **wrong** — OpenViking **requires a VLM + embedding model** (extraction + semantic search) and is **query-driven**. The deterministic, no-LLM engine is **Holographic**. OpenViking is still a strong *self-hosted* choice, but its determinism/egress profile depends on running LOCAL models.
+
+**OpenViking server API — spike result (the adapter targets this, not a guess; from the [Hermes plugin client](https://github.com/NousResearch/hermes-agent/tree/main/plugins/memory/openviking) + [OpenViking](https://github.com/volcengine/OpenViking)):**
+
+| Endpoint | Method | Body | Response |
 |---|---|---|---|
-| **1 — canonical** | **OpenViking** (self-hosted, `OPENVIKING_ENDPOINT`, tiered retrieval over a hierarchy); **Holographic** (local SQLite, HRR algebra — no LLM in the loop) | bytes stay on operator infra; ranking is deterministic; config is one endpoint/path we control. OpenViking's "filesystem hierarchy + tiered retrieval" is ~1:1 with our namespaced S3 store. | **Build the adapter against OpenViking first.** Holographic second — it proves the no-LLM-call ranking property. |
-| **2 — extraction-local** | ByteRover (local pre-compression extraction); Hindsight (local mode) | local-ish; useful for the `extract` call, not just `rank` | after Tier 1 |
-| **3 — gate-the-egress only** | Mem0, Honcho, Supermemory, RetainDB, Memori (cloud-bundled store) | their cloud sees the bytes — fights own-store. We cannot *store*, but the gate still controls the *call*. | support as "operator accepts egress"; the cap authorizes whether the egress happens, audit records it |
+| `/api/v1/search/find` | POST | `{query, top_k, mode?}` | `{result:{results:[{score, content\|text, uri}]}}` |
+| `/api/v1/content/write` | POST | `{uri, content, mode:"create"}` | `{result}` |
+| `/api/v1/content/{read,abstract,overview}` | POST | `{uri}` | full / L0 / L1 (tiered) |
+| `/api/v1/fs/{ls,stat,tree}` | GET | `?uri=viking://…` | filesystem nav |
 
-**Recommendation: OpenViking is the canonical engine to test.** Self-hosted single endpoint, no cloud account, maps onto the store, privacy thesis intact out of the box. Confirm its exact interface with a ½–1 day spike before writing the adapter (the provider doc is a summary, not a contract).
+Base `http://127.0.0.1:1933`; auth `OPENVIKING_API_KEY` + `account`/`user`/`agent` headers (default `default`/`default`/`hermes`); VLM + embedding configured in `~/.openviking/ov.conf`. Install: `pip install openviking` → `openviking-server`.
+
+**Key consequence — OpenViking fits the QUERY path, not the no-query passive injection.** `search/find` needs a query, but the `pre_llm_call` hook today injects the whole namespace with no query. So "fit OpenViking" means making injection **query-aware**: read the current turn from the hook payload, run `search/find`, inject the **gate-bounded** top-K (recency fallback when there is no query / no endpoint / an error). The gate still bounds what is injectable — we only ever inject lines the gate authorized, so OpenViking *ranks* but can never *widen* visibility. This is the model-B "engine behind the gate" shape for a query-driven engine.
 
 ### 6a.4 The adapter seam — one trait, three calls
 
