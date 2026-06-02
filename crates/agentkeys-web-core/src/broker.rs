@@ -1,19 +1,18 @@
 //! Host-agnostic broker HTTP client for the master control plane.
 //!
-//! W0/X0 of [`docs/plan/web-flow/wire-real-paths.md`]: one typed broker client
-//! that the daemon ui-bridge, the future WASM `CoreBackend` (web), and the
-//! mobile UniFFI shell all share — so the browser/phone never re-implement
-//! broker calls in TypeScript/Swift (the "consistency is structural" rule).
+//! W0/X0 of `docs/plan/web-flow/wire-real-paths.md`: one typed broker client
+//! that the daemon ui-bridge, the WASM `CoreBackend` (web), and the mobile
+//! UniFFI shell all share — so the browser/phone never re-implement broker
+//! calls in TypeScript/Swift (the "consistency is structural" rule).
 //!
 //! Scope: the pairing (arch.md §10.2 method A, master-side) + cap-mint
-//! endpoints the web wiring proxies. The email/OAuth/SIWE auth flow already
-//! lives in [`crate::init_flow`]; this module is the net-new surface plus a
+//! endpoints the web wiring proxies. The email/OAuth/SIWE auth flow lives in
+//! `agentkeys_core::init_flow`; this module is the net-new surface plus a
 //! reusable typed client others can build on.
 //!
-//! WASM note: `reqwest` has a browser-`fetch` target, so this compiles for the
-//! web host. Feature-gating the crate's `reqwest` for `wasm32` (drop the native
-//! TLS/tokio default features) is the X1 build step — out of scope here; this
-//! module is host-agnostic by construction (no filesystem, no clock, no env).
+//! WASM: this crate pins `reqwest` to `default-features = false` so `wasm32`
+//! uses the browser `fetch` backend (native adds `rustls-tls`); the client is
+//! host-agnostic by construction (no filesystem, clock, or env).
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -220,7 +219,7 @@ struct AckRequest {
     request_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AckResponse {
     pub acked: bool,
     pub request_id: String,

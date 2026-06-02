@@ -2,7 +2,6 @@ pub mod actor_omni;
 pub mod audit;
 pub mod auth_request;
 pub mod backend;
-pub mod broker;
 pub mod chain_profile;
 pub mod clear_signing;
 pub mod device_crypto;

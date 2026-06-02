@@ -238,6 +238,48 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+# Build the WASM master-plane core (agentkeys-web-core → apps/parent-control via
+# wasm-pack) iff the Rust source / Cargo.toml / wasm-pack version changed since
+# the last build. Cached via a src-hash stamp in the (gitignored) out dir; the
+# generated pkg + served .wasm are never committed. Graceful no-op if wasm-pack
+# isn't installed (the UI then runs with the daemon/empty backend; only the
+# `core` backend needs the WASM module).
+build_wasm() {
+  local crate_dir="$REPO_ROOT/crates/agentkeys-web-core"
+  local out_dir="$REPO_ROOT/apps/parent-control/lib/wasm/agentkeys-web-core"
+  local pub_dir="$REPO_ROOT/apps/parent-control/public/wasm"
+  local stamp="$out_dir/.src-hash"
+
+  if ! command -v wasm-pack >/dev/null 2>&1; then
+    warn "wasm-pack not installed — skipping WASM core (cargo install wasm-pack && rustup target add wasm32-unknown-unknown). 'core' backend unavailable; UI uses daemon/empty."
+    return 0
+  fi
+
+  # Version key: every .rs under src/ + Cargo.toml + the wasm-pack version. Any
+  # change ⇒ rebuild; otherwise reuse the cached pkg (the "verify same version").
+  local cur
+  cur="$( { find "$crate_dir/src" -type f -name '*.rs' -exec shasum -a 256 {} +;
+            shasum -a 256 "$crate_dir/Cargo.toml";
+            wasm-pack --version; } | shasum -a 256 | awk '{print $1}' )"
+
+  if [ -f "$out_dir/agentkeys_web_core_bg.wasm" ] && [ -f "$pub_dir/agentkeys_web_core_bg.wasm" ] \
+     && [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$cur" ]; then
+    printf "%b[dev]%b WASM core up-to-date (%s…) — skip build\n" "$C_DIM" "$C_RESET" "${cur:0:12}"
+    return 0
+  fi
+
+  rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown \
+    || rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true
+  say "building WASM core (agentkeys-web-core → lib/wasm)…"
+  ( cd "$REPO_ROOT" && wasm-pack build crates/agentkeys-web-core --dev --target web \
+      --out-dir "$out_dir" -- --features wasm ) \
+    || { err "wasm-pack build failed"; exit 1; }
+  mkdir -p "$pub_dir"
+  cp "$out_dir/agentkeys_web_core_bg.wasm" "$pub_dir/agentkeys_web_core_bg.wasm"
+  printf '%s' "$cur" > "$stamp"
+  say "WASM core built + cached (${cur:0:12}…)."
+}
+
 # ─── Preflight ─────────────────────────────────────────────────────
 free_port "$UI_PORT"
 free_port "$DAEMON_PORT"
@@ -246,6 +288,7 @@ build_if_needed "$DAEMON_BIN" "agentkeys-daemon" "agentkeys-daemon" \
   "$REPO_ROOT/crates/agentkeys-daemon"
 build_if_needed "$MCP_BIN" "agentkeys-mcp-server" "agentkeys-mcp-server" \
   "$REPO_ROOT/crates/agentkeys-mcp" "$REPO_ROOT/crates/agentkeys-mcp-server"
+build_wasm
 
 # ─── Start daemon ──────────────────────────────────────────────────
 #
