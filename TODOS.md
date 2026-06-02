@@ -144,4 +144,4 @@ milestone. Filing as TODOs to prevent "post-MVP" from becoming "never":
 - Stage 5b: agentic fallback + audit trail + fallback→PR + `/agentkeys-record-scraper` skill usage
 - Stage 6: npm package + install.sh + README polish + DX docs
 - Stage 8: production hardening (daemon memory hygiene + CLI defensive features)
-- Pattern 4 (Heima) audit submission infrastructure — see docs/spec/plans/development-stages.md Stage 9
+- Pattern 4 (Heima) audit submission infrastructure — see docs/archived/development-stages-v2-2026-04.md Stage 9
