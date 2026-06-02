@@ -9,7 +9,8 @@ import {K11Verifier} from "./K11Verifier.sol";
 ///
 /// @dev    Stage-2 (#90) hardening:
 ///         - K11 assertions are P-256 verified ON CHAIN via [K11Verifier] +
-///           [P256Verifier] (Heima is at London EVM, no EIP-7212 precompile).
+///           [P256Verifier] (Heima executes Cancun; no EIP-7212/RIP-7212 P-256
+///           precompile, so on-chain P-256 is pure-Solidity). See #168.
 ///         - K11 assertion challenge is bound to (operation_kind || operator ||
 ///           params || chainid || operatorNonce[operator]) so a captured K11
 ///           sig cannot be replayed for a different operation.
