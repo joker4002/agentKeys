@@ -532,7 +532,10 @@ pub async fn cmd_init_with_force(
     if !force {
         if let Ok(existing) = ctx.load_session() {
             if is_usable_session(&existing) {
-                let msg = format!("Already initialized as {}", existing.wallet.0);
+                let msg = format!(
+                    "Already initialized as {}. Run 'agentkeys init --force' to re-initialize.",
+                    existing.wallet.0
+                );
                 return Ok((msg, existing));
             }
         }

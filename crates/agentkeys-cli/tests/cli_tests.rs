@@ -105,7 +105,10 @@ async fn init_is_idempotent_when_session_exists() {
 
     assert_eq!(
         second_output,
-        format!("Already initialized as {}", first_session.wallet.0)
+        format!(
+            "Already initialized as {}. Run 'agentkeys init --force' to re-initialize.",
+            first_session.wallet.0
+        )
     );
     assert_eq!(second_session, first_session);
 }
