@@ -60,7 +60,9 @@ impl SelectionBudget {
 }
 
 fn env_usize(key: &str) -> Option<usize> {
-    std::env::var(key).ok().and_then(|raw| raw.trim().parse().ok())
+    std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
 }
 
 /// The pluggable engine. Input is gate-authorized lines; output is the ordered
@@ -117,7 +119,7 @@ impl MemoryEngine for PassthroughEngine {
             return lines;
         }
         let mut by_recency = lines;
-        by_recency.sort_by(|a, b| b.seq.cmp(&a.seq));
+        by_recency.sort_by_key(|line| std::cmp::Reverse(line.seq));
         apply_budget(by_recency, budget)
     }
 }
@@ -245,7 +247,12 @@ Tokyo conference in March, stayed in Shibuya.";
 
     #[test]
     fn lexical_with_query_selects_relevant_line() {
-        let out = select_blob(&LexicalEngine, Some("where did I go in Chengdu"), BLOB, &budget(Some(1)));
+        let out = select_blob(
+            &LexicalEngine,
+            Some("where did I go in Chengdu"),
+            BLOB,
+            &budget(Some(1)),
+        );
         assert_eq!(out, "Chengdu trip — Apr 12 to 16, hotpot at Yulin.");
     }
 
@@ -259,8 +266,14 @@ Tokyo conference in March, stayed in Shibuya.";
     fn single_line_blob_unchanged_across_engines() {
         let single = "Chengdu trip — Apr 12 to 16, hotpot at Yulin.";
         let unbounded = SelectionBudget::default();
-        assert_eq!(select_blob(&PassthroughEngine, None, single, &unbounded), single);
-        assert_eq!(select_blob(&LexicalEngine, Some("chengdu"), single, &unbounded), single);
+        assert_eq!(
+            select_blob(&PassthroughEngine, None, single, &unbounded),
+            single
+        );
+        assert_eq!(
+            select_blob(&LexicalEngine, Some("chengdu"), single, &unbounded),
+            single
+        );
     }
 
     #[test]
@@ -287,7 +300,13 @@ Tokyo conference in March, stayed in Shibuya.";
 
     #[test]
     fn empty_blob_stays_empty() {
-        assert_eq!(select_blob(&PassthroughEngine, None, "   ", &SelectionBudget::default()), "");
-        assert_eq!(select_blob(&LexicalEngine, Some("x"), "", &SelectionBudget::default()), "");
+        assert_eq!(
+            select_blob(&PassthroughEngine, None, "   ", &SelectionBudget::default()),
+            ""
+        );
+        assert_eq!(
+            select_blob(&LexicalEngine, Some("x"), "", &SelectionBudget::default()),
+            ""
+        );
     }
 }
