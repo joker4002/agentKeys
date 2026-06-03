@@ -12,6 +12,20 @@
 | What OpenViking does | **ranks** gate-authorized lines for the current turn | stores + serves + extracts |
 
 > ⛔ **Do NOT run `hermes memory setup`.** The OpenViking docs tell you to — but that sets `memory.provider: openviking`, which wires OpenViking as a **Hermes provider**: it hands the LLM the 5 `viking_*` tools and makes OpenViking the store, **bypassing our gate** (the ungated "Model A" we rejected). In our gated model the Hermes-side wiring is **`agentkeys wire hermes --memory-engine openviking …`** (Step 6) — that's the replacement for `hermes memory setup`.
+>
+> **Already ran it? Undo (the provider is just a config key — this does NOT touch the AgentKeys `pre_llm_call` hook, which lives in a separate `# >>> agentkeys wire` managed block):**
+> ```bash
+> # inspect what it set
+> hermes config get memory.provider 2>/dev/null            # → openviking
+> sed -n '/^memory:/,/^[^[:space:]]/p' ~/.hermes/config.yaml   # the memory: block
+> grep -nE 'OPENVIKING' ~/.hermes/.env 2>/dev/null
+> # turn it off — try the hermes way first, else edit the files:
+> hermes memory setup        # pick "none"/"disable"/"built-in" if offered
+> #   else: delete the `memory:`/`provider: openviking` block from ~/.hermes/config.yaml,
+> #         and remove OPENVIKING_ENDPOINT / OPENVIKING_API_KEY from ~/.hermes/.env
+> hermes config get memory.provider     # verify empty/none
+> ```
+> Keep `openviking-server` running and keep (or run) `agentkeys wire … --memory-engine openviking` — our gated hook still uses OpenViking; you've only removed the ungated Hermes provider.
 
 OpenViking is a pluggable *engine*, swappable for Holographic / mem0 / a deterministic built-in. If you don't need semantic search, `MEMORY_ENGINE=lexical` gives gated, query-aware ranking with **zero models to deploy** — skip this whole runbook.
 
@@ -151,6 +165,7 @@ agentkeys wire hermes --namespaces travel \
 | Step 7 injects the *whole* namespace, unranked | hook fell back (no query, or `OPENVIKING_ENDPOINT` not baked) | confirm Step 6 baked the env; ensure the payload has a `query` field |
 | `content/write` 4xx | `mode:"create"` on an existing URI | use a fresh `viking://` path or OpenViking's update mode |
 | hook hangs on a manual call | reading an open stdin | the hook is `is_terminal()`-guarded; always **pipe** the payload (`printf … \| …`) |
+| LLM has `viking_*` tools / memory double-injects | you ran `hermes memory setup` (provider is on) | undo it — see the ⛔ callout above (remove `memory.provider`); keep the `agentkeys wire` block |
 
 ## References
 - Plan: [`plan/agentkeys-memory-design.md`](plan/agentkeys-memory-design.md) §6a (engine seam, spiked OpenViking API, model-B rationale).
