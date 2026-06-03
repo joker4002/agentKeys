@@ -625,7 +625,9 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         .await
         .context("POST /v1/agent/pairing/request")?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    // Cap the body (one-shot request, but a faulty broker/proxy shouldn't be able
+    // to make us buffer an unbounded response).
+    let text = read_capped_body(resp, MAX_POLL_BODY).await;
     if !status.is_success() {
         // Body is never trusted (a proxy/WAF could echo the request JSON incl.
         // pop_sig) — same suppression contract as the poll path.
@@ -805,7 +807,11 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
             } else {
                 None
             };
-            let text = resp.text().await.unwrap_or_default();
+            // Skip the body for retryable statuses (5xx/408/429) — classify_poll
+            // suppresses it anyway, and an overloaded/malicious broker must not be
+            // able to make every retry download a huge/slow body until the
+            // deadline. Success/fatal bodies are read but capped.
+            let text = read_poll_body(resp).await;
             Ok::<_, reqwest::Error>((status, retry_after, text))
         };
 
@@ -1284,10 +1290,7 @@ fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
                 e.column()
             )),
         }
-    } else if status.is_server_error()
-        || status == reqwest::StatusCode::REQUEST_TIMEOUT
-        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-    {
+    } else if is_retryable_status(status) {
         // Retryable failure: suppress the response body entirely. A faulty
         // gateway/proxy can echo diagnostics, request metadata, or even a
         // misclassified claimed payload (carrying session_jwt) in a 5xx/408/429
@@ -1368,6 +1371,54 @@ async fn sleep_within_deadline(dur: Duration, deadline: Instant) {
 fn poll_retry_wait(retry_after: Option<Duration>, attempt: u32) -> Duration {
     let backoff = backoff_with_jitter(attempt);
     retry_after.map_or(backoff, |ra| ra.max(backoff))
+}
+
+/// Max bytes to buffer from a poll/request response body. A broker JSON envelope
+/// is tiny; this bounds the allocation if a broker/proxy streams a huge body.
+const MAX_POLL_BODY: usize = 64 * 1024;
+
+/// Statuses classify_poll treats as retryable (body suppressed): 5xx, 408, 429.
+/// Shared so the poll path can SKIP reading the body for these — an overloaded or
+/// malicious broker must not be able to make every retry download a huge/slow
+/// body until the deadline (codex review #182).
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Read at most `max` bytes of a response body by streaming chunks, so an
+/// oversized body is never fully buffered. Returns lossy UTF-8.
+async fn read_capped_body(mut resp: reqwest::Response, max: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = max.saturating_sub(buf.len());
+                if remaining == 0 {
+                    break;
+                }
+                let take = remaining.min(chunk.len());
+                buf.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    break; // hit the cap mid-chunk
+                }
+            }
+            Ok(None) => break, // EOF
+            Err(_) => break,   // transport error mid-body: use what we have
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Read a poll response body ONLY when the classifier will use it. Retryable
+/// statuses (5xx/408/429) suppress the body anyway, so skip the download
+/// entirely; success/fatal bodies are read but capped at `MAX_POLL_BODY`.
+async fn read_poll_body(resp: reqwest::Response) -> String {
+    if is_retryable_status(resp.status()) {
+        return String::new();
+    }
+    read_capped_body(resp, MAX_POLL_BODY).await
 }
 
 /// True iff `s` is a 64-char lowercase-hex omni address — the exact shape
@@ -1525,9 +1576,10 @@ fn session_bearer_path(dir: &str, child_omni: &str) -> String {
 mod pairing_poll_tests {
     use super::{
         backoff_with_jitter, binding_artifact, classify_poll, format_broker_error,
-        is_derivation_path, is_omni_hex, pairing_request_guard, pairing_state_path,
-        parse_retry_after, poll_retry_wait, request_artifact, session_bearer_path, truncate_body,
-        validate_claimed_binding, PollClass, PAIRING_POLL_INTERVAL_SECONDS,
+        is_derivation_path, is_omni_hex, is_retryable_status, pairing_request_guard,
+        pairing_state_path, parse_retry_after, poll_retry_wait, read_poll_body, request_artifact,
+        session_bearer_path, truncate_body, validate_claimed_binding, PollClass, MAX_POLL_BODY,
+        PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -1891,6 +1943,83 @@ mod pairing_poll_tests {
         assert!(pairing_request_guard(None, 500, false).is_ok());
         // Unreadable prior state is not a handle worth protecting → proceed.
         assert!(pairing_request_guard(Some("not json"), 500, false).is_ok());
+    }
+
+    #[test]
+    fn is_retryable_status_covers_5xx_408_429_only() {
+        for s in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert!(is_retryable_status(s), "{s} should be retryable");
+        }
+        for s in [
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::MOVED_PERMANENTLY,
+        ] {
+            assert!(!is_retryable_status(s), "{s} should NOT be retryable");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_poll_body_skips_retryable_and_caps_success() {
+        use axum::{routing::get, Router};
+        // Bodies far larger than the cap, served on a retryable 503 and a 200.
+        let big = "x".repeat(MAX_POLL_BODY * 4);
+        let big503 = big.clone();
+        let big200 = big;
+        let app = Router::new()
+            .route(
+                "/r",
+                get(move || {
+                    let b = big503.clone();
+                    async move { (axum::http::StatusCode::SERVICE_UNAVAILABLE, b) }
+                }),
+            )
+            .route(
+                "/ok",
+                get(move || {
+                    let b = big200.clone();
+                    async move { b }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+
+        // Retryable 503: the body is NOT read (empty), no matter how large.
+        let resp = client.get(format!("http://{addr}/r")).send().await.unwrap();
+        assert!(is_retryable_status(resp.status()));
+        let body = read_poll_body(resp).await;
+        assert!(
+            body.is_empty(),
+            "retryable body must be skipped, got {} bytes",
+            body.len()
+        );
+
+        // Success 200: body is read but capped at MAX_POLL_BODY (not the full size).
+        let resp = client
+            .get(format!("http://{addr}/ok"))
+            .send()
+            .await
+            .unwrap();
+        let body = read_poll_body(resp).await;
+        assert!(!body.is_empty());
+        assert!(
+            body.len() <= MAX_POLL_BODY,
+            "success body must be capped at {MAX_POLL_BODY}, got {}",
+            body.len()
+        );
     }
 
     #[test]
