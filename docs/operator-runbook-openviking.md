@@ -145,14 +145,36 @@ mirror travel "Hotel in Yulin district near hotpot street." 2
 
 ## Step 6 — wire AgentKeys to use OpenViking as the engine
 
-This is the replacement for `hermes memory setup` (which we do **not** run — see the warning above). It bakes `AGENTKEYS_MEMORY_ENGINE=openviking` **and** `OPENVIKING_ENDPOINT` into the `pre_llm_call` hook:
+This is the replacement for `hermes memory setup` (which we do **not** run — see the warning above). It bakes `AGENTKEYS_MEMORY_ENGINE=openviking` **and** `OPENVIKING_ENDPOINT` into the `pre_llm_call` hook — for the **same agent identity** the [Step-0 prerequisite](#prerequisites) (`harness/phase1-wire-demo.sh`) already wired.
+
+### 6a — inherit the agent's omni identity from the wire demo
+`agentkeys wire` reads the actor/operator omni, MCP URL, vendor token, and session bearer from the env (`AGENTKEYS_ACTOR_OMNI`, `AGENTKEYS_OPERATOR_OMNI`, `AGENTKEYS_MCP_URL`, `AGENTKEYS_MCP_VENDOR_TOKEN`, `AGENTKEYS_SESSION_BEARER`) — and the wire demo **baked all five into the hook header**. Recover them so this re-wire keeps the *same* agent (re-typing the 64-hex omnis is error-prone, and passing `--actor-omni ""` from an unset var silently wires an **empty** actor):
+```bash
+hook=~/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh
+[ -f "$hook" ] || echo "no wired hook yet — run the Step-0 prerequisite (harness/phase1-wire-demo.sh) first"
+eval "$(grep -E '^export AGENTKEYS_(ACTOR_OMNI|OPERATOR_OMNI|MCP_URL|MCP_VENDOR_TOKEN|SESSION_BEARER)=' "$hook" 2>/dev/null)"
+: "${AGENTKEYS_ACTOR_OMNI:?unset — set it from the wire demo (see the per-mode note below)}"
+echo "actor=$AGENTKEYS_ACTOR_OMNI"
+echo "operator=$AGENTKEYS_OPERATOR_OMNI"
+echo "mcp=$AGENTKEYS_MCP_URL  vendor=$AGENTKEYS_MCP_VENDOR_TOKEN  bearer=${AGENTKEYS_SESSION_BEARER:+set}"
+```
+> **Where the omnis come from** (6a recovers them automatically — this is for setting them by hand):
+> - **`--light`** (this runbook's default): the fixed in-memory demo identity (`AGENTKEYS_ACTOR_OMNI=0xa0c7…`, `AGENTKEYS_OPERATOR_OMNI=0x07e8…`). Canonical source: [`crates/agentkeys-mcp-server/src/backend/in_memory.rs`](../crates/agentkeys-mcp-server/src/backend/in_memory.rs) lines 33-35; `agentkeys wire` falls back to exactly these when the env is unset, so light mode works even if 6a found nothing — but only if you **omit** the flags (don't pass `--actor-omni ""`).
+> - **`--real`**: the per-agent omnis the wire demo resolves in **Phase P** and prints in the `heima-agent-create.sh` `==> Inputs` block, e.g.
+>   ```
+>   operator_omni    = 0x941cb1c3260518bbf40eac7d02663517fc7cff304d9b03e80d2cc54126c6bef2
+>   actor_omni       = 0x18e49c6020dfef1bd1c973bb001b5fb95fa735c41c3a23efae2b22b6447c5ed8
+>   ```
+>   The operator omni derives from your master key; the actor omni is the HDKD child minted at pairing. The wire step bakes both into the hook, so 6a recovers them — no copy-paste. (The session bearer is a JWT that **expires**; if a real-mode re-wire later fails auth, re-run `harness/phase1-wire-demo.sh --real` to refresh it.)
+
+### 6b — wire (adds OpenViking; keeps the 6a identity)
 ```bash
 agentkeys wire hermes \
   --actor-omni "$AGENTKEYS_ACTOR_OMNI" --operator-omni "$AGENTKEYS_OPERATOR_OMNI" \
   --namespaces travel \
   --memory-engine openviking --openviking-endpoint http://localhost:1933 \
-  --mcp-url http://localhost:18088/mcp --vendor-token demo-tok
-grep -E 'OPENVIKING_ENDPOINT|AGENTKEYS_MEMORY_ENGINE' ~/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh
+  --mcp-url "$AGENTKEYS_MCP_URL" --vendor-token "$AGENTKEYS_MCP_VENDOR_TOKEN"
+grep -E 'OPENVIKING_ENDPOINT|AGENTKEYS_MEMORY_ENGINE|AGENTKEYS_ACTOR_OMNI' ~/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh
 ```
 Leave `memory.provider` **unset** in `~/.hermes/config.yaml` — the AgentKeys hook stays the sole memory delivery.
 
@@ -178,10 +200,15 @@ Then the real chat (Phase 4 of the wire demo): ask the agent about the trip and 
 | **Durable copy stays encrypted** | the S3 object `bots/<actor>/memory/memory:travel.enc` | unchanged; OpenViking holds only its `viking://` index |
 
 ## Step 9 — teardown
+Revert to the deterministic engine **for the same agent**. The block re-recovers the identity from the hook (same as [6a](#6a--inherit-the-agents-omni-identity-from-the-wire-demo)) so it works in a fresh shell too — without it the omni env would be unset and the re-wire would drop the hook back to the demo actor:
 ```bash
 pkill -f openviking-server 2>/dev/null; true
-agentkeys wire hermes --namespaces travel \
-  --mcp-url http://localhost:18088/mcp --vendor-token demo-tok   # no --memory-engine ⇒ deterministic
+hook=~/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh
+eval "$(grep -E '^export AGENTKEYS_(ACTOR_OMNI|OPERATOR_OMNI|MCP_URL|MCP_VENDOR_TOKEN|SESSION_BEARER)=' "$hook" 2>/dev/null)"
+agentkeys wire hermes \
+  --actor-omni "$AGENTKEYS_ACTOR_OMNI" --operator-omni "$AGENTKEYS_OPERATOR_OMNI" \
+  --namespaces travel \
+  --mcp-url "$AGENTKEYS_MCP_URL" --vendor-token "$AGENTKEYS_MCP_VENDOR_TOKEN"   # no --memory-engine ⇒ deterministic
 ```
 
 ## Automated path
@@ -195,6 +222,7 @@ agentkeys wire hermes --namespaces travel \
 | `/health` fails | embedding/VLM misconfigured | re-run `openviking-server init`; read `~/openviking.log` |
 | `search/find` returns nothing | index empty | run Step 4/5 (load/mirror) — it ranks only what's indexed |
 | Step 7 injects the *whole* namespace, unranked | hook fell back (no query, or `OPENVIKING_ENDPOINT` not baked) | confirm Step 6 baked the env; ensure the payload has a `query` field |
+| Step 6 bakes an empty `AGENTKEYS_ACTOR_OMNI=''` (or the wrong actor) into the hook | you ran the wire command (6b) before exporting the omni env (6a) — `--actor-omni "$UNSET"` passes an empty string, overriding `wire`'s demo fallback | run **Step 6a** first: it recovers actor/operator omni + MCP URL + vendor token from the hook the [Step-0](#prerequisites) wire demo baked. `--light` falls back to the `in_memory.rs` demo omnis only when you **omit** the flags entirely |
 | `content/write` HTTP 400 on every write | malformed URI — it **must** be `viking://user/<user>/memories/<subdir>/<name>.md` (the `<user>` segment + `.md` are required) | use the full path (Step 4); drop `-f` so you can see the error body |
 | `search/find` → `jq: Cannot iterate over null` | results are under **`.result.memories`** (+ `.resources`/`.skills`), not `.result.results` | `jq '.result.memories[]? \| {score,uri,abstract}'` |
 | `search/find` returns score+uri but blank `abstract` | **Skip VLM** mode — no model to write the L0 abstract | ranking is fine; read verbatim with `content/read <uri>` |
