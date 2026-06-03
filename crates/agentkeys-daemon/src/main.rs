@@ -1162,16 +1162,33 @@ fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
                 }
                 // Only an explicit "pending" keeps waiting; a missing/unknown
                 // success status (e.g. "expired", an error envelope) is a
-                // protocol/state error — surface the status string (short, safe),
-                // suppress the body.
+                // protocol/state error → fail fast.
                 Some("pending") => PollClass::Pending,
-                other => PollClass::Fatal(format!(
-                    "unexpected poll status {:?} (body suppressed)",
-                    other.unwrap_or("<missing>")
-                )),
+                // Known statuses (claimed/pending) are matched above, so `other`
+                // is by definition unrecognized. Do NOT interpolate the value: a
+                // reflected `{"status":"session_jwt=..."}` would leak it (same
+                // class as the fatal error-value leak). Log only whether status
+                // was missing vs present-but-unrecognized — never the value or
+                // the body.
+                other => {
+                    let detail = if other.is_none() {
+                        "missing"
+                    } else {
+                        "unrecognized"
+                    };
+                    PollClass::Fatal(format!(
+                        "unexpected poll status ({detail}; value + body suppressed)"
+                    ))
+                }
             },
+            // Body is unparseable JSON. Do NOT format the serde error's Display
+            // (a body-derived string): surface only its line/column integers,
+            // which provably cannot carry a token. Keeps the boundary airtight —
+            // no body-derived string is logged on ANY poll path.
             Err(e) => PollClass::Transient(format!(
-                "unparseable success response (body suppressed — may contain a token): {e}"
+                "unparseable success response (body suppressed; parse error at line {} col {})",
+                e.line(),
+                e.column()
             )),
         }
     } else if status.is_server_error()
@@ -1268,16 +1285,40 @@ mod pairing_poll_tests {
     #[test]
     fn only_explicit_pending_is_pending() {
         // Unknown / missing / non-"pending" success status must NOT silently
-        // wait — it fails fast (protocol/state error), body suppressed.
+        // wait — it fails fast (protocol/state error). The status VALUE is never
+        // logged: a reflected `{"status":"session_jwt=..."}` must not leak (same
+        // class as the fatal error-value leak).
+        for body in ["{}", r#"{"foo":1}"#] {
+            match classify_poll(StatusCode::OK, body) {
+                PollClass::Fatal(reason) => assert!(
+                    reason.contains("missing"),
+                    "missing status should report 'missing', got {reason}"
+                ),
+                other => panic!("body {body} should fail fast, got {other:?}"),
+            }
+        }
+
+        let long_leak = format!(r#"{{"status":"{}"}}"#, "SENTINEL_JWT".repeat(40));
         for body in [
-            r#"{"foo":1}"#,            // no status field
             r#"{"status":"expired"}"#, // rejected/expired state
             r#"{"status":"error","detail":"nope"}"#,
+            r#"{"status":"SENTINEL_JWT"}"#, // identifier-shaped token
+            r#"{"status":"session_jwt=SENTINEL_JWT"}"#, // key=value leak
+            long_leak.as_str(),             // long reflected string
         ] {
-            assert!(
-                matches!(classify_poll(StatusCode::OK, body), PollClass::Fatal(_)),
-                "body {body} should fail fast, not wait"
-            );
+            match classify_poll(StatusCode::OK, body) {
+                PollClass::Fatal(reason) => {
+                    assert!(
+                        !reason.contains("SENTINEL_JWT"),
+                        "unknown status leaked its value: {reason}"
+                    );
+                    assert!(
+                        reason.contains("unrecognized"),
+                        "present-but-unknown status should report 'unrecognized', got {reason}"
+                    );
+                }
+                other => panic!("body {body} should fail fast, got {other:?}"),
+            }
         }
     }
 
