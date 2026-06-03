@@ -747,7 +747,7 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
             }
             PollClass::Transient(reason) => {
                 transient_attempts += 1;
-                let wait = retry_after.unwrap_or_else(|| backoff_with_jitter(transient_attempts));
+                let wait = poll_retry_wait(retry_after, transient_attempts);
                 let wait_secs = wait.as_secs();
                 info!(
                     target: "agentkeys.daemon.init",
@@ -759,24 +759,16 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         }
     };
 
-    let session_jwt = body
-        .get("session_jwt")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!("claimed poll response missing session_jwt (body suppressed)")
-        })?;
-    let child_omni = body
-        .get("child_omni")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let operator_omni = body
-        .get("operator_omni")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let derivation_path = body
-        .get("derivation_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    // Validate the claimed binding BEFORE logging, deriving session_id, or
+    // emitting any field on stdout — these public fields are attacker-
+    // influenceable under the untrusted-body model, so a reflected token must
+    // never reach a log or the master's stdout.
+    let ClaimedBinding {
+        session_jwt,
+        child_omni,
+        operator_omni,
+        derivation_path,
+    } = validate_claimed_binding(&body)?;
 
     // Persist J1_agent so a daemon restart resumes (Session.wallet = K10 address;
     // the HDKD omni rides inside the J1 claims, not in Session.wallet).
@@ -785,7 +777,7 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let sess = Session {
-        token: session_jwt.to_string(),
+        token: session_jwt.clone(),
         wallet: WalletAddress(device_pubkey.clone()),
         scope: None,
         created_at: now,
@@ -808,7 +800,7 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         std::fs::create_dir_all(&dir).ok();
         format!("{dir}/agent-session.jwt")
     };
-    agentkeys_core::device_crypto::write_key_0600(&session_file, session_jwt)
+    agentkeys_core::device_crypto::write_key_0600(&session_file, &session_jwt)
         .context("persist agent session jwt (0600)")?;
 
     info!(
@@ -1257,10 +1249,110 @@ async fn sleep_within_deadline(dur: Duration, deadline: Instant) {
     tokio::time::sleep(dur.min(remaining)).await;
 }
 
+/// Effective wait before the next transient retry. Floors at the jittered
+/// backoff so a broker/proxy `Retry-After: 0` (or any value below the backoff)
+/// can't disable backoff and let the loop hammer the broker until the deadline;
+/// a LONGER `Retry-After` is still honored (codex review #182).
+fn poll_retry_wait(retry_after: Option<Duration>, attempt: u32) -> Duration {
+    let backoff = backoff_with_jitter(attempt);
+    retry_after.map_or(backoff, |ra| ra.max(backoff))
+}
+
+/// True iff `s` is a 64-char lowercase-hex omni address — the exact shape
+/// `agentkeys_core::actor_omni::{actor_omni_hex,child_omni_hex}` emit. Rejects
+/// reflected tokens, `0x`-prefixed values, uppercase, and any non-hex.
+fn is_omni_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// True iff `s` is a `//<label>` derivation path with a valid HDKD label
+/// (`^[a-z0-9-]{1,32}$`), matching the broker's `format!("//{label}")`.
+fn is_derivation_path(s: &str) -> bool {
+    match s.strip_prefix("//") {
+        Some(label) => {
+            !label.is_empty()
+                && label.len() <= 32
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        }
+        None => false,
+    }
+}
+
+/// The PUBLIC binding fields the daemon logs + emits on stdout after a claimed
+/// pairing. `classify_poll` only guarantees `session_jwt` is a string; the other
+/// three fields are still attacker-influenceable under the same untrusted-body
+/// model, and a reflected token in `child_omni`/`operator_omni`/`derivation_path`
+/// would otherwise be logged AND printed to the master's stdout. Validate each
+/// to its exact shape; a malformed identity is a protocol error.
+struct ClaimedBinding {
+    session_jwt: String,
+    child_omni: String,
+    operator_omni: String,
+    derivation_path: String,
+}
+
+// Manual Debug that REDACTS session_jwt — never derive it, or a future
+// `debug!("{binding:?}")` would dump the bearer. The public fields are already
+// validated to safe shapes (64-hex omni / //label), so they print as-is.
+impl std::fmt::Debug for ClaimedBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimedBinding")
+            .field("session_jwt", &"<redacted>")
+            .field("child_omni", &self.child_omni)
+            .field("operator_omni", &self.operator_omni)
+            .field("derivation_path", &self.derivation_path)
+            .finish()
+    }
+}
+
+/// Extract + validate the claimed-pairing binding from a 2xx claimed body.
+/// Error messages never echo a field value (it could carry a token).
+fn validate_claimed_binding(body: &serde_json::Value) -> anyhow::Result<ClaimedBinding> {
+    let session_jwt = body
+        .get("session_jwt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("claimed poll response missing session_jwt (body suppressed)")
+        })?;
+    let child_omni = body
+        .get("child_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let operator_omni = body
+        .get("operator_omni")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let derivation_path = body
+        .get("derivation_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !is_omni_hex(child_omni) {
+        anyhow::bail!("claimed poll response has a malformed child_omni (value suppressed)");
+    }
+    if !is_omni_hex(operator_omni) {
+        anyhow::bail!("claimed poll response has a malformed operator_omni (value suppressed)");
+    }
+    if !is_derivation_path(derivation_path) {
+        anyhow::bail!("claimed poll response has a malformed derivation_path (value suppressed)");
+    }
+    Ok(ClaimedBinding {
+        session_jwt: session_jwt.to_string(),
+        child_omni: child_omni.to_string(),
+        operator_omni: operator_omni.to_string(),
+        derivation_path: derivation_path.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod pairing_poll_tests {
     use super::{
-        backoff_with_jitter, classify_poll, parse_retry_after_secs, truncate_body, PollClass,
+        backoff_with_jitter, classify_poll, is_derivation_path, is_omni_hex,
+        parse_retry_after_secs, poll_retry_wait, truncate_body, validate_claimed_binding,
+        PollClass, PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::Duration;
@@ -1522,6 +1614,94 @@ mod pairing_poll_tests {
         assert!(out.chars().count() < 400);
         assert!(out.contains("bytes total"));
         assert_eq!(truncate_body("short"), "short");
+    }
+
+    #[test]
+    fn omni_and_path_validators_reject_reflected_tokens() {
+        // Valid shapes (64-char lowercase hex omni; //label path) pass.
+        assert!(is_omni_hex(&"0123456789abcdef".repeat(4)));
+        assert!(is_omni_hex(&"a".repeat(64)));
+        assert!(is_derivation_path("//hermes"));
+        assert!(is_derivation_path("//agent-01"));
+
+        // Reflected tokens / wrong shapes are rejected — these would otherwise
+        // be logged + printed on stdout from a claimed body.
+        let upper_hex = "A".repeat(64); // uppercase hex
+        let short_hex = "a".repeat(63); // wrong length
+        for bad in [
+            "session_jwt=SENTINEL_JWT",
+            "eyJhbGciOiJIUzI1NiJ9.payload.sig", // JWT-shaped (dots)
+            "SENTINEL_JWT",
+            "0xabcdef", // 0x prefix + short
+            upper_hex.as_str(),
+            short_hex.as_str(),
+            "",
+        ] {
+            assert!(!is_omni_hex(bad), "is_omni_hex must reject {bad}");
+        }
+        for bad in [
+            "//session_jwt=SENTINEL_JWT", // label charset
+            "//UPPER",
+            "/hermes", // single slash
+            "//",      // empty label
+            "session_jwt=x",
+            "",
+        ] {
+            assert!(
+                !is_derivation_path(bad),
+                "is_derivation_path must reject {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn claimed_binding_rejects_reflected_tokens_in_public_fields() {
+        // 64-char lowercase hex (&str is Copy, so it can be reused below).
+        let omni = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ok = serde_json::json!({
+            "session_jwt": "tok",
+            "child_omni": omni,
+            "operator_omni": omni,
+            "derivation_path": "//hermes",
+        });
+        assert!(validate_claimed_binding(&ok).is_ok());
+
+        // A reflected token in ANY public field (child_omni → also the derived
+        // session_id, operator_omni, derivation_path) is rejected, and the error
+        // never echoes the offending value.
+        for field in ["child_omni", "operator_omni", "derivation_path"] {
+            let mut v = ok.clone();
+            v[field] = serde_json::json!("session_jwt=SENTINEL_JWT");
+            let err = validate_claimed_binding(&v)
+                .expect_err("reflected token must be rejected")
+                .to_string();
+            assert!(
+                !err.contains("SENTINEL_JWT"),
+                "{field} value leaked into error: {err}"
+            );
+        }
+
+        // Missing session_jwt is rejected without echoing the body.
+        let no_jwt = serde_json::json!({
+            "child_omni": omni, "operator_omni": omni, "derivation_path": "//hermes",
+        });
+        assert!(validate_claimed_binding(&no_jwt).is_err());
+    }
+
+    #[test]
+    fn retry_after_zero_does_not_disable_backoff() {
+        // A broker/proxy `Retry-After: 0` must NOT zero the wait (which would let
+        // the loop hammer the broker); it floors at the jittered backoff.
+        let w = poll_retry_wait(Some(Duration::ZERO), 1);
+        assert!(
+            w >= Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS),
+            "zero Retry-After must floor at backoff, got {w:?}"
+        );
+        // A longer Retry-After is honored.
+        let long = Duration::from_secs(3600);
+        assert_eq!(poll_retry_wait(Some(long), 1), long);
+        // No header → pure backoff, still nonzero.
+        assert!(poll_retry_wait(None, 2) > Duration::ZERO);
     }
 }
 
