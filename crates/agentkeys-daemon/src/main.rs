@@ -669,8 +669,15 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
 
     // Poll until claimed or the operator-set timeout elapses.
     let deadline = SystemTime::now() + Duration::from_secs(args.init_poll_timeout_seconds);
+    // The sandbox polls the broker over the public internet, so a single
+    // transient failure (network blip, HTTP 5xx, an unparseable error page)
+    // must NOT abort the whole pairing — that made P.1b a coin-flip that
+    // "passed on the second run". Retry transient failures until the deadline,
+    // exactly like the not-yet-claimed wait; only `claimed` succeeds, only the
+    // deadline gives up (reporting the last transient if that's why).
+    let mut last_transient: Option<String> = None;
     let body: serde_json::Value = loop {
-        let resp = client
+        let poll_result: Result<serde_json::Value, String> = match client
             .post(format!("{base}/v1/agent/pairing/poll"))
             .json(&serde_json::json!({
                 "request_id": request_id,
@@ -679,31 +686,56 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
             }))
             .send()
             .await
-            .context("POST /v1/agent/pairing/poll")?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("pairing poll failed: HTTP {status}: {text}");
+        {
+            Err(e) => Err(format!("POST /v1/agent/pairing/poll: {e}")),
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    Err(format!("HTTP {status}: {text}"))
+                } else {
+                    serde_json::from_str::<serde_json::Value>(&text)
+                        .map_err(|e| format!("parse poll response: {e} (body: {text})"))
+                }
+            }
+        };
+
+        match poll_result {
+            Ok(body) => {
+                last_transient = None;
+                let pstatus = body
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if pstatus == "claimed" {
+                    break body;
+                }
+                info!(
+                    target: "agentkeys.daemon.init",
+                    "§10.2 pairing request still pending — waiting for the master to claim…"
+                );
+            }
+            Err(e) => {
+                info!(
+                    target: "agentkeys.daemon.init",
+                    "§10.2 pairing poll transient error (will retry): {e}"
+                );
+                last_transient = Some(e);
+            }
         }
-        let body: serde_json::Value =
-            serde_json::from_str(&text).with_context(|| format!("parse poll response: {text}"))?;
-        let pstatus = body
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if pstatus == "claimed" {
-            break body;
-        }
+
         if SystemTime::now() >= deadline {
-            anyhow::bail!(
-                "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
-                args.init_poll_timeout_seconds
-            );
+            match &last_transient {
+                Some(e) => anyhow::bail!(
+                    "pairing poll gave up after {}s of transient errors (last: {e})",
+                    args.init_poll_timeout_seconds
+                ),
+                None => anyhow::bail!(
+                    "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
+                    args.init_poll_timeout_seconds
+                ),
+            }
         }
-        info!(
-            target: "agentkeys.daemon.init",
-            "§10.2 pairing request still pending — waiting for the master to claim…"
-        );
         tokio::time::sleep(Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS)).await;
     };
 
