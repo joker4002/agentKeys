@@ -232,6 +232,13 @@ struct Args {
     #[arg(long)]
     request_id: Option<String>,
 
+    /// Replace an existing UNEXPIRED `--request-pairing` request for this device.
+    /// Without it, re-running `--request-pairing` while a prior request is still
+    /// claimable refuses (so it can't silently destroy the only retrieval handle,
+    /// since request_id is off stdout).
+    #[arg(long)]
+    force: bool,
+
     /// Path to the agent's K10 device-key file for the pairing flow. Defaults
     /// to the same path as `agentkeys agent device-session`
     /// (`~/.agentkeys/agent-device.key`) so the CLI + daemon share one key.
@@ -520,6 +527,37 @@ fn pairing_state_path(device_pubkey: &str) -> String {
     format!("{home}/.agentkeys/pairing-request-{device_pubkey}.json")
 }
 
+/// Guard `--request-pairing` against silently clobbering an in-flight request for
+/// the SAME device. Refuses (Err) when `existing_state` holds an UNEXPIRED
+/// request and `force` is false — re-running would replace the only retrieval
+/// handle (request_id is off stdout), stranding a still-claimable pairing_code.
+/// Proceeds (Ok) when there is no prior state, it is expired/unparseable, or
+/// `--force` is set.
+fn pairing_request_guard(
+    existing_state: Option<&str>,
+    now_secs: i64,
+    force: bool,
+) -> anyhow::Result<()> {
+    if force {
+        return Ok(());
+    }
+    let Some(raw) = existing_state else {
+        return Ok(());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Ok(()); // unreadable prior state is not a valid handle to protect
+    };
+    let expires_at = v.get("expires_at").and_then(|x| x.as_i64()).unwrap_or(0);
+    if expires_at > now_secs {
+        anyhow::bail!(
+            "an unexpired §10.2 pairing request already exists for this device (expires in {}s) — \
+             retrieve it with --retrieve-pairing, wait for it to expire, or pass --force to replace it",
+            expires_at - now_secs
+        );
+    }
+    Ok(())
+}
+
 /// `--request-pairing` (method A §10.2): generate (or reuse) the K10 device key
 /// in the sandbox, open an agent-INITIATED pairing request at the broker, and
 /// print `{pairing_code, state_file, …}` on stdout. The agent DISPLAYS
@@ -552,6 +590,20 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     let device_pubkey = dk.address().to_string();
     let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
     let pop_sig = dk.pop_sig().context("pop_sig")?;
+
+    // Refuse to clobber an in-flight (unexpired) request for this device unless
+    // --force: request_id is off stdout, so a silent overwrite would strand a
+    // still-claimable pairing_code with no way to retrieve it.
+    let state_file = pairing_state_path(&device_pubkey);
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    pairing_request_guard(
+        std::fs::read_to_string(&state_file).ok().as_deref(),
+        now_secs,
+        args.force,
+    )?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -601,11 +653,9 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         })?;
     let expires_at = body.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    // Persist the request state (0600) so `--retrieve-pairing` can resolve
-    // request_id without the caller threading it (--request-id overrides). Keyed
-    // by device_pubkey so a concurrent request for a DIFFERENT device key does
-    // not clobber this one's handle.
-    let state_file = pairing_state_path(&device_pubkey);
+    // Persist the request state (0600, per-device path computed + guarded above)
+    // so `--retrieve-pairing` can resolve request_id without the caller threading
+    // it (--request-id overrides).
     if let Some(parent) = std::path::Path::new(&state_file).parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -1475,9 +1525,9 @@ fn session_bearer_path(dir: &str, child_omni: &str) -> String {
 mod pairing_poll_tests {
     use super::{
         backoff_with_jitter, binding_artifact, classify_poll, format_broker_error,
-        is_derivation_path, is_omni_hex, pairing_state_path, parse_retry_after, poll_retry_wait,
-        request_artifact, session_bearer_path, truncate_body, validate_claimed_binding, PollClass,
-        PAIRING_POLL_INTERVAL_SECONDS,
+        is_derivation_path, is_omni_hex, pairing_request_guard, pairing_state_path,
+        parse_retry_after, poll_retry_wait, request_artifact, session_bearer_path, truncate_body,
+        validate_claimed_binding, PollClass, PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -1826,6 +1876,21 @@ mod pairing_poll_tests {
         // Same device → stable path (--request-pairing and --retrieve-pairing
         // derive the same handle from the same device key).
         assert_eq!(a, pairing_state_path("0xaaaa1111"));
+    }
+
+    #[test]
+    fn pairing_request_guard_protects_unexpired_handle() {
+        let unexpired = r#"{"request_id":"x","expires_at":1000}"#;
+        // Unexpired (now < expires_at) + no --force → refuse (no silent clobber).
+        assert!(pairing_request_guard(Some(unexpired), 500, false).is_err());
+        // --force overrides.
+        assert!(pairing_request_guard(Some(unexpired), 500, true).is_ok());
+        // Expired → safe to replace.
+        assert!(pairing_request_guard(Some(unexpired), 2000, false).is_ok());
+        // No prior state → proceed.
+        assert!(pairing_request_guard(None, 500, false).is_ok());
+        // Unreadable prior state is not a handle worth protecting → proceed.
+        assert!(pairing_request_guard(Some("not json"), 500, false).is_ok());
     }
 
     #[test]
