@@ -570,18 +570,30 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("pairing request failed: HTTP {status}: {text}");
+        // Body is never trusted (a proxy/WAF could echo the request JSON incl.
+        // pop_sig) — same suppression contract as the poll path.
+        anyhow::bail!(
+            "pairing request failed: {}",
+            format_broker_error(status, &text)
+        );
     }
-    let body: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("parse request response: {text}"))?;
+    let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "unparseable request response (body suppressed; parse error at line {} col {})",
+            e.line(),
+            e.column()
+        )
+    })?;
     let request_id = body
         .get("request_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("request response missing request_id: {text}"))?;
+        .ok_or_else(|| anyhow::anyhow!("request response missing request_id (body suppressed)"))?;
     let pairing_code = body
         .get("pairing_code")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("request response missing pairing_code: {text}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("request response missing pairing_code (body suppressed)")
+        })?;
     let expires_at = body.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
 
     // Persist the request state (0600) so `--retrieve-pairing` can resolve
@@ -1220,28 +1232,30 @@ fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
         // it is the broker's actionable rejection reason and is not retried.)
         PollClass::Transient(format!("HTTP {status} (transient; body suppressed)"))
     } else {
-        // Fatal (4xx/3xx + any other non-success, non-retryable status). Do NOT
-        // log the raw body: classify_poll cannot prove a non-success body came
-        // from the broker's error envelope rather than a reverse proxy, WAF,
-        // stale route, or a wrongly-statused claimed payload (which carries
-        // session_jwt). Parse the broker envelope ({"error": <kind>, ...}) and
-        // log the `error` field ONLY when its VALUE is one of the closed set of
-        // known broker error kinds — allowlisting the field NAME alone is not
-        // enough, since `{"error":"session_jwt=..."}` would still leak. Any
-        // other value (token, reflected request_id/pop_sig, proxy/WAF text,
-        // claimed payload) is suppressed to status-only.
-        let kind = serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-            .filter(|k| KNOWN_BROKER_ERROR_KINDS.contains(&k.as_str()));
-        match kind {
-            // truncate_body is a no-op on these short closed-set literals; kept
-            // as a defensive second layer against any future kind drift.
-            Some(k) => PollClass::Fatal(format!("HTTP {status}: {}", truncate_body(&k))),
-            None => PollClass::Fatal(format!(
-                "HTTP {status} (body suppressed — unrecognized error kind)"
-            )),
-        }
+        // Fatal (4xx/3xx + any other non-success, non-retryable status). The body
+        // is never trusted — format_broker_error surfaces only an allowlisted
+        // broker error KIND and suppresses everything else to status-only.
+        PollClass::Fatal(format_broker_error(status, body))
+    }
+}
+
+/// Format a non-success broker HTTP response for safe logging, shared by the poll
+/// path (classify_poll's fatal branch) and the request path. The body is NEVER
+/// trusted: a reverse proxy / WAF / stale route / reflected payload can echo a
+/// token, request_id, or pop_sig. Parse the broker envelope ({"error": <kind>})
+/// and surface the `error` field ONLY when its VALUE is one of the closed set of
+/// known broker kinds (allowlisting the field NAME alone is not enough — e.g.
+/// `{"error":"pop_sig=..."}` would leak); otherwise suppress to status-only.
+fn format_broker_error(status: reqwest::StatusCode, body: &str) -> String {
+    let kind = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .filter(|k| KNOWN_BROKER_ERROR_KINDS.contains(&k.as_str()));
+    match kind {
+        // truncate_body is a no-op on these short closed-set literals; kept as a
+        // defensive second layer against any future kind drift.
+        Some(k) => format!("HTTP {status}: {}", truncate_body(&k)),
+        None => format!("HTTP {status} (body suppressed — unrecognized error kind)"),
     }
 }
 
@@ -1437,9 +1451,9 @@ fn request_artifact(
 #[cfg(test)]
 mod pairing_poll_tests {
     use super::{
-        backoff_with_jitter, binding_artifact, classify_poll, is_derivation_path, is_omni_hex,
-        parse_retry_after, poll_retry_wait, request_artifact, truncate_body,
-        validate_claimed_binding, PollClass, PAIRING_POLL_INTERVAL_SECONDS,
+        backoff_with_jitter, binding_artifact, classify_poll, format_broker_error,
+        is_derivation_path, is_omni_hex, parse_retry_after, poll_retry_wait, request_artifact,
+        truncate_body, validate_claimed_binding, PollClass, PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -1738,6 +1752,27 @@ mod pairing_poll_tests {
         for k in ["pairing_code", "state_file", "agent_address"] {
             assert!(art.get(k).is_some(), "request artifact missing field {k}");
         }
+    }
+
+    #[test]
+    fn format_broker_error_suppresses_untrusted_bodies() {
+        // A 307 proxy body echoing the request JSON (incl. pop_sig) must NOT leak
+        // through the request path's non-2xx error.
+        let reflected = r#"{"device_pubkey":"0xabc","pop_sig":"SENTINEL_POP_SIG"}"#;
+        let out = format_broker_error(StatusCode::TEMPORARY_REDIRECT, reflected);
+        assert!(
+            !out.contains("SENTINEL_POP_SIG"),
+            "format_broker_error leaked pop_sig: {out}"
+        );
+        // An `error` field whose VALUE is not a known kind is suppressed too.
+        let leaky_kind = r#"{"error":"pop_sig=SENTINEL_POP_SIG"}"#;
+        assert!(
+            !format_broker_error(StatusCode::BAD_REQUEST, leaky_kind).contains("SENTINEL_POP_SIG"),
+            "unknown error-kind value leaked"
+        );
+        // A KNOWN broker kind is surfaced for operator diagnostics.
+        let known = r#"{"error":"bad_request","message":"..."}"#;
+        assert!(format_broker_error(StatusCode::BAD_REQUEST, known).contains("bad_request"));
     }
 
     #[test]
