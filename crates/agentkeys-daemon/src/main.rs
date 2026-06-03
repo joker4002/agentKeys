@@ -517,13 +517,16 @@ fn pairing_state_path() -> String {
 
 /// `--request-pairing` (method A §10.2): generate (or reuse) the K10 device key
 /// in the sandbox, open an agent-INITIATED pairing request at the broker, and
-/// print `{request_id, pairing_code, …}` on stdout. The agent DISPLAYS
+/// print `{pairing_code, state_file, …}` on stdout. The agent DISPLAYS
 /// `pairing_code` for its owner to claim (the Matter/HomeKit model); the device
 /// key NEVER leaves this machine.
 ///
 /// Logs go to stderr; the JSON artifact is the ONLY thing on stdout, so the wire
-/// harness can capture it. `request_id` is the secret retrieval ticket for the
-/// follow-up `--retrieve-pairing`.
+/// harness can capture it. `request_id` — the secret retrieval ticket — is
+/// DELIBERATELY kept OFF stdout (it is half of the replayable broker-poll tuple
+/// `(request_id, device_pubkey, pop_sig)`); it is written only to the 0600
+/// `state_file`, which `--retrieve-pairing` reads by default and from which an
+/// explicit workflow can source it.
 async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     use agentkeys_core::device_crypto::DeviceKey;
 
@@ -547,6 +550,12 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        // Never follow redirects: the request/poll POST bodies carry the pairing
+        // credential (device_pubkey + pop_sig, and request_id for poll), and
+        // reqwest re-sends a cloneable body across 307/308 — a broker/proxy
+        // redirect would forward that bearer-minting tuple to another origin. A
+        // 3xx is therefore fatal (classify_poll suppresses the body).
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build http client")?;
     let resp = client
@@ -598,19 +607,19 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
         "agentkeys-daemon opened §10.2 pairing request — show this code to your owner to claim: {pairing_code}"
     );
 
-    // Machine artifact on STDOUT (logs are on stderr). The harness/owner reads
-    // pairing_code to claim, request_id to retrieve.
+    // Machine artifact on STDOUT (logs are on stderr). The owner reads
+    // pairing_code to claim; request_id is NOT here (it is half the replayable
+    // poll tuple) — it lives only in the 0600 state_file for --retrieve-pairing.
     println!(
         "{}",
-        serde_json::json!({
-            "request_id": request_id,
-            "pairing_code": pairing_code,
-            "agent_address": device_pubkey,
-            "device_key_hash": device_key_hash,
-            "expires_at": expires_at,
-            "state_file": state_file,
-            "key_file": key_file,
-        })
+        request_artifact(
+            pairing_code,
+            &device_pubkey,
+            &device_key_hash,
+            expires_at,
+            &state_file,
+            &key_file,
+        )
     );
     Ok(())
 }
@@ -664,6 +673,12 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        // Never follow redirects: the request/poll POST bodies carry the pairing
+        // credential (device_pubkey + pop_sig, and request_id for poll), and
+        // reqwest re-sends a cloneable body across 307/308 — a broker/proxy
+        // redirect would forward that bearer-minting tuple to another origin. A
+        // 3xx is therefore fatal (classify_poll suppresses the body).
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build http client")?;
 
@@ -1396,12 +1411,35 @@ fn binding_artifact(
     })
 }
 
+/// The stdout artifact for `--request-pairing`. `request_id` is intentionally
+/// NOT included — it is half the replayable broker-poll tuple
+/// (request_id, device_pubkey, pop_sig), and the daemon already writes it to the
+/// 0600 `state_file` that `--retrieve-pairing` reads by default. `pairing_code`
+/// (the master's claim code) is NOT a poll credential and stays.
+fn request_artifact(
+    pairing_code: &str,
+    agent_address: &str,
+    device_key_hash: &str,
+    expires_at: i64,
+    state_file: &str,
+    key_file: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pairing_code": pairing_code,
+        "agent_address": agent_address,
+        "device_key_hash": device_key_hash,
+        "expires_at": expires_at,
+        "state_file": state_file,
+        "key_file": key_file,
+    })
+}
+
 #[cfg(test)]
 mod pairing_poll_tests {
     use super::{
         backoff_with_jitter, binding_artifact, classify_poll, is_derivation_path, is_omni_hex,
-        parse_retry_after, poll_retry_wait, truncate_body, validate_claimed_binding, PollClass,
-        PAIRING_POLL_INTERVAL_SECONDS,
+        parse_retry_after, poll_retry_wait, request_artifact, truncate_body,
+        validate_claimed_binding, PollClass, PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -1684,6 +1722,21 @@ mod pairing_poll_tests {
         // The fields the master legitimately needs are still present.
         for k in ["agent_address", "pop_sig", "device_key_hash", "actor_omni"] {
             assert!(art.get(k).is_some(), "artifact missing required field {k}");
+        }
+    }
+
+    #[test]
+    fn request_artifact_omits_replayable_request_id() {
+        // --request-pairing stdout must NOT carry request_id (half the replayable
+        // poll tuple); it lives only in the 0600 state_file. pairing_code (claim
+        // code, not a poll credential) and the state_file path stay.
+        let art = request_artifact("paircode", "0xdevice", "dkh", 123, "/state.json", "/k.json");
+        assert!(
+            art.get("request_id").is_none(),
+            "request artifact must not expose request_id: {art}"
+        );
+        for k in ["pairing_code", "state_file", "agent_address"] {
+            assert!(art.get(k).is_some(), "request artifact missing field {k}");
         }
     }
 
