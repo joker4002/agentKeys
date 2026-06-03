@@ -558,6 +558,30 @@ fn pairing_request_guard(
     Ok(())
 }
 
+/// Acquire a per-device advisory lock so two CONCURRENT `--request-pairing` for
+/// the same device serialize: the second is refused instead of racing the
+/// guard→broker-POST→state-write window (a TOCTOU that would let the loser's
+/// request_id be silently clobbered — it is no longer on stdout). The lock is a
+/// sibling `<state_file>.lock`; it releases when the returned File is dropped, so
+/// the caller holds it across the whole critical section. `--force` replaces
+/// under the same lock.
+fn acquire_pairing_lock(state_file: &str) -> anyhow::Result<std::fs::File> {
+    use fs2::FileExt;
+    let lock_path = format!("{state_file}.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open pairing lock {lock_path}"))?;
+    f.try_lock_exclusive().map_err(|_| {
+        anyhow::anyhow!(
+            "another --request-pairing for this device is in progress — retry once it finishes"
+        )
+    })?;
+    Ok(f)
+}
+
 /// `--request-pairing` (method A §10.2): generate (or reuse) the K10 device key
 /// in the sandbox, open an agent-INITIATED pairing request at the broker, and
 /// print `{pairing_code, state_file, …}` on stdout. The agent DISPLAYS
@@ -595,6 +619,11 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     // --force: request_id is off stdout, so a silent overwrite would strand a
     // still-claimable pairing_code with no way to retrieve it.
     let state_file = pairing_state_path(&device_pubkey);
+    // Hold a per-device advisory lock across the WHOLE guard→POST→state-write
+    // window so a concurrent same-device request can't slip past the guard and
+    // race the state write (TOCTOU). Released when `_pairing_lock` drops — at fn
+    // end or on any early `?` error.
+    let _pairing_lock = acquire_pairing_lock(&state_file)?;
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1585,11 +1614,11 @@ fn session_bearer_path(dir: &str, child_omni: &str) -> String {
 #[cfg(test)]
 mod pairing_poll_tests {
     use super::{
-        backoff_with_jitter, binding_artifact, classify_poll, format_broker_error,
-        is_derivation_path, is_omni_hex, is_retryable_status, pairing_request_guard,
-        pairing_state_path, parse_retry_after, poll_retry_wait, read_poll_body, request_artifact,
-        retry_after_for, session_bearer_path, truncate_body, validate_claimed_binding, PollClass,
-        MAX_POLL_BODY, PAIRING_POLL_INTERVAL_SECONDS,
+        acquire_pairing_lock, backoff_with_jitter, binding_artifact, classify_poll,
+        format_broker_error, is_derivation_path, is_omni_hex, is_retryable_status,
+        pairing_request_guard, pairing_state_path, parse_retry_after, poll_retry_wait,
+        read_poll_body, request_artifact, retry_after_for, session_bearer_path, truncate_body,
+        validate_claimed_binding, PollClass, MAX_POLL_BODY, PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -1953,6 +1982,28 @@ mod pairing_poll_tests {
         assert!(pairing_request_guard(None, 500, false).is_ok());
         // Unreadable prior state is not a handle worth protecting → proceed.
         assert!(pairing_request_guard(Some("not json"), 500, false).is_ok());
+    }
+
+    #[test]
+    fn acquire_pairing_lock_serializes_same_device() {
+        let base = std::env::temp_dir().join(format!("akd-pairlock-{}", std::process::id()));
+        let path = base.to_string_lossy().into_owned();
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+        // First acquisition succeeds and HOLDS the lock.
+        let held = acquire_pairing_lock(&path).expect("first lock acquires");
+        // A concurrent same-device acquisition is refused while the first is held
+        // (closes the guard→POST→write TOCTOU).
+        assert!(
+            acquire_pairing_lock(&path).is_err(),
+            "concurrent same-device --request-pairing must be refused"
+        );
+        // After the first releases, a new acquisition succeeds.
+        drop(held);
+        assert!(
+            acquire_pairing_lock(&path).is_ok(),
+            "lock must re-acquire after release"
+        );
+        let _ = std::fs::remove_file(format!("{path}.lock"));
     }
 
     #[test]
