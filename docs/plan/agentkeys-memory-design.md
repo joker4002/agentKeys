@@ -577,6 +577,7 @@ The same cap-token + scope contract drives both; only the enforcement point move
 
 - **§7.4 (Mem0 / Letta / LangMem export adapter)** is the *data-portability* bridge — move bytes between runtimes at rest. **This section** is the *live-ranking* bridge — let an external engine rank our at-rest store per turn. Same delegation philosophy, different verb (migrate vs. rank).
 - **§5 / §6** describe an engine's *internal* concerns (index, extraction) if one is ever built in-worker (stages E1 / E2). This section describes the *boundary* to an engine running outside the worker — the common case under Position C.
+- **Write-side dual — [`classifier-service.md`](classifier-service.md):** this §6a is the *read*-side seam (the gate authorizes, then the engine **ranks** — `gate-then-rank`). Its mirror is the **classifier-service**, the *write*-side seam (a pluggable classifier **tags** content/requests into the structured policy attribute; the gate then enforces — `classify-then-gate`). Same shape — a gate over a pluggable model, per-actor, audited, with the same inline/central privacy spectrum and the same determinism guardrail (the model advises an attribute; the gate decides by set-membership, never trusting a model verdict). For memory, that policy attribute **is** the namespace this doc already uses; the permission config the gate checks is itself a master-only encrypted `Config` data class (classifier-service.md §7).
 
 ---
 
