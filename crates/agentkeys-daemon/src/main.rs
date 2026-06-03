@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentkeys_core::backend::CredentialBackend;
 use agentkeys_core::init_flow;
@@ -667,42 +667,66 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         .build()
         .context("build http client")?;
 
-    // Poll until claimed or the operator-set timeout elapses.
-    let deadline = SystemTime::now() + Duration::from_secs(args.init_poll_timeout_seconds);
-    // Poll until claimed or the deadline. classify_poll() (defined below, and
-    // unit-tested) decides the failure class; here we drive retries: Pending
-    // uses the fixed cadence; Transient honors a 429 Retry-After else capped
-    // backoff with jitter; Fatal (4xx) and Claimed exit. The timeout message is
-    // decided per-arm, so it reflects the CURRENT outcome, never a long-gone
-    // earlier transient.
+    // Poll until claimed or the operator deadline. classify_poll() (below,
+    // unit-tested) decides the failure class; here we drive retries. Two
+    // deadline guards (codex review #182): the loop checks the deadline at the
+    // TOP before sending (so we never make an extra poll after timeout), and
+    // each request is bounded by the remaining time (so a hung/slow poll can't
+    // overrun it). Instant = monotonic. `last_outcome` makes the give-up message
+    // reflect the CURRENT state (pending vs a transient error); read at the top
+    // on the first iteration, so it is never a dead assignment.
+    let deadline = Instant::now() + Duration::from_secs(args.init_poll_timeout_seconds);
     let mut transient_attempts: u32 = 0;
+    let mut last_outcome: Option<String> = None;
     let body: serde_json::Value = loop {
-        let (class, retry_after) = match client
-            .post(format!("{base}/v1/agent/pairing/poll"))
-            .json(&serde_json::json!({
-                "request_id": request_id,
-                "device_pubkey": device_pubkey,
-                "pop_sig": pop_sig,
-            }))
-            .send()
-            .await
-        {
-            Err(e) => (PollClass::Transient(format!("send: {e}")), None),
-            Ok(resp) => {
-                let status = resp.status();
-                // Read Retry-After (429) from the header BEFORE consuming the body.
-                let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    parse_retry_after_secs(
-                        resp.headers()
-                            .get(reqwest::header::RETRY_AFTER)
-                            .and_then(|v| v.to_str().ok()),
-                    )
-                } else {
-                    None
-                };
-                let text = resp.text().await.unwrap_or_default();
-                (classify_poll(status, &text), retry_after)
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            match &last_outcome {
+                Some(reason) => anyhow::bail!(
+                    "pairing poll gave up after {}s — last error was transient: {reason}",
+                    args.init_poll_timeout_seconds
+                ),
+                None => anyhow::bail!(
+                    "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
+                    args.init_poll_timeout_seconds
+                ),
             }
+        }
+
+        // One poll, bounded by the remaining deadline so a hung/slow request
+        // (or the client's own timeout) can never overrun the operator timeout.
+        let poll = async {
+            let resp = client
+                .post(format!("{base}/v1/agent/pairing/poll"))
+                .json(&serde_json::json!({
+                    "request_id": request_id,
+                    "device_pubkey": device_pubkey,
+                    "pop_sig": pop_sig,
+                }))
+                .send()
+                .await?;
+            let status = resp.status();
+            // Read Retry-After (429) from the header BEFORE consuming the body.
+            let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                parse_retry_after_secs(
+                    resp.headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                )
+            } else {
+                None
+            };
+            let text = resp.text().await.unwrap_or_default();
+            Ok::<_, reqwest::Error>((status, retry_after, text))
+        };
+
+        let (class, retry_after) = match tokio::time::timeout(remaining, poll).await {
+            Err(_elapsed) => (
+                PollClass::Transient("poll exceeded the remaining pairing deadline".to_string()),
+                None,
+            ),
+            Ok(Err(e)) => (PollClass::Transient(format!("send: {e}")), None),
+            Ok(Ok((status, retry_after, text))) => (classify_poll(status, &text), retry_after),
         };
 
         match class {
@@ -712,13 +736,8 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
                  wrong --device-key-file will not resolve by waiting; re-run --request-pairing"
             ),
             PollClass::Pending => {
+                last_outcome = None;
                 transient_attempts = 0;
-                if SystemTime::now() >= deadline {
-                    anyhow::bail!(
-                        "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
-                        args.init_poll_timeout_seconds
-                    );
-                }
                 info!(
                     target: "agentkeys.daemon.init",
                     "§10.2 pairing request still pending — waiting for the master to claim…"
@@ -727,12 +746,6 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
                     .await;
             }
             PollClass::Transient(reason) => {
-                if SystemTime::now() >= deadline {
-                    anyhow::bail!(
-                        "pairing poll gave up after {}s — last error was transient: {reason}",
-                        args.init_poll_timeout_seconds
-                    );
-                }
                 transient_attempts += 1;
                 let wait = retry_after.unwrap_or_else(|| backoff_with_jitter(transient_attempts));
                 let wait_secs = wait.as_secs();
@@ -740,6 +753,7 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
                     target: "agentkeys.daemon.init",
                     "§10.2 pairing poll transient (retry in ~{wait_secs}s): {reason}"
                 );
+                last_outcome = Some(reason);
                 sleep_within_deadline(wait, deadline).await;
             }
         }
@@ -748,7 +762,9 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
     let session_jwt = body
         .get("session_jwt")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("claimed poll response missing session_jwt: {body}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("claimed poll response missing session_jwt (body suppressed)")
+        })?;
     let child_omni = body
         .get("child_omni")
         .and_then(|v| v.as_str())
@@ -1110,13 +1126,32 @@ fn truncate_body(body: &str) -> String {
 fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
     if status.is_success() {
         match serde_json::from_str::<serde_json::Value>(body) {
-            Ok(v) => {
-                if v.get("status").and_then(|s| s.as_str()) == Some("claimed") {
-                    PollClass::Claimed(v)
-                } else {
-                    PollClass::Pending
+            Ok(v) => match v.get("status").and_then(|s| s.as_str()) {
+                Some("claimed") => {
+                    // Validate required fields BEFORE returning Claimed, so the
+                    // caller never interpolates a claimed body (it carries
+                    // session_jwt). A parse-VALID schema mismatch — e.g. a
+                    // non-string session_jwt — must not slip through as Claimed.
+                    if v.get("session_jwt").and_then(|t| t.as_str()).is_some() {
+                        PollClass::Claimed(v)
+                    } else {
+                        PollClass::Fatal(
+                            "claimed response missing a valid string session_jwt \
+                             (body suppressed — possible token/schema drift)"
+                                .to_string(),
+                        )
+                    }
                 }
-            }
+                // Only an explicit "pending" keeps waiting; a missing/unknown
+                // success status (e.g. "expired", an error envelope) is a
+                // protocol/state error — surface the status string (short, safe),
+                // suppress the body.
+                Some("pending") => PollClass::Pending,
+                other => PollClass::Fatal(format!(
+                    "unexpected poll status {:?} (body suppressed)",
+                    other.unwrap_or("<missing>")
+                )),
+            },
             Err(e) => PollClass::Transient(format!(
                 "unparseable success response (body suppressed — may contain a token): {e}"
             )),
@@ -1155,10 +1190,8 @@ fn backoff_with_jitter(attempt: u32) -> Duration {
 
 /// Sleep `dur`, but never past `deadline`, so the next iteration's deadline
 /// check fires promptly.
-async fn sleep_within_deadline(dur: Duration, deadline: SystemTime) {
-    let remaining = deadline
-        .duration_since(SystemTime::now())
-        .unwrap_or(Duration::ZERO);
+async fn sleep_within_deadline(dur: Duration, deadline: Instant) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
     tokio::time::sleep(dur.min(remaining)).await;
 }
 
@@ -1188,11 +1221,34 @@ mod pairing_poll_tests {
     }
 
     #[test]
-    fn unknown_2xx_json_is_pending() {
-        assert!(matches!(
-            classify_poll(StatusCode::OK, r#"{"foo":1}"#),
-            PollClass::Pending
-        ));
+    fn only_explicit_pending_is_pending() {
+        // Unknown / missing / non-"pending" success status must NOT silently
+        // wait — it fails fast (protocol/state error), body suppressed.
+        for body in [
+            r#"{"foo":1}"#,            // no status field
+            r#"{"status":"expired"}"#, // rejected/expired state
+            r#"{"status":"error","detail":"nope"}"#,
+        ] {
+            assert!(
+                matches!(classify_poll(StatusCode::OK, body), PollClass::Fatal(_)),
+                "body {body} should fail fast, not wait"
+            );
+        }
+    }
+
+    #[test]
+    fn claimed_2xx_with_non_string_session_jwt_is_fatal_no_leak() {
+        // A parse-VALID claimed body whose session_jwt is the wrong shape must
+        // not become Claimed (the caller would otherwise dump it), and the
+        // token-bearing body must not appear in the error.
+        let body = r#"{"status":"claimed","session_jwt":{"token":"SECRET-OBJ-TOKEN"}}"#;
+        match classify_poll(StatusCode::OK, body) {
+            PollClass::Fatal(reason) => assert!(
+                !reason.contains("SECRET-OBJ-TOKEN"),
+                "token leaked into fatal reason: {reason}"
+            ),
+            other => panic!("expected Fatal, got {other:?}"),
+        }
     }
 
     #[test]
