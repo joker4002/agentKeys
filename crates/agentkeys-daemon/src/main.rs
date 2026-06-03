@@ -558,16 +558,14 @@ fn pairing_request_guard(
     Ok(())
 }
 
-/// Acquire a per-device advisory lock so two CONCURRENT `--request-pairing` for
-/// the same device serialize: the second is refused instead of racing the
-/// guard→broker-POST→state-write window (a TOCTOU that would let the loser's
-/// request_id be silently clobbered — it is no longer on stdout). The lock is a
-/// sibling `<state_file>.lock`; it releases when the returned File is dropped, so
-/// the caller holds it across the whole critical section. `--force` replaces
-/// under the same lock.
-fn acquire_pairing_lock(state_file: &str) -> anyhow::Result<std::fs::File> {
+/// Acquire an advisory lock at `<path>.lock` so two CONCURRENT `--request-pairing`
+/// invocations serialize: the second is refused instead of racing key generation,
+/// the unexpired-request guard, the broker POST, or the state write. Releases when
+/// the returned File is dropped, so the caller holds it across the whole critical
+/// section (`--force` replaces under the same lock).
+fn acquire_pairing_lock(path: &str) -> anyhow::Result<std::fs::File> {
     use fs2::FileExt;
-    let lock_path = format!("{state_file}.lock");
+    let lock_path = format!("{path}.lock");
     let f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -575,9 +573,7 @@ fn acquire_pairing_lock(state_file: &str) -> anyhow::Result<std::fs::File> {
         .open(&lock_path)
         .with_context(|| format!("open pairing lock {lock_path}"))?;
     f.try_lock_exclusive().map_err(|_| {
-        anyhow::anyhow!(
-            "another --request-pairing for this device is in progress — retry once it finishes"
-        )
+        anyhow::anyhow!("another --request-pairing is in progress — retry once it finishes")
     })?;
     Ok(f)
 }
@@ -602,6 +598,20 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     })?;
     let base = broker_url.trim_end_matches('/').to_string();
 
+    // Serialize the ENTIRE --request-pairing flow (K10 load/generate → guard →
+    // broker POST → state write) under ONE HOME-scoped advisory lock, acquired
+    // BEFORE keygen. The per-device state path isn't known until after keygen, so
+    // a lock taken later can't stop two concurrent invocations from racing key
+    // generation (fresh HOME: both see no key, generate different keys, race the
+    // key-file write) or the state write. A second concurrent --request-pairing is
+    // refused; released when `_pairing_lock` drops (fn end / early `?`-error).
+    let _pairing_lock = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let lock_dir = format!("{home}/.agentkeys");
+        std::fs::create_dir_all(&lock_dir).ok();
+        acquire_pairing_lock(&format!("{lock_dir}/request-pairing"))?
+    };
+
     let key_file = args
         .device_key_file
         .clone()
@@ -617,13 +627,10 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
 
     // Refuse to clobber an in-flight (unexpired) request for this device unless
     // --force: request_id is off stdout, so a silent overwrite would strand a
-    // still-claimable pairing_code with no way to retrieve it.
+    // still-claimable pairing_code with no way to retrieve it. (Concurrency is
+    // already serialized by the HOME-scoped _pairing_lock above, held through
+    // this guard + the POST + the state write.)
     let state_file = pairing_state_path(&device_pubkey);
-    // Hold a per-device advisory lock across the WHOLE guard→POST→state-write
-    // window so a concurrent same-device request can't slip past the guard and
-    // race the state write (TOCTOU). Released when `_pairing_lock` drops — at fn
-    // end or on any early `?` error.
-    let _pairing_lock = acquire_pairing_lock(&state_file)?;
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -2002,17 +2009,17 @@ mod pairing_poll_tests {
     }
 
     #[test]
-    fn acquire_pairing_lock_serializes_same_device() {
+    fn acquire_pairing_lock_serializes_concurrent_requests() {
         let base = std::env::temp_dir().join(format!("akd-pairlock-{}", std::process::id()));
         let path = base.to_string_lossy().into_owned();
         let _ = std::fs::remove_file(format!("{path}.lock"));
         // First acquisition succeeds and HOLDS the lock.
         let held = acquire_pairing_lock(&path).expect("first lock acquires");
-        // A concurrent same-device acquisition is refused while the first is held
-        // (closes the guard→POST→write TOCTOU).
+        // A concurrent acquisition is refused while the first is held (serializes
+        // the whole --request-pairing flow: keygen → guard → POST → state write).
         assert!(
             acquire_pairing_lock(&path).is_err(),
-            "concurrent same-device --request-pairing must be refused"
+            "concurrent --request-pairing must be refused while one is in progress"
         );
         // After the first releases, a new acquisition succeeds.
         drop(held);
