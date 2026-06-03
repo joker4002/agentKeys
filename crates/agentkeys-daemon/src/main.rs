@@ -708,10 +708,11 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
             let status = resp.status();
             // Read Retry-After (429) from the header BEFORE consuming the body.
             let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                parse_retry_after_secs(
+                parse_retry_after(
                     resp.headers()
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok()),
+                    SystemTime::now(),
                 )
             } else {
                 None
@@ -815,19 +816,28 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
     // Binding artifact on STDOUT (logs are on stderr). Same fields the master's
     // chain helper consumes; pop_sig + device_key_hash let the master submit
     // registerAgentDevice without re-deriving.
+    //
+    // request_id is DELIBERATELY omitted: the broker poll authenticates with the
+    // tuple (request_id, device_pubkey, pop_sig) and mints a fresh J1_agent on
+    // every claimed poll (the claimed row is not consumed, pop_sig is static), so
+    // emitting request_id here would put a replayable bearer-minting credential
+    // on stdout — which the master captures and which can surface in `ps`/logs —
+    // defeating the "bearer stays in the sandbox" boundary. The master does not
+    // need it (registerAgentDevice keys off omni + device + pop_sig; the agent
+    // already holds request_id in its 0600 pairing-state file for polling).
+    // (The broker-side replay window itself is tracked as a separate follow-up.)
     println!(
         "{}",
-        serde_json::json!({
-            "agent_address": device_pubkey,
-            "actor_omni": child_omni,
-            "operator_omni": operator_omni,
-            "derivation_path": derivation_path,
-            "device_key_hash": device_key_hash,
-            "pop_sig": pop_sig,
-            "session_file": session_file,
-            "request_id": request_id,
-            "key_file": key_file,
-        })
+        binding_artifact(
+            &device_pubkey,
+            &child_omni,
+            &operator_omni,
+            &derivation_path,
+            &device_key_hash,
+            &pop_sig,
+            &session_file,
+            &key_file,
+        )
     );
     Ok(())
 }
@@ -1220,12 +1230,21 @@ fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
     }
 }
 
-/// Parse a `Retry-After` header value (delta-seconds form only; the HTTP-date
-/// form is ignored so the caller falls back to backoff).
-fn parse_retry_after_secs(header_val: Option<&str>) -> Option<Duration> {
-    header_val
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+/// Parse a `Retry-After` header into a delay from `now`. Handles BOTH RFC 7231
+/// forms: delta-seconds (`"120"`) and an HTTP-date
+/// (`"Wed, 21 Oct 2026 07:28:00 GMT"`), so a proxy throttling with a future date
+/// is honored instead of being ignored. A past/now date or an unparseable value
+/// yields `None`, and the caller floors the wait at the jittered backoff.
+fn parse_retry_after(header_val: Option<&str>, now: SystemTime) -> Option<Duration> {
+    let raw = header_val?.trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // HTTP-date form — honor only a FUTURE instant (past date → None → backoff).
+    httpdate::parse_http_date(raw)
+        .ok()?
+        .duration_since(now)
+        .ok()
 }
 
 /// Capped exponential backoff (base = poll interval) with sub-second jitter, so
@@ -1347,15 +1366,45 @@ fn validate_claimed_binding(body: &serde_json::Value) -> anyhow::Result<ClaimedB
     })
 }
 
+/// The PUBLIC binding artifact emitted on stdout after a claimed pairing — the
+/// fields the master's chain helper needs for `registerAgentDevice`. `request_id`
+/// is intentionally NOT included: the broker poll authenticates with
+/// (request_id, device_pubkey, pop_sig) and mints a fresh J1_agent on every
+/// claimed poll, so emitting request_id would put a replayable bearer-minting
+/// credential on stdout. session_jwt is likewise absent (it stays in the 0600
+/// session file inside the sandbox).
+#[allow(clippy::too_many_arguments)]
+fn binding_artifact(
+    agent_address: &str,
+    actor_omni: &str,
+    operator_omni: &str,
+    derivation_path: &str,
+    device_key_hash: &str,
+    pop_sig: &str,
+    session_file: &str,
+    key_file: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "agent_address": agent_address,
+        "actor_omni": actor_omni,
+        "operator_omni": operator_omni,
+        "derivation_path": derivation_path,
+        "device_key_hash": device_key_hash,
+        "pop_sig": pop_sig,
+        "session_file": session_file,
+        "key_file": key_file,
+    })
+}
+
 #[cfg(test)]
 mod pairing_poll_tests {
     use super::{
-        backoff_with_jitter, classify_poll, is_derivation_path, is_omni_hex,
-        parse_retry_after_secs, poll_retry_wait, truncate_body, validate_claimed_binding,
-        PollClass, PAIRING_POLL_INTERVAL_SECONDS,
+        backoff_with_jitter, binding_artifact, classify_poll, is_derivation_path, is_omni_hex,
+        parse_retry_after, poll_retry_wait, truncate_body, validate_claimed_binding, PollClass,
+        PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn claimed_2xx_is_claimed() {
@@ -1577,22 +1626,65 @@ mod pairing_poll_tests {
     }
 
     #[test]
-    fn retry_after_parses_delta_seconds_only() {
+    fn retry_after_parses_delta_and_http_date() {
+        let epoch = SystemTime::UNIX_EPOCH;
+        // delta-seconds form (now-independent).
         assert_eq!(
-            parse_retry_after_secs(Some("5")),
+            parse_retry_after(Some("5"), epoch),
             Some(Duration::from_secs(5))
         );
         assert_eq!(
-            parse_retry_after_secs(Some("  12 ")),
+            parse_retry_after(Some("  12 "), epoch),
             Some(Duration::from_secs(12))
         );
-        // HTTP-date form is ignored (falls back to backoff).
+        // HTTP-date form, relative to `now`. A FUTURE date longer than local
+        // backoff is honored (the point of finding #2 — no retry storm).
         assert_eq!(
-            parse_retry_after_secs(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            parse_retry_after(Some("Thu, 01 Jan 1970 01:00:00 GMT"), epoch),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            parse_retry_after(Some("Thu, 01 Jan 1970 00:00:10 GMT"), epoch),
+            Some(Duration::from_secs(10))
+        );
+        // A PAST date yields None → caller floors at jittered backoff.
+        let later = epoch + Duration::from_secs(100);
+        assert_eq!(
+            parse_retry_after(Some("Thu, 01 Jan 1970 00:00:10 GMT"), later),
             None
         );
-        assert_eq!(parse_retry_after_secs(Some("garbage")), None);
-        assert_eq!(parse_retry_after_secs(None), None);
+        // Garbage / missing → None.
+        assert_eq!(parse_retry_after(Some("garbage"), epoch), None);
+        assert_eq!(parse_retry_after(None, epoch), None);
+    }
+
+    #[test]
+    fn binding_artifact_omits_replayable_request_id() {
+        // The stdout artifact must NOT carry request_id: with it, the tuple
+        // (request_id, device_pubkey=agent_address, pop_sig) replays the broker
+        // poll to mint a fresh J1_agent. Nor may it carry the session_jwt.
+        let art = binding_artifact(
+            "0xdevice",
+            "childomni",
+            "operomni",
+            "//hermes",
+            "dkh",
+            "popsig",
+            "/s.jwt",
+            "/k.json",
+        );
+        assert!(
+            art.get("request_id").is_none(),
+            "artifact must not expose request_id (replayable poll credential): {art}"
+        );
+        assert!(
+            art.get("session_jwt").is_none(),
+            "artifact must not expose the bearer"
+        );
+        // The fields the master legitimately needs are still present.
+        for k in ["agent_address", "pop_sig", "device_key_hash", "actor_omni"] {
+            assert!(art.get(k).is_some(), "artifact missing required field {k}");
+        }
     }
 
     #[test]

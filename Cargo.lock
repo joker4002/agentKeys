@@ -168,6 +168,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
+ "httpdate",
  "hyper 1.9.0",
  "hyper-util",
  "libc",
