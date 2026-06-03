@@ -284,20 +284,39 @@ phase6_wire() {
 # ── Phase 7 — gated -> OpenViking-ranked -> injected ──────────────────────────
 phase7_test() {
   [[ "$DO_TEST" == true ]] || { skip "7 test" "--no-test"; return 0; }
-  log "Phase 7 — gated → OpenViking-ranked → injected"
+  log "Phase 7 — gated → OpenViking-ranked → injected (STRICT: no lexical fallback)"
+
+  # 7a — OpenViking itself must rank $TEST_QUERY. Direct /search/find; count
+  # hits across the possible result shapes (memories / results / skills). Zero
+  # hits ⇒ nothing for OpenViking to rank (namespace not seeded / mirrored).
+  local find_resp nhits
+  find_resp="$(curl -sS --max-time 20 -X POST "$OV/api/v1/search/find" -H 'content-type: application/json' \
+    -d "$(jq -n --arg q "$TEST_QUERY" '{query:$q, top_k:5}')" 2>/dev/null)"
+  nhits="$(printf '%s' "$find_resp" | jq '[.result.memories[]?, .result.results[]?, .result.skills[]?] | length' 2>/dev/null)"
+  [[ "$nhits" =~ ^[0-9]+$ ]] || nhits=0
+  if [[ "$nhits" -lt 1 ]]; then
+    fail "7a openviking-find" "OpenViking /search/find returned 0 hits for \"$TEST_QUERY\" — nothing for OpenViking to rank. Seed a query-relevant line into '$NS' (Phase 5 mirrors the namespace into OpenViking; e.g. memory.put a peanut-allergy line) and confirm openviking-server is healthy."
+    return 0
+  fi
+  ok "7a openviking-find" "OpenViking ranks \"$TEST_QUERY\" → $nhits hit(s) direct from /search/find"
+
+  # 7b — THE proof. Run the hook in STRICT mode (AGENTKEYS_MEMORY_ENGINE_STRICT):
+  # the lexical fallback is DISABLED, so a non-empty injection is reachable ONLY
+  # via OpenViking's gate-matched ranking. A broken/unused OpenViking → empty →
+  # red. (A non-strict run could look green via fallback for the same query —
+  # exactly the trap codex flagged; strict mode closes it.)
   local out err ctx ef; ef="$(mktemp)"
-  out="$(printf '%s' "$(jq -n --arg q "$TEST_QUERY" '{query:$q}')" | bash "$HOOK" 2>"$ef")"
+  out="$(printf '%s' "$(jq -n --arg q "$TEST_QUERY" '{query:$q}')" \
+    | AGENTKEYS_MEMORY_ENGINE_STRICT=1 bash "$HOOK" 2>"$ef")"
   err="$(cat "$ef" 2>/dev/null)"; rm -f "$ef"
-  ctx="$(echo "$out" | jq -r '.context // empty' 2>/dev/null)"
+  ctx="$(printf '%s' "$out" | jq -r '.context // empty' 2>/dev/null)"
   if [[ -n "$ctx" ]]; then
-    ok "7 inject" "query \"$TEST_QUERY\" → injected $(printf '%s\n' "$ctx" | grep -c .) line(s)"
+    ok "7 inject (strict)" "OpenViking-ranked, gate-bounded, NO fallback → injected $(printf '%s\n' "$ctx" | grep -c .) line(s)"
     printf '%s\n' "$ctx" | sed 's/^/      | /'
   else
-    # The proof step. An empty injection means the gated → ranked → injected
-    # flow produced NOTHING — the whole point of the run. FAIL (not skip) so
-    # the summary can go red; a skip never increments FAILED → vacuous green.
-    # Legit "set up before seeding" path: pass --no-test to skip this phase.
-    fail "7 inject" "EMPTY injection for query \"$TEST_QUERY\" — the gated → ranked → injected proof produced no lines. Seed namespace '$NS' first (harness/phase1-wire-demo.sh --real --webauthn, or memory.put) then re-run, or pass --no-test for setup-only. Namespace may be empty (Phase 5) or memory.get errored — detail below."
+    # Empty in STRICT mode = the gated → OpenViking-ranked → injected path is not
+    # proven (fallback can't mask it here). FAIL so the summary goes red.
+    fail "7 inject (strict)" "EMPTY injection in STRICT mode for \"$TEST_QUERY\" — OpenViking produced no gate-matched ranking and the lexical fallback is DISABLED, so 'gated → OpenViking-ranked → injected' is NOT proven. OpenViking ranked $nhits hit(s) directly (7a), so the gate text-match likely failed: confirm '$NS' is seeded with the SAME lines mirrored into OpenViking (Phase 5). Or pass --no-test for setup-only. Detail below."
     show "$err"
     [[ -z "$err" && -n "$out" ]] && show "raw: $(printf '%s' "$out" | head -c 200)"
   fi
@@ -306,7 +325,12 @@ phase7_test() {
 # ── Phase 8 — (--verify) OpenViking is NOT load-bearing: kill it, still injects ─
 phase8_verify() {
   [[ "$DO_VERIFY" == true ]] || return 0
-  log "Phase 8 — verify fallback (kill openviking → hook still injects)"
+  log "Phase 8 — verify fallback: kill openviking, NON-strict hook still injects"
+  # NON-strict on purpose (no AGENTKEYS_MEMORY_ENGINE_STRICT) — the complement to
+  # Phase 7. Phase 7 (strict) proves OpenViking ranked; Phase 8 proves that with
+  # OpenViking DOWN the lexical fallback still injects, so OpenViking is never
+  # load-bearing for availability. Empty here = the fallback regressed (or '$NS'
+  # is empty) → red.
   pkill -f openviking-server 2>/dev/null; sleep 1
   local ctx
   ctx="$(printf '%s' "$(jq -n --arg q "$TEST_QUERY" '{query:$q}')" | bash "$HOOK" 2>/dev/null | jq -r '.context // empty' 2>/dev/null)"

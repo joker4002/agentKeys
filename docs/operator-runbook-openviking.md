@@ -178,24 +178,32 @@ grep -E 'OPENVIKING_ENDPOINT|AGENTKEYS_MEMORY_ENGINE|AGENTKEYS_ACTOR_OMNI' ~/.he
 ```
 Leave `memory.provider` **unset** in `~/.hermes/config.yaml` — the AgentKeys hook stays the sole memory delivery.
 
-## Step 7 — test: gated → OpenViking-ranked → injected
-OpenViking is query-driven, so feed the wired hook a turn (it reads the query from the host payload). The injected block is OpenViking-ranked **and** gate-bounded:
+## Step 7 — test: gated → OpenViking-ranked → injected (STRICT, no fallback)
+OpenViking is query-driven, so feed the wired hook a turn (it reads the query from the host payload). **A plain non-empty injection does NOT prove OpenViking ranked anything** — the hook falls back to the deterministic lexical engine on any OpenViking error/miss, and with an unbounded budget that fallback returns the whole namespace. To prove the *OpenViking* path specifically, disable the fallback with `AGENTKEYS_MEMORY_ENGINE_STRICT=1` (test-only — production wiring never sets it, so OpenViking stays non-load-bearing there):
 ```bash
+# 1) OpenViking itself ranks the query (direct, gate-free) — expect >= 1 hit:
+curl -sS -X POST "${OPENVIKING_ENDPOINT:-http://localhost:1933}/api/v1/search/find" \
+  -H 'content-type: application/json' \
+  -d '{"query":"what about my peanut allergy?","top_k":5}' \
+  | jq '[.result.memories[]?, .result.results[]?, .result.skills[]?] | length'
+
+# 2) STRICT hook run — fallback DISABLED, so a non-empty injection can ONLY
+#    have come from OpenViking's gate-matched ranking:
 printf '%s' '{"query":"what about my peanut allergy?"}' \
-  | bash ~/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh
+  | AGENTKEYS_MEMORY_ENGINE_STRICT=1 bash ~/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh
 ```
-Expected — the peanut line ranked first, only gate-authorized lines:
+Expected — the peanut line ranked first, only gate-authorized lines; because the fallback is off, this output **is** the proof OpenViking ranked it:
 ```json
 {"context":"## Memory: travel\nPeanut allergy — note for inflight meals.\n..."}
 ```
-Then the real chat (Phase 4 of the wire demo): ask the agent about the trip and watch it answer from the OpenViking-ranked, gate-bounded memory — without ever getting an OpenViking tool.
+An **empty** `{}` in strict mode means OpenViking produced no gate-matched ranking (server down, no hit, or its mirrored content does not text-match the namespace lines) — fix that, rather than reading a *non-strict* green as success. Then the real chat (Phase 4 of the wire demo): ask the agent about the trip and watch it answer from the OpenViking-ranked, gate-bounded memory — without ever getting an OpenViking tool.
 
 ## Step 8 — verify the safety + privacy properties
 
 | Property | How to check | Expected |
 |---|---|---|
 | **Gate bounds visibility** | mirror a line into OpenViking under a namespace the cap does NOT authorize, then query Step 7 | it is **never** injected — `rank_gate_bounded` only returns gate-authorized lines |
-| **OpenViking is not load-bearing** | `pkill -f openviking-server`, re-run Step 7 | still injects — falls back to the deterministic lexical engine, never errors |
+| **OpenViking is not load-bearing** | `pkill -f openviking-server`, then re-run the hook **without** strict mode (plain `printf … \| bash …`, no `AGENTKEYS_MEMORY_ENGINE_STRICT`) — *not* Step 7, which is strict and would correctly fail | still injects — falls back to the deterministic lexical engine, never errors |
 | **LLM gets no memory tools** | `hermes hooks doctor` + inspect the tool list | only the 3 AgentKeys hooks; **no** `viking_*` |
 | **Durable copy stays encrypted** | the S3 object `bots/<actor>/memory/memory:travel.enc` | unchanged; OpenViking holds only its `viking://` index |
 
@@ -227,7 +235,7 @@ bash ~/openviking-sandbox-setup.sh --init     # fresh sandbox: run the init wiza
 ```
 Re-run it any time — every step pre-checks and short-circuits (`ok` / `skip` / `fail`).
 
-**Phase 7 asserts a non-empty injection** (so a green run is meaningful): if the `$NS` namespace (default `travel`) is empty, the gated → ranked → injected proof produces nothing, and Phase 7 **fails red** rather than skipping to a vacuous green. Seed the namespace first — the [Prerequisites](#prerequisites) wire demo (`--real --webauthn` grants `memory:travel` **and** seeds it) or a direct `memory.put` — or pass `--no-test` if you only want to stand up + wire the server without running the proof. (`--verify`'s Phase 8 fallback check is symmetric: empty injection with OpenViking killed is a fallback regression and also fails red.)
+**Phase 7 proves the OpenViking path, not just a non-empty injection.** It (7a) asserts OpenViking's `/search/find` ranks `$TEST_QUERY` directly, then (7b) runs the hook with the lexical fallback **disabled** (`AGENTKEYS_MEMORY_ENGINE_STRICT=1`) so a non-empty injection can *only* come from OpenViking — never the fallback masquerading as it. An empty `$NS`, a down server, or a gate-match miss makes Phase 7 **fail red** (not a vacuous green). Seed the namespace first — the [Prerequisites](#prerequisites) wire demo (`--real --webauthn` grants `memory:travel` **and** seeds it) or a direct `memory.put` — or pass `--no-test` to stand up + wire without the proof. (`--verify`'s Phase 8 is the deliberately *non-strict* complement: with OpenViking killed the lexical fallback must still inject — proving OpenViking is never load-bearing — so empty there is a fallback regression and also fails red.)
 
 **Laptop-driven harness: `bash harness/phase1-wire-demo.sh --openviking`** runs the AgentKeys-side checks (Steps 6–7) **when `openviking-server` is already reachable** at `OPENVIKING_ENDPOINT`. It does **not** install/configure OpenViking (Steps 1–3) or load a corpus (Steps 4–5). If the server isn't up, the phase skips with a pointer back here.
 

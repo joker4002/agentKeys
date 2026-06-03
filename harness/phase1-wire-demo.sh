@@ -1217,14 +1217,20 @@ phase_openviking() {
     return
   fi
 
+  # STRICT mode (AGENTKEYS_MEMORY_ENGINE_STRICT) disables the lexical fallback,
+  # so a non-empty .context here can ONLY have come from OpenViking's gate-matched
+  # ranking — not the fallback masquerading as it. (A plain run would go green via
+  # fallback even with OpenViking broken; that is the trap codex flagged.) The
+  # deep proof + direct /search/find assertion live in openviking-sandbox-setup.sh
+  # Phase 7 / docs/operator-runbook-openviking.md; OV.3 here is the lighter gate.
   local out
-  out="$(sbx_exec "printf '%s' '{\"query\":\"what about my peanut allergy?\"}' | bash \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh 2>/dev/null")"
+  out="$(sbx_exec "printf '%s' '{\"query\":\"what about my peanut allergy?\"}' | AGENTKEYS_MEMORY_ENGINE_STRICT=1 bash \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh 2>/dev/null")"
   if echo "$out" | jq -e '.context' >/dev/null 2>&1; then
-    ok "OV.3 query inject" "query-aware inject OK → $(echo "$out" | jq -r '.context' | tr '\n' ' ' | cut -c1-46)…"
+    ok "OV.3 query inject (strict)" "OpenViking-ranked, NO fallback → $(echo "$out" | jq -r '.context' | tr '\n' ' ' | cut -c1-46)…"
   elif [[ "$(echo "$out" | tr -d '[:space:]')" == "{}" ]]; then
-    skip "OV.3 query inject" "empty {} — mirror the namespace lines into OpenViking first (runbook step 4)"
+    skip "OV.3 query inject (strict)" "empty {} in strict mode — OpenViking produced no gate-matched ranking (fallback disabled). Mirror the namespace lines into OpenViking + seed $MEMORY_NS (runbook steps 4-5); deep proof: harness/openviking-sandbox-setup.sh / docs/operator-runbook-openviking.md"
   else
-    fail "OV.3 query inject" "unexpected: $(echo "$out" | tr '\n' ' ' | cut -c1-100)"
+    fail "OV.3 query inject (strict)" "unexpected: $(echo "$out" | tr '\n' ' ' | cut -c1-100)"
   fi
 }
 

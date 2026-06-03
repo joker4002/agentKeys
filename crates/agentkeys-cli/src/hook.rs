@@ -270,6 +270,14 @@ pub async fn memory_inject(
             agentkeys_core::memory_engine::engine_from_env()
         };
 
+    // Test/proof-only (`/codex:adversarial-review`): with the openviking engine,
+    // a turn where OpenViking produces no gate-matched ranking injects NOTHING
+    // rather than silently falling back to lexical — so a harness can PROVE the
+    // OpenViking path ran (a non-empty injection ⇒ OpenViking, not the fallback
+    // masquerading as it). Unset in production wiring, so OpenViking stays
+    // non-load-bearing for availability (arch.md §22).
+    let strict_openviking = openviking.is_some() && env_flag("AGENTKEYS_MEMORY_ENGINE_STRICT");
+
     let mut chunks = Vec::new();
     for ns in namespaces
         .split(',')
@@ -282,36 +290,46 @@ pub async fn memory_inject(
         {
             Ok(result) => {
                 if let Some(text) = extract_memory_content(&result) {
-                    let selected = match (&openviking, &query) {
+                    // Did OpenViking produce a gate-matched ranking this turn?
+                    // `None` on any OpenViking error / empty / no-match (per
+                    // rank_gate_bounded), or when not in openviking mode / no query.
+                    let openviking_ranked = match (&openviking, &query) {
                         (Some(ov), Some(q)) => {
-                            let lines = agentkeys_core::memory_engine::MemoryLine::from_blob(&text);
-                            match agentkeys_core::openviking::rank_gate_bounded(
-                                ov, q, &lines, &budget,
-                            )
-                            .await
-                            {
-                                Some(ranked) => ranked
-                                    .into_iter()
-                                    .map(|l| l.text)
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                                None => agentkeys_core::memory_engine::select_blob(
-                                    fallback_engine.as_ref(),
-                                    query.as_deref(),
-                                    &text,
-                                    &budget,
-                                ),
-                            }
+                            let lines =
+                                agentkeys_core::memory_engine::MemoryLine::from_blob(&text);
+                            agentkeys_core::openviking::rank_gate_bounded(ov, q, &lines, &budget)
+                                .await
+                                .map(|ranked| {
+                                    ranked
+                                        .into_iter()
+                                        .map(|l| l.text)
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
                         }
-                        _ => agentkeys_core::memory_engine::select_blob(
+                        _ => None,
+                    };
+                    let selected = resolve_selection(openviking_ranked, strict_openviking, || {
+                        agentkeys_core::memory_engine::select_blob(
                             fallback_engine.as_ref(),
                             query.as_deref(),
                             &text,
                             &budget,
-                        ),
-                    };
-                    if !selected.is_empty() {
-                        chunks.push(format!("## Memory: {ns}\n{selected}"));
+                        )
+                    });
+                    match selected {
+                        Some(s) if !s.is_empty() => {
+                            chunks.push(format!("## Memory: {ns}\n{s}"));
+                        }
+                        Some(_) => {}
+                        None => {
+                            eprintln!(
+                                "[agentkeys hook memory-inject] ns={ns}: OpenViking produced no \
+                                 gate-matched ranking (query={query:?}); \
+                                 AGENTKEYS_MEMORY_ENGINE_STRICT on — NOT falling back to lexical, \
+                                 injecting nothing for this namespace"
+                            );
+                        }
                     }
                 }
             }
@@ -412,9 +430,79 @@ pub fn extract_query(payload: &Value) -> Option<String> {
     None
 }
 
+/// `AGENTKEYS_MEMORY_ENGINE_STRICT=1|true` — test/proof-only flag (see
+/// [`resolve_selection`]). Pure helper.
+fn env_flag(key: &str) -> bool {
+    std::env::var(key)
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
+/// Decide the injected text for ONE namespace from whether OpenViking produced
+/// a gate-matched ranking this turn.
+///
+/// - `Some(ranked)` → inject the OpenViking ranking.
+/// - `None` + **strict** OpenViking → `None`: inject NOTHING, do NOT fall back.
+///   This is what lets a harness PROVE the OpenViking path actually ran — a
+///   non-empty injection is then only reachable via OpenViking, never the
+///   lexical fallback masquerading as it (`/codex:adversarial-review`).
+/// - `None` + non-strict (production default) → run the fallback engine, so
+///   OpenViking stays non-load-bearing for availability (arch.md §22).
+///
+/// Pure helper, unit-tested.
+fn resolve_selection(
+    openviking_ranked: Option<String>,
+    strict_openviking: bool,
+    fallback: impl FnOnce() -> String,
+) -> Option<String> {
+    match openviking_ranked {
+        Some(ranked) => Some(ranked),
+        None if strict_openviking => None,
+        None => Some(fallback()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_openviking_blocks_lexical_fallback() {
+        // No OpenViking ranking + strict ⇒ inject nothing, and the fallback
+        // closure must never run. This is what makes the harness proof airtight:
+        // a non-empty strict injection can ONLY have come from OpenViking.
+        assert_eq!(
+            resolve_selection(None, true, || panic!("fallback must not run in strict mode")),
+            None
+        );
+    }
+
+    #[test]
+    fn strict_openviking_passes_ranking_through() {
+        assert_eq!(
+            resolve_selection(Some("ranked".into()), true, || unreachable!()),
+            Some("ranked".to_string())
+        );
+    }
+
+    #[test]
+    fn nonstrict_falls_back_when_openviking_empty() {
+        assert_eq!(
+            resolve_selection(None, false, || "fallback".into()),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn nonstrict_prefers_openviking_ranking() {
+        assert_eq!(
+            resolve_selection(Some("ranked".into()), false, || unreachable!()),
+            Some("ranked".to_string())
+        );
+    }
 
     #[test]
     fn accept_verdict_emits_empty_object() {
