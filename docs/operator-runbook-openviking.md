@@ -212,7 +212,22 @@ agentkeys wire hermes \
 ```
 
 ## Automated path
-`bash harness/phase1-wire-demo.sh --openviking` runs the AgentKeys-side checks (Steps 6–7) automatically **when `openviking-server` is already reachable** at `OPENVIKING_ENDPOINT`. It does **not** install/configure OpenViking (Steps 1–3) or load a corpus (Steps 4–5) — those are operator- and provider-specific. If the server isn't up, the phase skips with a pointer back here.
+
+Two scripts automate different slices — pick by where you run them.
+
+**Sandbox-side, all-in-one (recommended): [`harness/openviking-sandbox-setup.sh`](../harness/openviking-sandbox-setup.sh).** The idempotent, scripted form of **Steps 2–7**, run **inside the sandbox**: server init (`--init`, first time), start + health, corpus load, mirror, identity recovery (6a), re-wire (6b), and the gated injection test (7). Self-contained — the sample corpus is embedded, so nothing else to upload. It **assumes** the operator/Mac side is done (the agent is already wired — it recovers the omni identity from the hook) and OpenViking is pip-installed (Step 1).
+```bash
+# laptop (repo root) — upload the script into the sandbox:
+curl -sS -X POST "${SANDBOX_URL:-http://localhost:8080}/v1/file/upload" \
+  -F "file=@harness/openviking-sandbox-setup.sh" -F "path=/home/gem/openviking-sandbox-setup.sh"
+# sandbox (docker exec -it <container> bash):
+bash ~/openviking-sandbox-setup.sh            # init already done before
+bash ~/openviking-sandbox-setup.sh --init     # fresh sandbox: run the init wizard too
+#   --reload force a fresh corpus load · --verify prove the fallback · --no-test stop after wiring
+```
+Re-run it any time — every step pre-checks and short-circuits (`ok` / `skip` / `fail`).
+
+**Laptop-driven harness: `bash harness/phase1-wire-demo.sh --openviking`** runs the AgentKeys-side checks (Steps 6–7) **when `openviking-server` is already reachable** at `OPENVIKING_ENDPOINT`. It does **not** install/configure OpenViking (Steps 1–3) or load a corpus (Steps 4–5). If the server isn't up, the phase skips with a pointer back here.
 
 ## Troubleshooting
 
