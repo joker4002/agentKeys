@@ -796,17 +796,9 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
                 .send()
                 .await?;
             let status = resp.status();
-            // Read Retry-After (429) from the header BEFORE consuming the body.
-            let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                parse_retry_after(
-                    resp.headers()
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok()),
-                    SystemTime::now(),
-                )
-            } else {
-                None
-            };
+            // Read any server-directed Retry-After (429 AND 5xx load-shed, e.g.
+            // 503) from the header BEFORE consuming the body.
+            let retry_after = retry_after_for(&resp, SystemTime::now());
             // Skip the body for retryable statuses (5xx/408/429) — classify_poll
             // suppresses it anyway, and an overloaded/malicious broker must not be
             // able to make every retry download a huge/slow body until the
@@ -1421,6 +1413,24 @@ async fn read_poll_body(resp: reqwest::Response) -> String {
     read_capped_body(resp, MAX_POLL_BODY).await
 }
 
+/// Extract a server-directed `Retry-After` cooldown for any retryable response
+/// that may legally carry it — NOT just 429. A `503 Service Unavailable` plus
+/// `Retry-After: <delay>` is the standard load-shed/maintenance signal; honoring
+/// it (via poll_retry_wait's max(header, backoff)) stops every daemon from
+/// hammering an overloaded broker on local backoff. Non-retryable statuses have
+/// no cooldown to honor.
+fn retry_after_for(resp: &reqwest::Response, now: SystemTime) -> Option<Duration> {
+    if !is_retryable_status(resp.status()) {
+        return None;
+    }
+    parse_retry_after(
+        resp.headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        now,
+    )
+}
+
 /// True iff `s` is a 64-char lowercase-hex omni address — the exact shape
 /// `agentkeys_core::actor_omni::{actor_omni_hex,child_omni_hex}` emit. Rejects
 /// reflected tokens, `0x`-prefixed values, uppercase, and any non-hex.
@@ -1578,8 +1588,8 @@ mod pairing_poll_tests {
         backoff_with_jitter, binding_artifact, classify_poll, format_broker_error,
         is_derivation_path, is_omni_hex, is_retryable_status, pairing_request_guard,
         pairing_state_path, parse_retry_after, poll_retry_wait, read_poll_body, request_artifact,
-        session_bearer_path, truncate_body, validate_claimed_binding, PollClass, MAX_POLL_BODY,
-        PAIRING_POLL_INTERVAL_SECONDS,
+        retry_after_for, session_bearer_path, truncate_body, validate_claimed_binding, PollClass,
+        MAX_POLL_BODY, PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -2020,6 +2030,48 @@ mod pairing_poll_tests {
             "success body must be capped at {MAX_POLL_BODY}, got {}",
             body.len()
         );
+    }
+
+    #[tokio::test]
+    async fn retry_after_for_honors_503_load_shed() {
+        use axum::{http::header::RETRY_AFTER, routing::get, Router};
+        let app = Router::new()
+            .route(
+                "/down",
+                get(|| async {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        [(RETRY_AFTER, "300")],
+                        "down",
+                    )
+                }),
+            )
+            .route("/ok", get(|| async { "ok" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+
+        // 503 + Retry-After: 300 is honored even though it is NOT a 429.
+        let resp = client
+            .get(format!("http://{addr}/down"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            retry_after_for(&resp, SystemTime::UNIX_EPOCH),
+            Some(Duration::from_secs(300)),
+            "503 Retry-After must be honored, not just 429"
+        );
+        // A success response has no cooldown to honor.
+        let resp = client
+            .get(format!("http://{addr}/ok"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry_after_for(&resp, SystemTime::UNIX_EPOCH), None);
     }
 
     #[test]
