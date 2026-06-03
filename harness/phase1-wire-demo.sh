@@ -26,7 +26,9 @@
 #
 # Usage:
 #   bash harness/phase1-wire-demo.sh {--light | --real} [--webauthn] [--unwire]
-#                                    [--yes] [--skip-N ...] [--help]
+#                                    [--openviking] [--yes] [--skip-N ...] [--help]
+#   --openviking : after the acts, test the OpenViking engine behind the gate
+#                  (needs openviking-server up — see docs/operator-runbook-openviking.md).
 #   (--light or --real is REQUIRED — the harness refuses to guess.)
 
 set -uo pipefail
@@ -55,6 +57,18 @@ MEMORY_NS="${MEMORY_NS:-travel}"
 MEMORY_ENGINE="${MEMORY_ENGINE:-passthrough}"
 MEMORY_MAX_LINES="${MEMORY_MAX_LINES:-}"
 PAYMENT_SCOPE="${PAYMENT_SCOPE:-payment.spend}"
+# On-chain memory scope service(s) to grant the agent. Issue #147 folds the
+# namespace into the SIGNED cap service as "memory:<ns>" (arch.md §896), and the
+# MCP requests exactly that (crates/agentkeys-mcp-server/src/tools/memory.rs).
+# So the GRANT must be "memory:<ns>" too — bare "memory" never matches
+# (keccak("memory") != keccak("memory:travel")) and cap-mint returns
+# service_not_in_scope. Derive per-namespace from MEMORY_NS; override via
+# SEED_SCOPE_SERVICES (comma-sep, e.g. memory:travel,memory:personal).
+if [[ -z "${SEED_SCOPE_SERVICES:-}" ]]; then
+  SEED_SCOPE_SERVICES=""
+  IFS=',' read -ra _seed_ns <<<"$MEMORY_NS"
+  for _n in "${_seed_ns[@]}"; do SEED_SCOPE_SERVICES+="${SEED_SCOPE_SERVICES:+,}memory:$_n"; done
+fi
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 AGENT_FILE="${AGENT_FILE:-$HOME/.agentkeys/agents/${AGENT_LABEL}.json}"
 # Operator/master private key used to non-interactively mint a fresh session JWT
@@ -75,7 +89,7 @@ MCP_BIN_DST=""
 DEMO_ACTOR="0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7"
 DEMO_OPERATOR="0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8"
 
-WEBAUTHN=false; UNWIRE=false; ASSUME_YES=false
+WEBAUTHN=false; UNWIRE=false; ASSUME_YES=false; OPENVIKING=false
 SKIP_PHASES=""   # space-separated phase numbers (bash 3.2 — no assoc arrays)
 
 # Resolved at runtime (Mode R from account; Mode L from demo constants):
@@ -109,6 +123,7 @@ while [[ $# -gt 0 ]]; do
     --webauthn)  WEBAUTHN=true; shift ;;
     --reuse-agent) REUSE_AGENT=true; shift ;;
     --unwire)    UNWIRE=true; shift ;;
+    --openviking) OPENVIKING=true; shift ;;
     --yes)       ASSUME_YES=true; shift ;;
     --skip-*)    SKIP_PHASES="$SKIP_PHASES ${1#--skip-}"; shift ;;
     --help|-h)   sed -n '2,29p' "$0"; exit 0 ;;
@@ -615,13 +630,13 @@ phase1_sandbox() {
         # declaring scope. Raw POST fallback so a --real run without a host build works.
         local cl child_omni
         if [[ -n "$la" ]]; then
-          cl="$("$la" agent claim --pairing-code "$pairing_code" --label "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" \
+          cl="$("$la" agent claim --pairing-code "$pairing_code" --label "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES}" \
             --broker-url "${BROKER_URL%/}" --session-bearer "$SESSION_BEARER" 2>&1)"
         else
           log "    P.1 claim: no local agentkeys binary — raw POST fallback (build the host CLI to exercise it: cargo build --release -p agentkeys-cli)"
           cl="$(curl -sS --max-time 30 -X POST "${BROKER_URL%/}/v1/agent/pairing/claim" \
             -H "authorization: Bearer $SESSION_BEARER" -H 'content-type: application/json' \
-            -d "$(jq -n --arg code "$pairing_code" --arg label "$AGENT_LABEL" --arg scope "${SEED_SCOPE_SERVICES:-memory}" '{pairing_code:$code, label:$label, requested_scope:$scope}')" 2>&1)"
+            -d "$(jq -n --arg code "$pairing_code" --arg label "$AGENT_LABEL" --arg scope "${SEED_SCOPE_SERVICES}" '{pairing_code:$code, label:$label, requested_scope:$scope}')" 2>&1)"
         fi
         child_omni="$(echo "$cl" | jq -r '.child_omni // empty' 2>/dev/null)"
         if [[ -z "$child_omni" ]]; then
@@ -688,11 +703,11 @@ phase1_sandbox() {
             fi
             # P.3 master grants the requested scope (one Touch ID).
             if [[ "$WEBAUTHN" == true ]]; then
-              log "    P.3 grant: heima-scope-set --webauthn --agent $AGENT_LABEL --services ${SEED_SCOPE_SERVICES:-memory} (expect Touch ID)"
-              local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES:-memory}" 2>&1)"
+              log "    P.3 grant: heima-scope-set --webauthn --agent $AGENT_LABEL --services ${SEED_SCOPE_SERVICES} (expect Touch ID)"
+              local grant; grant="$(bash "$REPO_ROOT/scripts/heima-scope-set.sh" --webauthn --agent "$AGENT_LABEL" --services "${SEED_SCOPE_SERVICES}" 2>&1)"
               echo "$grant" | sed 's/^/        /' >&2
               echo "$grant" | grep -qiE '"ok"[[:space:]]*:[[:space:]]*true' \
-                && ok "P.3 grant" "🔐 master granted [${SEED_SCOPE_SERVICES:-memory}] to ${ds_actor:0:14}… (Touch ID)" \
+                && ok "P.3 grant" "🔐 master granted [${SEED_SCOPE_SERVICES}] to ${ds_actor:0:14}… (Touch ID)" \
                 || fail "P.3 grant" "scope grant failed: $(echo "$grant" | tr '\n' ' ' | cut -c1-160)"
             else
               skip "P.3 grant" "no --webauthn — re-run with --real --webauthn so the master can grant the fresh actor's scope (Touch ID)"
@@ -789,7 +804,7 @@ phase1_sandbox() {
   # SEED_SCOPE_SERVICES the granted list (heima-scope-set.sh SETS the full list).
   if [[ "$MODE" == "real" ]]; then
     local seed="${SEED_MEMORY_CONTENT:-Chengdu trip — Apr 12 to 16, hotpot at Yulin.}"
-    local svcs="${SEED_SCOPE_SERVICES:-memory}"
+    local svcs="${SEED_SCOPE_SERVICES}"
     local env_pfx="AGENTKEYS_MCP_URL=$MCP_URL_IN_SANDBOX AGENTKEYS_MCP_VENDOR_TOKEN=$VENDOR_TOKEN AGENTKEYS_ACTOR_OMNI=$ACTOR_OMNI AGENTKEYS_OPERATOR_OMNI=$OPERATOR_OMNI AGENTKEYS_SESSION_BEARER=$SESSION_BEARER"
     # </dev/null gives stdin an immediate EOF — older binaries' memory-inject
     # block on read_to_string(stdin) without it (fixed in hook.rs, kept here so
@@ -1173,6 +1188,46 @@ phase5_teardown() {
 # Until then, harness/erc4337-master-e8.sh is a standalone *mechanism smoke* (run
 # it directly), not part of this agent-side e2e. See docs/operator-runbook-wire.md.
 
+# ─── Phase OV — OpenViking engine behind the gate (--openviking) ─────────────
+# Optional. Proves the AgentKeys-SIDE OpenViking integration: `wire` bakes the
+# openviking engine + endpoint into the hook, and the query-aware pre_llm_call
+# hook runs against the live server. Installing/configuring openviking-server +
+# the deep ranking proof are operator steps — see
+# docs/operator-runbook-openviking.md. Skips gracefully if the server is down,
+# so a normal run is unaffected unless --openviking is passed.
+phase_openviking() {
+  [[ "$OPENVIKING" == true ]] || return 0
+  log "Phase OV — OpenViking engine behind the gate (#147 §6a)"
+  resolve_sbx_paths || return
+  local ovurl="${OPENVIKING_ENDPOINT:-http://localhost:1933}"
+
+  if [[ "$(sbx_rc "curl -fsS -m 4 $ovurl/health")" != "0" ]]; then
+    skip "OV.1 server" "openviking-server not reachable at $ovurl — install+start it (docs/operator-runbook-openviking.md steps 1-3), then re-run --openviking"
+    return
+  fi
+  ok "OV.1 server" "openviking-server up at $ovurl"
+
+  local args="hermes --actor-omni $ACTOR_OMNI --operator-omni $OPERATOR_OMNI --namespaces $MEMORY_NS --payment-scope $PAYMENT_SCOPE --mcp-url $MCP_URL_IN_SANDBOX --vendor-token $VENDOR_TOKEN --memory-engine openviking --openviking-endpoint $ovurl"
+  [[ -n "$SESSION_BEARER" ]] && args="$args --session-bearer $SESSION_BEARER"
+  sbx_exec "$AGENT_BIN_DST wire $args" >/dev/null 2>&1
+  if [[ "$(sbx_rc "grep -q OPENVIKING_ENDPOINT \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh")" == "0" ]]; then
+    ok "OV.2 wire" "hook baked AGENTKEYS_MEMORY_ENGINE=openviking + OPENVIKING_ENDPOINT"
+  else
+    fail "OV.2 wire" "wire did not bake OPENVIKING_ENDPOINT into the hook"
+    return
+  fi
+
+  local out
+  out="$(sbx_exec "printf '%s' '{\"query\":\"what about my peanut allergy?\"}' | bash \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh 2>/dev/null")"
+  if echo "$out" | jq -e '.context' >/dev/null 2>&1; then
+    ok "OV.3 query inject" "query-aware inject OK → $(echo "$out" | jq -r '.context' | tr '\n' ' ' | cut -c1-46)…"
+  elif [[ "$(echo "$out" | tr -d '[:space:]')" == "{}" ]]; then
+    skip "OV.3 query inject" "empty {} — mirror the namespace lines into OpenViking first (runbook step 4)"
+  else
+    fail "OV.3 query inject" "unexpected: $(echo "$out" | tr '\n' ' ' | cut -c1-100)"
+  fi
+}
+
 # ─── main ────────────────────────────────────────────────────────────────────
 main() {
   for t in curl jq docker; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t" >&2; exit 2; }; done
@@ -1185,6 +1240,7 @@ main() {
   phase1_sandbox
   phase2_wire
   phase3_acts
+  phase_openviking
   phase4_surprise
   phase5_teardown
 

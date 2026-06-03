@@ -115,11 +115,11 @@ Condensed from `phase1-wire-demo.sh` + helper scripts. **This is the call list t
 | Step | Actor | Real call |
 |---|---|---|
 | request | agent daemon | `agentkeys-daemon --request-pairing` → `POST /v1/agent/pairing/request {device_pubkey, pop_sig}` → `{pairing_code, request_id, device_key_hash}` (K10 stays on the agent) |
-| claim | master | `agentkeys agent claim --pairing-code <c> --label <l> --services memory --session-bearer <J1>` → `POST /v1/agent/pairing/claim` → `{child_omni, device_pubkey, pop_sig, device_key_hash}` |
+| claim | master | `agentkeys agent claim --pairing-code <c> --label <l> --services memory:travel --session-bearer <J1>` → `POST /v1/agent/pairing/claim` → `{child_omni, device_pubkey, pop_sig, device_key_hash}` (service is namespace-qualified `memory:<ns>` per arch.md §896 — bare `memory` fails cap-mint) |
 | retrieve | agent daemon | `agentkeys-daemon --retrieve-pairing --request-id <id>` → `POST /v1/agent/pairing/poll` → **J1_agent** minted at poll (stays in sandbox) |
 | pending | master | `agentkeys agent pending` → `GET /v1/agent/pending-bindings` (the notification source) |
 | **bind** | master | `scripts/heima-agent-create.sh --agent-address <a> --actor-omni <child> --device-key-hash <dkh> --pop-sig <s>` → `cast send <SidecarRegistry> registerAgentDevice(...)` then `POST /v1/agent/pending-bindings/ack` |
-| **grant** | master | `scripts/heima-scope-set.sh --webauthn --agent <l> --services memory` → `agentkeys k11 assert --webauthn` (**the one Touch ID**) → `cast send <AgentKeysScope> setScopeWithWebauthn(...)` |
+| **grant** | master | `scripts/heima-scope-set.sh --webauthn --agent <l> --services memory:travel` → `agentkeys k11 assert --webauthn` (**the one Touch ID**) → `cast send <AgentKeysScope> setScopeWithWebauthn(...)` (grant the SAME `memory:<ns>` the cap-mint requests, else `service_not_in_scope`) |
 
 Per arch §10.2, bind + grant are **one operator gesture** (one K11 assertion authorizes both txs).
 

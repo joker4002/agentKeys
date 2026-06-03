@@ -40,6 +40,9 @@
 #   MAINNET_CONFIRM=1             (REQUIRED to run real deploy on mainnet)
 #   SKIP_FUND=1                   (skip step 4 entirely)
 #   SKIP_DEPLOY=1                 (skip step 5 entirely)
+#   FORCE_DEPLOY=1                (deploy fresh even when an env address is
+#                                 0x0/empty — only for a brand-NEW chain; the
+#                                 default REFUSES, to avoid duplicate deploys)
 
 set -euo pipefail
 
@@ -87,14 +90,20 @@ env_set() {
 # Returns 0 if there's contract code at $1 on-chain, else 1. Empty
 # `cast code` output, "0x" alone, or any error means "no code".
 contract_exists_on_chain() {
-  local addr="$1"
+  local addr="$1" code
   [ -z "$addr" ] && return 1
   case "$addr" in
     0x0|0x00*|0x0000000000000000000000000000000000000000) return 1 ;;
   esac
-  local code
-  code=$(cast code "$addr" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "")
-  [ -n "$code" ] && [ "$code" != "0x" ]
+  # Distinguish "RPC said no code" from "RPC errored". On an RPC error we must
+  # NOT report "no code" — that would make the caller redeploy (a DUPLICATE)
+  # just because the RPC blipped. Fail safe: assume the contract still exists.
+  if code=$(cast code "$addr" --rpc-url "$RPC_HTTP" 2>/dev/null); then
+    [ -n "$code" ] && [ "$code" != "0x" ]
+  else
+    echo "  WARN: cast code $addr failed (RPC error) — assuming deployed (won't redeploy)" >&2
+    return 0
+  fi
 }
 
 # 1. Tool sanity check ----------------------------------------------------
@@ -318,6 +327,7 @@ else
   PROFILE_NAME_UC=$(echo "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
 
   ALL_DEPLOYED=1
+  DEPLOY_REASON=""   # "unknown-address" (env 0x0/empty) vs "no-onchain-code" (chain reset)
   for slot in \
       "SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME_UC}:AgentKeysScope" \
       "SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}:SidecarRegistry" \
@@ -327,15 +337,15 @@ else
     name="${slot##*:}"
     eval "stored_addr=\${$var:-}"
     if [ -z "$stored_addr" ] || [ "$stored_addr" = "0x0" ]; then
-      echo "  $name ($var) not in env yet → deploy needed"
-      ALL_DEPLOYED=0
+      echo "  $name ($var) has no address in env (0x0/empty) — address UNKNOWN"
+      ALL_DEPLOYED=0; DEPLOY_REASON="unknown-address"
       break
     fi
     if contract_exists_on_chain "$stored_addr"; then
       echo "  $name = $stored_addr ✓ has code on-chain"
     else
       echo "  $name = $stored_addr ✗ NO code on-chain (chain reset?) → redeploy"
-      ALL_DEPLOYED=0
+      ALL_DEPLOYED=0; DEPLOY_REASON="no-onchain-code"
       break
     fi
   done
@@ -347,6 +357,20 @@ else
     EPOCH_ADDR="$(eval echo \$K3_EPOCH_COUNTER_ADDRESS_${PROFILE_NAME_UC})"
     AUDIT_ADDR="$(eval echo \$CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME_UC})"
   else
+    # SAFETY — never create DUPLICATE contracts. If we're here because an env
+    # address is 0x0/empty (address UNKNOWN), the contracts are very likely
+    # already deployed and this would mint a costly duplicate set (it orphaned
+    # a mainnet deploy once, via the SKIP_DEPLOY persist-clobber now fixed in
+    # step 6). Refuse unless the operator explicitly wants a genuinely-fresh
+    # deploy on a NEW chain.
+    if [ "$DEPLOY_REASON" = "unknown-address" ] && [ "${FORCE_DEPLOY:-0}" != "1" ]; then
+      echo "  REFUSING to deploy — a contract address is 0x0/empty in $ENV_FILE (address unknown)." >&2
+      echo "  The contracts are most likely ALREADY deployed; deploying now would DUPLICATE them." >&2
+      echo "  • Env accidentally zeroed? Restore it:  git checkout -- $ENV_FILE" >&2
+      echo "    (canonical addresses are in docs/spec/deployed-contracts.md)." >&2
+      echo "  • Genuinely-fresh deploy on a NEW chain? Re-run with FORCE_DEPLOY=1." >&2
+      exit 1
+    fi
     CHAIN_DIR="$REPO_ROOT/crates/agentkeys-chain"
     if [ ! -d "$CHAIN_DIR" ]; then
       echo "  NOTE: crates/agentkeys-chain not present yet (chain crate is pending in stage-1)."
@@ -421,12 +445,24 @@ fi
 # Re-running the script never duplicates lines, no matter how many runs.
 echo "[6/7] Persisting contract addresses to $ENV_FILE …"
 PROFILE_NAME_UC=$(echo "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
-env_set "SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME_UC}"   "${SCOPE_ADDR:-0x0}"    "$ENV_FILE"
-env_set "SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}" "${REGISTRY_ADDR:-0x0}" "$ENV_FILE"
-env_set "K3_EPOCH_COUNTER_ADDRESS_${PROFILE_NAME_UC}" "${EPOCH_ADDR:-0x0}"    "$ENV_FILE"
-env_set "CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME_UC}" "${AUDIT_ADDR:-0x0}"    "$ENV_FILE"
+# NEVER clobber a populated address with 0x0/empty. When the deploy step was
+# skipped (SKIP_DEPLOY=1, e.g. the fund-only phase) the *_ADDR vars are unset;
+# writing 0x0 here previously ZEROED the env, which then made the next run
+# deploy DUPLICATE contracts. Skip-and-preserve instead — only persist a real
+# resolved address.
+persist_addr() {  # persist_addr <VAR> <addr>
+  case "${2:-}" in
+    ""|0x0|0x0000000000000000000000000000000000000000)
+      echo "  skip $1 (address unresolved — preserving existing value)" ;;
+    *) env_set "$1" "$2" "$ENV_FILE" ;;
+  esac
+}
+persist_addr "SCOPE_CONTRACT_ADDRESS_${PROFILE_NAME_UC}"   "${SCOPE_ADDR:-}"
+persist_addr "SIDECAR_REGISTRY_ADDRESS_${PROFILE_NAME_UC}" "${REGISTRY_ADDR:-}"
+persist_addr "K3_EPOCH_COUNTER_ADDRESS_${PROFILE_NAME_UC}" "${EPOCH_ADDR:-}"
+persist_addr "CREDENTIAL_AUDIT_ADDRESS_${PROFILE_NAME_UC}" "${AUDIT_ADDR:-}"
 env_set "HEIMA_DEPLOYER_ADDR_${PROFILE_NAME_UC}"       "$DEPLOYER_ADDR"        "$ENV_FILE"
-echo "  persisted (replaced existing or appended new — no duplicates)."
+echo "  persisted (skipped unresolved — never clobbers a populated address)."
 
 # 7. Summary --------------------------------------------------------------
 echo "[7/7] Demo ready."
