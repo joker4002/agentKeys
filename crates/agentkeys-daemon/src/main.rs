@@ -702,7 +702,6 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
 
         match poll_result {
             Ok(body) => {
-                last_transient = None;
                 let pstatus = body
                     .get("status")
                     .and_then(|v| v.as_str())
