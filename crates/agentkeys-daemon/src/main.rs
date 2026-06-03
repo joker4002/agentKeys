@@ -227,8 +227,8 @@ struct Args {
     retrieve_pairing: bool,
 
     /// The `request_id` returned by `--request-pairing`, for `--retrieve-pairing`.
-    /// If omitted, read from the pairing state file
-    /// (`~/.agentkeys/pairing-request.json`).
+    /// If omitted, read from the per-device pairing state file
+    /// (`~/.agentkeys/pairing-request-<device_pubkey>.json`).
     #[arg(long)]
     request_id: Option<String>,
 
@@ -510,9 +510,14 @@ const PAIRING_POLL_INTERVAL_SECONDS: u64 = 3;
 /// Default state file written by `--request-pairing` and read back by
 /// `--retrieve-pairing` (so the two one-shot invocations don't have to thread
 /// `request_id` by hand; `--request-id` overrides). 0600.
-fn pairing_state_path() -> String {
+/// Per-DEVICE pairing state file (0600). Keyed by the K10 `device_pubkey` so two
+/// concurrent `--request-pairing` under one HOME with DISTINCT device keys never
+/// clobber each other's `request_id` retrieval handle (the state file is the
+/// default handle now that request_id is kept off stdout). `--request-pairing`
+/// writes it; `--retrieve-pairing` derives the SAME path from its own device key.
+fn pairing_state_path(device_pubkey: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    format!("{home}/.agentkeys/pairing-request.json")
+    format!("{home}/.agentkeys/pairing-request-{device_pubkey}.json")
 }
 
 /// `--request-pairing` (method A §10.2): generate (or reuse) the K10 device key
@@ -597,8 +602,10 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     let expires_at = body.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
 
     // Persist the request state (0600) so `--retrieve-pairing` can resolve
-    // request_id without the caller threading it (--request-id overrides).
-    let state_file = pairing_state_path();
+    // request_id without the caller threading it (--request-id overrides). Keyed
+    // by device_pubkey so a concurrent request for a DIFFERENT device key does
+    // not clobber this one's handle.
+    let state_file = pairing_state_path(&device_pubkey);
     if let Some(parent) = std::path::Path::new(&state_file).parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -652,11 +659,27 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
     })?;
     let base = broker_url.trim_end_matches('/').to_string();
 
-    // request_id: explicit flag wins; else read the state file from --request-pairing.
+    // Load the device key FIRST: its device_pubkey keys the per-device state file
+    // read below. Same key as --request-pairing (never regenerate — the broker
+    // bound the request to this exact device_pubkey, and poll re-proves it).
+    let key_file = args
+        .device_key_file
+        .clone()
+        .unwrap_or_else(|| "~/.agentkeys/agent-device.key".to_string());
+    let dk =
+        DeviceKey::load_or_generate(&key_file, false).context("load/generate K10 device key")?;
+    let device_pubkey = dk.address().to_string();
+    let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
+    let pop_sig = dk.pop_sig().context("pop_sig")?;
+
+    // request_id: explicit flag wins; else read the per-device state file written
+    // by --request-pairing (derived from THIS device key, so it resolves to the
+    // file --request-pairing wrote for the same device — concurrent requests for
+    // other devices have their own files and can't be read by mistake).
     let request_id = match args.request_id.clone() {
         Some(id) => id,
         None => {
-            let state_file = pairing_state_path();
+            let state_file = pairing_state_path(&device_pubkey);
             let raw = std::fs::read_to_string(&state_file).with_context(|| {
                 format!("read pairing state file {state_file} (pass --request-id to override)")
             })?;
@@ -670,18 +693,6 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
                 })?
         }
     };
-
-    let key_file = args
-        .device_key_file
-        .clone()
-        .unwrap_or_else(|| "~/.agentkeys/agent-device.key".to_string());
-    // Same key as --request-pairing (never regenerate — the broker bound the
-    // request to this exact device_pubkey, and poll re-proves possession of it).
-    let dk =
-        DeviceKey::load_or_generate(&key_file, false).context("load/generate K10 device key")?;
-    let device_pubkey = dk.address().to_string();
-    let device_key_hash = dk.device_key_hash().context("device_key_hash")?;
-    let pop_sig = dk.pop_sig().context("pop_sig")?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -1464,8 +1475,8 @@ fn session_bearer_path(dir: &str, child_omni: &str) -> String {
 mod pairing_poll_tests {
     use super::{
         backoff_with_jitter, binding_artifact, classify_poll, format_broker_error,
-        is_derivation_path, is_omni_hex, parse_retry_after, poll_retry_wait, request_artifact,
-        session_bearer_path, truncate_body, validate_claimed_binding, PollClass,
+        is_derivation_path, is_omni_hex, pairing_state_path, parse_retry_after, poll_retry_wait,
+        request_artifact, session_bearer_path, truncate_body, validate_claimed_binding, PollClass,
         PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
@@ -1800,6 +1811,21 @@ mod pairing_poll_tests {
         assert!(a.contains(&omni_a) && b.contains(&omni_b));
         // Re-pairing the SAME actor reuses its own path (overwrites only itself).
         assert_eq!(a, session_bearer_path(dir, &omni_a));
+    }
+
+    #[test]
+    fn pairing_state_path_is_per_device() {
+        // Two distinct device keys → distinct state files, so two concurrent
+        // --request-pairing for different devices can't clobber each other's
+        // request_id retrieval handle.
+        let a = pairing_state_path("0xaaaa1111");
+        let b = pairing_state_path("0xbbbb2222");
+        assert_ne!(a, b, "distinct devices must not share a state file: {a}");
+        assert!(a.contains("0xaaaa1111") && b.contains("0xbbbb2222"));
+        assert!(a.ends_with(".json"));
+        // Same device → stable path (--request-pairing and --retrieve-pairing
+        // derive the same handle from the same device key).
+        assert_eq!(a, pairing_state_path("0xaaaa1111"));
     }
 
     #[test]
