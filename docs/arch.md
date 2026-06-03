@@ -1425,9 +1425,12 @@ $AUDIT_BUCKET           bots/<actor_omni_hex>/audit/<batch>
 $EMAIL_BUCKET           bots/<actor_omni_hex>/inbound/<msg_id>
                         bots/<actor_omni_hex>/sent/<yyyymm>/<msg_id>
 $PAYMENT_AUDIT_BUCKET   bots/<actor_omni_hex>/payments/<yyyymm>/<idempotency_key>
+$CONFIG_BUCKET          bots/<operator_omni_hex>/config/policy.enc      (planned — see below)
 ```
 
 AWS PrincipalTag `agentkeys_actor_omni = <actor_omni_hex>` scopes IAM access to a single actor's prefix across all five buckets.
+
+**Planned — `$CONFIG_BUCKET` (the permission/policy config data class).** The permission config (the natural-language policy specs, the category taxonomy, device/service→category labels, and the readable scope grants the classifier-service compiles) is **more** sensitive than individual data lines — it maps a whole household/business. It is stored as **just another gated, encrypted data class** (K3-KEK, own bucket + IAM role per §17.2), but keyed by the **operator** omni and **master-only**: the agent a policy governs holds **no cap** for it (access-control on the access-control). This is the off-chain half of the policy; the on-chain scope (§19 / `AgentKeysScope`) is the minimal enforcement half. Design: [`plan/classifier-service.md`](plan/classifier-service.md) §7. The on-chain `serviceHash` is currently `keccak256(service)` (unsalted, low-entropy → brute-forceable, so the chain leaks the grant set); a **salted commitment** (`keccak256(operator_salt ‖ service)`, K3-derived salt) is the planned privacy hardening — phase 3, not early.
 
 ### 17.4 Why `$<CLASS>_BUCKET` is a variable
 
@@ -1457,6 +1460,8 @@ Each worker rejects caps whose `data_class` doesn't match its bucket with HTTP 4
 | 4. Per-data-class buckets | vault-role can't reach memory bucket; memory-role can't reach vault bucket | per-data-class IAM roles | step 10 |
 
 **Test discipline:** any PR adding a new data class (e.g., payments-audit) MUST extend the cap-token enum, add two new broker endpoints, and extend the stage-3 demo with negative isolation tests for all four layers. CLAUDE.md codifies this rule.
+
+**Planned data class — `Config`** (the permission/policy config, §17.3): adds `/v1/cap/config-get` + `/v1/cap/config-put` minting `{ op, data_class: Config, ... }`, **master-only** (the governed agents hold no `Config` cap). The same four-layer discipline applies. Plus a separate planned `CapOp::Classify` + `/v1/cap/classify` for the classifier-service worker. Design: [`plan/classifier-service.md`](plan/classifier-service.md).
 
 **Why route-per-class beats a single endpoint with a `data_class` parameter:** the broker statically derives the variant from the URL, so a programmer error in the cap-mint handler cannot produce a cap with the wrong class. A query-param would carry the variant through user input, expanding the attack surface for nothing.
 

@@ -17,9 +17,9 @@ The classifier-service is the **compiler** between the two: NL intent → struct
 
 | Phase | Scope | Where the model runs | New mechanism |
 |---|---|---|---|
-| **P1 — inline, memory only** | classify a memory at write into a namespace | **inline in the agent's own LLM call** (it already sees the turn) + a deterministic rules floor | none — the namespace is an agent-asserted attribute the *existing* gate already enforces. No worker, no GPU, no AgentKeys-reads-plaintext. |
-| **P2 — central classifier-service + COMPILE** | a shared, cap-gated, audited worker; **COMPILE** NL → scope grants for credentials ("only trading") and IoT device tiering (the auto-distribution win); **TAG** novel requests | one central shared base model on the GPU fleet; per-tenant via the tenant's taxonomy in the prompt | `classifier-service` (§15.6), `CapOp::Classify` + `/v1/cap/classify`, the tag / decision / chain caches, the parent-confirm flywheel |
-| **P3 — fleet-wide + learned** | scope contract generalized to **attribute / category sets** (hierarchical grants); per-tenant **LoRA** trained on confirmations; *optional* TEE for plaintext privacy | LoRA adapters via multi-LoRA serving; (optional) confidential-computing enclave | scope-contract attribute-set check (chain change); LoRA pipeline |
+| **P1 — inline + config storage** | classify a memory at write into a namespace; **stand up the off-chain `Config` data class** so policy gets a gated, encrypted, master-only home from day one (§7) | **inline in the agent's own LLM call** (it already sees the turn) + a deterministic rules floor | the namespace is an agent-asserted attribute the *existing* gate enforces (no worker / GPU / AgentKeys-read) **+ `DataClass::Config`** — a gated encrypted data class like cred/memory |
+| **P2 — central classifier-service + COMPILE** | a shared, cap-gated, audited worker; **COMPILE** NL → scope grants + the rich `Config` (credentials "only trading", IoT device tiering = the auto-distribution win); **TAG** novel requests | one central shared base model on the GPU fleet; per-tenant via the tenant's taxonomy in the prompt | `classifier-service` (§15.6), `CapOp::Classify` + `/v1/cap/classify`, the tag / decision / chain caches, the parent-confirm flywheel |
+| **P3 — hardened + learned** | **salt the on-chain scope commitment** (so the chain stops leaking the policy); scope contract generalized to **attribute / category sets** (hierarchical grants); per-tenant **LoRA**; *optional* TEE | LoRA via multi-LoRA serving; (optional) confidential-computing enclave | salted `serviceHash` (contract + `cap.rs` change + one-time re-`setScope` migration); attribute-set scope check; LoRA pipeline |
 
 Each phase ships independently. **The glossary (§5) and the determinism guardrail are stable across all three** — only the engine and the policy surface grow. The "no overkill" rule that defers TEE also defers LoRA: don't build P3 machinery until P1/P2 accuracy demands it.
 
@@ -40,6 +40,8 @@ Three caches make the steady state near-free:
 | **Chain-check cache** | `(cap, K3-epoch)` | device / scope / k3 verdict | epoch change | skips the per-get on-chain RPCs (the *real* current per-get cost) within an epoch |
 
 **Steady-state per-get cost = signature verify + set-membership + cache hits → zero inference.** Inference happens once at author (COMPILE), once per novel entity (TAG), once per ambiguous case (ask) — all cached. The **PUT-side classification can be async / queued** (not latency-sensitive). And memory *get* needs zero inference regardless — the namespace was assigned at PUT.
+
+**Who tags at *tool-call* time (the IoT / credential case) — the gate, by a lookup, not a model.** A tool call is already *structured*: `home_assistant.unlock(door:front)` = a tool name + a real entity ID. At `pre_tool_call`, `permission.check` (in the MCP) maps `entity → category/tier` via the cached `Config` (the device was tiered **once** at pairing / COMPILE) and checks set-membership — a hashmap lookup, **no per-call inference**. The classifier (the LLM, the cost) ran once at registration; the **agent's** LLM is *never* consulted for the gate decision — it is the thing being gated, so trusting its self-description would be prompt-injectable (the gate keys on the real entity ID — "tag the entity, not the narrative", §6). A brand-new entity never seen → deny-by-default + tag-once-async + daily review.
 
 ## 3. The Claude Code analog
 
@@ -126,6 +128,18 @@ READ:  agent turn ─► cap (TTL cache) ─► gate: attribute ∈ policy?  (de
 9. **Onboarding = the NL capture.** Day-1 friction is set by how well the first NL-policy capture covers the user's life. Invest in the onboarding conversation that produces the initial COMPILE; safe defaults backstop the rest.
 10. **Per-tenant quotas on the shared GPU.** Meter COMPILE/TAG per tenant so one can't starve the fleet; batch puts.
 11. **Privacy posture (record it).** Central (P2/P3) classification reads plaintext → AgentKeys is in the trust boundary for the classify path; **inline (P1)** and **TEE (P3)** close it; the durable store stays encrypted throughout. Write the chosen posture into the threat model.
+
+## 7. Where the policy config lives (storage)
+
+Permission configs are *more* sensitive than individual memory lines — they map a whole household / business. Stored in **two layers** (the same store+gate split as memory / creds):
+
+**Rich, human-readable config → off-chain, encrypted, gated, master-only — `DataClass::Config` (EARLY, phase 1).**
+The NL specs, the category taxonomy, the device/service→category labels, and the readable grant list live as a **new gated data class** — `bots/<operator_omni_hex>/config/policy.enc`, K3-KEK, its own bucket + IAM role per the per-data-class isolation invariant (arch.md §17). **Master-only:** the agent a policy governs has **no cap** for it — *access-control on the access-control* (you don't let the kid read the rules that restrict the kid). AgentKeys can't read it (encrypted at rest). This is the substrate `COMPILE` writes and `apps/parent-control` reads. It slots into the grand arch as just another data class alongside creds / memory / audit / email / payment — **config**. Ship it early; it's the same store+gate the fleet already uses.
+
+**Enforcement primitive → on-chain (kept), privacy-hardened LATER (phase 3).**
+Scope stays on-chain — it's the tamper-proof, broker-independent anchor (four-layer isolation, layer 2). **Today `serviceHash = keccak256(service)` is unsalted + low-entropy → brute-forceable**, so the chain currently leaks the policy. Phase 3 replaces it with a **salted commitment** `keccak256(operator_salt ‖ service)` (`operator_salt` = K3-derived: master / broker / worker can compute it, chain observers can't). Residual grant-graph-structure leak → a future Merkle/ZK item. Salting is a contract + `cap.rs` change + a one-time re-`setScope` migration — hence phase 3, not now.
+
+The **cap** is the runtime artifact — signed, TTL'd, carrying only the one scoped service it authorizes; it never exposes the whole policy.
 
 ## References
 - [`../research/universal-gate-pattern.md`](../research/universal-gate-pattern.md) — the four primitives + the determinism principle (this doc's foundation; "the upstream classifier" it names *is* this worker).
