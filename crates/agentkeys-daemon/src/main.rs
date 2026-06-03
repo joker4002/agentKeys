@@ -1168,7 +1168,24 @@ fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
         // it is the broker's actionable rejection reason and is not retried.)
         PollClass::Transient(format!("HTTP {status} (transient; body suppressed)"))
     } else {
-        PollClass::Fatal(format!("HTTP {status}: {}", truncate_body(body)))
+        // Fatal (4xx/3xx + any other non-success, non-retryable status). Do NOT
+        // log the raw body: classify_poll cannot prove a non-success body came
+        // from the broker's error envelope rather than a reverse proxy, WAF,
+        // stale route, or a wrongly-statused claimed payload (which carries
+        // session_jwt). Parse the broker envelope ({"error": <kind>, ...}) and
+        // log ONLY the short `error` KIND — a broker-controlled category string
+        // (e.g. "not_found", "device_role_missing"), never a token, request_id,
+        // or pop_sig. Anything that isn't that envelope (proxy HTML, reflected
+        // body, claimed payload) is suppressed to status-only.
+        let kind = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+        match kind {
+            Some(k) => PollClass::Fatal(format!("HTTP {status}: {}", truncate_body(&k))),
+            None => PollClass::Fatal(format!(
+                "HTTP {status} (body suppressed — no broker error envelope)"
+            )),
+        }
     }
 }
 
@@ -1322,6 +1339,60 @@ mod pairing_poll_tests {
                 ),
                 "status {s} should fail fast"
             );
+        }
+    }
+
+    #[test]
+    fn fatal_non_success_bodies_never_leak_secrets() {
+        // A fatal (4xx/3xx) body whose provenance we can't trust — proxy/WAF,
+        // stale route, or a wrongly-statused claimed payload — must NEVER be
+        // logged. Only the broker envelope's short `error` kind is allowed
+        // through; everything else (session_jwt/request_id/pop_sig) is dropped.
+        let secrets = ["SENTINEL_JWT", "SENTINEL_REQ_ID", "SENTINEL_POP_SIG"];
+
+        // (a) No broker envelope (raw reflected/claimed payload) → fully suppressed.
+        let no_envelope = r#"{"session_jwt":"SENTINEL_JWT","request_id":"SENTINEL_REQ_ID","pop_sig":"SENTINEL_POP_SIG"}"#;
+        for s in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::MOVED_PERMANENTLY, // 3xx also lands in the fatal branch
+        ] {
+            match classify_poll(s, no_envelope) {
+                PollClass::Fatal(reason) => {
+                    for secret in secrets {
+                        assert!(
+                            !reason.contains(secret),
+                            "fatal reason for {s} leaked {secret}: {reason}"
+                        );
+                    }
+                    assert!(
+                        reason.contains("body suppressed"),
+                        "fatal reason for {s} should be suppressed, got {reason}"
+                    );
+                }
+                other => panic!("status {s} should be fatal, got {other:?}"),
+            }
+        }
+
+        // (b) Broker envelope with extra secret fields → logs ONLY the `error`
+        //     kind, never the sibling secrets.
+        let with_envelope =
+            r#"{"error":"device_role_missing","message":"...","session_jwt":"SENTINEL_JWT"}"#;
+        match classify_poll(StatusCode::FORBIDDEN, with_envelope) {
+            PollClass::Fatal(reason) => {
+                assert!(
+                    reason.contains("device_role_missing"),
+                    "fatal reason should surface the broker error kind: {reason}"
+                );
+                for secret in secrets {
+                    assert!(
+                        !reason.contains(secret),
+                        "fatal reason leaked {secret}: {reason}"
+                    );
+                }
+            }
+            other => panic!("403 with envelope should be fatal, got {other:?}"),
         }
     }
 
