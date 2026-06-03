@@ -302,11 +302,16 @@ say "starting daemon on http://${DAEMON_BIND} (rp_id=${DAEMON_RP_ID})"
 prefix "$C_DAEMON" "daemon" < "$FIFO_DAEMON" &
 PREFIX_DAEMON_PID=$!
 disown "$PREFIX_DAEMON_PID" 2>/dev/null || true
+# Broker for the W1 onboarding email→verify flow (the real magic-link). Override
+# with AGENTKEYS_BROKER_URL=…; defaults to prod so onboarding works out of the box.
+DAEMON_BROKER_URL="${AGENTKEYS_BROKER_URL:-https://broker.litentry.org}"
+say "  daemon onboarding broker: ${DAEMON_BROKER_URL}"
 "$DAEMON_BIN" --ui-bridge \
   --ui-bridge-bind   "$DAEMON_BIND" \
   --ui-bridge-origin "$DAEMON_ORIGIN" \
   --ui-bridge-rp-id  "$DAEMON_RP_ID" \
   --ui-bridge-rp-name "$DAEMON_RP_NAME" \
+  --broker-url       "$DAEMON_BROKER_URL" \
   > "$FIFO_DAEMON" 2>&1 &
 DAEMON_PID=$!
 disown "$DAEMON_PID" 2>/dev/null || true

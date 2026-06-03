@@ -43,6 +43,8 @@ use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 use webauthn_rs::prelude::*;
 
+use agentkeys_core::init_flow;
+
 /// In-flight registration state. Keyed by `user_id` (the random opaque
 /// handle the browser echoes back). Cleared once a finish call consumes
 /// the entry, or on next start (in-memory only).
@@ -72,6 +74,10 @@ pub struct UiBridgeState {
     /// plant (re-planting the same entry is a no-op). Maps the §2 "plant
     /// preserved memory" flow + GH plan issue-9step-flow.md.
     pub master_memory: RwLock<HashMap<String, ApiMemoryEntry>>,
+    /// Broker base URL for the W1 onboarding email→verify flow. `None` ⇒ email
+    /// onboarding is disabled (the daemon was started without `--broker-url`)
+    /// and the email endpoints fail closed with `broker-not-configured`.
+    pub broker_url: Option<String>,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -238,6 +244,32 @@ pub struct EnrollFinishResponse {
     pub chain_tx_hash: Option<String>,
 }
 
+// ── W1 onboarding: real email magic-link verify (broker-backed) ──
+
+#[derive(Debug, Deserialize)]
+pub struct EmailStartRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmailStartResponse {
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EmailStatusQuery {
+    pub request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EmailStatusResponse {
+    /// "pending" | "verified" | "failed:<reason>"
+    pub status: String,
+    /// Set when verified: the operator's identity omni (shown after login).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omni_account: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -274,6 +306,8 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/healthz", get(healthz))
         .route("/v1/k11/enroll/begin", post(enroll_begin))
         .route("/v1/k11/enroll/finish", post(enroll_finish))
+        .route("/v1/auth/email/start", post(auth_email_start))
+        .route("/v1/auth/email/status", get(auth_email_status))
         .route("/v1/actors", get(list_actors))
         .route("/v1/actors/:id", get(get_actor))
         .route("/v1/actors/:id/caps", get(list_caps))
@@ -301,6 +335,7 @@ pub fn build_state(
     rp_id: &str,
     rp_origin: &str,
     rp_name: &str,
+    broker_url: Option<String>,
 ) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
@@ -316,11 +351,83 @@ pub fn build_state(
         workers: RwLock::new(HashMap::new()),
         anchor: RwLock::new(ApiAnchorStatus::default()),
         master_memory: RwLock::new(HashMap::new()),
+        broker_url,
     }))
 }
 
 async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "surface": "ui-bridge" }))
+}
+
+/// W1: request a magic-link email. Proxies the broker's `email/request` so the
+/// browser never holds broker URLs; returns the `request_id` the browser polls.
+async fn auth_email_start(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<EmailStartRequest>,
+) -> Result<Json<EmailStartResponse>, (StatusCode, Json<ErrorBody>)> {
+    let broker = state.broker_url.as_deref().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "email onboarding disabled (daemon started without --broker-url)",
+            "broker-not-configured",
+        )
+    })?;
+    if req.email.trim().is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "email required",
+            "missing-email",
+        ));
+    }
+    let request_id = init_flow::email_request(broker, req.email.trim())
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("broker email/request failed: {e}"),
+                "broker-email-failed",
+            )
+        })?;
+    Ok(Json(EmailStartResponse { request_id }))
+}
+
+/// W1: poll the magic-link status (the browser calls this on a timer until the
+/// status is no longer `pending` — i.e. the operator clicked the link).
+async fn auth_email_status(
+    State(state): State<SharedUiBridgeState>,
+    axum::extract::Query(q): axum::extract::Query<EmailStatusQuery>,
+) -> Result<Json<EmailStatusResponse>, (StatusCode, Json<ErrorBody>)> {
+    let broker = state.broker_url.as_deref().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "email onboarding disabled (daemon started without --broker-url)",
+            "broker-not-configured",
+        )
+    })?;
+    let status = init_flow::auth_status_once(broker, "email", &q.request_id)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("broker email/status failed: {e}"),
+                "broker-status-failed",
+            )
+        })?;
+    let resp = match status {
+        init_flow::AuthStatus::Pending => EmailStatusResponse {
+            status: "pending".into(),
+            omni_account: None,
+        },
+        init_flow::AuthStatus::Verified { identity_omni, .. } => EmailStatusResponse {
+            status: "verified".into(),
+            omni_account: Some(identity_omni),
+        },
+        init_flow::AuthStatus::Failed(reason) => EmailStatusResponse {
+            status: format!("failed:{reason}"),
+            omni_account: None,
+        },
+    };
+    Ok(Json(resp))
 }
 
 async fn enroll_begin(
@@ -896,7 +1003,25 @@ mod tests {
     use super::*;
 
     fn make_state() -> SharedUiBridgeState {
-        build_state("localhost", "http://localhost:3113", "AgentKeys Test").unwrap()
+        build_state("localhost", "http://localhost:3113", "AgentKeys Test", None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn auth_email_start_without_broker_is_unavailable() {
+        // make_state() builds with broker_url = None ⇒ email onboarding is
+        // disabled, so the endpoint fails closed (503 broker-not-configured)
+        // rather than silently no-op'ing.
+        let state = make_state();
+        let e = auth_email_start(
+            State(state),
+            Json(EmailStartRequest {
+                email: "sara@example.com".into(),
+            }),
+        )
+        .await
+        .expect_err("no broker configured should error");
+        assert_eq!(e.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(e.1 .0.reason, "broker-not-configured");
     }
 
     #[tokio::test]

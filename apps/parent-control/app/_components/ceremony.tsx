@@ -11,9 +11,9 @@ import type { CeremonyStep } from './types';
 // daemon is configured. Returns 'real' on a completed browser ceremony,
 // 'fallback' when no daemon / no authenticator / the user dismissed it (the
 // onboarding then runs the narrated ceremony so the offline demo still flows).
-async function tryRealEnroll(client: AgentKeysClient): Promise<'real' | 'fallback'> {
+async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'real' | 'fallback'> {
   if (!webauthnAvailable()) return 'fallback';
-  const begin = await client.enrollK11Begin({ userName: 'sara@local', userDisplayName: 'Sara (master)' });
+  const begin = await client.enrollK11Begin({ userName: email, userDisplayName: email });
   if (!begin.ok) return 'fallback'; // EmptyBackend → disconnected → narrated fallback
   try {
     const opts = jsonToCreationOptions({
@@ -118,35 +118,75 @@ export function CeremonyRunner({
 // Full-screen WebAuthn login → onboarding ceremony (workflow 1).
 export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   const client = useClient();
-  const [phase, setPhase] = useState<'email' | 'ceremony'>('email');
+  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony'>('email');
   const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending'>('pending');
   const [email, setEmail] = useState('');
+  const [requestId, setRequestId] = useState('');
+  const [omni, setOmni] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
   // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
   // email) comes FIRST; the WebAuthn Touch ID is Stage 2 (master binding),
   // fired automatically MID-ceremony. There is no separate "register" step —
   // the passkey binding is one stage of the running ceremony.
-  const submitEmail = () => {
-    if (emailValid) setPhase('ceremony');
+  // Enter email → REAL broker magic link via the daemon. If the backend is
+  // disconnected (no daemon), fall back to the narrated demo so the offline UI
+  // still flows (enrollMode = 'demo').
+  const submitEmail = async () => {
+    if (!emailValid || busy) return;
+    setBusy(true);
+    setNote('');
+    const r = await client.startEmailVerify(email.trim());
+    setBusy(false);
+    if (r.ok) {
+      setRequestId(r.data.requestId);
+      setPhase('verify');
+    } else {
+      setEnrollMode('demo');
+      setPhase('ceremony');
+    }
   };
+
+  // While in 'verify', poll the broker until the operator clicks the magic link.
+  useEffect(() => {
+    if (phase !== 'verify' || !requestId) return;
+    let cancelled = false;
+    const tick = async () => {
+      const r = await client.pollEmailVerify(requestId);
+      if (cancelled || !r.ok) return;
+      if (r.data.status === 'verified') {
+        setOmni(r.data.omniAccount ?? '');
+        setPhase('ceremony');
+      } else if (r.data.status.startsWith('failed')) {
+        setNote(`Email verification ${r.data.status} — start over with a fresh link.`);
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [phase, requestId, client]);
 
   // §9 Stages 0–4. The Stage-2 binding step carries the real WebAuthn action;
   // the runner awaits it (real Touch ID via the daemon ui-bridge, narrated
   // fallback offline).
   const stages: CeremonyStep[] = [
     { label: 'Generate device key (K10)', sub: 'secp256k1 keypair · generated locally · no network · sealed in the OS keychain' },
-    { label: 'Verify your email', sub: `magic link → ${email} · broker returns binding_nonce (single-use, TTL-bound)` },
+    { label: 'Email verified ✓', sub: `${email} · broker issued the single-use binding_nonce` },
     {
       label: 'Bind passkey (K11) · Touch ID',
-      sub: 'WebAuthn create · challenge = SHA256(binding_nonce ‖ D_pub) · commits the device atomically',
+      sub: 'WebAuthn create · the passkey is bound to your verified email (not a demo identity)',
       action: async () => {
-        const outcome = await tryRealEnroll(client);
+        const outcome = await tryRealEnroll(client, email.trim());
         setEnrollMode(outcome === 'real' ? 'real' : 'demo');
       },
     },
-    { label: 'Derive wallet + SIWE → session', sub: 'signer derives initial_master_wallet · SIWE round-trip → J1 · actor_omni freezes here' },
-    { label: 'Register master device on chain', sub: 'SidecarRegistry.register_master_device · roles = CAP_MINT | RECOVERY | SCOPE_MGMT', onchain: true, fn: 'register_master_device(bytes32,bytes32,bytes32,bytes32,bytes,uint8,bytes)' },
+    { label: 'Derive wallet + SIWE → session', sub: 'signer derives initial_master_wallet · SIWE round-trip → J1 (W1: next slice)' },
+    { label: 'Register master device on chain', sub: 'registerFirstMasterDevice — deferred (ERC-4337 E7); chain_tx pending', onchain: true, fn: 'registerFirstMasterDevice(...)' },
   ];
 
   return (
@@ -216,6 +256,27 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
           </div>
         )}
 
+        {phase === 'verify' && (
+          <div className="onboard-login">
+            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Check your inbox.</h1>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
+              We sent a one-time magic link to <strong>{email}</strong>. Click it to verify this address — this page
+              continues automatically once you do.
+            </p>
+            <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
+              ▸ waiting for the link to be clicked…
+            </div>
+            {note && <div style={{ fontSize: 11.5, color: '#b00', marginTop: 12 }}>{note}</div>}
+            <button
+              className="btn"
+              style={{ marginTop: 18, padding: '8px 14px' }}
+              onClick={() => { setPhase('email'); setRequestId(''); setNote(''); }}
+            >
+              ← use a different email
+            </button>
+          </div>
+        )}
+
         {phase === 'ceremony' && (
           <div>
             <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
@@ -223,6 +284,11 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
               {enrollMode === 'real' && <span className="chip ok" style={{ marginLeft: 8 }}>K11 bound · real WebAuthn</span>}
               {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
             </div>
+            {omni && (
+              <div className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)', marginBottom: 14, wordBreak: 'break-all' }}>
+                logged in as <strong>{email}</strong> · omni {omni}
+              </div>
+            )}
             <CeremonyRunner steps={stages} onDone={onComplete} stepMs={760} />
           </div>
         )}

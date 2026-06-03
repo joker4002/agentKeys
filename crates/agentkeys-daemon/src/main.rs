@@ -898,6 +898,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         &args.ui_bridge_rp_id,
         &args.ui_bridge_origin,
         &args.ui_bridge_rp_name,
+        args.broker_url.clone(),
     )
     .with_context(|| {
         format!(

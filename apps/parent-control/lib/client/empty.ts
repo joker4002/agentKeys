@@ -4,6 +4,8 @@ import type {
   CapToken,
   ConnectionStatus,
   DisconnectedStatus,
+  EmailVerifyStart,
+  EmailVerifyStatus,
   K11EnrollBegin,
   K11EnrollFinishInput,
   K11EnrollResult,
@@ -28,6 +30,14 @@ function disconnected<T>(): Result<T> {
 export class EmptyBackend implements AgentKeysClient {
   async status(): Promise<ConnectionStatus> {
     return DISCONNECTED;
+  }
+
+  async startEmailVerify(): Promise<Result<EmailVerifyStart>> {
+    return disconnected();
+  }
+
+  async pollEmailVerify(): Promise<Result<EmailVerifyStatus>> {
+    return disconnected();
   }
 
   async listActors(): Promise<Result<Actor[]>> {

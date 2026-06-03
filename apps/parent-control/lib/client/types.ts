@@ -85,6 +85,17 @@ export interface PlantResult {
   total: number;
 }
 
+export interface EmailVerifyStart {
+  requestId: string;
+}
+
+export interface EmailVerifyStatus {
+  /** "pending" | "verified" | "failed:<reason>" */
+  status: string;
+  /** Set when verified: the operator's identity omni (shown after login). */
+  omniAccount?: string;
+}
+
 export interface AgentKeysClient {
   status(): Promise<ConnectionStatus>;
 
@@ -105,6 +116,11 @@ export interface AgentKeysClient {
 
   enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
   enrollK11Finish(input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>>;
+
+  // §1 onboarding — real email magic-link verify (broker-backed, W1). The
+  // browser starts it, then polls until the operator clicks the link.
+  startEmailVerify(email: string): Promise<Result<EmailVerifyStart>>;
+  pollEmailVerify(requestId: string): Promise<Result<EmailVerifyStatus>>;
 
   // §2 — master memory (real list + idempotent plant; server dedups by content-hash).
   // Per namespace; an agent reads a namespace only with a `memory:<ns>` scope
