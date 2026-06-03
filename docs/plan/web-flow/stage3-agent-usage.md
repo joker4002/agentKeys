@@ -114,13 +114,13 @@ The web UI shows a three-step progress card mirroring harness Phase P:
 
 **P.2 — master binds the device on-chain.** The UI calls the daemon to run `heima-agent-create --from-pubkey --agent-address <addr> --actor-omni <omni> --device-key-hash <hash> --pop-sig <sig>` → `registerAgentDevice`. The master signs with its own key; it bound a device whose private key it has never seen, attested by the agent's `pop_sig`. *(harness `P.2`.)*
 
-**P.3 — master approves the scope (Touch ID).** The UI runs the K11 ceremony: `heima-scope-set --webauthn --agent travel-bot --services travel` (or whatever §1.1 selected). The operator's real Touch ID prompt fires. This is the on-chain scope grant — the moment the agent *earns* its permission. *(harness `P.3`.)*
+**P.3 — master approves the scope (Touch ID).** The UI runs the K11 ceremony: `heima-scope-set --webauthn --agent travel-bot --services memory:travel` (or whatever §1.1 selected — the memory service is **namespace-qualified `memory:<ns>`** per arch.md §896 / #177; a bare `travel` or `memory` never matches the cap-mint's `memory:travel` hash → `service_not_in_scope`). The operator's real Touch ID prompt fires. This is the on-chain scope grant — the moment the agent *earns* its permission. *(harness `P.3`.)*
 
 > 🔐 *Approve travel-bot's permissions*
 > *travel-bot is asking to read your **travel** memory. Approve with Touch ID to grant it on-chain.*
 > `[ Approve with Touch ID → ]`
 
-After P.3 the fresh actor exists on-chain with an empty memory and a `travel`-scoped grant. Because the identity is brand-new, the UI offers to **seed** a first memory so the agent has something to recall (harness step `1.5`) — operator-supplied content, or skip.
+After P.3 the fresh actor exists on-chain with an empty memory and a `memory:travel`-scoped grant. Because the identity is brand-new, the UI offers to **seed** a first memory so the agent has something to recall (harness step `1.5`) — operator-supplied content, or skip.
 
 **Why "born in the sandbox" matters in the UI copy:** the prior design generated the agent key on the laptop and shipped it out — a key-custody smell. The redesign's headline guarantee is that the master holds *no* agent private keys. The pairing card says so explicitly: *"its key is generated on its own device, never on yours."*
 
@@ -138,7 +138,7 @@ Now the agent has an identity and a scope. Wiring is what makes that scope *unby
 > agentkeys hook check         pre_tool_call       blocks over-cap / out-of-scope actions
 >                              (pay|order|spend…)   — fails CLOSED if AgentKeys unreachable
 > agentkeys hook audit         post_tool_call       appends an audit row — never blocks
-> agentkeys hook memory-inject pre_llm_call         injects only your granted namespaces
+> agentkeys hook memory-inject pre_llm_call         injects only granted memory:<ns>, engine-ranked per query
 > ```
 >
 > `[ Wire travel-bot → ]`   `[ Preview what gets written ]`

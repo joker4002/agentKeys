@@ -64,6 +64,10 @@ export interface RevokeIntent {
 }
 
 export interface MasterMemoryEntry {
+  /** Namespace (e.g. `travel`). An agent's cap/scope to read this namespace is
+   *  the namespace-qualified signed service `memory:<ns>` — build it with
+   *  `memoryService(ns)` (lib/constants.ts); a bare `memory` fails cap-mint
+   *  (arch.md §896, #177). The configured engine ranks injected lines per query. */
   ns: string;
   key: string;
   title: string;
@@ -102,7 +106,9 @@ export interface AgentKeysClient {
   enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
   enrollK11Finish(input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>>;
 
-  // §2 — master memory (real list + idempotent plant; server dedups by content-hash)
+  // §2 — master memory (real list + idempotent plant; server dedups by content-hash).
+  // Per namespace; an agent reads a namespace only with a `memory:<ns>` scope
+  // (memoryService(ns)), and the configured engine ranks what's injected (#177).
   listMasterMemory(): Promise<Result<MasterMemoryEntry[]>>;
   plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>>;
 }
