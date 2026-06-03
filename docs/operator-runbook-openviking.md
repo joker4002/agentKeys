@@ -227,6 +227,8 @@ bash ~/openviking-sandbox-setup.sh --init     # fresh sandbox: run the init wiza
 ```
 Re-run it any time — every step pre-checks and short-circuits (`ok` / `skip` / `fail`).
 
+**Phase 7 asserts a non-empty injection** (so a green run is meaningful): if the `$NS` namespace (default `travel`) is empty, the gated → ranked → injected proof produces nothing, and Phase 7 **fails red** rather than skipping to a vacuous green. Seed the namespace first — the [Prerequisites](#prerequisites) wire demo (`--real --webauthn` grants `memory:travel` **and** seeds it) or a direct `memory.put` — or pass `--no-test` if you only want to stand up + wire the server without running the proof. (`--verify`'s Phase 8 fallback check is symmetric: empty injection with OpenViking killed is a fallback regression and also fails red.)
+
 **Laptop-driven harness: `bash harness/phase1-wire-demo.sh --openviking`** runs the AgentKeys-side checks (Steps 6–7) **when `openviking-server` is already reachable** at `OPENVIKING_ENDPOINT`. It does **not** install/configure OpenViking (Steps 1–3) or load a corpus (Steps 4–5). If the server isn't up, the phase skips with a pointer back here.
 
 ## Troubleshooting

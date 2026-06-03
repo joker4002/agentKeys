@@ -17,6 +17,14 @@
 #   - `cargo run` (not a hardcoded target/debug path) so CI cache
 #     layouts with $CARGO_TARGET_DIR work.
 #
+# Hardened per /codex:adversarial-review (2026-06-04):
+#   - Act 1 proves the MEMORY FUNCTIONS, not just a seeded read: a
+#     memory.put -> memory.get round-trip reads a written value back
+#     verbatim (the write path), and a get on an unprovisioned namespace
+#     is denied with -32000 (namespace isolation). The prior Act 1 only
+#     grep'd a preseeded "Chengdu" fixture and could pass with the write
+#     path or namespace binding fully broken.
+#
 # Usage:
 #   bash scripts/mcp-demo-mode-a.sh
 #
@@ -161,6 +169,39 @@ assert_eq "$(jread "$ACT1" '.result.isError')" "false" "tool isError = false"
 assert_eq "$(jread "$ACT1" '.result.structuredContent.ok')" "true" "structuredContent.ok = true"
 assert_eq "$(jread "$ACT1" '.result.structuredContent.namespace')" "travel" "namespace echoed back"
 assert_contains "Chengdu" "$ACT1" "Chengdu trip surfaces in body"
+
+# ── ACT 1b — REAL write→read round-trip (proves the WRITE path) ──────
+# The seeded read above can pass even if memory.put, the namespace
+# binding, or the worker payload shape is broken. Write a unique value,
+# read it back, assert it round-trips verbatim.
+echo
+echo "=== ACT 1b: memory.put → memory.get round-trip ==="
+RT_NS="trip-notes"
+RT_VAL="Lisbon trip booked May 2 to 9; pid $$"
+ACT1B_PUT=$(call "$(call_body agentkeys.memory.put \
+  "$(printf '{"actor":"%s","namespace":"%s","content":"%s","operator_omni":"%s","device_key_hash":"%s"}' \
+    "$ACTOR" "$RT_NS" "$RT_VAL" "$OPERATOR" "$DEVICE")")")
+assert_no_error "$ACT1B_PUT" "memory.put has no JSON-RPC error"
+assert_eq "$(jread "$ACT1B_PUT" '.result.structuredContent.ok')" "true" "memory.put ok = true"
+assert_eq "$(jread "$ACT1B_PUT" '.result.structuredContent.namespace')" "$RT_NS" "put namespace echoed back"
+
+ACT1B_GET=$(call "$(call_body agentkeys.memory.get \
+  "$(printf '{"actor":"%s","namespace":"%s","operator_omni":"%s","device_key_hash":"%s"}' \
+    "$ACTOR" "$RT_NS" "$OPERATOR" "$DEVICE")")")
+assert_no_error "$ACT1B_GET" "round-trip memory.get has no JSON-RPC error"
+assert_eq "$(jread "$ACT1B_GET" '.result.structuredContent.content')" "$RT_VAL" \
+  "written value reads back verbatim (write path round-trips)"
+
+# ── ACT 1c — namespace isolation: get on an unprovisioned namespace ──
+# Proves a get returns ONLY the requested namespace — an unwritten
+# namespace yields an error, never another namespace's content.
+echo
+echo "=== ACT 1c: memory.get on an empty namespace → denied (isolation) ==="
+ACT1C=$(call "$(call_body agentkeys.memory.get \
+  "$(printf '{"actor":"%s","namespace":"never-written-%s","operator_omni":"%s","device_key_hash":"%s"}' \
+    "$ACTOR" "$$" "$OPERATOR" "$DEVICE")")")
+assert_eq "$(jread "$ACT1C" '.error.code')" "-32000" \
+  "get on unprovisioned namespace → TOOL_ERROR (-32000), not a cross-namespace leak"
 
 # ── ACT 2 — Deterministic Denial (no LLM in the verdict) ─────────────
 echo

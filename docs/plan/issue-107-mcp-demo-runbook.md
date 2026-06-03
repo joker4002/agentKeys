@@ -303,13 +303,18 @@ For those, see mode **B** below.
 
 | Tier | What it proves | What you need | One-line command |
 |---|---|---|---|
-| 1 | Server boots; in-memory backend three-act flow works; auth scoping works | Rust toolchain + curl + jq/python3 | `bash scripts/mcp-demo-mode-a.sh` |
+| 1 | Server boots; in-memory `memory.put`→`get` round-trip + namespace isolation; three-act flow; auth scoping | Rust toolchain + curl + jq/python3 | `bash scripts/mcp-demo-mode-a.sh` |
 | 2 | MCP wire protocol is spec-compliant (Anthropic SDK can drive us) | `uv` (Python launcher) | `bash scripts/mcp-demo-mode-b-protocol.sh` |
 | 3 | xiaozhi-server's actual production integration class (`ServerMCPClient`) can call every tool, with sanitized names + deterministic fake-LLM tool choice | `uv` + git (clones xiaozhi-server) | `bash scripts/mcp-demo-mode-c-xiaozhi-client.sh` |
 | 4 | xiaozhi-style relay topology — two ws paths, token pairing, frame forwarding — end-to-end through `--transport mcp-endpoint` | `uv` (mock relay is Python) | `bash scripts/mcp-demo-mode-d-xiaozhi-endpoint.sh` |
 | 5 | Live broker + workers + real `mcp-endpoint-server` on EC2 + a xiaozhi.me agent + a paired device | All of the above + AWS access + xiaozhi.me account + voice device | §B.4–§B.10 below |
 
-Tiers 1–4 are **CI-able**. They run in `.github/workflows/mcp-server.yml` and assert every claim in this section. **When all four pass, the only remaining failure modes are operator deploy errors and cloud-side config** — neither is a bug in our code.
+Tiers 1–4 are **CI-able** — they run in [`.github/workflows/mcp-server.yml`](../../.github/workflows/mcp-server.yml) on every push/PR. What they prove, and — crucially — what they do **not**:
+
+- **Tier 1** proves the memory functions *against the in-memory backend*: a `memory.put` → `memory.get` round-trip reads a written value back verbatim (the write path), and a `get` on an unprovisioned namespace is denied (namespace isolation). It does **not** exercise the HTTP backend, the live memory worker's independent cap re-verification, S3 envelope encrypt/decrypt, STS `PrincipalTag` scoping, or cross-actor S3 isolation.
+- **Tiers 2–4** prove MCP wire-protocol compliance and the xiaozhi relay topology — **not** any persistent memory path.
+
+So **CI-green does NOT mean the live memory path is healthy.** The worker, S3, STS, and the on-chain `service == memory:<namespace>` scope enforcement (issue #147) are real code paths first exercised at **tier 5** — they can regress while tiers 1–4 stay green. Do not read a green run as "the only remaining failure modes are deploy/config."
 
 Tier 5 is operator-driven. There is no software substitute for "did the chain actually mint the cap with the right device binding" — that's why tier 5 is on hardware + live infrastructure.
 

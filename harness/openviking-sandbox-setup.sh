@@ -230,7 +230,7 @@ phase5_mirror() {
   if [[ -z "$ctx" ]]; then
     # Distinguish a genuinely-empty namespace from a memory.get ERROR (MCP/broker/
     # bearer) — show whatever memory-inject emitted so it is debuggable.
-    skip "5 mirror" "no '$NS' content from memory.get — empty namespace (seed via memory.put / wire demo --webauthn), OR an error shown below. Phase 7 gated inject will be empty."
+    skip "5 mirror" "no '$NS' content from memory.get — empty namespace (seed via memory.put / wire demo --webauthn), OR an error shown below. Phase 7 will FAIL (it asserts a non-empty injection)."
     show "$err"
     [[ -z "$err" && -n "$raw" ]] && show "raw: $(printf '%s' "$raw" | head -c 200)"
     return 0
@@ -293,7 +293,11 @@ phase7_test() {
     ok "7 inject" "query \"$TEST_QUERY\" → injected $(printf '%s\n' "$ctx" | grep -c .) line(s)"
     printf '%s\n' "$ctx" | sed 's/^/      | /'
   else
-    skip "7 inject" "empty injection — namespace empty (Phase 5) or OpenViking returned nothing; hook detail below"
+    # The proof step. An empty injection means the gated → ranked → injected
+    # flow produced NOTHING — the whole point of the run. FAIL (not skip) so
+    # the summary can go red; a skip never increments FAILED → vacuous green.
+    # Legit "set up before seeding" path: pass --no-test to skip this phase.
+    fail "7 inject" "EMPTY injection for query \"$TEST_QUERY\" — the gated → ranked → injected proof produced no lines. Seed namespace '$NS' first (harness/phase1-wire-demo.sh --real --webauthn, or memory.put) then re-run, or pass --no-test for setup-only. Namespace may be empty (Phase 5) or memory.get errored — detail below."
     show "$err"
     [[ -z "$err" && -n "$out" ]] && show "raw: $(printf '%s' "$out" | head -c 200)"
   fi
@@ -307,7 +311,7 @@ phase8_verify() {
   local ctx
   ctx="$(printf '%s' "$(jq -n --arg q "$TEST_QUERY" '{query:$q}')" | bash "$HOOK" 2>/dev/null | jq -r '.context // empty' 2>/dev/null)"
   if [[ -n "$ctx" ]]; then ok "8 fallback" "still injected with openviking down (deterministic fallback)"
-  else skip "8 fallback" "empty (namespace may be empty regardless of engine)"; fi
+  else fail "8 fallback" "EMPTY injection with openviking down — the deterministic fallback did NOT inject (regression), OR namespace '$NS' is empty (see Phase 7). The fallback must always re-inject gate-authorized lines."; fi
   log "  (restart the server with this script again, or: nohup openviking-server >~/openviking.log 2>&1 &)"
 }
 
