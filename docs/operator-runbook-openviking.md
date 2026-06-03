@@ -75,18 +75,35 @@ A 3-line database can't show semantic retrieval. Load the diverse sample corpus 
 curl -sS -X POST "${SANDBOX_URL:-http://localhost:8080}/v1/file/upload" \
   -F "file=@harness/fixtures/sample-memory.md" -F "path=/home/gem/sample-memory.md"
 ```
-**Load it** (inside the sandbox) — one `viking://` entry per fact, skipping `#` headers:
+**Load it** (inside the sandbox). The write URI **must** be
+`viking://user/<user>/memories/<subdir>/<name>.md` — the `<user>` segment **and**
+the `.md` extension are required, or the server returns **HTTP 400**. First confirm
+one write (show the response, don't hide it), then load the corpus idempotently:
+
 ```bash
-OV=http://localhost:1933; n=0
+OV=http://localhost:1933; OVUSER=default     # OVUSER = your OPENVIKING_USER (default: "default")
+
+# sanity: ONE write, SHOW the response (no -f/-s hiding the error)
+curl -sS -X POST "$OV/api/v1/content/write" -H 'content-type: application/json' \
+  -d "$(jq -n --arg u "viking://user/$OVUSER/memories/sample/mem_000.md" \
+              --arg c "Severely allergic to peanuts." '{uri:$u,content:$c,mode:"create"}')" | jq .
+# expect: {"result":{"written_bytes":...}}   — if you see an error, paste it.
+
+# load the corpus — counts ACTUAL successes; re-runs are idempotent
+ok=0; n=0
 while IFS= read -r line; do
   case "$line" in ''|'#'*) continue ;; esac
-  curl -fsS -X POST "$OV/api/v1/content/write" -H 'content-type: application/json' \
-    -d "$(jq -n --arg u "viking://user/memories/sample/$n" --arg c "$line" \
-            '{uri:$u, content:$c, mode:"create"}')" >/dev/null
+  uri="viking://user/$OVUSER/memories/sample/mem_$(printf '%03d' "$n").md"
+  resp="$(curl -sS -X POST "$OV/api/v1/content/write" -H 'content-type: application/json' \
+    -d "$(jq -n --arg u "$uri" --arg c "$line" '{uri:$u,content:$c,mode:"create"}')")"
+  if echo "$resp" | jq -e '.result' >/dev/null 2>&1; then ok=$((ok+1))
+  elif echo "$resp" | grep -qi exist; then ok=$((ok+1))     # idempotent: already loaded, no dup
+  else echo "  FAIL [$n]: $(echo "$resp" | jq -rc '.error // .' 2>/dev/null | cut -c1-90)"; fi
   n=$((n+1))
 done < ~/sample-memory.md
-echo "loaded $n facts"
+echo "loaded/present $ok of $n facts"
 ```
+> **Idempotency:** the filename is **deterministic** (`mem_000.md`, `mem_001.md`, …), so a re-run targets the *same* URIs — `mode:"create"` then reports "exists", which the loader counts as already-loaded (no duplicates). To force a clean reload, change the subdir (e.g. `sample2`).
 **Query it semantically** — note the query words don't appear in the matches:
 ```bash
 curl -fsS -X POST "$OV/api/v1/search/find" -H 'content-type: application/json' \
@@ -99,16 +116,18 @@ Expected: the **peanut / lactose / vegetarian** lines rank top — none contain 
 
 For the *gated* flow, OpenViking may only rank lines AgentKeys authorized. So the lines in OpenViking must match what `memory.get` returns for the namespace (the gate then bounds the result to exactly that set). Mirror the lines already in the agent's memory namespace:
 ```bash
-OV=http://localhost:1933
+OV=http://localhost:1933; OVUSER=default
 mirror() {  # mirror <namespace> "<line text>" <n>
-  curl -fsS -X POST "$OV/api/v1/content/write" -H 'content-type: application/json' \
-    -d "$(jq -n --arg u "viking://user/memories/$1/$3" --arg c "$2" \
-            '{uri:$u, content:$c, mode:"create"}')"
+  local uri="viking://user/$OVUSER/memories/$1/mem_$3.md"
+  curl -sS -X POST "$OV/api/v1/content/write" -H 'content-type: application/json' \
+    -d "$(jq -n --arg u "$uri" --arg c "$2" '{uri:$u,content:$c,mode:"create"}')" \
+    | jq -rc '.result // .error // .'
 }
 mirror travel "Booked Chengdu flight CA4515 on Apr 12." 0
 mirror travel "Peanut allergy — note for inflight meals." 1
 mirror travel "Hotel in Yulin district near hotpot street." 2
 ```
+> The gate matches OpenViking hits back to authorized lines by **text**, not URI — so the subdir/filename here are free; only the `content` must equal the namespace line.
 > For production, mirror **on write** (when `agentkeys memory put` runs), not ad hoc — see plan §6a "remaining: write-path mirroring."
 
 ## Step 6 — wire AgentKeys to use OpenViking as the engine
@@ -163,7 +182,8 @@ agentkeys wire hermes --namespaces travel \
 | `/health` fails | embedding/VLM misconfigured | re-run `openviking-server init`; read `~/openviking.log` |
 | `search/find` returns nothing | index empty | run Step 4/5 (load/mirror) — it ranks only what's indexed |
 | Step 7 injects the *whole* namespace, unranked | hook fell back (no query, or `OPENVIKING_ENDPOINT` not baked) | confirm Step 6 baked the env; ensure the payload has a `query` field |
-| `content/write` 4xx | `mode:"create"` on an existing URI | use a fresh `viking://` path or OpenViking's update mode |
+| `content/write` HTTP 400 on every write | malformed URI — it **must** be `viking://user/<user>/memories/<subdir>/<name>.md` (the `<user>` segment + `.md` are required) | use the full path (Step 4); drop `-f` so you can see the error body |
+| `content/write` says "exists" on a re-run | `mode:"create"` on an already-loaded URI | expected/idempotent — the loader counts it as loaded; no duplicate is created |
 | hook hangs on a manual call | reading an open stdin | the hook is `is_terminal()`-guarded; always **pipe** the payload (`printf … \| …`) |
 | LLM has `viking_*` tools / memory double-injects | you ran `hermes memory setup` (provider is on) | undo it — see the ⛔ callout above (remove `memory.provider`); keep the `agentkeys wire` block |
 
