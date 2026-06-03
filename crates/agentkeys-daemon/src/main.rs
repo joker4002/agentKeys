@@ -1541,6 +1541,23 @@ fn validate_claimed_binding(body: &serde_json::Value) -> anyhow::Result<ClaimedB
     if !is_derivation_path(derivation_path) {
         anyhow::bail!("claimed poll response has a malformed derivation_path (value suppressed)");
     }
+    // Defense-in-depth HDKD check: child_omni MUST equal the deterministic
+    // child_omni_hex(operator_omni, label). This rejects a shape-valid-but-
+    // impossible tuple (corrupt/stale broker or a terminating proxy) HERE, before
+    // run_retrieve_pairing saves the bearer + prints the artifact the master feeds
+    // to registerAgentDevice — otherwise the master could register/grant an actor
+    // that is not the HDKD child of the returned (operator_omni, path). The label
+    // charset was validated by is_derivation_path above; values are suppressed.
+    let label = derivation_path.strip_prefix("//").unwrap_or_default();
+    let expected_child =
+        agentkeys_core::actor_omni::child_omni_hex(operator_omni, label).map_err(|_| {
+            anyhow::anyhow!("claimed binding: child_omni recompute failed (values suppressed)")
+        })?;
+    if expected_child != child_omni {
+        anyhow::bail!(
+            "claimed binding child_omni does not match HDKD(operator_omni, label) (values suppressed)"
+        );
+    }
     Ok(ClaimedBinding {
         session_jwt: session_jwt.to_string(),
         child_omni: child_omni.to_string(),
@@ -2186,19 +2203,20 @@ mod pairing_poll_tests {
 
     #[test]
     fn claimed_binding_rejects_reflected_tokens_in_public_fields() {
-        // 64-char lowercase hex (&str is Copy, so it can be reused below).
-        let omni = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        // 64-char lowercase hex operator omni; child is its REAL HDKD derivation
+        // (the semantic check requires child_omni == HDKD(operator, label)).
+        let operator = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let child = agentkeys_core::actor_omni::child_omni_hex(operator, "hermes").unwrap();
         let ok = serde_json::json!({
             "session_jwt": "tok",
-            "child_omni": omni,
-            "operator_omni": omni,
+            "child_omni": child.clone(),
+            "operator_omni": operator,
             "derivation_path": "//hermes",
         });
         assert!(validate_claimed_binding(&ok).is_ok());
 
-        // A reflected token in ANY public field (child_omni → also the derived
-        // session_id, operator_omni, derivation_path) is rejected, and the error
-        // never echoes the offending value.
+        // A reflected token in ANY public field is rejected at the shape check,
+        // and the error never echoes the offending value.
         for field in ["child_omni", "operator_omni", "derivation_path"] {
             let mut v = ok.clone();
             v[field] = serde_json::json!("session_jwt=SENTINEL_JWT");
@@ -2211,11 +2229,38 @@ mod pairing_poll_tests {
             );
         }
 
-        // Missing session_jwt is rejected without echoing the body.
+        // Missing session_jwt is rejected (before any field/HDKD check) without
+        // echoing the body.
         let no_jwt = serde_json::json!({
-            "child_omni": omni, "operator_omni": omni, "derivation_path": "//hermes",
+            "child_omni": child.clone(), "operator_omni": operator, "derivation_path": "//hermes",
         });
         assert!(validate_claimed_binding(&no_jwt).is_err());
+    }
+
+    #[test]
+    fn claimed_binding_rejects_hdkd_child_mismatch() {
+        // All fields are individually well-shaped (64-hex omnis, //label), but
+        // child_omni is NOT the HDKD derivation of (operator_omni, label) — a
+        // corrupt/stale broker or terminating-proxy response. Reject it locally.
+        let operator = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let wrong_child = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let v = serde_json::json!({
+            "session_jwt": "tok",
+            "child_omni": wrong_child,
+            "operator_omni": operator,
+            "derivation_path": "//hermes",
+        });
+        let err = validate_claimed_binding(&v)
+            .expect_err("HDKD child mismatch must be rejected")
+            .to_string();
+        assert!(
+            err.contains("HDKD") || err.contains("does not match"),
+            "should reject HDKD mismatch, got: {err}"
+        );
+        assert!(
+            !err.contains("ffffffff"),
+            "error must not echo the bad value: {err}"
+        );
     }
 
     #[test]
