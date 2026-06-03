@@ -104,13 +104,26 @@ done < ~/sample-memory.md
 echo "loaded/present $ok of $n facts"
 ```
 > **Idempotency:** the filename is **deterministic** (`mem_000.md`, `mem_001.md`, …), so a re-run targets the *same* URIs — `mode:"create"` then reports "exists", which the loader counts as already-loaded (no duplicates). To force a clean reload, change the subdir (e.g. `sample2`).
-**Query it semantically** — note the query words don't appear in the matches:
+**Query it semantically.** Results live under **`result.memories`** (also `result.resources` / `result.skills`); each item has `score` / `uri` / `abstract`:
 ```bash
-curl -fsS -X POST "$OV/api/v1/search/find" -H 'content-type: application/json' \
+# see the raw shape the first time:
+curl -sS -X POST "$OV/api/v1/search/find" -H 'content-type: application/json' \
+  -d "$(jq -n '{query:"what are my dietary restrictions?", top_k:5}')" | jq .
+
+# the ranked memories:
+curl -sS -X POST "$OV/api/v1/search/find" -H 'content-type: application/json' \
   -d "$(jq -n '{query:"what are my dietary restrictions?", top_k:5}')" \
-  | jq '.result.results[] | {score, content}'
+  | jq '.result.memories[]? | {score, uri, abstract}'
 ```
-Expected: the **peanut / lactose / vegetarian** lines rank top — none contain the word "dietary." That's semantic search earning its keep. Try also `"where have I travelled?"` (→ Chengdu / Tokyo / Lisbon) and `"important family dates"` (→ birthday / anniversary). This is a **direct** OpenViking eval — it does not go through the AgentKeys gate (next step).
+Expected: the **peanut / lactose / vegetarian** entries rank top — none contain the word "dietary." That's semantic search earning its keep. Try `"where have I travelled?"` (→ Chengdu / Tokyo / Lisbon) and `"important family dates"` (→ birthday / anniversary). This is a **direct** OpenViking eval — it does not go through the AgentKeys gate (next step).
+
+> **`abstract` blank?** If you picked **Skip VLM** at setup, OpenViking still embeds + ranks (scores + URIs are correct) but has no model to generate the L0 `abstract`, so it can be empty. The ranking is unaffected — read the verbatim line by URI:
+> ```bash
+> top=$(curl -sS -X POST "$OV/api/v1/search/find" -H 'content-type: application/json' \
+>   -d "$(jq -n '{query:"dietary restrictions", top_k:1}')" | jq -r '.result.memories[0].uri')
+> curl -sS -X POST "$OV/api/v1/content/read" -H 'content-type: application/json' \
+>   -d "$(jq -n --arg u "$top" '{uri:$u}')" | jq .
+> ```
 
 ## Step 5 — the gated path: mirror gate-authorized lines
 
@@ -183,6 +196,8 @@ agentkeys wire hermes --namespaces travel \
 | `search/find` returns nothing | index empty | run Step 4/5 (load/mirror) — it ranks only what's indexed |
 | Step 7 injects the *whole* namespace, unranked | hook fell back (no query, or `OPENVIKING_ENDPOINT` not baked) | confirm Step 6 baked the env; ensure the payload has a `query` field |
 | `content/write` HTTP 400 on every write | malformed URI — it **must** be `viking://user/<user>/memories/<subdir>/<name>.md` (the `<user>` segment + `.md` are required) | use the full path (Step 4); drop `-f` so you can see the error body |
+| `search/find` → `jq: Cannot iterate over null` | results are under **`.result.memories`** (+ `.resources`/`.skills`), not `.result.results` | `jq '.result.memories[]? \| {score,uri,abstract}'` |
+| `search/find` returns score+uri but blank `abstract` | **Skip VLM** mode — no model to write the L0 abstract | ranking is fine; read verbatim with `content/read <uri>` |
 | `content/write` says "exists" on a re-run | `mode:"create"` on an already-loaded URI | expected/idempotent — the loader counts it as loaded; no duplicate is created |
 | hook hangs on a manual call | reading an open stdin | the hook is `is_terminal()`-guarded; always **pipe** the payload (`printf … \| …`) |
 | LLM has `viking_*` tools / memory double-injects | you ran `hermes memory setup` (provider is on) | undo it — see the ⛔ callout above (remove `memory.provider`); keep the `agentkeys wire` block |
