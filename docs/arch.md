@@ -495,9 +495,9 @@ ON AGENT MACHINE (any VM / container / CI runner / cloud sandbox / no-input devi
 
 ON MASTER (already initialized; holds J1_master; master ≠ agent machine):
 6. The owner scans/enters the displayed code:
-   agentkeys agent claim --pairing-code <code> --label agent-A --services memory
+   agentkeys agent claim --pairing-code <code> --label agent-A --services memory:travel
 7. CLI → broker: POST /v1/agent/pairing/claim
-                  { pairing_code, label: "agent-A", requested_scope: "memory" }
+                  { pairing_code, label: "agent-A", requested_scope: "memory:travel" }
                   Authorization: Bearer J1_master
 8. Broker (J1_master bearer is the gate; K11 is NOT presented here — agents are
    K10-only per the contract, so there is nothing for the broker to K11-verify):
