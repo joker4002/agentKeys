@@ -1160,7 +1160,13 @@ fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
         || status == reqwest::StatusCode::REQUEST_TIMEOUT
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS
     {
-        PollClass::Transient(format!("HTTP {status}: {}", truncate_body(body)))
+        // Retryable failure: suppress the response body entirely. A faulty
+        // gateway/proxy can echo diagnostics, request metadata, or even a
+        // misclassified claimed payload (carrying session_jwt) in a 5xx/408/429
+        // body — none of which belongs in daemon logs. The status/class alone
+        // is enough to drive the retry. (4xx Fatal below keeps its capped body:
+        // it is the broker's actionable rejection reason and is not retried.)
+        PollClass::Transient(format!("HTTP {status} (transient; body suppressed)"))
     } else {
         PollClass::Fatal(format!("HTTP {status}: {}", truncate_body(body)))
     }
@@ -1266,32 +1272,38 @@ mod pairing_poll_tests {
 
     #[test]
     fn server_errors_are_transient() {
+        // A faulty gateway could echo a misclassified claimed payload (with a
+        // token) inside a 5xx body — the transient reason must never carry it.
+        let leaky_body = r#"<html>err {"session_jwt":"SENTINEL_TOKEN_LEAK"}</html>"#;
         for s in [
             StatusCode::INTERNAL_SERVER_ERROR,
             StatusCode::BAD_GATEWAY,
             StatusCode::SERVICE_UNAVAILABLE,
             StatusCode::GATEWAY_TIMEOUT,
         ] {
-            assert!(
-                matches!(
-                    classify_poll(s, "<html>err</html>"),
-                    PollClass::Transient(_)
+            match classify_poll(s, leaky_body) {
+                PollClass::Transient(reason) => assert!(
+                    !reason.contains("SENTINEL_TOKEN_LEAK"),
+                    "transient reason for {s} leaked the response body: {reason}"
                 ),
-                "status {s} should be transient"
-            );
+                other => panic!("status {s} should be transient, got {other:?}"),
+            }
         }
     }
 
     #[test]
     fn timeout_and_rate_limit_are_transient() {
-        assert!(matches!(
-            classify_poll(StatusCode::REQUEST_TIMEOUT, ""),
-            PollClass::Transient(_)
-        ));
-        assert!(matches!(
-            classify_poll(StatusCode::TOO_MANY_REQUESTS, ""),
-            PollClass::Transient(_)
-        ));
+        // Same suppression contract for 408/429: status only, never the body.
+        let leaky_body = r#"{"session_jwt":"SENTINEL_TOKEN_LEAK"}"#;
+        for s in [StatusCode::REQUEST_TIMEOUT, StatusCode::TOO_MANY_REQUESTS] {
+            match classify_poll(s, leaky_body) {
+                PollClass::Transient(reason) => assert!(
+                    !reason.contains("SENTINEL_TOKEN_LEAK"),
+                    "transient reason for {s} leaked the response body: {reason}"
+                ),
+                other => panic!("status {s} should be transient, got {other:?}"),
+            }
+        }
     }
 
     #[test]
