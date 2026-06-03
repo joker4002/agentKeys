@@ -62,6 +62,7 @@ log()  { printf '\n[ov-sandbox] %s\n' "$*"; }
 ok()   { printf '  %-24s ok proceeding (%s)\n' "$1" "$2"; }
 skip() { printf '  %-24s skip %s\n' "$1" "$2"; }
 fail() { printf '  %-24s FAIL %s\n' "$1" "$2" >&2; FAILED=$((FAILED+1)); }
+show() { [[ -n "${1:-}" ]] && printf '%s\n' "$1" | sed 's/^/      | /' >&2 || true; }   # indented detail for debugging
 
 AK=""   # resolved agentkeys binary (Phase 0)
 ov_health() { curl -fsS --max-time 5 "$OV/health" >/dev/null 2>&1; }
@@ -222,11 +223,16 @@ phase4_corpus() {
 # to read the FULL namespace (not an already-openviking-ranked subset).
 phase5_mirror() {
   log "Phase 5 — mirror real '$NS' namespace lines into OpenViking"
-  local ctx
-  ctx="$(AGENTKEYS_MEMORY_ENGINE=passthrough "$AK" hook memory-inject --namespaces "$NS" </dev/null 2>/dev/null \
-        | jq -r '.context // empty' 2>/dev/null)"
+  local raw err ctx ef; ef="$(mktemp)"
+  raw="$(AGENTKEYS_MEMORY_ENGINE=passthrough "$AK" hook memory-inject --namespaces "$NS" </dev/null 2>"$ef")"
+  err="$(cat "$ef" 2>/dev/null)"; rm -f "$ef"
+  ctx="$(printf '%s' "$raw" | jq -r '.context // empty' 2>/dev/null)"
   if [[ -z "$ctx" ]]; then
-    skip "5 mirror" "namespace '$NS' empty (seed via memory.put or wire demo --webauthn) — Phase 7 gated inject will be empty"
+    # Distinguish a genuinely-empty namespace from a memory.get ERROR (MCP/broker/
+    # bearer) — show whatever memory-inject emitted so it is debuggable.
+    skip "5 mirror" "no '$NS' content from memory.get — empty namespace (seed via memory.put / wire demo --webauthn), OR an error shown below. Phase 7 gated inject will be empty."
+    show "$err"
+    [[ -z "$err" && -n "$raw" ]] && show "raw: $(printf '%s' "$raw" | head -c 200)"
     return 0
   fi
   local m=0 good=0 uri verdict
@@ -244,18 +250,34 @@ phase5_mirror() {
 # ── Phase 6 — re-wire so the hook uses OpenViking as the engine ────────────────
 phase6_wire() {
   log "Phase 6 — re-wire hook with --memory-engine openviking"
-  if "$AK" wire hermes \
+  # Capability pre-check: --openviking-endpoint landed in PR #177. A sandbox
+  # `agentkeys` cross-built from an older branch lacks it → clap errors with
+  # "unexpected argument". Catch it here with an actionable message.
+  if ! "$AK" wire hermes --help 2>&1 | grep -q -- '--openviking-endpoint'; then
+    fail "6 wire" "this 'agentkeys' has no --openviking-endpoint flag — it was built before PR #177"
+    log  "      fix: rebuild + re-upload the sandbox binary from the #177 checkout —"
+    log  "           run 'bash harness/phase1-wire-demo.sh --real' from that branch (it cross-builds aarch64 + uploads),"
+    log  "           or fall back to a deployed engine: re-run with MEMORY_ENGINE unset / use the lexical engine."
+    return 1
+  fi
+  # Run wire, capturing BOTH streams so a failure is debuggable (no silent 2>/dev/null).
+  local out rc ef; ef="$(mktemp)"
+  "$AK" wire hermes \
        --actor-omni "$AGENTKEYS_ACTOR_OMNI" --operator-omni "$AGENTKEYS_OPERATOR_OMNI" \
        --namespaces "$NS" \
        --memory-engine openviking --openviking-endpoint "$OV" \
-       --mcp-url "$AGENTKEYS_MCP_URL" --vendor-token "$AGENTKEYS_MCP_VENDOR_TOKEN" >/dev/null 2>&1; then
-    if grep -qiE 'AGENTKEYS_MEMORY_ENGINE=.*openviking' "$HOOK" && grep -q 'OPENVIKING_ENDPOINT=' "$HOOK"; then
-      ok "6 wire" "hook now bakes openviking engine + endpoint $OV"
-    else
-      fail "6 wire" "wire ran but the hook is missing the openviking env"
-    fi
+       --mcp-url "$AGENTKEYS_MCP_URL" --vendor-token "$AGENTKEYS_MCP_VENDOR_TOKEN" >"$ef" 2>&1
+  rc=$?; out="$(cat "$ef" 2>/dev/null)"; rm -f "$ef"
+  if [[ $rc -ne 0 ]]; then
+    fail "6 wire" "agentkeys wire exited $rc — output below"
+    show "$out"
+    return 1
+  fi
+  if grep -qiE 'AGENTKEYS_MEMORY_ENGINE=.*openviking' "$HOOK" && grep -q 'OPENVIKING_ENDPOINT=' "$HOOK"; then
+    ok "6 wire" "hook now bakes openviking engine + endpoint $OV"
   else
-    fail "6 wire" "agentkeys wire failed (MCP/identity?) — re-run after fixing Phase 0"
+    fail "6 wire" "wire exited 0 but the hook is missing the openviking env — output below"
+    show "$out"
   fi
 }
 
@@ -263,14 +285,17 @@ phase6_wire() {
 phase7_test() {
   [[ "$DO_TEST" == true ]] || { skip "7 test" "--no-test"; return 0; }
   log "Phase 7 — gated → OpenViking-ranked → injected"
-  local out ctx
-  out="$(printf '%s' "$(jq -n --arg q "$TEST_QUERY" '{query:$q}')" | bash "$HOOK" 2>/dev/null)"
+  local out err ctx ef; ef="$(mktemp)"
+  out="$(printf '%s' "$(jq -n --arg q "$TEST_QUERY" '{query:$q}')" | bash "$HOOK" 2>"$ef")"
+  err="$(cat "$ef" 2>/dev/null)"; rm -f "$ef"
   ctx="$(echo "$out" | jq -r '.context // empty' 2>/dev/null)"
   if [[ -n "$ctx" ]]; then
     ok "7 inject" "query \"$TEST_QUERY\" → injected $(printf '%s\n' "$ctx" | grep -c .) line(s)"
     printf '%s\n' "$ctx" | sed 's/^/      | /'
   else
-    skip "7 inject" "empty injection — namespace empty (Phase 5) or OpenViking returned nothing"
+    skip "7 inject" "empty injection — namespace empty (Phase 5) or OpenViking returned nothing; hook detail below"
+    show "$err"
+    [[ -z "$err" && -n "$out" ]] && show "raw: $(printf '%s' "$out" | head -c 200)"
   fi
 }
 
