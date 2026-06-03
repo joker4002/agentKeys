@@ -141,6 +141,36 @@ Scope stays on-chain — it's the tamper-proof, broker-independent anchor (four-
 
 The **cap** is the runtime artifact — signed, TTL'd, carrying only the one scoped service it authorizes; it never exposes the whole policy.
 
+## 8. Entity discovery & registration (how the gate knows `home_assistant` / `door:front`)
+
+Two registries, never merged:
+- **Tool / operation** (`home_assistant.unlock(door)`) — a *type* of action; lives in the agent runtime's tool registry (Hermes / an MCP server).
+- **Resource / instance** (`door:front`) — a concrete object; lives in the integration's own registry (home-assistant's device list, the vault's service list, the contacts list).
+
+**The gate never compiles the interface.** On each call the `pre_tool_call` hook payload carries `{tool_name, tool_input}` (today `agentkeys hook check` reads exactly that). The gate *receives* `home_assistant.unlock(door:front)` and resolves the category by an **O(1) lookup** in `Config` (`operation → category` × `resource → tier`), independent of how many tools/devices exist.
+
+**How `(entity → category)` entries enter `Config` — incrementally, never a full recompile:**
+
+| When | What happens | Cost |
+|---|---|---|
+| **Integration connect** (eager) | enumerate that integration's operations + resources, classify each **once** (batched, async — the auto-distribution), write to `Config`, master skims/confirms in `apps/parent-control` | once per integration |
+| **Novel entity at request** (lazy) | not in `Config` → **deny-by-default + classify-once-async + daily review**; next time → cache hit | once per entity |
+| **Add one device / function** | classify **that one** entity → append | one classify call |
+
+Adding a device classifies *that device*; adding a function classifies *that function*; connecting an integration batches *its* entities once. The gate's per-call lookup is O(1) regardless. The **runtime/integration owns "what exists"**; `Config` caches only the **classifications**, not a mirror of the registry.
+
+### 8.1 The category catalog — a shared bootstrap DB (yes, build it)
+
+Most new devices/services are **globally known** — every tenant's `notion` is the same `notion`, every `philips-hue` is lighting, every `august-lock` is exterior-access. So classify them **by a shared lookup table, not an LLM**:
+
+- **A versioned, shared `category catalog`** maps well-known entities → categories: `notion → productivity`, `stripe → payments`, `binance → exchange/trading`, `august-lock → access-control{exterior}`, plus standards we already lean on — **payment MCC codes** are exactly this for spend (`universal-gate-pattern.md` already uses an "MCC/category check"). Per-domain catalogs: **MCC** (payments), a **device-type taxonomy** (IoT), a **service catalog** (credentials).
+- It is the **deterministic tier-0** of the classify cascade: **catalog lookup → embedding-nearest → LLM → deny+ask.** The catalog handles the bulk (deterministic, instant, free, auditable); the **LLM runs only on the novel/ambiguous tail** — this is the main lever that keeps GPU cost low.
+- **Distribution follows the existing `ClearSigningCatalog` pattern** (arch.md §22): **bundled defaults → registry fetch → community/on-chain**, versioned. AgentKeys already ships a curated catalog this way for clear-signing; the category catalog is the same shape for entity→category.
+- **Catalog ≠ policy — keep them separate.** The catalog is **shared, generic knowledge** ("notion is productivity") — no PII, safe to bundle / open-source. The **grant** ("this household denies productivity for kids") is **per-tenant, private** — it lives in the `Config` data class (§7). Same split as public MCC codes vs. your card's private category limits.
+- **The flywheel feeds the catalog.** When the LLM classifies a genuine novel entity and the master confirms, promote it (with review) into the shared catalog — the fleet's confirmations make the catalog denser over time, shrinking the LLM tail for everyone.
+
+Net: a new device/service is *usually* a free catalog lookup; the LLM runs only for the genuinely-unknown remainder; per-tenant privacy is preserved because the catalog carries categories, not grants.
+
 ## References
 - [`../research/universal-gate-pattern.md`](../research/universal-gate-pattern.md) — the four primitives + the determinism principle (this doc's foundation; "the upstream classifier" it names *is* this worker).
 - [`agentkeys-memory-design.md`](agentkeys-memory-design.md) §6a — the read-side engine seam this is the write-side dual of.
