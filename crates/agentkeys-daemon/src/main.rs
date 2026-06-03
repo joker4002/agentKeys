@@ -669,24 +669,15 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
 
     // Poll until claimed or the operator-set timeout elapses.
     let deadline = SystemTime::now() + Duration::from_secs(args.init_poll_timeout_seconds);
-    // The sandbox polls the broker over the public internet. Classify failures
-    // by whether waiting can fix them (codex adversarial-review #182):
-    //   - transient (send error / HTTP 5xx / 408 / 429 / unparseable success
-    //     body): retry until the deadline — a single blip must not abort
-    //     pairing (the "passed on the second run" flake this fix targets).
-    //   - definitive 4xx (bad device_pubkey / pop_sig, expired or unknown
-    //     request, device mismatch): FAIL FAST with the broker's body — a stale
-    //     state file or wrong --device-key-file will never resolve by waiting,
-    //     and the poll endpoint is unauthenticated so retrying just hammers it.
-    // The deadline message is decided in each arm, so it reflects the CURRENT
-    // outcome (pending vs transient), never a long-gone earlier transient.
-    enum Poll {
-        Claimed(serde_json::Value),
-        Pending,
-        Transient(String),
-    }
+    // Poll until claimed or the deadline. classify_poll() (defined below, and
+    // unit-tested) decides the failure class; here we drive retries: Pending
+    // uses the fixed cadence; Transient honors a 429 Retry-After else capped
+    // backoff with jitter; Fatal (4xx) and Claimed exit. The timeout message is
+    // decided per-arm, so it reflects the CURRENT outcome, never a long-gone
+    // earlier transient.
+    let mut transient_attempts: u32 = 0;
     let body: serde_json::Value = loop {
-        let outcome = match client
+        let (class, retry_after) = match client
             .post(format!("{base}/v1/agent/pairing/poll"))
             .json(&serde_json::json!({
                 "request_id": request_id,
@@ -696,44 +687,32 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
             .send()
             .await
         {
-            Err(e) => Poll::Transient(format!("send: {e}")),
+            Err(e) => (PollClass::Transient(format!("send: {e}")), None),
             Ok(resp) => {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                if status.is_success() {
-                    match serde_json::from_str::<serde_json::Value>(&text) {
-                        Ok(v) => {
-                            if v.get("status").and_then(|s| s.as_str()).unwrap_or_default()
-                                == "claimed"
-                            {
-                                Poll::Claimed(v)
-                            } else {
-                                Poll::Pending
-                            }
-                        }
-                        Err(e) => {
-                            Poll::Transient(format!("parse poll response: {e} (body: {text})"))
-                        }
-                    }
-                } else if status.is_server_error()
-                    || status == reqwest::StatusCode::REQUEST_TIMEOUT
-                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                {
-                    Poll::Transient(format!("HTTP {status}: {text}"))
+                // Read Retry-After (429) from the header BEFORE consuming the body.
+                let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    parse_retry_after_secs(
+                        resp.headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok()),
+                    )
                 } else {
-                    // Definitive client error (4xx) — fail fast, surface the broker body.
-                    anyhow::bail!(
-                        "pairing poll rejected by broker (HTTP {status}): {text} — a stale \
-                         pairing state file or wrong --device-key-file will not resolve by \
-                         waiting; re-run --request-pairing to open a fresh request"
-                    );
-                }
+                    None
+                };
+                let text = resp.text().await.unwrap_or_default();
+                (classify_poll(status, &text), retry_after)
             }
         };
 
-        match outcome {
-            Poll::Claimed(v) => break v,
-            Poll::Pending => {
+        match class {
+            PollClass::Claimed(v) => break v,
+            PollClass::Fatal(reason) => anyhow::bail!(
+                "pairing poll rejected by broker ({reason}) — a stale pairing state file or \
+                 wrong --device-key-file will not resolve by waiting; re-run --request-pairing"
+            ),
+            PollClass::Pending => {
+                transient_attempts = 0;
                 if SystemTime::now() >= deadline {
                     anyhow::bail!(
                         "pairing not claimed within {}s — the master has not run `agentkeys agent claim --pairing-code <code>` yet",
@@ -744,21 +723,26 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
                     target: "agentkeys.daemon.init",
                     "§10.2 pairing request still pending — waiting for the master to claim…"
                 );
+                sleep_within_deadline(Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS), deadline)
+                    .await;
             }
-            Poll::Transient(e) => {
+            PollClass::Transient(reason) => {
                 if SystemTime::now() >= deadline {
                     anyhow::bail!(
-                        "pairing poll gave up after {}s — last error was transient: {e}",
+                        "pairing poll gave up after {}s — last error was transient: {reason}",
                         args.init_poll_timeout_seconds
                     );
                 }
+                transient_attempts += 1;
+                let wait = retry_after.unwrap_or_else(|| backoff_with_jitter(transient_attempts));
+                let wait_secs = wait.as_secs();
                 info!(
                     target: "agentkeys.daemon.init",
-                    "§10.2 pairing poll transient error (will retry): {e}"
+                    "§10.2 pairing poll transient (retry in ~{wait_secs}s): {reason}"
                 );
+                sleep_within_deadline(wait, deadline).await;
             }
         }
-        tokio::time::sleep(Duration::from_secs(PAIRING_POLL_INTERVAL_SECONDS)).await;
     };
 
     let session_jwt = body
@@ -1086,6 +1070,232 @@ async fn run_proxy_mode(args: Args) -> anyhow::Result<()> {
         _ = async { if let Some(t) = tcp_task { let _ = t.await; } else { std::future::pending::<()>().await } } => {},
     }
     Ok(())
+}
+
+// ── §10.2 pairing-poll response classification (codex review #182) ───────────
+// Pure, unit-testable helpers behind run_retrieve_pairing's poll loop.
+
+/// Classification of a single pairing-poll response. Pure over `(status, body)`
+/// so it is unit-testable without HTTP.
+#[derive(Debug)]
+enum PollClass {
+    /// 2xx `status: "claimed"` — carries the binding artifact (incl. J1_agent).
+    Claimed(serde_json::Value),
+    /// 2xx not-yet-claimed — keep waiting for the master.
+    Pending,
+    /// Retry until the deadline. The reason is PRE-REDACTED — it never contains a
+    /// 2xx body, because a claimed 2xx carries `session_jwt`; logging it would
+    /// leak the bearer token (codex review #182, high finding).
+    Transient(String),
+    /// Definitive 4xx (bad device_pubkey/pop_sig, expired/unknown request,
+    /// device mismatch) — fail fast; waiting cannot fix it.
+    Fatal(String),
+}
+
+/// Cap a response body for safe logging (avoid dumping huge error pages).
+fn truncate_body(body: &str) -> String {
+    const MAX: usize = 300;
+    if body.chars().count() <= MAX {
+        body.to_string()
+    } else {
+        let head: String = body.chars().take(MAX).collect();
+        format!("{head}…[{} bytes total]", body.len())
+    }
+}
+
+/// Classify a pairing-poll response. 4xx → fail fast; 5xx/408/429 → transient;
+/// a 2xx that fails to parse is transient but its body is SUPPRESSED (a claimed
+/// 2xx contains `session_jwt`). 4xx/5xx bodies are broker error messages (no
+/// token), capped for logging.
+fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
+    if status.is_success() {
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(v) => {
+                if v.get("status").and_then(|s| s.as_str()) == Some("claimed") {
+                    PollClass::Claimed(v)
+                } else {
+                    PollClass::Pending
+                }
+            }
+            Err(e) => PollClass::Transient(format!(
+                "unparseable success response (body suppressed — may contain a token): {e}"
+            )),
+        }
+    } else if status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        PollClass::Transient(format!("HTTP {status}: {}", truncate_body(body)))
+    } else {
+        PollClass::Fatal(format!("HTTP {status}: {}", truncate_body(body)))
+    }
+}
+
+/// Parse a `Retry-After` header value (delta-seconds form only; the HTTP-date
+/// form is ignored so the caller falls back to backoff).
+fn parse_retry_after_secs(header_val: Option<&str>) -> Option<Duration> {
+    header_val
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+/// Capped exponential backoff (base = poll interval) with sub-second jitter, so
+/// many unauthenticated pollers don't retry in lockstep and extend a broker
+/// overload (codex review #182, medium finding). `attempt` starts at 1.
+fn backoff_with_jitter(attempt: u32) -> Duration {
+    let base = PAIRING_POLL_INTERVAL_SECONDS.max(1);
+    let factor = 1u64 << attempt.min(4); // ×2 … ×16
+    let secs = base.saturating_mul(factor).min(30);
+    let jitter_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()) % 1000)
+        .unwrap_or(0);
+    Duration::from_secs(secs) + Duration::from_millis(jitter_ms)
+}
+
+/// Sleep `dur`, but never past `deadline`, so the next iteration's deadline
+/// check fires promptly.
+async fn sleep_within_deadline(dur: Duration, deadline: SystemTime) {
+    let remaining = deadline
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO);
+    tokio::time::sleep(dur.min(remaining)).await;
+}
+
+#[cfg(test)]
+mod pairing_poll_tests {
+    use super::{
+        backoff_with_jitter, classify_poll, parse_retry_after_secs, truncate_body, PollClass,
+    };
+    use reqwest::StatusCode;
+    use std::time::Duration;
+
+    #[test]
+    fn claimed_2xx_is_claimed() {
+        let body = r#"{"status":"claimed","session_jwt":"tok"}"#;
+        assert!(matches!(
+            classify_poll(StatusCode::OK, body),
+            PollClass::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn pending_2xx_is_pending() {
+        assert!(matches!(
+            classify_poll(StatusCode::OK, r#"{"status":"pending"}"#),
+            PollClass::Pending
+        ));
+    }
+
+    #[test]
+    fn unknown_2xx_json_is_pending() {
+        assert!(matches!(
+            classify_poll(StatusCode::OK, r#"{"foo":1}"#),
+            PollClass::Pending
+        ));
+    }
+
+    #[test]
+    fn malformed_claimed_2xx_never_leaks_token() {
+        // A truncated claimed payload that fails to parse must not echo the body.
+        let body = r#"{"status":"claimed","session_jwt":"SUPER-SECRET-TOKEN""#;
+        match classify_poll(StatusCode::OK, body) {
+            PollClass::Transient(reason) => assert!(
+                !reason.contains("SUPER-SECRET-TOKEN"),
+                "session token leaked into log reason: {reason}"
+            ),
+            other => panic!("expected Transient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_errors_are_transient() {
+        for s in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(
+                matches!(
+                    classify_poll(s, "<html>err</html>"),
+                    PollClass::Transient(_)
+                ),
+                "status {s} should be transient"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_and_rate_limit_are_transient() {
+        assert!(matches!(
+            classify_poll(StatusCode::REQUEST_TIMEOUT, ""),
+            PollClass::Transient(_)
+        ));
+        assert!(matches!(
+            classify_poll(StatusCode::TOO_MANY_REQUESTS, ""),
+            PollClass::Transient(_)
+        ));
+    }
+
+    #[test]
+    fn client_errors_fail_fast() {
+        for s in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
+        ] {
+            assert!(
+                matches!(
+                    classify_poll(s, r#"{"error":"bad pop_sig"}"#),
+                    PollClass::Fatal(_)
+                ),
+                "status {s} should fail fast"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_after_parses_delta_seconds_only() {
+        assert_eq!(
+            parse_retry_after_secs(Some("5")),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            parse_retry_after_secs(Some("  12 ")),
+            Some(Duration::from_secs(12))
+        );
+        // HTTP-date form is ignored (falls back to backoff).
+        assert_eq!(
+            parse_retry_after_secs(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(parse_retry_after_secs(Some("garbage")), None);
+        assert_eq!(parse_retry_after_secs(None), None);
+    }
+
+    #[test]
+    fn backoff_is_capped_and_nondecreasing() {
+        let a1 = backoff_with_jitter(1);
+        let a_big = backoff_with_jitter(10);
+        assert!(a1 >= Duration::from_secs(1));
+        assert!(
+            a_big <= Duration::from_secs(31),
+            "backoff not capped: {a_big:?}"
+        );
+        assert!(a_big >= a1, "backoff should not shrink with attempts");
+    }
+
+    #[test]
+    fn truncate_caps_long_bodies() {
+        let long = "x".repeat(2000);
+        let out = truncate_body(&long);
+        assert!(out.chars().count() < 400);
+        assert!(out.contains("bytes total"));
+        assert_eq!(truncate_body("short"), "short");
+    }
 }
 
 #[cfg(test)]
