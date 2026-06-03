@@ -826,7 +826,10 @@ async fn run_retrieve_pairing(args: Args) -> anyhow::Result<()> {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
         let dir = format!("{home}/.agentkeys");
         std::fs::create_dir_all(&dir).ok();
-        format!("{dir}/agent-session.jwt")
+        // Per-ACTOR bearer path: pairing a second actor under the same HOME must
+        // NOT overwrite the first actor's bearer (a stale artifact + an
+        // overwritten file would pair actor A with JWT B → STS identity skew).
+        session_bearer_path(&dir, &child_omni)
     };
     agentkeys_core::device_crypto::write_key_0600(&session_file, &session_jwt)
         .context("persist agent session jwt (0600)")?;
@@ -1448,12 +1451,22 @@ fn request_artifact(
     })
 }
 
+/// Per-actor path for the 0600 session-bearer file, scoped by `child_omni` (the
+/// validated 64-hex actor id — a safe filename). Pairing a second actor under the
+/// same HOME thus writes a DISTINCT file instead of overwriting the first actor's
+/// bearer, which would otherwise skew actor↔JWT (per-actor isolation). Re-pairing
+/// the SAME actor reuses the same path (it overwrites only its own bearer).
+fn session_bearer_path(dir: &str, child_omni: &str) -> String {
+    format!("{dir}/agent-session-{child_omni}.jwt")
+}
+
 #[cfg(test)]
 mod pairing_poll_tests {
     use super::{
         backoff_with_jitter, binding_artifact, classify_poll, format_broker_error,
         is_derivation_path, is_omni_hex, parse_retry_after, poll_retry_wait, request_artifact,
-        truncate_body, validate_claimed_binding, PollClass, PAIRING_POLL_INTERVAL_SECONDS,
+        session_bearer_path, truncate_body, validate_claimed_binding, PollClass,
+        PAIRING_POLL_INTERVAL_SECONDS,
     };
     use reqwest::StatusCode;
     use std::time::{Duration, SystemTime};
@@ -1773,6 +1786,20 @@ mod pairing_poll_tests {
         // A KNOWN broker kind is surfaced for operator diagnostics.
         let known = r#"{"error":"bad_request","message":"..."}"#;
         assert!(format_broker_error(StatusCode::BAD_REQUEST, known).contains("bad_request"));
+    }
+
+    #[test]
+    fn session_bearer_path_is_per_actor() {
+        let dir = "/h/.agentkeys";
+        let omni_a = "a".repeat(64);
+        let omni_b = "b".repeat(64);
+        let a = session_bearer_path(dir, &omni_a);
+        let b = session_bearer_path(dir, &omni_b);
+        // Two distinct actors → distinct bearer files (no cross-actor overwrite).
+        assert_ne!(a, b, "two actors must not share a bearer file: {a}");
+        assert!(a.contains(&omni_a) && b.contains(&omni_b));
+        // Re-pairing the SAME actor reuses its own path (overwrites only itself).
+        assert_eq!(a, session_bearer_path(dir, &omni_a));
     }
 
     #[test]

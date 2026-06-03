@@ -1216,7 +1216,7 @@ agentkeys-daemon --retrieve-pairing --broker-url "https://$BROKER_HOST"
 
 # Output:
 # [INFO] Polling /v1/agent/pairing/poll ... pending ... claimed
-# [INFO] J1_agent minted at retrieval; persisted at ~/.agentkeys/agent-session.jwt (0600)
+# [INFO] J1_agent minted at retrieval; persisted at ~/.agentkeys/agent-session-<actor_omni>.jwt (0600, per-actor)
 # [INFO] Binding artifact emitted on stdout (agent_address, actor_omni, device_key_hash, pop_sig)
 ```
 
