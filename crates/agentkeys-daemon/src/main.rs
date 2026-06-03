@@ -1119,6 +1119,24 @@ fn truncate_body(body: &str) -> String {
     }
 }
 
+/// Closed allowlist of broker error KINDS (mirrors
+/// `agentkeys-broker-server`'s `BrokerError::status_and_kind`). The fatal
+/// branch logs the `error` field ONLY when it exactly matches one of these
+/// short, broker-controlled category strings; any other value (a token,
+/// reflected request_id/pop_sig, proxy/WAF text, or a wrongly-statused claimed
+/// payload) is suppressed to status-only. The set degrades gracefully: a kind
+/// missing here is logged as "unrecognized" — never leaked — so drift from the
+/// broker only costs log detail, never correctness.
+const KNOWN_BROKER_ERROR_KINDS: &[&str] = &[
+    "unauthorized",
+    "forbidden",
+    "backend_unreachable",
+    "sts_error",
+    "audit_error",
+    "bad_request",
+    "internal",
+];
+
 /// Classify a pairing-poll response. 4xx → fail fast; 5xx/408/429 → transient;
 /// a 2xx that fails to parse is transient but its body is SUPPRESSED (a claimed
 /// 2xx contains `session_jwt`). 4xx/5xx bodies are broker error messages (no
@@ -1173,17 +1191,21 @@ fn classify_poll(status: reqwest::StatusCode, body: &str) -> PollClass {
         // from the broker's error envelope rather than a reverse proxy, WAF,
         // stale route, or a wrongly-statused claimed payload (which carries
         // session_jwt). Parse the broker envelope ({"error": <kind>, ...}) and
-        // log ONLY the short `error` KIND — a broker-controlled category string
-        // (e.g. "not_found", "device_role_missing"), never a token, request_id,
-        // or pop_sig. Anything that isn't that envelope (proxy HTML, reflected
-        // body, claimed payload) is suppressed to status-only.
+        // log the `error` field ONLY when its VALUE is one of the closed set of
+        // known broker error kinds — allowlisting the field NAME alone is not
+        // enough, since `{"error":"session_jwt=..."}` would still leak. Any
+        // other value (token, reflected request_id/pop_sig, proxy/WAF text,
+        // claimed payload) is suppressed to status-only.
         let kind = serde_json::from_str::<serde_json::Value>(body)
             .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|k| KNOWN_BROKER_ERROR_KINDS.contains(&k.as_str()));
         match kind {
+            // truncate_body is a no-op on these short closed-set literals; kept
+            // as a defensive second layer against any future kind drift.
             Some(k) => PollClass::Fatal(format!("HTTP {status}: {}", truncate_body(&k))),
             None => PollClass::Fatal(format!(
-                "HTTP {status} (body suppressed — no broker error envelope)"
+                "HTTP {status} (body suppressed — unrecognized error kind)"
             )),
         }
     }
@@ -1375,15 +1397,14 @@ mod pairing_poll_tests {
             }
         }
 
-        // (b) Broker envelope with extra secret fields → logs ONLY the `error`
-        //     kind, never the sibling secrets.
-        let with_envelope =
-            r#"{"error":"device_role_missing","message":"...","session_jwt":"SENTINEL_JWT"}"#;
-        match classify_poll(StatusCode::FORBIDDEN, with_envelope) {
+        // (b) Broker envelope with a KNOWN kind + sibling secret → logs ONLY the
+        //     known kind, never the sibling secret.
+        let known = r#"{"error":"forbidden","message":"...","session_jwt":"SENTINEL_JWT"}"#;
+        match classify_poll(StatusCode::FORBIDDEN, known) {
             PollClass::Fatal(reason) => {
                 assert!(
-                    reason.contains("device_role_missing"),
-                    "fatal reason should surface the broker error kind: {reason}"
+                    reason.contains("forbidden"),
+                    "fatal reason should surface the known broker error kind: {reason}"
                 );
                 for secret in secrets {
                     assert!(
@@ -1392,7 +1413,33 @@ mod pairing_poll_tests {
                     );
                 }
             }
-            other => panic!("403 with envelope should be fatal, got {other:?}"),
+            other => panic!("403 with known kind should be fatal, got {other:?}"),
+        }
+
+        // (c)-(e) An `error` field whose VALUE is not a known broker kind is
+        // suppressed — allowlisting the field NAME alone is not enough. Covers:
+        // an identifier-shaped token, a key=value leak, a long reflected string,
+        // and arbitrary proxy text.
+        let long_leak = format!(r#"{{"error":"{}"}}"#, "SENTINEL_JWT".repeat(40));
+        for body in [
+            r#"{"error":"SENTINEL_JWT"}"#,
+            r#"{"error":"session_jwt=SENTINEL_JWT"}"#,
+            long_leak.as_str(),
+            r#"{"error":"some unexpected proxy message"}"#,
+        ] {
+            match classify_poll(StatusCode::BAD_REQUEST, body) {
+                PollClass::Fatal(reason) => {
+                    assert!(
+                        !reason.contains("SENTINEL_JWT"),
+                        "fatal reason leaked an unrecognized error value: {reason}"
+                    );
+                    assert!(
+                        reason.contains("body suppressed"),
+                        "unrecognized error value should be suppressed, got {reason}"
+                    );
+                }
+                other => panic!("400 with unknown error value should be fatal, got {other:?}"),
+            }
         }
     }
 
