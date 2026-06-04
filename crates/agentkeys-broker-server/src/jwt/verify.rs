@@ -39,7 +39,7 @@ pub struct AgentKeysClaims {
     /// Agent only: the parent (master) omni this child was HDKD-derived from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_omni: Option<String>,
-    /// Agent only: the HDKD path, e.g. `"//agent-a"`.
+    /// Agent only: the HDKD path, e.g. `"//agent-a/0"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derivation_path: Option<String>,
     /// Agent only: the K10 device address whose pop_sig redeemed the link code.

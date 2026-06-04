@@ -1483,12 +1483,17 @@ fn is_omni_hex(s: &str) -> bool {
 /// (`^[a-z0-9-]{1,32}$`), matching the broker's `format!("//{label}")`.
 fn is_derivation_path(s: &str) -> bool {
     match s.strip_prefix("//") {
-        Some(label) => {
+        Some(rest) => {
+            let Some((label, gen)) = rest.rsplit_once('/') else {
+                return false;
+            };
             !label.is_empty()
                 && label.len() <= 32
                 && label
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && !gen.is_empty()
+                && gen.bytes().all(|b| b.is_ascii_digit())
         }
         None => false,
     }
@@ -1911,7 +1916,7 @@ mod pairing_poll_tests {
             "0xdevice",
             "childomni",
             "operomni",
-            "//hermes",
+            "//hermes/0",
             "dkh",
             "popsig",
             "/s.jwt",
@@ -2178,8 +2183,8 @@ mod pairing_poll_tests {
         // Valid shapes (64-char lowercase hex omni; //label path) pass.
         assert!(is_omni_hex(&"0123456789abcdef".repeat(4)));
         assert!(is_omni_hex(&"a".repeat(64)));
-        assert!(is_derivation_path("//hermes"));
-        assert!(is_derivation_path("//agent-01"));
+        assert!(is_derivation_path("//hermes/0"));
+        assert!(is_derivation_path("//agent-01/0"));
 
         // Reflected tokens / wrong shapes are rejected — these would otherwise
         // be logged + printed on stdout from a claimed body.
@@ -2199,8 +2204,11 @@ mod pairing_poll_tests {
         for bad in [
             "//session_jwt=SENTINEL_JWT", // label charset
             "//UPPER",
-            "/hermes", // single slash
-            "//",      // empty label
+            "/hermes",  // single slash
+            "//",       // empty label
+            "//hermes", // missing generation suffix
+            "//hermes/",
+            "//hermes/a",
             "session_jwt=x",
             "",
         ] {
@@ -2216,12 +2224,13 @@ mod pairing_poll_tests {
         // 64-char lowercase hex operator omni; child is its REAL HDKD derivation
         // (the semantic check requires child_omni == HDKD(operator, label)).
         let operator = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let child = agentkeys_core::actor_omni::child_omni_hex(operator, "hermes").unwrap();
+        let child =
+            agentkeys_core::actor_omni::child_omni_generation_hex(operator, "hermes", 0).unwrap();
         let ok = serde_json::json!({
             "session_jwt": "tok",
             "child_omni": child.clone(),
             "operator_omni": operator,
-            "derivation_path": "//hermes",
+            "derivation_path": "//hermes/0",
         });
         assert!(validate_claimed_binding(&ok).is_ok());
 
@@ -2242,7 +2251,7 @@ mod pairing_poll_tests {
         // Missing session_jwt is rejected (before any field/HDKD check) without
         // echoing the body.
         let no_jwt = serde_json::json!({
-            "child_omni": child.clone(), "operator_omni": operator, "derivation_path": "//hermes",
+            "child_omni": child.clone(), "operator_omni": operator, "derivation_path": "//hermes/0",
         });
         assert!(validate_claimed_binding(&no_jwt).is_err());
     }
@@ -2258,7 +2267,7 @@ mod pairing_poll_tests {
             "session_jwt": "tok",
             "child_omni": wrong_child,
             "operator_omni": operator,
-            "derivation_path": "//hermes",
+            "derivation_path": "//hermes/0",
         });
         let err = validate_claimed_binding(&v)
             .expect_err("HDKD child mismatch must be rejected")

@@ -10,7 +10,7 @@
 //!   `pop_sig`, store an UNBOUND request (naming no master), return a
 //!   `pairing_code` to display + a secret `request_id` retrieval ticket.
 //! - `POST /v1/agent/pairing/claim` (master, `J1_master`-gated) — claim the
-//!   code; derive the HDKD child omni `O_agent = SHA256(.. || O_master || "//label")`,
+//!   code; derive the HDKD child omni `O_agent = SHA256(.. || O_master || "//label/0")`,
 //!   mark the request claimed, and stash the device artifact as a pending binding.
 //! - `POST /v1/agent/pairing/poll` (agent, no bearer) — once claimed, re-prove
 //!   device-key possession (fresh `pop_sig`) and mint + retrieve `J1_agent`.
