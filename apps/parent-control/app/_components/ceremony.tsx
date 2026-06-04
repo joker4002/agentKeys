@@ -1,10 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
 import type { AgentKeysClient } from '@/lib/client/types';
-import { credentialToFinishPayload, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
+import {
+  credentialToFinishPayload,
+  jsonToCreationOptions,
+  webauthnAvailable,
+} from '@/lib/webauthn';
 import type { CeremonyStep } from './types';
 import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 
@@ -12,9 +15,15 @@ import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 // daemon is configured. Returns 'real' on a completed browser ceremony,
 // 'fallback' when no daemon / no authenticator / the user dismissed it (the
 // onboarding then runs the narrated ceremony so the offline demo still flows).
-async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'real' | 'fallback'> {
+async function tryRealEnroll(
+  client: AgentKeysClient,
+  email: string
+): Promise<'real' | 'fallback'> {
   if (!webauthnAvailable()) return 'fallback';
-  const begin = await client.enrollK11Begin({ userName: email, userDisplayName: email });
+  const begin = await client.enrollK11Begin({
+    userName: email,
+    userDisplayName: email,
+  });
   if (!begin.ok) return 'fallback'; // EmptyBackend → disconnected → narrated fallback
   try {
     // The macOS/Safari passkey dialog quotes user.name ("A passkey for '…'") and
@@ -28,13 +37,22 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'r
     const label = (raw: string) => (masked ? 'AgentKeys master device' : raw);
     const opts = jsonToCreationOptions({
       rp: { id: begin.data.rpId, name: begin.data.rpName },
-      user: { id: begin.data.userId, name: label(begin.data.userName), displayName: label(begin.data.userDisplayName) },
+      user: {
+        id: begin.data.userId,
+        name: label(begin.data.userName),
+        displayName: label(begin.data.userDisplayName),
+      },
       challenge: begin.data.challenge,
       pubKeyCredParams: begin.data.pubKeyCredParams,
       timeout: begin.data.timeout,
-      authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+      authenticatorSelection: {
+        userVerification: 'required',
+        residentKey: 'preferred',
+      },
     });
-    const cred = (await navigator.credentials.create({ publicKey: opts })) as PublicKeyCredential | null;
+    const cred = (await navigator.credentials.create({
+      publicKey: opts,
+    })) as PublicKeyCredential | null;
     if (!cred) return 'fallback';
     const payload = credentialToFinishPayload(cred);
     const fin = await client.enrollK11Finish({
@@ -62,7 +80,7 @@ export function CeremonyRunner({
   stepMs?: number;
 }) {
   const [done, setDone] = useState(0);
-  const [txs, setTxs] = useState<Record<number, string>>({});
+  const [txs, setTxs] = useState<Record<number, true>>({});
 
   useEffect(() => {
     if (done >= steps.length) {
@@ -75,15 +93,22 @@ export function CeremonyRunner({
       // Real async work for this step (e.g. the §9 Stage-2 WebAuthn Touch ID)
       // runs WHILE the row shows "running"; the bar advances when it resolves.
       if (step.action) {
-        try { await step.action(); } catch { /* fall through — narrated */ }
+        try {
+          await step.action();
+        } catch {
+          /* fall through — narrated */
+        }
       }
       if (cancelled) return;
       if (step.onchain) {
-        setTxs((prev) => ({ ...prev, [done]: txHash(step.label + done) }));
+        setTxs((prev) => ({ ...prev, [done]: true }));
       }
       setDone((d) => d + 1);
     }, stepMs);
-    return () => { cancelled = true; clearTimeout(t); };
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [done]);
 
@@ -93,7 +118,10 @@ export function CeremonyRunner({
     <div className="ceremony">
       <div className="ceremony-bar-wrap">
         <div className="ceremony-bar-track">
-          <div className="ceremony-bar-fill" style={{ width: `${pct}%`, background: accent }} />
+          <div
+            className="ceremony-bar-fill"
+            style={{ width: `${pct}%`, background: accent }}
+          />
         </div>
         <div className="ceremony-bar-meta">
           <span>{done >= steps.length ? 'complete' : 'working…'}</span>
@@ -108,14 +136,20 @@ export function CeremonyRunner({
           const status = i < done ? 'done' : i === done ? 'running' : 'pending';
           return (
             <div key={i} className={`clog-row ${status}`}>
-              <span className="clog-mark">{status === 'done' ? '✓' : status === 'running' ? '▸' : '·'}</span>
+              <span className="clog-mark">
+                {status === 'done' ? '✓' : status === 'running' ? '▸' : '·'}
+              </span>
               <div className="clog-body">
                 <div className="clog-label">
                   {s.label}
                   {s.onchain && <span className="clog-chain">on-chain</span>}
                 </div>
                 <div className="clog-sub">{s.sub}</div>
-                {txs[i] && <div className="clog-tx mono">tx {txs[i].slice(0, 22)}… · heima · confirmed</div>}
+                {txs[i] && (
+                  <div className="clog-tx mono">
+                    heima tx submitted by daemon · confirmed
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -129,14 +163,18 @@ export function CeremonyRunner({
 export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   const client = useClient();
   const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony'>('email');
-  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending'>('pending');
+  const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending'>(
+    'pending'
+  );
   const [email, setEmail] = useState('');
   const [requestId, setRequestId] = useState('');
   const [omni, setOmni] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const [maskEm, setMaskEm] = useState(true);
-  useEffect(() => { setMaskEm(getMaskEmail()); }, []);
+  useEffect(() => {
+    setMaskEm(getMaskEmail());
+  }, []);
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
   // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
@@ -172,7 +210,9 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
         setOmni(r.data.omniAccount ?? '');
         setPhase('ceremony');
       } else if (r.data.status.startsWith('failed')) {
-        setNote(`Email verification ${r.data.status} — start over with a fresh link.`);
+        setNote(
+          `Email verification ${r.data.status} — start over with a fresh link.`
+        );
       }
     };
     void tick();
@@ -187,8 +227,17 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   // the runner awaits it (real Touch ID via the daemon ui-bridge, narrated
   // fallback offline).
   const stages: CeremonyStep[] = [
-    { label: 'Generate device key (K10)', sub: 'secp256k1 keypair · generated locally · no network · sealed in the OS keychain' },
-    { label: 'Email verified ✓', sub: `${maskEmail(email, maskEm)} · broker issued the single-use binding_nonce` },
+    {
+      label: 'Generate device key (K10)',
+      sub: 'secp256k1 keypair · generated locally · no network · sealed in the OS keychain',
+    },
+    {
+      label: 'Email verified ✓',
+      sub: `${maskEmail(
+        email,
+        maskEm
+      )} · broker issued the single-use binding_nonce`,
+    },
     {
       label: 'Bind passkey (K11) · Touch ID',
       sub: 'WebAuthn create · the passkey is bound to your verified email (not a demo identity)',
@@ -197,8 +246,16 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
         setEnrollMode(outcome === 'real' ? 'real' : 'demo');
       },
     },
-    { label: 'Activate managed wallet → session', sub: 'the signer derives + attests your managed wallet (EIP-191) and mints your session (J1) — no wallet app, no MetaMask' },
-    { label: 'Register master device on chain', sub: 'registerFirstMasterDevice — deferred (ERC-4337 E7); chain_tx pending', onchain: true, fn: 'registerFirstMasterDevice(...)' },
+    {
+      label: 'Activate managed wallet → session',
+      sub: 'the signer derives + attests your managed wallet (EIP-191) and mints your session (J1) — no wallet app, no MetaMask',
+    },
+    {
+      label: 'Register master device on chain',
+      sub: 'registerFirstMasterDevice — deferred (ERC-4337 E7); chain_tx pending',
+      onchain: true,
+      fn: 'registerFirstMasterDevice(...)',
+    },
   ];
 
   return (
@@ -207,35 +264,78 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
         <div className="onboard-brand">
           <div
             style={{
-              width: 56, height: 56, border: '1px solid var(--rule)', display: 'grid',
-              placeItems: 'center', fontSize: 28, color: 'var(--ink)',
+              width: 56,
+              height: 56,
+              border: '1px solid var(--rule)',
+              display: 'grid',
+              placeItems: 'center',
+              fontSize: 28,
+              color: 'var(--ink)',
             }}
             aria-hidden
           >
             ◐
           </div>
           <div>
-            <div className="serif" style={{ fontSize: 30, fontStyle: 'italic', letterSpacing: '-0.02em', lineHeight: 1 }}>
+            <div
+              className="serif"
+              style={{
+                fontSize: 30,
+                fontStyle: 'italic',
+                letterSpacing: '-0.02em',
+                lineHeight: 1,
+              }}
+            >
               agentKeys
             </div>
-            <div style={{ fontSize: 11, color: 'var(--ink-dim)', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 6 }}>
+            <div
+              style={{
+                fontSize: 11,
+                color: 'var(--ink-dim)',
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+                marginTop: 6,
+              }}
+            >
               sovereign keys · for agents
             </div>
           </div>
         </div>
 
-        <div className="hr-ascii" style={{ margin: '20px 0' }}>{'─'.repeat(220)}</div>
+        <div className="hr-ascii" style={{ margin: '20px 0' }}>
+          {'─'.repeat(220)}
+        </div>
 
         {phase === 'email' && (
           <div className="onboard-login">
-            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your master identity.</h1>
-            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
-              Enter the email you&apos;ll use as your account. We send a one-time magic link there to verify it&apos;s
-              yours — your master identity is anchored to it. No password, no seed phrase.
+            <h1
+              className="serif"
+              style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}
+            >
+              Set up your master identity.
+            </h1>
+            <p
+              style={{
+                fontSize: 12.5,
+                color: 'var(--ink-dim)',
+                marginBottom: 18,
+                maxWidth: 400,
+              }}
+            >
+              Enter the email you&apos;ll use as your account. We send a
+              one-time magic link there to verify it&apos;s yours — your master
+              identity is anchored to it. No password, no seed phrase.
             </p>
             <label
               htmlFor="ak-email"
-              style={{ display: 'block', fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}
+              style={{
+                display: 'block',
+                fontSize: 10.5,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: 'var(--ink-faint)',
+                marginBottom: 6,
+              }}
             >
               email address
             </label>
@@ -247,30 +347,63 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
               autoFocus
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') submitEmail(); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitEmail();
+              }}
               placeholder="you@example.com"
               style={{
-                width: '100%', padding: '11px 12px', fontFamily: 'inherit', fontSize: 14,
-                border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', marginBottom: 14,
+                width: '100%',
+                padding: '11px 12px',
+                fontFamily: 'inherit',
+                fontSize: 14,
+                border: '1px solid var(--rule)',
+                background: 'var(--bg)',
+                color: 'var(--ink)',
+                marginBottom: 14,
               }}
             />
             <button
               type="button"
-              onClick={() => { const v = !maskEm; setMaskEm(v); setMaskEmail(v); }}
-              style={{ background: 'none', border: 'none', color: 'var(--ink-faint)', fontSize: 11, cursor: 'pointer', padding: '0 0 10px', textDecoration: 'underline' }}
+              onClick={() => {
+                const v = !maskEm;
+                setMaskEm(v);
+                setMaskEmail(v);
+              }}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--ink-faint)',
+                fontSize: 11,
+                cursor: 'pointer',
+                padding: '0 0 10px',
+                textDecoration: 'underline',
+              }}
               title="Toggle email masking (for screen-sharing); persists"
             >
-              {maskEm ? '🕶 email hidden — click to show' : '👁 email shown — click to hide'}
+              {maskEm
+                ? '🕶 email hidden — click to show'
+                : '👁 email shown — click to hide'}
             </button>
             <button
               className="btn primary"
-              style={{ width: '100%', justifyContent: 'center', padding: '12px' }}
+              style={{
+                width: '100%',
+                justifyContent: 'center',
+                padding: '12px',
+              }}
               disabled={!emailValid}
               onClick={submitEmail}
             >
               Continue →
             </button>
-            <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 14, textAlign: 'center' }}>
+            <div
+              style={{
+                fontSize: 10.5,
+                color: 'var(--ink-faint)',
+                marginTop: 14,
+                textAlign: 'center',
+              }}
+            >
               first login creates O_master · HDKD root at /
             </div>
           </div>
@@ -278,19 +411,47 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
 
         {phase === 'verify' && (
           <div className="onboard-login">
-            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Check your inbox.</h1>
-            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
-              We sent a one-time magic link to <strong>{maskEmail(email, maskEm)}</strong>. Click it to verify this address — this page
-              continues automatically once you do.
+            <h1
+              className="serif"
+              style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}
+            >
+              Check your inbox.
+            </h1>
+            <p
+              style={{
+                fontSize: 12.5,
+                color: 'var(--ink-dim)',
+                marginBottom: 18,
+                maxWidth: 400,
+              }}
+            >
+              We sent a one-time magic link to{' '}
+              <strong>{maskEmail(email, maskEm)}</strong>. Click it to verify
+              this address — this page continues automatically once you do.
             </p>
-            <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
+            <div
+              style={{
+                fontSize: 11,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: 'var(--ink-faint)',
+              }}
+            >
               ▸ waiting for the link to be clicked…
             </div>
-            {note && <div style={{ fontSize: 11.5, color: '#b00', marginTop: 12 }}>{note}</div>}
+            {note && (
+              <div style={{ fontSize: 11.5, color: '#b00', marginTop: 12 }}>
+                {note}
+              </div>
+            )}
             <button
               className="btn"
               style={{ marginTop: 18, padding: '8px 14px' }}
-              onClick={() => { setPhase('email'); setRequestId(''); setNote(''); }}
+              onClick={() => {
+                setPhase('email');
+                setRequestId('');
+                setNote('');
+              }}
             >
               ← use a different email
             </button>
@@ -299,14 +460,39 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
 
         {phase === 'ceremony' && (
           <div>
-            <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
+            <div
+              style={{
+                fontSize: 11,
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+                color: 'var(--ink-dim)',
+                marginBottom: 14,
+              }}
+            >
               Bringing up your trust core · {maskEmail(email, maskEm)}
-              {enrollMode === 'real' && <span className="chip ok" style={{ marginLeft: 8 }}>K11 bound · real WebAuthn</span>}
-              {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
+              {enrollMode === 'real' && (
+                <span className="chip ok" style={{ marginLeft: 8 }}>
+                  K11 bound · real WebAuthn
+                </span>
+              )}
+              {enrollMode === 'demo' && (
+                <span className="chip" style={{ marginLeft: 8 }}>
+                  demo · no daemon
+                </span>
+              )}
             </div>
             {omni && (
-              <div className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)', marginBottom: 14, wordBreak: 'break-all' }}>
-                logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}
+              <div
+                className="mono"
+                style={{
+                  fontSize: 11,
+                  color: 'var(--ink-dim)',
+                  marginBottom: 14,
+                  wordBreak: 'break-all',
+                }}
+              >
+                logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni{' '}
+                {omni}
               </div>
             )}
             <CeremonyRunner steps={stages} onDone={onComplete} stepMs={760} />

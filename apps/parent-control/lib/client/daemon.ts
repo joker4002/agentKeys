@@ -1,6 +1,7 @@
 import type {
   AgentKeysClient,
   AnchorStatus,
+  AuditDecodeResult,
   CapToken,
   ConnectionStatus,
   DisconnectedStatus,
@@ -57,19 +58,32 @@ export class DaemonBackend implements AgentKeysClient {
   private baseUrl: string;
 
   constructor(baseUrl?: string) {
-    this.baseUrl = (baseUrl ?? process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+    this.baseUrl = (
+      baseUrl ??
+      process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ??
+      DEFAULT_BASE_URL
+    ).replace(/\/$/, '');
   }
 
   private async getJson<T>(path: string): Promise<Result<T>> {
     try {
-      const resp = await fetch(`${this.baseUrl}${path}`, { method: 'GET', cache: 'no-store' });
+      const resp = await fetch(`${this.baseUrl}${path}`, {
+        method: 'GET',
+        cache: 'no-store',
+      });
       if (!resp.ok) {
         const text = await resp.text();
-        return { ok: false, status: unreachable(`GET ${path} → ${resp.status}: ${text}`) };
+        return {
+          ok: false,
+          status: unreachable(`GET ${path} → ${resp.status}: ${text}`),
+        };
       }
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {
-      return { ok: false, status: unreachable(`GET ${path}: ${(e as Error).message}`) };
+      return {
+        ok: false,
+        status: unreachable(`GET ${path}: ${(e as Error).message}`),
+      };
     }
   }
 
@@ -82,21 +96,32 @@ export class DaemonBackend implements AgentKeysClient {
       });
       if (!resp.ok) {
         const text = await resp.text();
-        return { ok: false, status: unreachable(`POST ${path} → ${resp.status}: ${text}`) };
+        return {
+          ok: false,
+          status: unreachable(`POST ${path} → ${resp.status}: ${text}`),
+        };
       }
       return { ok: true, data: (await resp.json()) as T };
     } catch (e) {
-      return { ok: false, status: unreachable(`POST ${path}: ${(e as Error).message}`) };
+      return {
+        ok: false,
+        status: unreachable(`POST ${path}: ${(e as Error).message}`),
+      };
     }
   }
 
   async status(): Promise<ConnectionStatus> {
     try {
-      const resp = await fetch(`${this.baseUrl}/healthz`, { method: 'GET', cache: 'no-store' });
+      const resp = await fetch(`${this.baseUrl}/healthz`, {
+        method: 'GET',
+        cache: 'no-store',
+      });
       if (!resp.ok) return unreachable(`/healthz returned ${resp.status}`);
       return { kind: 'connected', via: 'daemon', endpoint: this.baseUrl };
     } catch (e) {
-      return unreachable(`fetch ${this.baseUrl}/healthz failed: ${(e as Error).message}`);
+      return unreachable(
+        `fetch ${this.baseUrl}/healthz failed: ${(e as Error).message}`
+      );
     }
   }
 
@@ -107,7 +132,9 @@ export class DaemonBackend implements AgentKeysClient {
   }
 
   async getActor(id: string): Promise<Result<Actor | null>> {
-    const r = await this.getJson<ApiActor>(`/v1/actors/${encodeURIComponent(id)}`);
+    const r = await this.getJson<ApiActor>(
+      `/v1/actors/${encodeURIComponent(id)}`
+    );
     if (!r.ok) {
       if (r.status.detail?.includes('→ 404')) return { ok: true, data: null };
       return r;
@@ -117,30 +144,43 @@ export class DaemonBackend implements AgentKeysClient {
 
   async listCapTokens(actorId: string): Promise<Result<CapToken[]>> {
     const r = await this.getJson<{ caps: CapToken[] }>(
-      `/v1/actors/${encodeURIComponent(actorId)}/caps`,
+      `/v1/actors/${encodeURIComponent(actorId)}/caps`
     );
     if (!r.ok) return r;
     return { ok: true, data: r.data.caps };
   }
 
-  async listRecentAuditEvents(opts?: { actorId?: string; limit?: number }): Promise<Result<AuditEvent[]>> {
+  async listRecentAuditEvents(opts?: {
+    actorId?: string;
+    limit?: number;
+  }): Promise<Result<AuditEvent[]>> {
     const params = new URLSearchParams();
     if (opts?.actorId) params.set('actor_id', opts.actorId);
     if (opts?.limit) params.set('limit', String(opts.limit));
     const qs = params.toString();
     const r = await this.getJson<{ events: ApiAuditEvent[] }>(
-      `/v1/audit/recent${qs ? `?${qs}` : ''}`,
+      `/v1/audit/recent${qs ? `?${qs}` : ''}`
     );
     if (!r.ok) return r;
     return { ok: true, data: r.data.events.map(apiToAuditEvent) };
   }
 
+  async decodeAuditEvent(eventId: string): Promise<Result<AuditDecodeResult>> {
+    const r = await this.getJson<ApiAuditDecodeResult>(
+      `/v1/audit/${encodeURIComponent(eventId)}/decode`
+    );
+    if (!r.ok) return r;
+    return { ok: true, data: apiToAuditDecodeResult(r.data) };
+  }
+
   streamAudit(
     onEvent: (e: AuditEvent) => void,
-    onStatusChange: (s: ConnectionStatus) => void,
+    onStatusChange: (s: ConnectionStatus) => void
   ): () => void {
     if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
-      onStatusChange(unreachable('EventSource not available in this environment'));
+      onStatusChange(
+        unreachable('EventSource not available in this environment')
+      );
       return () => {};
     }
     const es = new EventSource(`${this.baseUrl}/v1/audit/stream`);
@@ -152,7 +192,12 @@ export class DaemonBackend implements AgentKeysClient {
         // ignore malformed event
       }
     });
-    es.onopen = () => onStatusChange({ kind: 'connected', via: 'daemon', endpoint: this.baseUrl });
+    es.onopen = () =>
+      onStatusChange({
+        kind: 'connected',
+        via: 'daemon',
+        endpoint: this.baseUrl,
+      });
     es.onerror = () => onStatusChange(unreachable('/v1/audit/stream errored'));
     return () => es.close();
   }
@@ -164,7 +209,9 @@ export class DaemonBackend implements AgentKeysClient {
   }
 
   async getWorker(id: Worker['id']): Promise<Result<Worker | null>> {
-    const r = await this.getJson<ApiWorker>(`/v1/workers/${encodeURIComponent(id)}`);
+    const r = await this.getJson<ApiWorker>(
+      `/v1/workers/${encodeURIComponent(id)}`
+    );
     if (!r.ok) {
       if (r.status.detail?.includes('→ 404')) return { ok: true, data: null };
       return r;
@@ -176,7 +223,13 @@ export class DaemonBackend implements AgentKeysClient {
     const r = await this.getJson<{
       last_anchor_at: number;
       next_anchor_in: number;
-      recent: { ts: string; root: string; count: number; txn: string; conf: number }[];
+      recent: {
+        ts: string;
+        root: string;
+        count: number;
+        txn: string;
+        conf: number;
+      }[];
     }>('/v1/anchor/status');
     if (!r.ok) return r;
     return {
@@ -189,49 +242,81 @@ export class DaemonBackend implements AgentKeysClient {
     };
   }
 
-  async updateScope(actorId: string, ns: Namespace, value: ScopeBits): Promise<Result<void>> {
-    const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/scope`, {
-      namespace: ns,
-      read: value.read,
-      write: value.write,
-    });
+  async updateScope(
+    actorId: string,
+    ns: Namespace,
+    value: ScopeBits
+  ): Promise<Result<void>> {
+    const r = await this.postJson<unknown>(
+      `/v1/actors/${encodeURIComponent(actorId)}/scope`,
+      {
+        namespace: ns,
+        read: value.read,
+        write: value.write,
+      }
+    );
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  async updatePaymentCap(actorId: string, perTx: number, daily: number): Promise<Result<void>> {
-    const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/payment-cap`, {
-      per_tx: perTx,
-      daily,
-    });
+  async updatePaymentCap(
+    actorId: string,
+    perTx: number,
+    daily: number
+  ): Promise<Result<void>> {
+    const r = await this.postJson<unknown>(
+      `/v1/actors/${encodeURIComponent(actorId)}/payment-cap`,
+      {
+        per_tx: perTx,
+        daily,
+      }
+    );
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  async revokeDevice(actorId: string, intent: RevokeIntent): Promise<Result<void>> {
-    const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/revoke`, {
-      intent_text: intent.text,
-      intent_fields: intent.fields,
-    });
+  async revokeDevice(
+    actorId: string,
+    intent: RevokeIntent
+  ): Promise<Result<void>> {
+    const r = await this.postJson<unknown>(
+      `/v1/actors/${encodeURIComponent(actorId)}/revoke`,
+      {
+        intent_text: intent.text,
+        intent_fields: intent.fields,
+      }
+    );
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
-  async revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>> {
+  async revokeCap(
+    actorId: string,
+    capName: string,
+    intent: RevokeIntent
+  ): Promise<Result<void>> {
     const r = await this.postJson<unknown>(
       `/v1/actors/${encodeURIComponent(actorId)}/caps/revoke`,
-      { cap: capName, intent_text: intent.text },
+      { cap: capName, intent_text: intent.text }
     );
     return r.ok ? { ok: true, data: undefined as unknown as void } : r;
   }
 
   async startEmailVerify(email: string): Promise<Result<EmailVerifyStart>> {
-    const r = await this.postJson<{ request_id: string }>('/v1/auth/email/start', { email });
+    const r = await this.postJson<{ request_id: string }>(
+      '/v1/auth/email/start',
+      { email }
+    );
     return r.ok ? { ok: true, data: { requestId: r.data.request_id } } : r;
   }
 
   async pollEmailVerify(requestId: string): Promise<Result<EmailVerifyStatus>> {
     const r = await this.getJson<{ status: string; omni_account?: string }>(
-      `/v1/auth/email/status?request_id=${encodeURIComponent(requestId)}`,
+      `/v1/auth/email/status?request_id=${encodeURIComponent(requestId)}`
     );
-    return r.ok ? { ok: true, data: { status: r.data.status, omniAccount: r.data.omni_account } } : r;
+    return r.ok
+      ? {
+          ok: true,
+          data: { status: r.data.status, omniAccount: r.data.omni_account },
+        }
+      : r;
   }
 
   async getOnboardingState(): Promise<Result<OnboardingState>> {
@@ -243,19 +328,29 @@ export class DaemonBackend implements AgentKeysClient {
     return r.ok ? { ok: true, data: undefined } : r;
   }
 
-  async enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>> {
+  async enrollK11Begin(input: {
+    userName: string;
+    userDisplayName: string;
+  }): Promise<Result<K11EnrollBegin>> {
     try {
       const resp = await fetch(`${this.baseUrl}/v1/k11/enroll/begin`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username: input.userName, display_name: input.userDisplayName }),
+        body: JSON.stringify({
+          username: input.userName,
+          display_name: input.userDisplayName,
+        }),
       });
       if (!resp.ok) {
         const text = await resp.text();
-        return { ok: false, status: unreachable(`enroll/begin returned ${resp.status}: ${text}`) };
+        return {
+          ok: false,
+          status: unreachable(`enroll/begin returned ${resp.status}: ${text}`),
+        };
       }
       const body = await resp.json();
-      const opts = body.creation_options?.publicKey ?? body.creation_options ?? {};
+      const opts =
+        body.creation_options?.publicKey ?? body.creation_options ?? {};
       return {
         ok: true,
         data: {
@@ -274,11 +369,18 @@ export class DaemonBackend implements AgentKeysClient {
         },
       };
     } catch (e) {
-      return { ok: false, status: unreachable(`enroll/begin fetch failed: ${(e as Error).message}`) };
+      return {
+        ok: false,
+        status: unreachable(
+          `enroll/begin fetch failed: ${(e as Error).message}`
+        ),
+      };
     }
   }
 
-  async enrollK11Finish(input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>> {
+  async enrollK11Finish(
+    input: K11EnrollFinishInput
+  ): Promise<Result<K11EnrollResult>> {
     try {
       const resp = await fetch(`${this.baseUrl}/v1/k11/enroll/finish`, {
         method: 'POST',
@@ -298,7 +400,10 @@ export class DaemonBackend implements AgentKeysClient {
       });
       if (!resp.ok) {
         const text = await resp.text();
-        return { ok: false, status: unreachable(`enroll/finish returned ${resp.status}: ${text}`) };
+        return {
+          ok: false,
+          status: unreachable(`enroll/finish returned ${resp.status}: ${text}`),
+        };
       }
       const body = await resp.json();
       return {
@@ -310,29 +415,52 @@ export class DaemonBackend implements AgentKeysClient {
         },
       };
     } catch (e) {
-      return { ok: false, status: unreachable(`enroll/finish fetch failed: ${(e as Error).message}`) };
+      return {
+        ok: false,
+        status: unreachable(
+          `enroll/finish fetch failed: ${(e as Error).message}`
+        ),
+      };
     }
   }
 
   async listMasterMemory(): Promise<Result<MasterMemoryEntry[]>> {
-    const r = await this.getJson<{ entries: ApiMemoryEntry[] }>('/v1/master/memory');
+    const r = await this.getJson<{ entries: ApiMemoryEntry[] }>(
+      '/v1/master/memory'
+    );
     if (!r.ok) return r;
     return { ok: true, data: r.data.entries.map(apiToMemoryEntry) };
   }
 
-  async plantMemory(entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
-    const r = await this.postJson<{ planted: number; skipped: number; total: number }>(
-      '/v1/master/memory/plant',
-      {
-        entries: entries.map((m) => ({
-          ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
-          version: m.version, updated: m.updated, preview: m.preview, body: m.body,
-          content_hash: m.contentHash ?? '',
-        })),
-      },
-    );
+  async plantMemory(
+    entries: MasterMemoryEntry[]
+  ): Promise<Result<PlantResult>> {
+    const r = await this.postJson<{
+      planted: number;
+      skipped: number;
+      total: number;
+    }>('/v1/master/memory/plant', {
+      entries: entries.map((m) => ({
+        ns: m.ns,
+        key: m.key,
+        title: m.title,
+        bytes: m.bytes,
+        version: m.version,
+        updated: m.updated,
+        preview: m.preview,
+        body: m.body,
+        content_hash: m.contentHash ?? '',
+      })),
+    });
     if (!r.ok) return r;
-    return { ok: true, data: { planted: r.data.planted, skipped: r.data.skipped, total: r.data.total } };
+    return {
+      ok: true,
+      data: {
+        planted: r.data.planted,
+        skipped: r.data.skipped,
+        total: r.data.total,
+      },
+    };
   }
 }
 
@@ -369,6 +497,42 @@ interface ApiAuditEvent {
   sev: string;
 }
 
+interface ApiAuditDecodeEnvelope {
+  version: number;
+  ts_unix: number;
+  actor_omni: string;
+  operator_omni: string;
+  op_kind: number;
+  op: string;
+  op_body: unknown;
+  result: string;
+  intent_text?: string;
+  intent_commitment?: string;
+  envelope_hash: string;
+}
+
+interface ApiAuditDecodeArg {
+  name: string;
+  kind: string;
+  value: unknown;
+}
+
+interface ApiAuditDecodeTx {
+  hash?: string;
+  to?: string;
+  selector: string;
+  contract: string;
+  function: string;
+  args: ApiAuditDecodeArg[];
+}
+
+interface ApiAuditDecodeResult {
+  event_id: string;
+  status: string;
+  envelope?: ApiAuditDecodeEnvelope;
+  tx?: ApiAuditDecodeTx;
+}
+
 interface ApiWorker {
   id: string;
   title: string;
@@ -399,7 +563,11 @@ function apiToActor(a: ApiActor): Actor {
     k11: a.k11,
     scope: a.scope as Actor['scope'],
     paymentCap: a.payment_cap
-      ? { perTx: a.payment_cap.per_tx, daily: a.payment_cap.daily, currency: a.payment_cap.currency }
+      ? {
+          perTx: a.payment_cap.per_tx,
+          daily: a.payment_cap.daily,
+          currency: a.payment_cap.currency,
+        }
       : undefined,
     timeWindow: a.time_window,
     services: a.services,
@@ -416,6 +584,38 @@ function apiToAuditEvent(e: ApiAuditEvent): AuditEvent {
     detail: e.detail,
     chip: normalizeChip(e.chip),
     sev: normalizeStatus(e.sev),
+  };
+}
+
+function apiToAuditDecodeResult(d: ApiAuditDecodeResult): AuditDecodeResult {
+  return {
+    eventId: d.event_id,
+    status: d.status,
+    envelope: d.envelope
+      ? {
+          version: d.envelope.version,
+          tsUnix: d.envelope.ts_unix,
+          actorOmni: d.envelope.actor_omni,
+          operatorOmni: d.envelope.operator_omni,
+          opKind: d.envelope.op_kind,
+          op: d.envelope.op,
+          opBody: d.envelope.op_body,
+          result: d.envelope.result,
+          intentText: d.envelope.intent_text,
+          intentCommitment: d.envelope.intent_commitment,
+          envelopeHash: d.envelope.envelope_hash,
+        }
+      : undefined,
+    tx: d.tx
+      ? {
+          hash: d.tx.hash,
+          to: d.tx.to,
+          selector: d.tx.selector,
+          contract: d.tx.contract,
+          fn: d.tx.function,
+          args: d.tx.args,
+        }
+      : undefined,
   };
 }
 
@@ -470,8 +670,14 @@ interface ApiMemoryEntry {
 
 function apiToMemoryEntry(m: ApiMemoryEntry): MasterMemoryEntry {
   return {
-    ns: m.ns, key: m.key, title: m.title, bytes: m.bytes,
-    version: m.version, updated: m.updated, preview: m.preview, body: m.body,
+    ns: m.ns,
+    key: m.key,
+    title: m.title,
+    bytes: m.bytes,
+    version: m.version,
+    updated: m.updated,
+    preview: m.preview,
+    body: m.body,
     contentHash: m.content_hash,
   };
 }

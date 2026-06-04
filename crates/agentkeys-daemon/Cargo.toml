@@ -14,6 +14,8 @@ agentkeys-cli = { path = "../agentkeys-cli" } # K11 webauthn helpers (companion 
 agentkeys-mcp = { path = "../agentkeys-mcp" }
 hex = "0.4"
 sha2 = "0.10" # ui-bridge master-memory content-hash dedup (§2 plant)
+ethabi = "18"
+ciborium = "0.2"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,10 +1,23 @@
-import type { Actor, AuditEvent, Namespace, ScopeBits, Worker } from '@/app/_components/types';
+import type {
+  Actor,
+  AuditEvent,
+  Namespace,
+  ScopeBits,
+  Worker,
+} from '@/app/_components/types';
 
 export type ConnectionStatus =
-  | { kind: 'disconnected'; reason: 'no-backend-configured' | 'unreachable' | 'unauthorized'; detail?: string }
+  | {
+      kind: 'disconnected';
+      reason: 'no-backend-configured' | 'unreachable' | 'unauthorized';
+      detail?: string;
+    }
   | { kind: 'connected'; via: 'daemon' | 'broker' | 'mock'; endpoint: string };
 
-export type DisconnectedStatus = Extract<ConnectionStatus, { kind: 'disconnected' }>;
+export type DisconnectedStatus = Extract<
+  ConnectionStatus,
+  { kind: 'disconnected' }
+>;
 
 export type Result<T> =
   | { ok: true; data: T }
@@ -105,26 +118,86 @@ export interface OnboardingState {
   k11: string;
 }
 
+export interface AuditDecodeEnvelope {
+  version: number;
+  tsUnix: number;
+  actorOmni: string;
+  operatorOmni: string;
+  opKind: number;
+  op: string;
+  opBody: unknown;
+  result: string;
+  intentText?: string;
+  intentCommitment?: string;
+  envelopeHash: string;
+}
+
+export interface AuditDecodeArg {
+  name: string;
+  kind: string;
+  value: unknown;
+}
+
+export interface AuditDecodeTx {
+  hash?: string;
+  to?: string;
+  selector: string;
+  contract: string;
+  fn: string;
+  args: AuditDecodeArg[];
+}
+
+export interface AuditDecodeResult {
+  eventId: string;
+  status: string;
+  envelope?: AuditDecodeEnvelope;
+  tx?: AuditDecodeTx;
+}
+
 export interface AgentKeysClient {
   status(): Promise<ConnectionStatus>;
 
   listActors(): Promise<Result<Actor[]>>;
   getActor(id: string): Promise<Result<Actor | null>>;
   listCapTokens(actorId: string): Promise<Result<CapToken[]>>;
-  listRecentAuditEvents(opts?: { actorId?: string; limit?: number }): Promise<Result<AuditEvent[]>>;
-  streamAudit(onEvent: (e: AuditEvent) => void, onStatusChange: (s: ConnectionStatus) => void): () => void;
+  listRecentAuditEvents(opts?: {
+    actorId?: string;
+    limit?: number;
+  }): Promise<Result<AuditEvent[]>>;
+  decodeAuditEvent(eventId: string): Promise<Result<AuditDecodeResult>>;
+  streamAudit(
+    onEvent: (e: AuditEvent) => void,
+    onStatusChange: (s: ConnectionStatus) => void
+  ): () => void;
 
   listWorkers(): Promise<Result<Worker[]>>;
   getWorker(id: Worker['id']): Promise<Result<Worker | null>>;
   getAnchorStatus(): Promise<Result<AnchorStatus>>;
 
-  updateScope(actorId: string, ns: Namespace, value: ScopeBits): Promise<Result<void>>;
-  updatePaymentCap(actorId: string, perTx: number, daily: number): Promise<Result<void>>;
+  updateScope(
+    actorId: string,
+    ns: Namespace,
+    value: ScopeBits
+  ): Promise<Result<void>>;
+  updatePaymentCap(
+    actorId: string,
+    perTx: number,
+    daily: number
+  ): Promise<Result<void>>;
   revokeDevice(actorId: string, intent: RevokeIntent): Promise<Result<void>>;
-  revokeCap(actorId: string, capName: string, intent: RevokeIntent): Promise<Result<void>>;
+  revokeCap(
+    actorId: string,
+    capName: string,
+    intent: RevokeIntent
+  ): Promise<Result<void>>;
 
-  enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>>;
-  enrollK11Finish(input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>>;
+  enrollK11Begin(input: {
+    userName: string;
+    userDisplayName: string;
+  }): Promise<Result<K11EnrollBegin>>;
+  enrollK11Finish(
+    input: K11EnrollFinishInput
+  ): Promise<Result<K11EnrollResult>>;
 
   // §1 onboarding — real email magic-link verify (broker-backed, W1). The
   // browser starts it, then polls until the operator clicks the link.

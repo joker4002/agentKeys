@@ -43,6 +43,7 @@ use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 use webauthn_rs::prelude::*;
 
+use agentkeys_core::audit::{AuditEnvelope, AuditOpKind};
 use agentkeys_core::init_flow;
 
 /// In-flight registration state. Keyed by `user_id` (the random opaque
@@ -199,6 +200,20 @@ pub struct ApiAuditEvent {
     pub detail: String,
     pub chip: String,
     pub sev: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode: Option<ApiAuditDecodeSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiAuditDecodeSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_cbor_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_input: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,6 +378,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/actors/:id/payment-cap", post(update_payment_cap))
         .route("/v1/actors/:id/revoke", post(revoke_device))
         .route("/v1/actors/:id/caps/revoke", post(revoke_cap))
+        .route("/v1/audit/:id/decode", get(decode_audit_event))
         .route("/v1/audit/recent", get(list_recent_audit))
         .route("/v1/audit/stream", get(audit_stream))
         .route("/v1/anchor/status", get(anchor_status))
@@ -797,6 +813,7 @@ async fn update_scope(
         ),
         chip: "broker".into(),
         sev: "ok".into(),
+        decode: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(snapshot))
@@ -836,6 +853,7 @@ async fn update_payment_cap(
         detail: format!("{} · per_tx={} daily={}", id, req.per_tx, req.daily),
         chip: "broker".into(),
         sev: "ok".into(),
+        decode: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(snapshot))
@@ -881,6 +899,7 @@ async fn revoke_device(
         ),
         chip: "revoke".into(),
         sev: "bad".into(),
+        decode: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(snapshot))
@@ -922,6 +941,7 @@ async fn revoke_cap(
         detail: format!("{} · cap={} · intent='{}'", id, req.cap, req.intent_text),
         chip: "revoke".into(),
         sev: "bad".into(),
+        decode: None,
     };
     push_audit(&state, evt).await;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -953,6 +973,410 @@ async fn list_recent_audit(
     // (Re-sort by ts descending as a safety belt for ties.)
     events.sort_by(|a, b| b.ts.cmp(&a.ts));
     Json(serde_json::json!({ "events": events }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditDecodeResponse {
+    pub event_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<DecodedAuditEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<DecodedAuditTx>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DecodedAuditEnvelope {
+    pub version: u8,
+    pub ts_unix: u64,
+    pub actor_omni: String,
+    pub operator_omni: String,
+    pub op_kind: u8,
+    pub op: String,
+    pub op_body: serde_json::Value,
+    pub result: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_commitment: Option<String>,
+    pub envelope_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DecodedAuditTx {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    pub selector: String,
+    pub contract: String,
+    pub function: String,
+    pub args: Vec<DecodedAuditArg>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DecodedAuditArg {
+    pub name: String,
+    pub kind: String,
+    pub value: serde_json::Value,
+}
+
+async fn decode_audit_event(
+    State(state): State<SharedUiBridgeState>,
+    Path(id): Path<String>,
+) -> Result<Json<AuditDecodeResponse>, (StatusCode, Json<ErrorBody>)> {
+    let event = {
+        let guard = state.audit.read().await;
+        guard.iter().find(|e| e.id == id).cloned().ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "no such audit event",
+                "audit-event-not-found",
+            )
+        })?
+    };
+
+    let source = event.decode.clone().unwrap_or(ApiAuditDecodeSource {
+        envelope_cbor_hex: None,
+        tx_hash: None,
+        tx_to: None,
+        tx_input: None,
+    });
+
+    let envelope = match source.envelope_cbor_hex.as_deref() {
+        Some(hex) => Some(decode_envelope_hex(hex).map_err(|e| {
+            err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("stored audit envelope is not decodable: {e}"),
+                "audit-envelope-decode-failed",
+            )
+        })?),
+        None => None,
+    };
+    let tx = match source.tx_input.as_deref() {
+        Some(input) => Some(
+            decode_tx_input(input, source.tx_hash.clone(), source.tx_to.clone()).map_err(|e| {
+                err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("stored tx calldata is not decodable: {e}"),
+                    "audit-calldata-decode-failed",
+                )
+            })?,
+        ),
+        None => None,
+    };
+
+    let status = match (envelope.is_some(), tx.is_some()) {
+        (true, true) => "decoded",
+        (true, false) => "decoded-envelope-only",
+        (false, true) => "decoded-tx-only",
+        (false, false) => "no-decode-material",
+    }
+    .to_string();
+
+    Ok(Json(AuditDecodeResponse {
+        event_id: event.id,
+        status,
+        envelope,
+        tx,
+    }))
+}
+
+fn decode_envelope_hex(input: &str) -> anyhow::Result<DecodedAuditEnvelope> {
+    let bytes = decode_hex0x(input)?;
+    let env = AuditEnvelope::from_canonical_cbor(&bytes)?;
+    let envelope_hash = env.envelope_hash()?;
+    Ok(DecodedAuditEnvelope {
+        version: env.version,
+        ts_unix: env.ts_unix,
+        actor_omni: hex0x(&env.actor_omni),
+        operator_omni: hex0x(&env.operator_omni),
+        op_kind: env.op_kind,
+        op: AuditOpKind::from_u8(env.op_kind)
+            .map(|k| k.label().to_string())
+            .unwrap_or_else(|| format!("unknown({})", env.op_kind)),
+        op_body: cbor_value_to_json(&env.op_body)?,
+        result: audit_result_label(env.result).to_string(),
+        intent_text: env.intent_text,
+        intent_commitment: env.intent_commitment.map(|c| hex0x(&c)),
+        envelope_hash: hex0x(&envelope_hash),
+    })
+}
+
+fn decode_tx_input(
+    input: &str,
+    hash: Option<String>,
+    to: Option<String>,
+) -> anyhow::Result<DecodedAuditTx> {
+    let calldata = decode_hex0x(input)?;
+    if calldata.len() < 4 {
+        anyhow::bail!("calldata shorter than selector");
+    }
+    let selector = &calldata[..4];
+    let selector_hex = hex0x(selector);
+    for spec in known_audit_abi_functions() {
+        if spec.function.short_signature() == selector {
+            let tokens = spec.function.decode_input(&calldata[4..])?;
+            let args = spec
+                .function
+                .inputs
+                .iter()
+                .zip(tokens)
+                .map(|(param, token)| DecodedAuditArg {
+                    name: param.name.clone(),
+                    kind: param_type_name(&param.kind),
+                    value: token_to_json(&token),
+                })
+                .collect();
+            return Ok(DecodedAuditTx {
+                hash,
+                to,
+                selector: selector_hex,
+                contract: spec.contract,
+                function: spec.signature,
+                args,
+            });
+        }
+    }
+    Ok(DecodedAuditTx {
+        hash,
+        to,
+        selector: selector_hex,
+        contract: "unknown".into(),
+        function: "unknown(bytes)".into(),
+        args: vec![],
+    })
+}
+
+struct AbiFunctionSpec {
+    contract: String,
+    signature: String,
+    function: ethabi::Function,
+}
+
+fn known_audit_abi_functions() -> Vec<AbiFunctionSpec> {
+    use ethabi::{Function, Param, ParamType, StateMutability};
+
+    fn param(name: &str, kind: ParamType) -> Param {
+        Param {
+            name: name.to_string(),
+            kind,
+            internal_type: None,
+        }
+    }
+    #[allow(deprecated)]
+    fn fn_spec(contract: &str, name: &str, inputs: Vec<Param>) -> AbiFunctionSpec {
+        let signature = format!(
+            "{}({})",
+            name,
+            inputs
+                .iter()
+                .map(|p| param_type_name(&p.kind))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        AbiFunctionSpec {
+            contract: contract.to_string(),
+            signature,
+            function: Function {
+                name: name.to_string(),
+                inputs,
+                outputs: vec![],
+                constant: None,
+                state_mutability: StateMutability::NonPayable,
+            },
+        }
+    }
+
+    vec![
+        fn_spec(
+            "SidecarRegistry",
+            "registerAgentDevice",
+            vec![
+                param("deviceKeyHash", ParamType::FixedBytes(32)),
+                param("operatorOmni", ParamType::FixedBytes(32)),
+                param("actorOmni", ParamType::FixedBytes(32)),
+                param("linkCodeRedemption", ParamType::Bytes),
+                param("agentPopSig", ParamType::Bytes),
+            ],
+        ),
+        fn_spec(
+            "AgentKeysScope",
+            "setScope",
+            vec![
+                param("operatorOmni", ParamType::FixedBytes(32)),
+                param("agentOmni", ParamType::FixedBytes(32)),
+                param(
+                    "services",
+                    ParamType::Array(Box::new(ParamType::FixedBytes(32))),
+                ),
+                param("readOnly", ParamType::Bool),
+                param("maxPerCall", ParamType::Uint(128)),
+                param("maxPerPeriod", ParamType::Uint(128)),
+                param("maxTotal", ParamType::Uint(128)),
+                param("periodSeconds", ParamType::Uint(32)),
+            ],
+        ),
+        fn_spec(
+            "AgentKeysScope",
+            "setScopeWithWebauthn",
+            vec![
+                param("operatorOmni", ParamType::FixedBytes(32)),
+                param("agentOmni", ParamType::FixedBytes(32)),
+                param(
+                    "services",
+                    ParamType::Array(Box::new(ParamType::FixedBytes(32))),
+                ),
+                param("readOnly", ParamType::Bool),
+                param("maxPerCall", ParamType::Uint(128)),
+                param("maxPerPeriod", ParamType::Uint(128)),
+                param("maxTotal", ParamType::Uint(128)),
+                param("periodSeconds", ParamType::Uint(32)),
+                param("k11Assertion", ParamType::Bytes),
+            ],
+        ),
+        fn_spec(
+            "CredentialAudit",
+            "append",
+            vec![
+                param("operatorOmni", ParamType::FixedBytes(32)),
+                param("actorOmni", ParamType::FixedBytes(32)),
+                param("serviceHash", ParamType::FixedBytes(32)),
+                param("opType", ParamType::Uint(8)),
+                param("payloadHash", ParamType::FixedBytes(32)),
+            ],
+        ),
+        fn_spec(
+            "CredentialAudit",
+            "appendV2",
+            vec![
+                param("operatorOmni", ParamType::FixedBytes(32)),
+                param("actorOmni", ParamType::FixedBytes(32)),
+                param("opKind", ParamType::Uint(8)),
+                param("envelopeHash", ParamType::FixedBytes(32)),
+            ],
+        ),
+        fn_spec(
+            "CredentialAudit",
+            "appendRoot",
+            vec![
+                param("operatorOmni", ParamType::FixedBytes(32)),
+                param("merkleRoot", ParamType::FixedBytes(32)),
+                param("batchEntryCount", ParamType::Uint(64)),
+            ],
+        ),
+        fn_spec(
+            "CredentialAudit",
+            "appendRootV2",
+            vec![
+                param("operatorOmni", ParamType::FixedBytes(32)),
+                param("merkleRoot", ParamType::FixedBytes(32)),
+                param("opKindBitmap", ParamType::FixedBytes(32)),
+                param("batchEntryCount", ParamType::Uint(64)),
+            ],
+        ),
+        fn_spec("K3EpochCounter", "advanceEpoch", vec![]),
+        fn_spec(
+            "K3EpochCounter",
+            "setSignerGovernance",
+            vec![param("newGov", ParamType::Address)],
+        ),
+    ]
+}
+
+fn param_type_name(kind: &ethabi::ParamType) -> String {
+    use ethabi::ParamType;
+    match kind {
+        ParamType::Address => "address".into(),
+        ParamType::Bytes => "bytes".into(),
+        ParamType::Int(n) => format!("int{n}"),
+        ParamType::Uint(n) => format!("uint{n}"),
+        ParamType::Bool => "bool".into(),
+        ParamType::String => "string".into(),
+        ParamType::Array(inner) => format!("{}[]", param_type_name(inner)),
+        ParamType::FixedBytes(n) => format!("bytes{n}"),
+        ParamType::FixedArray(inner, n) => format!("{}[{n}]", param_type_name(inner)),
+        ParamType::Tuple(inner) => format!(
+            "({})",
+            inner
+                .iter()
+                .map(param_type_name)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+fn token_to_json(token: &ethabi::Token) -> serde_json::Value {
+    use ethabi::Token;
+    match token {
+        Token::Address(a) => serde_json::Value::String(format!("0x{}", hex::encode(a.as_bytes()))),
+        Token::FixedBytes(b) | Token::Bytes(b) => serde_json::Value::String(hex0x(b)),
+        Token::Int(n) | Token::Uint(n) => serde_json::Value::String(n.to_string()),
+        Token::Bool(b) => serde_json::Value::Bool(*b),
+        Token::String(s) => serde_json::Value::String(s.clone()),
+        Token::Array(items) | Token::FixedArray(items) | Token::Tuple(items) => {
+            serde_json::Value::Array(items.iter().map(token_to_json).collect())
+        }
+    }
+}
+
+fn cbor_value_to_json(v: &ciborium::Value) -> anyhow::Result<serde_json::Value> {
+    use ciborium::Value as CV;
+    Ok(match v {
+        CV::Null => serde_json::Value::Null,
+        CV::Bool(b) => serde_json::Value::Bool(*b),
+        CV::Integer(i) => {
+            let as_i128: i128 = (*i).into();
+            if as_i128 >= 0 && as_i128 <= u64::MAX as i128 {
+                serde_json::Value::Number((as_i128 as u64).into())
+            } else if as_i128 >= i64::MIN as i128 && as_i128 <= i64::MAX as i128 {
+                serde_json::Value::Number((as_i128 as i64).into())
+            } else {
+                anyhow::bail!("integer out of JSON range: {as_i128}");
+            }
+        }
+        CV::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        CV::Bytes(b) => serde_json::Value::String(hex0x(b)),
+        CV::Text(s) => serde_json::Value::String(s.clone()),
+        CV::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(cbor_value_to_json)
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        ),
+        CV::Map(m) => {
+            let mut out = serde_json::Map::with_capacity(m.len());
+            for (k, val) in m {
+                let key = match k {
+                    CV::Text(s) => s.clone(),
+                    other => format!("{other:?}"),
+                };
+                out.insert(key, cbor_value_to_json(val)?);
+            }
+            serde_json::Value::Object(out)
+        }
+        CV::Tag(_, inner) => cbor_value_to_json(inner)?,
+        other => anyhow::bail!("unsupported CBOR variant: {other:?}"),
+    })
+}
+
+fn decode_hex0x(input: &str) -> anyhow::Result<Vec<u8>> {
+    let raw = input.trim().strip_prefix("0x").unwrap_or(input.trim());
+    Ok(hex::decode(raw)?)
+}
+
+fn hex0x(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn audit_result_label(result: agentkeys_core::audit::AuditResult) -> &'static str {
+    match result {
+        agentkeys_core::audit::AuditResult::Success => "success",
+        agentkeys_core::audit::AuditResult::Failure => "failure",
+        agentkeys_core::audit::AuditResult::NotPermitted => "not_permitted",
+    }
 }
 
 async fn audit_stream(
@@ -1129,6 +1553,7 @@ async fn plant_master_memory(
             detail: format!("planted preserved memory · {planted} entries · {skipped} duplicates"),
             chip: "memory".into(),
             sev: "ok".into(),
+            decode: None,
         };
         push_audit(&state, evt).await;
     }
@@ -1857,6 +2282,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decode_audit_event_decodes_exported_cbor_vector_and_calldata() {
+        // First vector from:
+        // `cargo run -p agentkeys-core --example export_audit_vectors`
+        // op_kind_label=cred.store, envelope_hash_hex pinned below.
+        const CBOR_VECTOR: &str = "0xa966726573756c7400676f705f626f6479a267736572766963656a6f70656e726f757465726c7061796c6f61645f686173687842307861626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162676f705f6b696e64006774735f756e69781a6553f1006776657273696f6e016a6163746f725f6f6d6e69582011111111111111111111111111111111111111111111111111111111111111116b696e74656e745f74657874781f53746f72652063726564656e7469616c20666f72206f70656e726f757465726d6f70657261746f725f6f6d6e695820222222222222222222222222222222222222222222222222222222222222222271696e74656e745f636f6d6d69746d656e745820cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        const HASH_VECTOR: &str =
+            "0x68753389623bc1e0a3aa74e3e87130819aa6a8597a83f6270e18eb0556d3d0d4";
+
+        let append_v2 = known_audit_abi_functions()
+            .into_iter()
+            .find(|f| f.signature == "appendV2(bytes32,bytes32,uint8,bytes32)")
+            .expect("appendV2 ABI registered");
+        let calldata = append_v2
+            .function
+            .encode_input(&[
+                ethabi::Token::FixedBytes(vec![0x22; 32]),
+                ethabi::Token::FixedBytes(vec![0x11; 32]),
+                ethabi::Token::Uint(ethabi::ethereum_types::U256::from(0u8)),
+                ethabi::Token::FixedBytes(decode_hex0x(HASH_VECTOR).unwrap()),
+            ])
+            .unwrap();
+
+        let state = make_state();
+        push_audit(
+            &state,
+            ApiAuditEvent {
+                id: "audit-vector-1".into(),
+                ts: "00:00:00".into(),
+                actor_id: "master".into(),
+                actor: "master".into(),
+                kind: "cred.store".into(),
+                detail: "vector fixture".into(),
+                chip: "audit".into(),
+                sev: "ok".into(),
+                decode: Some(ApiAuditDecodeSource {
+                    envelope_cbor_hex: Some(CBOR_VECTOR.into()),
+                    tx_hash: Some("0xfeed".into()),
+                    tx_to: Some("0x1801ded1a4FBD8c9224Ab18B9EcbB293B8674c06".into()),
+                    tx_input: Some(hex0x(&calldata)),
+                }),
+            },
+        )
+        .await;
+
+        let decoded = decode_audit_event(State(state), Path("audit-vector-1".into()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(decoded.status, "decoded");
+        let env = decoded.envelope.expect("envelope decoded");
+        assert_eq!(env.op, "cred.store");
+        assert_eq!(env.op_kind, 0);
+        assert_eq!(env.actor_omni, format!("0x{}", "11".repeat(32)));
+        assert_eq!(env.envelope_hash, HASH_VECTOR);
+        assert_eq!(
+            env.intent_text.as_deref(),
+            Some("Store credential for openrouter")
+        );
+        assert_eq!(env.op_body["service"], "openrouter");
+
+        let tx = decoded.tx.expect("tx decoded");
+        assert_eq!(tx.contract, "CredentialAudit");
+        assert_eq!(tx.function, "appendV2(bytes32,bytes32,uint8,bytes32)");
+        assert_eq!(tx.args[2].name, "opKind");
+        assert_eq!(tx.args[2].value, serde_json::Value::String("0".into()));
+    }
+
+    #[test]
+    fn decode_tx_input_decodes_register_agent_device_typed_args() {
+        let register = known_audit_abi_functions()
+            .into_iter()
+            .find(|f| f.signature == "registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)")
+            .expect("registerAgentDevice ABI registered");
+        let calldata = register
+            .function
+            .encode_input(&[
+                ethabi::Token::FixedBytes(vec![0x50; 32]),
+                ethabi::Token::FixedBytes(vec![0x22; 32]),
+                ethabi::Token::FixedBytes(vec![0x11; 32]),
+                ethabi::Token::Bytes(vec![0xaa, 0xbb]),
+                ethabi::Token::Bytes(vec![0xcc, 0xdd]),
+            ])
+            .unwrap();
+        let tx = decode_tx_input(
+            &hex0x(&calldata),
+            Some("0xbeef".into()),
+            Some("0xsidecar".into()),
+        )
+        .unwrap();
+        assert_eq!(tx.contract, "SidecarRegistry");
+        assert_eq!(
+            tx.function,
+            "registerAgentDevice(bytes32,bytes32,bytes32,bytes,bytes)"
+        );
+        assert_eq!(tx.args[0].name, "deviceKeyHash");
+        assert_eq!(
+            tx.args[0].value,
+            serde_json::Value::String(hex0x(&[0x50; 32]))
+        );
+        assert_eq!(tx.args[3].value, serde_json::Value::String("0xaabb".into()));
+    }
+
+    #[tokio::test]
     async fn audit_buffer_caps_at_buffer_cap() {
         let state = make_state();
         for i in 0..(AUDIT_BUFFER_CAP + 25) {
@@ -1869,6 +2397,7 @@ mod tests {
                 detail: format!("event {i}"),
                 chip: "audit".into(),
                 sev: "ok".into(),
+                decode: None,
             };
             push_audit(&state, evt).await;
         }
@@ -1893,6 +2422,7 @@ mod tests {
             detail: "broadcast".into(),
             chip: "audit".into(),
             sev: "ok".into(),
+            decode: None,
         };
         push_audit(&state, evt.clone()).await;
         let received = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())

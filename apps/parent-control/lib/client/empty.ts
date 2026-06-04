@@ -1,6 +1,7 @@
 import type {
   AgentKeysClient,
   AnchorStatus,
+  AuditDecodeResult,
   CapToken,
   ConnectionStatus,
   DisconnectedStatus,
@@ -15,7 +16,13 @@ import type {
   Result,
   RevokeIntent,
 } from './types';
-import type { Actor, AuditEvent, Namespace, ScopeBits, Worker } from '@/app/_components/types';
+import type {
+  Actor,
+  AuditEvent,
+  Namespace,
+  ScopeBits,
+  Worker,
+} from '@/app/_components/types';
 
 const DISCONNECTED: DisconnectedStatus = {
   kind: 'disconnected',
@@ -65,9 +72,13 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async decodeAuditEvent(): Promise<Result<AuditDecodeResult>> {
+    return disconnected();
+  }
+
   streamAudit(
     _onEvent: (e: AuditEvent) => void,
-    onStatusChange: (s: ConnectionStatus) => void,
+    onStatusChange: (s: ConnectionStatus) => void
   ): () => void {
     onStatusChange(DISCONNECTED);
     return () => {};
@@ -85,19 +96,34 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async updateScope(_actorId: string, _ns: Namespace, _value: ScopeBits): Promise<Result<void>> {
+  async updateScope(
+    _actorId: string,
+    _ns: Namespace,
+    _value: ScopeBits
+  ): Promise<Result<void>> {
     return disconnected();
   }
 
-  async updatePaymentCap(_actorId: string, _perTx: number, _daily: number): Promise<Result<void>> {
+  async updatePaymentCap(
+    _actorId: string,
+    _perTx: number,
+    _daily: number
+  ): Promise<Result<void>> {
     return disconnected();
   }
 
-  async revokeDevice(_actorId: string, _intent: RevokeIntent): Promise<Result<void>> {
+  async revokeDevice(
+    _actorId: string,
+    _intent: RevokeIntent
+  ): Promise<Result<void>> {
     return disconnected();
   }
 
-  async revokeCap(_actorId: string, _capName: string, _intent: RevokeIntent): Promise<Result<void>> {
+  async revokeCap(
+    _actorId: string,
+    _capName: string,
+    _intent: RevokeIntent
+  ): Promise<Result<void>> {
     return disconnected();
   }
 
@@ -105,7 +131,9 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async enrollK11Finish(_input: K11EnrollFinishInput): Promise<Result<K11EnrollResult>> {
+  async enrollK11Finish(
+    _input: K11EnrollFinishInput
+  ): Promise<Result<K11EnrollResult>> {
     return disconnected();
   }
 
@@ -113,7 +141,9 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
-  async plantMemory(_entries: MasterMemoryEntry[]): Promise<Result<PlantResult>> {
+  async plantMemory(
+    _entries: MasterMemoryEntry[]
+  ): Promise<Result<PlantResult>> {
     return disconnected();
   }
 }
