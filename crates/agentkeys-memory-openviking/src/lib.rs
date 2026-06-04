@@ -895,6 +895,28 @@ mod tests {
         assert_eq!(openviking_fetch_top_k(1000), MAX_FETCH_TOP_K); // capped
     }
 
+    #[tokio::test]
+    async fn ranked_output_drops_oversized_line_under_byte_cap() {
+        // The only matching authorized line is larger than max_bytes → the HARD byte
+        // cap drops it; rank returns None so the caller falls back rather than inject
+        // over budget (/codex:adversarial-review).
+        let endpoint = spawn_stub(serde_json::json!({
+            "result": { "results": [ { "score": 0.9, "content": "Allergic to peanuts." } ] }
+        }))
+        .await;
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: None,
+            max_bytes: Some(5),
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await;
+        assert!(
+            out.is_none(),
+            "an oversized-only ranked line must be dropped (hard cap) → None"
+        );
+    }
+
     #[test]
     fn extract_read_content_handles_envelope_shapes() {
         let r = |v: serde_json::Value| extract_read_content(&v);

@@ -93,7 +93,14 @@ pub fn apply_budget(ordered: Vec<MemoryLine>, budget: &SelectionBudget) -> Vec<M
     let mut kept = Vec::new();
     for line in line_capped {
         let cost = line.text.len() + 1;
-        if used + cost > max_bytes && !kept.is_empty() {
+        if used + cost > max_bytes {
+            // Doesn't fit. If we've already kept a line, stop (priority order). If
+            // NOT, this leading line ALONE exceeds the whole budget — skip it so we
+            // never inject an over-budget line (a HARD cap, not soft), and try the
+            // next, smaller line (/codex:adversarial-review).
+            if kept.is_empty() {
+                continue;
+            }
             break;
         }
         used += cost;
@@ -309,6 +316,28 @@ Tokyo conference in March, stayed in Shibuya.";
         assert_eq!(
             select_blob(&LexicalEngine, Some("x"), "", &SelectionBudget::default()),
             ""
+        );
+    }
+
+    #[test]
+    fn byte_budget_is_a_hard_cap() {
+        // max_bytes smaller than the only line → DROP it (hard cap), don't push it
+        // through (/codex:adversarial-review).
+        let budget10 = SelectionBudget {
+            max_lines: None,
+            max_bytes: Some(10),
+        };
+        let one_big = "this single line is well over ten bytes";
+        assert_eq!(select_blob(&PassthroughEngine, None, one_big, &budget10), "");
+        assert_eq!(select_blob(&LexicalEngine, Some("line"), one_big, &budget10), "");
+
+        // A leading OVERSIZED line is skipped; a later line that fits is still kept,
+        // and the total never exceeds the cap. Passthrough ranks by recency (higher
+        // seq first), so the big line (last in the blob) is the highest priority.
+        let small_then_big = "short\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(
+            select_blob(&PassthroughEngine, None, small_then_big, &budget10),
+            "short"
         );
     }
 }
