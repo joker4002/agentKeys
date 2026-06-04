@@ -312,6 +312,7 @@ say "  daemon onboarding broker: ${DAEMON_BROKER_URL}"
   --ui-bridge-rp-id  "$DAEMON_RP_ID" \
   --ui-bridge-rp-name "$DAEMON_RP_NAME" \
   --broker-url       "$DAEMON_BROKER_URL" \
+  --signer-url       "${AGENTKEYS_SIGNER_URL:-https://signer.litentry.org}" \
   > "$FIFO_DAEMON" 2>&1 &
 DAEMON_PID=$!
 disown "$DAEMON_PID" 2>/dev/null || true

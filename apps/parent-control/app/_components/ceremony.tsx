@@ -185,7 +185,7 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
         setEnrollMode(outcome === 'real' ? 'real' : 'demo');
       },
     },
-    { label: 'Derive wallet + SIWE → session', sub: 'signer derives initial_master_wallet · SIWE round-trip → J1 (W1: next slice)' },
+    { label: 'Activate managed wallet → session', sub: 'the signer derives + attests your managed wallet (EIP-191) and mints your session (J1) — no wallet app, no MetaMask' },
     { label: 'Register master device on chain', sub: 'registerFirstMasterDevice — deferred (ERC-4337 E7); chain_tx pending', onchain: true, fn: 'registerFirstMasterDevice(...)' },
   ];
 

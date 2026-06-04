@@ -91,6 +91,12 @@ pub struct UiBridgeState {
     /// proxy). `None` until verified / after logout; this is the real "logged in"
     /// signal that replaces the browser's `ak_onboarded` localStorage flag.
     pub onboarding_session: RwLock<Option<OnboardingSession>>,
+    /// Signer (dev_key_service) base URL for the SIWE→J1 step — the signer
+    /// *attests* the managed wallet it derives (no user wallet / MetaMask).
+    /// `None` ⇒ email verify holds an identity-only session (no EVM J1 / actor omni).
+    pub signer_url: Option<String>,
+    /// Chain id for the managed-wallet attestation (mirrors `--init-chain-id`).
+    pub chain_id: u64,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -284,11 +290,18 @@ pub struct EmailStatusResponse {
 }
 
 /// The verified operator identity held in the daemon after the magic link is
-/// clicked. Held server-side; never handed to the browser.
-#[derive(Clone, Debug, Serialize)]
+/// clicked. Held server-side; never serialized to the browser.
+#[derive(Clone, Debug)]
 pub struct OnboardingSession {
     pub email: String,
+    /// The EVM `actor_omni` after the managed-wallet attestation (SIWE→J1), or
+    /// the identity omni if that step was skipped / unavailable.
     pub omni: String,
+    /// The J1 (EVM-omni) session JWT — the daemon's authenticated bearer; held
+    /// here, never handed to the browser. Read once cap-mint over the EVM session
+    /// lands (next W-phase); held now so onboarding establishes the real session.
+    #[allow(dead_code)]
+    pub j1: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -371,6 +384,8 @@ pub fn build_state(
     rp_origin: &str,
     rp_name: &str,
     broker_url: Option<String>,
+    signer_url: Option<String>,
+    chain_id: u64,
 ) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
@@ -390,6 +405,8 @@ pub fn build_state(
         allowed_origin: rp_origin.to_string(),
         pending_email: RwLock::new(HashMap::new()),
         onboarding_session: RwLock::new(None),
+        signer_url,
+        chain_id,
     }))
 }
 
@@ -485,9 +502,10 @@ async fn auth_email_status(
             status: "pending".into(),
             omni_account: None,
         },
-        init_flow::AuthStatus::Verified { identity_omni, .. } => {
-            // Record the verified identity in the daemon (request_id → email map
-            // was set at email/start). This is the real "logged in" state.
+        init_flow::AuthStatus::Verified {
+            session_jwt,
+            identity_omni,
+        } => {
             let email = state
                 .pending_email
                 .read()
@@ -495,13 +513,49 @@ async fn auth_email_status(
                 .get(&q.request_id)
                 .cloned()
                 .unwrap_or_default();
-            *state.onboarding_session.write().await = Some(OnboardingSession {
-                email,
-                omni: identity_omni.clone(),
-            });
+            // Managed-wallet attestation (SIWE→J1): the signer derives + attests
+            // the managed wallet for this email identity (no user wallet) and the
+            // broker mints J1. On success we hold the EVM `actor_omni` + J1; if the
+            // signer is unconfigured/unreachable we fall back to the identity-only
+            // session so onboarding still completes (the EVM session can retry).
+            let held = match state.signer_url.as_deref() {
+                Some(signer) => match init_flow::finish_email_session(
+                    broker,
+                    signer,
+                    &session_jwt,
+                    &identity_omni,
+                    state.chain_id,
+                    &email,
+                )
+                .await
+                {
+                    Ok(init) => OnboardingSession {
+                        email,
+                        omni: init.evm_omni,
+                        j1: init.session.token,
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "ui-bridge: SIWE->J1 attestation failed, holding identity-only: {e}"
+                        );
+                        OnboardingSession {
+                            email,
+                            omni: identity_omni,
+                            j1: String::new(),
+                        }
+                    }
+                },
+                None => OnboardingSession {
+                    email,
+                    omni: identity_omni,
+                    j1: String::new(),
+                },
+            };
+            let omni = held.omni.clone();
+            *state.onboarding_session.write().await = Some(held);
             EmailStatusResponse {
                 status: "verified".into(),
-                omni_account: Some(identity_omni),
+                omni_account: Some(omni),
             }
         }
         init_flow::AuthStatus::Failed(reason) => EmailStatusResponse {
@@ -1119,7 +1173,15 @@ mod tests {
     use super::*;
 
     fn make_state() -> SharedUiBridgeState {
-        build_state("localhost", "http://localhost:3113", "AgentKeys Test", None).unwrap()
+        build_state(
+            "localhost",
+            "http://localhost:3113",
+            "AgentKeys Test",
+            None,
+            None,
+            84532,
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1174,6 +1236,7 @@ mod tests {
         *state.onboarding_session.write().await = Some(OnboardingSession {
             email: "sara@example.com".into(),
             omni: "0xabc123".into(),
+            j1: String::new(),
         });
         let s = onboarding_state(State(state.clone())).await;
         assert_eq!(s.0.identity, "verified");
