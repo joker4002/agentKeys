@@ -82,28 +82,26 @@ pub trait MemoryEngine: Send + Sync {
 /// `pub` so external providers (e.g. the OpenViking adapter) apply the SAME budget
 /// to their ranked output as the built-in engines do (/codex:adversarial-review).
 pub fn apply_budget(ordered: Vec<MemoryLine>, budget: &SelectionBudget) -> Vec<MemoryLine> {
-    let line_capped = match budget.max_lines {
-        Some(max) => ordered.into_iter().take(max).collect(),
-        None => ordered,
-    };
-    let Some(max_bytes) = budget.max_bytes else {
-        return line_capped;
-    };
     let mut used = 0usize;
     let mut kept = Vec::new();
-    for line in line_capped {
-        let cost = line.text.len() + 1;
-        if used + cost > max_bytes {
-            // Doesn't fit. If we've already kept a line, stop (priority order). If
-            // NOT, this leading line ALONE exceeds the whole budget — skip it so we
-            // never inject an over-budget line (a HARD cap, not soft), and try the
-            // next, smaller line (/codex:adversarial-review).
-            if kept.is_empty() {
-                continue;
-            }
+    for line in ordered {
+        // Stop once the line budget is filled — counted AFTER keeping, so a skipped
+        // over-budget line never consumes a line slot (otherwise an oversized
+        // top-ranked line with max_lines=1 would suppress ALL memory).
+        if budget.max_lines.is_some_and(|max| kept.len() >= max) {
             break;
         }
-        used += cost;
+        // HARD byte cap: skip any line that wouldn't fit the remaining budget
+        // (including a leading line larger than the whole budget) and keep scanning
+        // lower-priority lines that still fit — never inject over budget, and don't
+        // let one oversized line suppress everything (/codex:adversarial-review).
+        if let Some(max_bytes) = budget.max_bytes {
+            let cost = line.text.len() + 1;
+            if used + cost > max_bytes {
+                continue;
+            }
+            used += cost;
+        }
         kept.push(line);
     }
     kept
@@ -339,5 +337,30 @@ Tokyo conference in March, stayed in Shibuya.";
             select_blob(&PassthroughEngine, None, small_then_big, &budget10),
             "short"
         );
+    }
+
+    #[test]
+    fn line_cap_plus_byte_cap_fills_with_next_fitting_line() {
+        // max_lines=1 + small max_bytes + oversized TOP-priority line: drop it and
+        // fill the 1-line budget with the next FITTING line, not leave it empty
+        // (the regression from counting max_lines before byte filtering)
+        // (/codex:adversarial-review).
+        let ordered = vec![
+            MemoryLine {
+                text: "x".repeat(50),
+                seq: 0,
+            }, // oversized, highest priority
+            MemoryLine {
+                text: "fits".into(),
+                seq: 1,
+            },
+        ];
+        let budget = SelectionBudget {
+            max_lines: Some(1),
+            max_bytes: Some(10),
+        };
+        let out = apply_budget(ordered, &budget);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "fits");
     }
 }
