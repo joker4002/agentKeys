@@ -344,6 +344,7 @@ impl OpenVikingClient {
         let read_cap = env_usize("OPENVIKING_MAX_URI_READS", DEFAULT_MAX_URI_READS);
         let mut reads = 0usize;
         let mut out: Vec<MemoryLine> = Vec::new();
+        let mut used_bytes = 0usize;
         let mut taken = std::collections::HashSet::new();
         for hit in hits {
             // Early stop: enough authorized lines to fill the output line budget.
@@ -386,7 +387,19 @@ impl OpenVikingClient {
                     || hit_norm.contains(&line_norm)
                     || line_norm.contains(&hit_norm)
             }) {
-                if taken.insert(line.seq) {
+                if !taken.contains(&line.seq) {
+                    // Apply the byte budget INLINE (not deferred to a later pass), so
+                    // an oversized matched line is SKIPPED — and does NOT count toward
+                    // max_lines (the early-stop above) — leaving room to recover
+                    // lower-ranked authorized lines that fit (/codex:adversarial-review).
+                    if let Some(max_bytes) = budget.max_bytes {
+                        let cost = line.text.len() + 1;
+                        if used_bytes + cost > max_bytes {
+                            continue;
+                        }
+                        used_bytes += cost;
+                    }
+                    taken.insert(line.seq);
                     out.push(line.clone());
                 }
             }
@@ -528,12 +541,10 @@ pub async fn rank_gate_bounded(
         Ok(out) => out,        // gate-matched authorized lines (possibly empty)
         Err(_) => return None, // overall deadline exceeded → fall back NOW
     };
-    if out.is_empty() {
-        return None;
-    }
-    // Apply the SAME line + byte budget the built-in engines use, so the ranked
-    // OpenViking output honors AGENTKEYS_MEMORY_MAX_BYTES / _LINES.
-    let out = agentkeys_memory_engine::apply_budget(out, budget);
+    // `out` is already line + byte budgeted by match_gate_authorized — the budget is
+    // applied INLINE with early-stop, so the line count and byte total are enforced
+    // together (an oversized line can't fill a line slot then get dropped) and reads
+    // stop once the output budget is met (/codex:adversarial-review).
     if out.is_empty() {
         None
     } else {
@@ -1010,6 +1021,33 @@ mod tests {
         let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
             .await
             .expect("must scan past 12 unauthorized URI hits and recover the authorized one");
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."]
+        );
+    }
+
+    #[tokio::test]
+    async fn openviking_line_and_byte_caps_recover_next_fitting_line() {
+        // max_lines=1 + max_bytes below the TOP-ranked authorized line, but a 2nd
+        // authorized line fits: the match must SKIP the oversized top line (not
+        // early-stop on it and then drop everything) and recover the fitting one
+        // (/codex:adversarial-review).
+        let endpoint = spawn_stub(serde_json::json!({
+            "result": { "results": [
+                { "content": "Chengdu trip — Apr 12 to 16." }, // authorized, oversized, top
+                { "content": "Allergic to peanuts." }          // authorized, fits
+            ]}
+        }))
+        .await;
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: Some(1),
+            max_bytes: Some("Allergic to peanuts.".len() + 1),
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await
+            .expect("must skip the oversized top line and recover the fitting authorized line");
         assert_eq!(
             out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             vec!["Allergic to peanuts."]
