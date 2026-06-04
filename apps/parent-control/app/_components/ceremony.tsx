@@ -6,6 +6,7 @@ import { useClient } from '@/lib/ClientProvider';
 import type { AgentKeysClient } from '@/lib/client/types';
 import { credentialToFinishPayload, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { CeremonyStep } from './types';
+import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 
 // Real K11 enroll via the daemon ui-bridge (PR-B) — used by onboarding when a
 // daemon is configured. Returns 'real' on a completed browser ceremony,
@@ -125,6 +126,8 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   const [omni, setOmni] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  const [maskEm, setMaskEm] = useState(true);
+  useEffect(() => { setMaskEm(getMaskEmail()); }, []);
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
   // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
@@ -176,7 +179,7 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   // fallback offline).
   const stages: CeremonyStep[] = [
     { label: 'Generate device key (K10)', sub: 'secp256k1 keypair · generated locally · no network · sealed in the OS keychain' },
-    { label: 'Email verified ✓', sub: `${email} · broker issued the single-use binding_nonce` },
+    { label: 'Email verified ✓', sub: `${maskEmail(email, maskEm)} · broker issued the single-use binding_nonce` },
     {
       label: 'Bind passkey (K11) · Touch ID',
       sub: 'WebAuthn create · the passkey is bound to your verified email (not a demo identity)',
@@ -229,7 +232,7 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
             </label>
             <input
               id="ak-email"
-              type="email"
+              type={maskEm ? 'password' : 'email'}
               inputMode="email"
               autoComplete="email"
               autoFocus
@@ -242,6 +245,14 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
                 border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', marginBottom: 14,
               }}
             />
+            <button
+              type="button"
+              onClick={() => { const v = !maskEm; setMaskEm(v); setMaskEmail(v); }}
+              style={{ background: 'none', border: 'none', color: 'var(--ink-faint)', fontSize: 11, cursor: 'pointer', padding: '0 0 10px', textDecoration: 'underline' }}
+              title="Toggle email masking (for screen-sharing); persists"
+            >
+              {maskEm ? '🕶 email hidden — click to show' : '👁 email shown — click to hide'}
+            </button>
             <button
               className="btn primary"
               style={{ width: '100%', justifyContent: 'center', padding: '12px' }}
@@ -260,7 +271,7 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
           <div className="onboard-login">
             <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Check your inbox.</h1>
             <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
-              We sent a one-time magic link to <strong>{email}</strong>. Click it to verify this address — this page
+              We sent a one-time magic link to <strong>{maskEmail(email, maskEm)}</strong>. Click it to verify this address — this page
               continues automatically once you do.
             </p>
             <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
@@ -280,13 +291,13 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
         {phase === 'ceremony' && (
           <div>
             <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
-              Bringing up your trust core · {email}
+              Bringing up your trust core · {maskEmail(email, maskEm)}
               {enrollMode === 'real' && <span className="chip ok" style={{ marginLeft: 8 }}>K11 bound · real WebAuthn</span>}
               {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
             </div>
             {omni && (
               <div className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)', marginBottom: 14, wordBreak: 'break-all' }}>
-                logged in as <strong>{email}</strong> · omni {omni}
+                logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}
               </div>
             )}
             <CeremonyRunner steps={stages} onDone={onComplete} stepMs={760} />

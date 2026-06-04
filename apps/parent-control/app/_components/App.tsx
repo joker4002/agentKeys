@@ -10,6 +10,7 @@ import {
   txHash,
 } from '@/lib/demoData';
 import { NAMESPACES } from '@/lib/constants';
+import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
 import { CeremonyRunner, OnboardingScreen } from './ceremony';
 import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
@@ -51,6 +52,7 @@ export function App() {
 
   const [onboarded, setOnboarded] = useState(false);
   const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
+  const [maskEm, setMaskEm] = useState(true);
   const [memories, setMemories] = useState<PreservedMemory[]>([]);
   const [planting, setPlanting] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
@@ -75,6 +77,8 @@ export function App() {
     })();
     return () => { cancelled = true; };
   }, [client]);
+
+  useEffect(() => { setMaskEm(getMaskEmail()); }, []);
 
   // §2: list the master's real memory once onboarded. EmptyBackend returns
   // disconnected → stays empty → the memory page renders its empty state.
@@ -281,7 +285,8 @@ export function App() {
     return h.length <= 12 ? o : `0x${h.slice(0, 6)}…${h.slice(-4)}`;
   };
   const whoOmni = master?.omni ?? identity?.omni;
-  const whoLabel = master?.label ?? identity?.email ?? 'O_master';
+  // Email shown masked when the privacy toggle is on (persisted in localStorage).
+  const whoLabel = master?.label ?? (identity?.email ? maskEmail(identity.email, maskEm) : undefined) ?? 'O_master';
 
   return (
     <div className="app">
@@ -303,6 +308,11 @@ export function App() {
           >
             ◉{pairingRequests.length > 0 && <span className="badge">{pairingRequests.length}</span>}
           </button>
+          <button
+            className="btn sm"
+            onClick={() => { const v = !maskEm; setMaskEm(v); setMaskEmail(v); }}
+            title={maskEm ? 'Email masked (for screen-sharing) — click to show' : 'Email shown — click to mask'}
+          >{maskEm ? '🕶' : '👁'}</button>
           <span className="who" title={whoOmni ?? ''}><span className="who-text">{whoOmni ? `${whoLabel} · ${shortOmni(whoOmni)}` : whoLabel}</span></span>
           <button className="btn sm" onClick={logout} title="Clear this session and return to login">log out</button>
         </div>
