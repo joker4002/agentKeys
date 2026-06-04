@@ -86,7 +86,20 @@ pub enum PairingPoll {
     NotFound,
     /// Request expired before any master claimed it.
     Expired,
+    /// Claimed, but the post-claim RETRIEVE window has elapsed: the agent had its
+    /// window to mint `J1_agent` and the row no longer mints, so a leaked
+    /// (request_id, device_pubkey, pop_sig) tuple can't replay-mint indefinitely.
+    RetrieveExpired,
 }
+
+/// How long after a master CLAIMS a request the agent may still poll it to mint
+/// `J1_agent`. The agent retrieves within seconds of the claim, so this is
+/// generous; bounding it turns "claimed rows mint forever" into "mints for N
+/// seconds after the claim", capping replay of the static poll tuple
+/// (request_id, device_pubkey, pop_sig) (codex #182 broker follow-up). The row
+/// itself persists for the master's pending-bindings list + ack — only POLL-time
+/// minting is gated.
+const PAIRING_RETRIEVE_WINDOW_SECS: i64 = 600;
 
 /// A claimed-but-not-yet-bound row — what the master pulls from
 /// `GET /v1/agent/pending-bindings` to approve. `request_id` is the stable
@@ -334,8 +347,16 @@ impl PairingRequestStore {
             }
             return Ok(PairingPoll::Pending);
         }
-        // Claimed rows don't expire (a binding the master is approving is
-        // long-lived), so we don't re-check expires_at here.
+        // Claimed rows persist for the master's pending-bindings list + ack, but
+        // the agent's RETRIEVE window is bounded: once PAIRING_RETRIEVE_WINDOW_SECS
+        // have elapsed since the claim, the row no longer mints J1_agent, so a
+        // leaked (request_id, device_pubkey, pop_sig) tuple can't replay-mint
+        // indefinitely (codex #182). The agent retrieves within seconds of the
+        // claim, so this never gates the legitimate flow.
+        let claimed_ts = claimed_at.unwrap_or(0);
+        if now.saturating_sub(claimed_ts) > PAIRING_RETRIEVE_WINDOW_SECS {
+            return Ok(PairingPoll::RetrieveExpired);
+        }
         Ok(PairingPoll::Claimed {
             operator_omni: operator_omni.unwrap_or_default(),
             child_omni: child_omni.unwrap_or_default(),
@@ -504,6 +525,26 @@ mod tests {
                 label: "agent-a".into(),
                 requested_scope: "memory".into(),
             }
+        );
+    }
+
+    #[test]
+    fn poll_claimed_retrieve_window_expires() {
+        let s = store();
+        s.issue("req-1", "code-1", "0xdev", "0xpop", 100, 100_000)
+            .unwrap();
+        s.claim("code-1", "op", "child", "agent-a", "memory", 1_000)
+            .unwrap();
+        // Within PAIRING_RETRIEVE_WINDOW_SECS (600) of the claim → still mints.
+        assert!(matches!(
+            s.poll("req-1", "0xdev", 1_500).unwrap(),
+            PairingPoll::Claimed { .. }
+        ));
+        // Just past the window after the CLAIM → no longer mints, so a leaked
+        // (request_id, device_pubkey, pop_sig) tuple can't replay-mint forever.
+        assert_eq!(
+            s.poll("req-1", "0xdev", 1_000 + 601).unwrap(),
+            PairingPoll::RetrieveExpired
         );
     }
 
