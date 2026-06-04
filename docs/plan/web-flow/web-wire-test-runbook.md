@@ -12,7 +12,7 @@ It follows the same `ok / skip / fail` discipline and the same idempotent, fail-
 
 | Concern | `phase1-wire-demo.sh` (CLI master) | This runbook (web master) |
 |---|---|---|
-| Master identity / session | `wallet_sig_init_session` SIWE-signs → J1 (0.7) | Web onboarding (email → WebAuthn K11). **SIWE/J1 mint is not in the web client yet** — see §6 |
+| Master identity / session | `wallet_sig_init_session` SIWE-signs → J1 (0.7) | Web onboarding (email → WebAuthn K11). **managed-wallet attestation / J1 mint is not in the web client yet** — see §6 |
 | Backend | `agentkeys` CLI → broker directly | Browser → **daemon** (`--ui-bridge`, :3114) → broker/chain, **or** browser → **WASM core** → broker directly |
 | Broker / workers / chain | `broker.litentry.org`, `memory.litentry.org`, Heima mainnet | **identical** |
 | Agent counterpart | the sandbox (same process) | a separate `phase1-wire-demo.sh --real` run, or `agentkeys agent` CLI |
@@ -24,7 +24,7 @@ For each phase1 master-side capability, what the web UI can do **today**:
 | phase1 capability | Web **daemon** mode | Web **core** mode | How this runbook tests it |
 |---|---|---|---|
 | **K11 WebAuthn enroll** (master passkey) | ✅ real (`/v1/k11/enroll/{begin,finish}`) | ⛔ inherits stub | §3 Step B — real Touch ID / virtual authenticator |
-| **Operator session (SIWE → J1)** | ⛔ narrated only in UI | ⛔ narrated only | §6 — mint out-of-band (CLI) or treat as task-2 gap |
+| **Operator session (managed-wallet attestation → J1)** | ⛔ narrated only in UI | ⛔ narrated only | §6 — mint out-of-band (CLI) or treat as task-2 gap |
 | **Register master device on-chain** | ⛔ narrated only in UI | ⛔ narrated only | §3 Step B note — cross-check on-chain via CLI |
 | **Memory list / plant** (master preserved memory) | ✅ real (`/v1/master/memory[/plant]`, content-hash dedup) | ⛔ inherits stub | §3 Step C — plant + list in UI; cross-check real worker/S3 per §5 |
 | **Cap-mint → worker → S3** (the `1.5 seed memory` path) | ⛔ not UI-wired | ⚠️ `capMemoryPut/Get` exist on the WASM core but **no screen calls them** | §3 Step C note + §4 console-drive |
@@ -33,7 +33,7 @@ For each phase1 master-side capability, what the web UI can do **today**:
 | **Device revoke** | ✅ real (`/v1/actors/:id/revoke`) | ⛔ inherits stub | §3 Step F |
 | **Actor list / audit feed** (observe the agent) | ✅ real (`/v1/actors`, `/v1/audit/recent`, SSE `/v1/audit/stream`) | ⛔ inherits stub | §3 Step G |
 
-**Bottom line:** in **daemon** mode the web app genuinely exercises onboarding (K11), memory plant/list, device revoke, and the read/audit views. **Pairing, cap-mint, scope-grant POST, SIWE, and on-chain master-register are not yet wired into a UI screen** — the daemon/WASM methods exist, but no component invokes them. Those are the [`wire-real-paths.md`](./wire-real-paths.md) task-2 (W-phase) deliverables. This runbook tests what ships today and gives a console/CLI path for the rest so the broker endpoints can still be smoke-tested from the browser.
+**Bottom line:** in **daemon** mode the web app genuinely exercises onboarding (K11), memory plant/list, device revoke, and the read/audit views. **Pairing, cap-mint, scope-grant POST, managed-wallet attestation, and on-chain master-register are not yet wired into a UI screen** — the daemon/WASM methods exist, but no component invokes them. Those are the [`wire-real-paths.md`](./wire-real-paths.md) task-2 (W-phase) deliverables. This runbook tests what ships today and gives a console/CLI path for the rest so the broker endpoints can still be smoke-tested from the browser.
 
 > **Memory model (#177 — OpenViking engine behind the gate).** Memory is namespace-partitioned and the cap/scope service is the **signed `memory:<ns>`** string (e.g. `memory:travel`, arch.md §896): the worker keys storage per-namespace (`memory:<ns>.enc`), the broker hashes it for `isServiceInScope`, and a bare `memory` fails cap-mint. **Reading is query-aware** — the agent's `pre_llm_call` read is ranked by the configured engine (OpenViking, else a deterministic fallback) over the gate-bounded lines; ranking reorders but can never widen past the granted namespaces. The web client builds the service with `memoryService(ns)` (`lib/constants.ts`).
 
@@ -104,7 +104,7 @@ Drive the browser manually, or with the [`/browse`](../../../) skill / a chrome-
   - **Real Touch ID:** approve on the Mac.
   - **Headless / CI:** attach a CDP **virtual authenticator** first — see §4. (This is the web analog of the harness's software passkey `harness/scripts/erc4337-webauthn-sign.py`.)
 - **Expect:** ceremony completes; `enrollK11Begin` → `enrollK11Finish` hit the daemon (`/v1/k11/enroll/{begin,finish}`); `ak_onboarded` set.
-- **⛔ not-wired note:** the ceremony's *email→SIWE→J1* and *register-master-on-chain* stages are **narrated only** in the UI (see §6). They do not mint a session or submit a tx.
+- **⛔ not-wired note:** the ceremony's *email→managed-wallet attestation→J1* and *register-master-on-chain* stages are **narrated only** in the UI (see §6). They do not mint a session or submit a tx.
 - **Cross-check (the real proof):** the K11 credential is registered on-chain for the master.
   ```bash
   # K11 enrollment is master-only; confirm the registry recorded it (CLI / read RPC):
@@ -204,7 +204,7 @@ A step is **green** only when the UI action *and* its cross-check agree.
 |---|---|---|---|
 | A status | dashboard loads | daemon `connected` / core `detail: reachable` | ✅ |
 | B K11 enroll | ceremony completes | on-chain master K11 registered (CLI) | ✅ daemon |
-| B SIWE/J1 + master-register | (narrated) | session minted + `registerFirstMasterDevice` tx | ⛔ §6 |
+| B managed-wallet attestation / J1 + master-register | (narrated) | session minted + `registerFirstMasterDevice` tx | ⛔ §6 |
 | C memory list/plant | namespaces shown; re-plant dedups | **real worker:** `agentkeys hook memory-inject` / S3 object | ✅ list/plant · ⛔ worker path |
 | D pairing claim/pending/ack | — (no screen) | console (§4) or `agentkeys agent …` returns child omni / pending / ack | ⛔ UI · ⚠️ console/CLI |
 | E scope grant | local toggle only | `heima-scope-set.sh` on-chain scope | ⛔ UI · ⚠️ CLI |
@@ -217,7 +217,7 @@ A step is **green** only when the UI action *and* its cross-check agree.
 
 Per the plan-completion + partial-implementation honesty rules, the explicit gaps:
 
-1. **Operator session (SIWE → J1) in the browser** — onboarding narrates it; no session is minted client-side. *Unblocks:* the web auth slice in [`wire-real-paths.md`](./wire-real-paths.md) (email → broker → SIWE → J1), or the broker **CORS** layer for the core path (the codex-flagged task-2 prerequisite for any browser-direct broker call). Until then, mint via CLI (§1 W0.4).
+1. **Operator session (managed-wallet attestation → J1) in the browser** — onboarding narrates it; no session is minted client-side. *Unblocks:* the web auth slice in [`wire-real-paths.md`](./wire-real-paths.md) (email → broker → managed-wallet attestation → J1), or the broker **CORS** layer for the core path (the codex-flagged task-2 prerequisite for any browser-direct broker call). Until then, mint via CLI (§1 W0.4).
 2. **On-chain master-device register** — narrated ceremony step; no tx from the UI. *Unblocks:* the ERC-4337 UserOp builder/signer in the core (E7 in [`erc4337-master-account.md`](../chain/erc4337-master-account.md)).
 3. **Pairing claim/pending/ack screen** — methods exist on `CoreBackend`; no component calls them. *Unblocks:* a real Pairing screen (task 2). Console/CLI in the meantime (Steps D, §4).
 4. **Cap-mint → worker → S3 from the UI** — `capMemoryPut/Get` exist on the core; no screen calls them; the UI "plant" uses the daemon's master-memory store instead. *Unblocks:* wiring Memory to the cap path (task 2).

@@ -50,7 +50,7 @@ What that session is, and isn't:
 
 This maps exactly to the [`arch.md`](../arch.md) §3 attacker matrix: a *stolen J1 alone* is only dangerous **paired with a stolen, chain-registered K10** — which stays in your daemon.
 
-> **Note on re-login / re-testing.** Encryption survives logins because the KEK is `HKDF(K3, actor_omni)` and `actor_omni` is **frozen at first SIWE-bind** ([`arch.md`](../arch.md) §6). Re-logging-in with the *same email* keeps the same anchor (same S3 paths, same KEK); only J1 re-mints. The device key K10 is reused from the keychain — the on-chain device registration is the one irreversible step, kept idempotent (skip-if-registered).
+> **Note on re-login / re-testing.** Encryption survives logins because the KEK is `HKDF(K3, actor_omni)` and `actor_omni` is **frozen at the first managed-wallet attestation** ([`arch.md`](../arch.md) §6). Re-logging-in with the *same email* keeps the same anchor (same S3 paths, same KEK); only J1 re-mints. The device key K10 is reused from the keychain — the on-chain device registration is the one irreversible step, kept idempotent (skip-if-registered).
 
 ---
 
