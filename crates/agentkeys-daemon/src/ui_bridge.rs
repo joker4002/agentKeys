@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -78,6 +78,11 @@ pub struct UiBridgeState {
     /// onboarding is disabled (the daemon was started without `--broker-url`)
     /// and the email endpoints fail closed with `broker-not-configured`.
     pub broker_url: Option<String>,
+    /// Allowed browser origin (= the CORS origin, e.g. `http://localhost:3113`).
+    /// Server-side defense-in-depth: the onboarding email endpoints reject a
+    /// mismatched `Origin` header even though browser CORS already would, so a
+    /// cross-origin page can't trigger magic-link emails.
+    pub allowed_origin: String,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -352,6 +357,7 @@ pub fn build_state(
         anchor: RwLock::new(ApiAnchorStatus::default()),
         master_memory: RwLock::new(HashMap::new()),
         broker_url,
+        allowed_origin: rp_origin.to_string(),
     }))
 }
 
@@ -361,10 +367,32 @@ async fn healthz() -> impl IntoResponse {
 
 /// W1: request a magic-link email. Proxies the broker's `email/request` so the
 /// browser never holds broker URLs; returns the `request_id` the browser polls.
+/// Server-side origin gate for the onboarding email endpoints (defense-in-depth
+/// on top of CORS): a present `Origin` that doesn't match the configured app
+/// origin is rejected, so a cross-origin page can't trigger magic-link emails.
+/// A missing Origin (non-browser / CLI) is allowed.
+fn reject_cross_origin(
+    state: &SharedUiBridgeState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if origin != state.allowed_origin {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                format!("cross-origin onboarding request from {origin} rejected"),
+                "bad-origin",
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn auth_email_start(
     State(state): State<SharedUiBridgeState>,
+    headers: HeaderMap,
     Json(req): Json<EmailStartRequest>,
 ) -> Result<Json<EmailStartResponse>, (StatusCode, Json<ErrorBody>)> {
+    reject_cross_origin(&state, &headers)?;
     let broker = state.broker_url.as_deref().ok_or_else(|| {
         err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -395,8 +423,10 @@ async fn auth_email_start(
 /// status is no longer `pending` — i.e. the operator clicked the link).
 async fn auth_email_status(
     State(state): State<SharedUiBridgeState>,
+    headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<EmailStatusQuery>,
 ) -> Result<Json<EmailStatusResponse>, (StatusCode, Json<ErrorBody>)> {
+    reject_cross_origin(&state, &headers)?;
     let broker = state.broker_url.as_deref().ok_or_else(|| {
         err(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1014,6 +1044,7 @@ mod tests {
         let state = make_state();
         let e = auth_email_start(
             State(state),
+            axum::http::HeaderMap::new(),
             Json(EmailStartRequest {
                 email: "sara@example.com".into(),
             }),
@@ -1022,6 +1053,27 @@ mod tests {
         .expect_err("no broker configured should error");
         assert_eq!(e.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(e.1 .0.reason, "broker-not-configured");
+    }
+
+    #[tokio::test]
+    async fn auth_email_start_rejects_cross_origin() {
+        // make_state()'s allowed origin is http://localhost:3113; a request
+        // carrying a different Origin is rejected before any broker call —
+        // the server-side gate on top of CORS.
+        let state = make_state();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("origin", "http://evil.example".parse().unwrap());
+        let e = auth_email_start(
+            State(state),
+            headers,
+            Json(EmailStartRequest {
+                email: "sara@example.com".into(),
+            }),
+        )
+        .await
+        .expect_err("cross-origin should be rejected");
+        assert_eq!(e.0, StatusCode::FORBIDDEN);
+        assert_eq!(e.1 .0.reason, "bad-origin");
     }
 
     #[tokio::test]
