@@ -20,7 +20,7 @@ This is the source of the user's review note. It's worth resolving once, clearly
 
 The operator types their real email when they first open the UI. It's the email *they* read, on a phone or laptop they own.
 
-- Used for: broker `/v1/auth/email/start` → magic link → SIWE → session JWT.
+- Used for: broker `/v1/auth/email/start` → magic link → managed-wallet attestation → session JWT.
 - Stored at: broker (associated with the operator's wallet + actor_omni) + locally in OS keychain as part of the session record.
 - Lifetime: as long as the operator's account exists. Changing it is a master-mutation (not in scope for v0; would be a deferred follow-up).
 - Visibility: the operator sees this in the header strip (`Sara · O_master · iPhone 17 Pro`) and on the master-detail page.

@@ -1,5 +1,3 @@
-# AgentKeys — Wiki
-
 > **This wiki is auto-generated from the `docs/wiki/` folder in the main repo.** Edit the source files there, not through the web UI — direct edits will be overwritten on the next push to `main`. The canonical source is [`docs/wiki/` in `litentry/agentKeys`](https://github.com/litentry/agentKeys/tree/main/docs/wiki).
 
 AgentKeys is a credential custody service: a TEE-backed vault that issues long-lived bearer tokens for per-agent credential access, with on-chain audit. **We mint ephemeral credentials; daemons use them to call remote services directly.** Credential broker, not operation proxy.
@@ -24,6 +22,7 @@ Every spec and every service on top of AgentKeys preserves these four invariants
 - **[Blockchain TEE Architecture](blockchain-tee-architecture)** — chain + TEE + clients; the four rules in §6
 - **[Session Token](session-token)** — 30-day JWT bearer; issuance, storage, revocation
 - **[Key Security](key-security)** — TEE keys, master session key, storage tiers, threat model
+- **[Open-Source Frontend Security](open-source-frontend-security)** — why the keyless web frontend is safe to open-source; malicious-clone + magic-link-phishing analysis (keys never touch the browser)
 - **[Data Classification](data-classification)** — data classes, where each lives, retention policy
 - **[Threat Model: Key Custody](https://github.com/litentry/agentKeys/blob/main/docs/spec/threat-model-key-custody.md)** *(spec)* — why nothing sensitive lives on chain or persistently in TEE; off-chain ciphertext + forward-secret epoch rotation (Stage 8)
 
