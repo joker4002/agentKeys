@@ -66,9 +66,13 @@ pub fn actor_omni_hex(wallet: &WalletAddress) -> String {
 /// Distinct from `DOMAIN` so a wallet-omni and a child-omni can never collide.
 const HDKD_DOMAIN: &[u8] = b"agentkeys-hdkd-v1";
 
-/// Validate an HDKD child label (`^[a-z0-9-]{1,32}$`). The label is spliced into
-/// the child-omni digest AND stored/echoed on chain + in JWT claims, so it must
-/// be a tight charset (no path separators, no whitespace, no uppercase).
+/// Initial child-key generation. The first pair flow always reserves the
+/// generation suffix by deriving at `<label>/0`.
+pub const INITIAL_CHILD_GENERATION: u32 = 0;
+
+/// Validate an HDKD child base label (`^[a-z0-9-]{1,32}$`). The label is stored
+/// and echoed as the logical agent name; derivation appends a numeric generation
+/// suffix separately, so the base label must stay path-separator-free.
 pub fn validate_label(label: &str) -> anyhow::Result<()> {
     if label.is_empty() || label.len() > 32 {
         return Err(anyhow::anyhow!(
@@ -83,6 +87,18 @@ pub fn validate_label(label: &str) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("label must match ^[a-z0-9-]+$: {label}"));
     }
     Ok(())
+}
+
+/// HDKD path segment for one logical agent generation, e.g. `agent-a/0`.
+pub fn generation_label(label: &str, generation: u32) -> anyhow::Result<String> {
+    validate_label(label)?;
+    Ok(format!("{label}/{generation}"))
+}
+
+/// JWT/audit derivation path for one logical agent generation, e.g.
+/// `//agent-a/0`.
+pub fn generation_derivation_path(label: &str, generation: u32) -> anyhow::Result<String> {
+    Ok(format!("//{}", generation_label(label, generation)?))
 }
 
 /// HDKD child actor omni (issue #144 / arch.md §6.2):
@@ -108,6 +124,19 @@ pub fn child_omni(master_omni: &[u8; 32], label: &str) -> [u8; 32] {
     out
 }
 
+/// HDKD child actor omni for a logical agent at a numeric generation. This is
+/// the production path for pair/rotation flows; generation 0 is the initial
+/// child key, and higher generations intentionally produce different child
+/// omnis for key rotation without recycling the base label.
+pub fn child_omni_generation(
+    master_omni: &[u8; 32],
+    label: &str,
+    generation: u32,
+) -> anyhow::Result<[u8; 32]> {
+    let generation_label = generation_label(label, generation)?;
+    Ok(child_omni(master_omni, &generation_label))
+}
+
 /// [`child_omni`] over a hex parent omni (`0x`-prefixed or not), returning the
 /// child as **un-prefixed** 64-char lowercase hex — matching the `omni_account`
 /// JWT claim, the `agentkeys_actor_omni` PrincipalTag, and the `bots/<hex>/...`
@@ -125,6 +154,29 @@ pub fn child_omni_hex(master_omni_hex: &str, label: &str) -> anyhow::Result<Stri
     let mut master = [0u8; 32];
     master.copy_from_slice(&bytes);
     Ok(hex::encode(child_omni(&master, label)))
+}
+
+/// [`child_omni_generation`] over a hex parent omni, returning un-prefixed
+/// 64-char lowercase hex.
+pub fn child_omni_generation_hex(
+    master_omni_hex: &str,
+    label: &str,
+    generation: u32,
+) -> anyhow::Result<String> {
+    let h = master_omni_hex.trim();
+    let h = h.strip_prefix("0x").unwrap_or(h);
+    let bytes = hex::decode(h).map_err(|e| anyhow::anyhow!("parent omni not hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(anyhow::anyhow!(
+            "parent omni must be 32 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut master = [0u8; 32];
+    master.copy_from_slice(&bytes);
+    Ok(hex::encode(child_omni_generation(
+        &master, label, generation,
+    )?))
 }
 
 #[cfg(test)]
@@ -205,6 +257,29 @@ mod tests {
     }
 
     #[test]
+    fn child_omni_generation_appends_numeric_suffix() {
+        let parent = "00".repeat(32);
+        let gen0 = child_omni_generation_hex(&parent, "agent-a", 0).unwrap();
+        let explicit_path = child_omni_hex(&parent, "agent-a/0").unwrap();
+        assert_eq!(gen0, explicit_path);
+        assert_eq!(
+            generation_derivation_path("agent-a", INITIAL_CHILD_GENERATION).unwrap(),
+            "//agent-a/0"
+        );
+    }
+
+    #[test]
+    fn child_omni_generation_distinguishes_rotations() {
+        let parent = "11".repeat(32);
+        let gen0 = child_omni_generation_hex(&parent, "agent-a", 0).unwrap();
+        let gen1 = child_omni_generation_hex(&parent, "agent-a", 1).unwrap();
+        let gen2 = child_omni_generation_hex(&parent, "agent-a", 2).unwrap();
+        assert_ne!(gen0, gen1);
+        assert_ne!(gen1, gen2);
+        assert_ne!(gen0, gen2);
+    }
+
+    #[test]
     fn child_omni_distinct_per_label_and_parent() {
         let p1 = "11".repeat(32);
         let p2 = "22".repeat(32);
@@ -232,5 +307,12 @@ mod tests {
         assert!(validate_label("agent/a").is_err()); // path sep
         assert!(validate_label("agent a").is_err()); // whitespace
         assert!(validate_label(&"a".repeat(33)).is_err()); // too long
+    }
+
+    #[test]
+    fn generation_helpers_reject_path_recycling_labels() {
+        assert!(generation_label("agent-a", 0).is_ok());
+        assert!(generation_label("agent-a/0", 0).is_err());
+        assert!(generation_label("agent a", 0).is_err());
     }
 }

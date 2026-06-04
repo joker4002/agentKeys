@@ -610,6 +610,7 @@ Three rotation paths, each routine under HDKD + the new pallets (7b):
 
 - **OIDC-issuer key rotation** (`oidc/issuer/v1` → `v2`): new derivation path; both keys in JWKS during the grace window; `pallet-oidc-pubkeys` records both `kid`s as active; consumer JWKS cache refreshes naturally. No external party action required.
 - **Session-JWT key rotation** (`issuer/jwt/v1` → `v2`): same pattern, but the session-JWT key is internal (not on public JWKS). Clients re-authenticate gradually as old tokens expire; no coordinated flip.
+- **Child-agent key rotation** (`//agent-a/0` → `//agent-a/1`): the base label is stable for the same logical agent, while a monotonic `u32` generation suffix changes the derived actor key. Initial pairing always uses generation `0`; recycling the base label for a different agent remains disabled.
 - **MRSIGNER rotation** (new enclave-signing key): one attested seed handoff from the old enclave to the new one; `pallet-enclave-successors::authorize_mrsigner(new_mrsigner, ...)` extrinsic lands before the handoff; JWKS / custodial wallets / DKIM DNS are **unchanged** because the master seed survived. Relying parties who pinned on MRSIGNER do a one-time trust-policy update (automatable via the `agentkeys oidc-rotate-trust` CLI — see [`docs/spec/post-v0.1-future-work.md`](../spec/post-v0.1-future-work.md) §3.1).
 
 See [`docs/spec/heima-gaps-vs-desired-architecture.md`](../spec/heima-gaps-vs-desired-architecture.md) §8 and §9 for the pallet specifications and the MRSIGNER-rotation runbook.
@@ -647,4 +648,3 @@ Narrower surfaces with their own dedicated pages:
 - [#4](https://github.com/litentry/agentKeys/issues/4) — TEE-side per-session read rate limit
 - [#5](https://github.com/litentry/agentKeys/issues/5) — Pattern 4 audit submission (TEE-as-paymaster)
 - [#6](https://github.com/litentry/agentKeys/issues/6) — On-chain pair transport
-

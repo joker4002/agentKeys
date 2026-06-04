@@ -244,7 +244,7 @@ async fn full_request_claim_poll_pending_flow() {
     // Public recomputability (acceptance criterion).
     assert_eq!(
         child_omni,
-        agentkeys_core::actor_omni::child_omni_hex(&master_omni, "agent-a").unwrap()
+        agentkeys_core::actor_omni::child_omni_generation_hex(&master_omni, "agent-a", 0).unwrap()
     );
     assert_eq!(claim["operator_omni"], master_omni);
     assert_eq!(claim["request_id"], request_id);
@@ -277,8 +277,9 @@ async fn full_request_claim_poll_pending_flow() {
     );
     assert_eq!(
         claims.agentkeys.derivation_path.as_deref(),
-        Some("//agent-a")
+        Some("//agent-a/0")
     );
+    assert_eq!(claimed_poll["derivation_path"], "//agent-a/0");
     assert_eq!(
         claims.agentkeys.device_pubkey.as_deref(),
         Some(dk.address())

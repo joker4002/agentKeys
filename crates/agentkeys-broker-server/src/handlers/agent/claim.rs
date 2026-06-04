@@ -6,7 +6,8 @@
 //! named a master, so an unclaimed request is inert (Sybil-safe). On claim the
 //! broker:
 //!
-//! 1. derives the HDKD child omni `O_agent = SHA256(HDKD_DOMAIN || O_master || "//label")`
+//! 1. derives the HDKD child omni for the initial generation path
+//!    `//label/0`;
 //!    — the master "adopts" the agent under its own omni tree;
 //! 2. assigns `operator_omni` + `child_omni` + `label` + `requested_scope` onto
 //!    the (previously unbound) row, marking it claimed;
@@ -52,8 +53,12 @@ pub async fn pairing_claim(
 
     agentkeys_core::actor_omni::validate_label(&body.label)
         .map_err(|e| BrokerError::BadRequest(format!("invalid label: {e}")))?;
-    let child_omni = agentkeys_core::actor_omni::child_omni_hex(&master_omni, &body.label)
-        .map_err(|e| BrokerError::BadRequest(format!("derive child omni: {e}")))?;
+    let child_omni = agentkeys_core::actor_omni::child_omni_generation_hex(
+        &master_omni,
+        &body.label,
+        agentkeys_core::actor_omni::INITIAL_CHILD_GENERATION,
+    )
+    .map_err(|e| BrokerError::BadRequest(format!("derive child omni: {e}")))?;
 
     let requested_scope = body
         .requested_scope

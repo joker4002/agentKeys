@@ -96,7 +96,11 @@ pub async fn pairing_poll(
 
     // 3. Mint J1_agent fresh (HDKD omni + lineage). The agent authenticates with
     //    this immediately, but has NO scope until the master approves the binding.
-    let derivation_path = format!("//{label}");
+    let derivation_path = agentkeys_core::actor_omni::generation_derivation_path(
+        &label,
+        agentkeys_core::actor_omni::INITIAL_CHILD_GENERATION,
+    )
+    .map_err(|e| BrokerError::Internal(format!("derive J1_agent path: {e}")))?;
     let session_jwt = mint_agent_session_jwt(
         &state.session_keypair,
         &state.config.oidc_issuer,

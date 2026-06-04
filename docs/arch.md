@@ -207,7 +207,7 @@ Pinned to disambiguate the same value showing up under different labels across c
 | `managed-wallet attestation` | **The stage-3 proof that the operator controls the derived managed wallet (K4).** The signer (TEE) produces an EIP-191 signature over the broker's challenge *on the wallet's behalf*; the broker verifies and mints the long-lived session JWT (J1); **`actor_omni` freezes here**. The operator never holds the wallet key — this is NOT a user-wallet sign-in. Distinct from the **K5 / `evm`-identity path** (§4 K5, §10.1), where the operator signs SIWE *directly* with their own MetaMask / hardware wallet (genuine Sign-In With Ethereum). | User-facing: **"activate your managed wallet"**. Small technical note: **SIWE / EIP-191, signer-performed** (the broker round-trip is SIWE-shaped). Aliases seen today: `SIWE → J1`, `SIWE round-trip`, `SIWE-bind`, "wallet attestation". |
 | `current_master_wallet` | **The current chain identity** = `HKDF(K3_v[current_epoch], O_master)`. Rotates each K3 epoch. Appears on chain as `msg.sender` in sovereign mode. The Layer 2 identifier per §6. | `master_wallet`, `wallet_address` (JWT claim shape pre-rotation), `MASTER_WALLET` (demo shell var). When historical K3 epochs are in scope, qualify with `master_wallet_K3_v[N]`. |
 | `identity_omni` | **The transient identity omni** — `SHA256("agentkeys" \|\| identity_type \|\| identity_value)`. Used internally by the broker between init and the managed-wallet attestation; never carried in a post-attestation JWT (J1). | `identity_omni_email` / `identity_omni_oauth2` (when narrowing to a specific identity type), `identity omni` (init-flow CLI log line). |
-| `agent_omni` | **A child actor omni** = `SHA256("agentkeys-hdkd-v1" \|\| O_master \|\| "//<label>")` (issue #144). **Public + recomputable** — anyone with the parent omni + label recomputes it; unforgeability is the master-gated `/v1/agent/pairing/claim` + the master-submitted on-chain binding, NOT a secret. (The "cannot be computed without the parent's master secret" property lives one layer down, at the K4 wallet `HKDF(K3_v[epoch], agent_omni)` in the signer.) Distinct from `master_omni`; both are valid actor_omnis. | `O_master//agent-A`, `O_agent_A` (HDKD-tree notation). |
+| `agent_omni` | **A child actor omni** = `SHA256("agentkeys-hdkd-v1" \|\| O_master \|\| "//<label>/<generation>")` (issue #144 + #8). Generation is a monotonic `u32` starting at `0`, so the initial pair flow derives at `//<label>/0`; rotation increments the suffix without recycling the base label. **Public + recomputable** — anyone with the parent omni + label + generation recomputes it; unforgeability is the master-gated `/v1/agent/pairing/claim` + the master-submitted on-chain binding, NOT a secret. (The "cannot be computed without the parent's master secret" property lives one layer down, at the K4 wallet `HKDF(K3_v[epoch], agent_omni)` in the signer.) Distinct from `master_omni`; both are valid actor_omnis. | `O_master//agent-A/0`, `O_agent_A_v0` (HDKD-tree notation). |
 | `K3` | The 32 bytes inside the signer enclave that K4 + KEK derivation HKDFs against. Per-epoch via `K3EpochCounter`. | `K3_v[N]` to disambiguate epoch; `master_secret` (signer-internal log term — discouraged). |
 | `session JWT` (= K6) | The bearer token at `~/.agentkeys/<id>/session.json` (or OS keychain). Signed by K1. Carries `agentkeys.actor_omni`, `agentkeys.device_pubkey`, `agentkeys.webauthn_cred_id` (master only). | `session_jwt`, `J1` (post-attestation bearer), `SESSION_JWT_A` / `SESSION_JWT_B` (demo shell vars). |
 | `OIDC JWT` (= K7) | Per-mint short-lived JWT signed by K2; consumed by `AssumeRoleWithWebIdentity`. Carries `agentkeys_actor_omni` claim → AWS session tag. | `oidc_jwt`, `JWT_A` / `JWT_B` (demo shell vars). |
@@ -270,31 +270,31 @@ flowchart LR
   ID_OMNI["identity omni<br/>= SHA256('agentkeys' || id_type || id_value)<br/>(transient — auth-event handle)"]
   M_OMNI["MASTER actor omni<br/>(root of HDKD tree)<br/>= SHA256('agentkeys' || 'evm' || initial_master_wallet)"]
   M_WALLET["current_master_wallet<br/>= HKDF(K3_v[epoch], O_master)"]
-  A_OMNI["AGENT actor omnis<br/>O_master//agent-A, //agent-B, ..."]
-  A_WALLET["wallet_agent_A<br/>= HKDF(K3_v[epoch], O_master//agent-A)"]
+  A_OMNI["AGENT actor omnis<br/>O_master//agent-A/0, //agent-B/0, ..."]
+  A_WALLET["wallet_agent_A<br/>= HKDF(K3_v[epoch], O_master//agent-A/0)"]
 
   ID -->|identity ceremony| ID_OMNI
   ID_OMNI -->|derive + link + attest + freeze| M_OMNI
   M_OMNI --> M_WALLET
-  M_OMNI -->|HDKD //label| A_OMNI
+  M_OMNI -->|HDKD //label/0| A_OMNI
   A_OMNI --> A_WALLET
 ```
 
 ```
 O_master                                wallet_master = HKDF(K3_v[epoch], O_master)
-├── O_master//agent-A                   wallet_agent_A = HKDF(K3_v[epoch], O_master//agent-A)
-├── O_master//agent-B                   wallet_agent_B = HKDF(K3_v[epoch], O_master//agent-B)
-│   └── O_master//agent-B//task-1       (sub-actors under agents)
+├── O_master//agent-A/0                 wallet_agent_A = HKDF(K3_v[epoch], O_master//agent-A/0)
+├── O_master//agent-B/0                 wallet_agent_B = HKDF(K3_v[epoch], O_master//agent-B/0)
+│   └── O_master//agent-B/0//task-1/0   (sub-actors under agents)
 └── ...
 ```
 
-The omni-tree edge `//<label>` is **public + recomputable** (issue #144): `O_child = SHA256("agentkeys-hdkd-v1" || O_parent || "//" || label)`. What "cannot be computed without the parent's master secret" is the per-node **wallet** (K4 = `HKDF(K3_v[epoch], O_node)`, derived in the signer) — not the omni node itself. Each node's wallet is a different EVM address; AWS PrincipalTag is per-actor `actor_omni` for prefix isolation. Only the master can *create* a binding for a child omni (the master-gated `/v1/agent/pairing/claim` + the master-submitted `registerAgentDevice`), so a public omni derivation never lets anyone bind a sibling.
+The omni-tree edge `//<label>/<generation>` is **public + recomputable** (issue #144 + #8): `O_child = SHA256("agentkeys-hdkd-v1" || O_parent || "//" || label || "/" || generation)`. Generation is a monotonic `u32` per logical base label; initial pairing uses generation `0`, and rotation uses `1`, `2`, ... so a rotated key gets a fresh omni/wallet without path recycling. What "cannot be computed without the parent's master secret" is the per-node **wallet** (K4 = `HKDF(K3_v[epoch], O_node)`, derived in the signer) — not the omni node itself. Each node's wallet is a different EVM address; AWS PrincipalTag is per-actor `actor_omni` for prefix isolation. Only the master can *create* a binding for a child omni (the master-gated `/v1/agent/pairing/claim` + the master-submitted `registerAgentDevice`), so a public omni derivation never lets anyone bind a sibling.
 
 **Why per-agent omni (not shared with master):**
 
 1. Per-agent compromise containment — leaked agent K10 touches only that agent's wallet/prefix.
 2. First-class audit attribution — audit rows carry `acting_actor_omni`, `parent_chain`, `derivation_path`.
-3. Atomic revocation — revoke `O_master//agent-A` alone; master and sibling agents untouched.
+3. Atomic revocation — revoke `O_master//agent-A/0` alone; master and sibling agents untouched.
 4. Tree topology IS the data model — no binding-table abstraction needed.
 
 ### 6.3 Identity ≠ actor ≠ machine ≠ capability
@@ -302,7 +302,7 @@ The omni-tree edge `//<label>` is **public + recomputable** (issue #144): `O_chi
 | Axis | What it answers | Realized by | Lifecycle |
 |---|---|---|---|
 | **Identity** | Who is the human? | identity omni (email / OAuth / EVM / passkey) | Recoverable via linked authenticators; identity omnis are ephemeral, masters are durable |
-| **Actor** | Master, or which agent? | actor_omni — a node in the HDKD tree | Master derived from identity at first init; agents derived from master via `//<label>` |
+| **Actor** | Master, or which agent? | actor_omni — a node in the HDKD tree | Master derived from identity at first init; agents derived from master via `//<label>/<generation>` |
 | **Machine** | Which physical box is signing right now? | K10 device pubkey (per-machine, per-actor); K11 WebAuthn (master only) | Per-box at init/rotation |
 | **Capability** | What is this actor allowed to do? | On-chain `ScopeContract[operator_omni][agent_omni] → {services, read_only}` + host-local sidecar policy (method/path/spend) | Master-issued via `set_scope_with_webauthn(...)`; chain-stored; revocable |
 
@@ -310,7 +310,7 @@ The omni-tree edge `//<label>` is **public + recomputable** (issue #144): `O_chi
 
 | | Master | Agent |
 |---|---|---|
-| HDKD position | Root | `//<label>` child of master |
+| HDKD position | Root | `//<label>/<generation>` child of master; initial pair uses `/0` |
 | K11 (WebAuthn) | Yes — needed for master mutations | No — agents have no human-presence credential |
 | Bootstrap | Identity ceremony + WebAuthn enrollment | **Link-code from master, only** |
 | Spawns other actors | Yes (claims agent pairing requests + grants scope) | No |
@@ -503,7 +503,7 @@ ON MASTER (already initialized; holds J1_master; master ≠ agent machine):
 8. Broker (J1_master bearer is the gate; K11 is NOT presented here — agents are
    K10-only per the contract, so there is nothing for the broker to K11-verify):
    - Verify J1_master; look up the UNBOUND request by pairing_code (atomic single-claim)
-   - Derive O_agent_A = SHA256(HDKD_DOMAIN || O_master || "//agent-A")
+   - Derive O_agent_A = SHA256(HDKD_DOMAIN || O_master || "//agent-A/0")
      [public + recomputable per §6.2 — the master "adopts" the agent under its omni
       tree; unforgeability is the J1_master claim + the master-submitted on-chain binding]
    - Bind the request to THIS operator_omni + O_agent_A + label + requested_scope;
@@ -518,7 +518,7 @@ ON AGENT MACHINE (continues polling from step 5):
       request's bound device key, then mints J1_agent FRESH (at retrieval — so no bearer
       secret sits at rest, and the JWT TTL starts when the agent actually fetches it):
       J1_agent { actor_omni=O_agent_A, parent_omni=O_master,
-                 derivation_path="//agent-A", device_pubkey=D_pub_agent }
+                 derivation_path="//agent-A/0", device_pubkey=D_pub_agent }
 11. Daemon: persist J1_agent; emit the binding artifact. The agent now authenticates
     but has NO scope yet (installed-but-not-yet-permitted).
 
@@ -1167,7 +1167,7 @@ for a worked example + the full PR checklist.
 - **K9 (DKIM) lives here**, sealed inside same TEE / KMS pattern as K3
 - **Send:** worker accepts cap-token + email payload; DKIM-signs; submits to SES; writes a copy to `sent/<yyyymm>/<message_id>`
 - **Receive:** SES routing Lambda (extension of existing #83 infrastructure) routes inbound mail to `inbound/<message_id>`; worker exposes `list-inbox(cap)` + `read-message(cap, msg_id)`
-- **Per-actor inbox:** `bots/<actor_omni_hex>/inbound/*` is keyed on actor; aliasing happens at the SES routing layer (e.g., `agent-a@bots.litentry.org` → `bots/<O_master//agent-A>/inbound/*`)
+- **Per-actor inbox:** `bots/<actor_omni_hex>/inbound/*` is keyed on actor; aliasing happens at the SES routing layer (e.g., `agent-a@bots.litentry.org` -> `bots/<O_master//agent-A/0>/inbound/*`)
 
 ### 15.5 payment-service
 
