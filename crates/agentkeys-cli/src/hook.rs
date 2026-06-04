@@ -290,8 +290,11 @@ pub async fn memory_inject(
     // deterministic fallback still runs in time even with several namespaces. Each
     // namespace's rank_gate_bounded gets the REMAINING budget; once it's spent we
     // skip OpenViking entirely and fall back (/codex:adversarial-review).
-    let openviking_budget =
-        Duration::from_millis(env_u64("OPENVIKING_RANK_DEADLINE_MS", DEFAULT_OPENVIKING_BUDGET_MS));
+    let openviking_budget = Duration::from_millis(clamped_openviking_budget_ms(
+        env_u64("OPENVIKING_RANK_DEADLINE_MS", DEFAULT_OPENVIKING_BUDGET_MS),
+        crate::wire::HOST_PRELLM_HOOK_TIMEOUT_SECS.saturating_mul(1000),
+        OPENVIKING_BUDGET_SAFETY_MARGIN_MS,
+    ));
     let openviking_started = Instant::now();
 
     let mut chunks = Vec::new();
@@ -479,6 +482,16 @@ fn env_flag(key: &str) -> bool {
 const DEFAULT_OPENVIKING_BUDGET_MS: u64 = 3000;
 /// Don't start an OpenViking call with less than this left — skip + fall back.
 const OPENVIKING_BUDGET_FLOOR_MS: u64 = 100;
+/// Safety margin below the host hook timeout: the OpenViking budget is clamped to
+/// (host timeout − this) so even a misconfigured `OPENVIKING_RANK_DEADLINE_MS`
+/// can't outlive the host timeout and starve the fallback (/codex:adversarial-review).
+const OPENVIKING_BUDGET_SAFETY_MARGIN_MS: u64 = 1000;
+
+/// Clamp a requested OpenViking budget below the host hook timeout (minus a
+/// margin) so an oversized override can't outlive the host. Pure — unit-tested.
+fn clamped_openviking_budget_ms(requested_ms: u64, host_timeout_ms: u64, margin_ms: u64) -> u64 {
+    requested_ms.min(host_timeout_ms.saturating_sub(margin_ms))
+}
 
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
@@ -542,6 +555,17 @@ mod tests {
         assert!(openviking_remaining(started, Duration::from_millis(0)).is_none());
         // Below the floor → None.
         assert!(openviking_remaining(started, Duration::from_millis(50)).is_none());
+    }
+
+    #[test]
+    fn openviking_budget_clamped_below_host_timeout() {
+        // An oversized OPENVIKING_RANK_DEADLINE_MS must clamp below the host hook
+        // timeout (minus margin) so it can't outlive it (/codex:adversarial-review).
+        let host_ms = crate::wire::HOST_PRELLM_HOOK_TIMEOUT_SECS * 1000; // 5000
+        let margin = OPENVIKING_BUDGET_SAFETY_MARGIN_MS; // 1000
+        assert_eq!(clamped_openviking_budget_ms(10_000, host_ms, margin), host_ms - margin);
+        assert_eq!(clamped_openviking_budget_ms(3000, host_ms, margin), 3000);
+        assert!(clamped_openviking_budget_ms(10_000, host_ms, margin) < host_ms);
     }
 
     #[test]

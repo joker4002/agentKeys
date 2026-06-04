@@ -36,14 +36,19 @@ use agentkeys_memory_engine::{MemoryLine, SelectionBudget};
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
 
 /// Per-request timeout (env `OPENVIKING_TIMEOUT_MS`). Secondary bound on a single
-/// find/read/write/health call; the overall deadline above caps their sum so a
-/// stalled server can never hang the hook (OpenViking is never load-bearing —
-/// arch.md §22).
+/// find/read/write/health call; the caller's overall ranking deadline caps their
+/// sum so a stalled server can never hang the hook (OpenViking is never
+/// load-bearing — arch.md §22).
 const DEFAULT_TIMEOUT_MS: u64 = 2000;
 /// Cap on per-turn `content/read` fan-out (env `OPENVIKING_MAX_URI_READS`).
 /// Defense-in-depth alongside the overall deadline; URI-only (Skip-VLM) hits are
 /// resolved in OpenViking rank order so the most relevant lines are fetched first.
 const DEFAULT_MAX_URI_READS: usize = 8;
+/// Max bytes buffered from ANY OpenViking response (env `OPENVIKING_MAX_RESPONSE_BYTES`).
+/// A larger body is treated as an error so a buggy/compromised/oversized server
+/// can't OOM or stall the hook before the timeout + read cap help — the caller
+/// falls back instead (/codex:adversarial-review).
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 1_048_576;
 
 fn http_client(timeout_ms: u64) -> reqwest::Client {
     reqwest::Client::builder()
@@ -74,6 +79,8 @@ pub struct OpenVikingClient {
     user: String,
     agent: String,
     http: reqwest::Client,
+    /// Max bytes buffered from any response — see [`DEFAULT_MAX_RESPONSE_BYTES`].
+    max_response_bytes: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,7 +173,14 @@ impl OpenVikingClient {
             std::env::var("OPENVIKING_USER").unwrap_or_else(|_| "default".to_string()),
             std::env::var("OPENVIKING_AGENT").unwrap_or_else(|_| "hermes".to_string()),
         );
-        Some(client.with_request_timeout_ms(env_u64("OPENVIKING_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)))
+        Some(
+            client
+                .with_request_timeout_ms(env_u64("OPENVIKING_TIMEOUT_MS", DEFAULT_TIMEOUT_MS))
+                .with_max_response_bytes(env_usize(
+                    "OPENVIKING_MAX_RESPONSE_BYTES",
+                    DEFAULT_MAX_RESPONSE_BYTES,
+                )),
+        )
     }
 
     pub fn new(
@@ -183,6 +197,7 @@ impl OpenVikingClient {
             user,
             agent,
             http: http_client(DEFAULT_TIMEOUT_MS),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
 
@@ -191,6 +206,39 @@ impl OpenVikingClient {
     pub fn with_request_timeout_ms(mut self, ms: u64) -> Self {
         self.http = http_client(ms);
         self
+    }
+
+    /// Override the max response byte cap (env `OPENVIKING_MAX_RESPONSE_BYTES`).
+    /// Used by `from_env` and by tests.
+    pub fn with_max_response_bytes(mut self, n: usize) -> Self {
+        self.max_response_bytes = n;
+        self
+    }
+
+    /// Read a response body bounded by `self.max_response_bytes`. A body that
+    /// exceeds the cap (by Content-Length or while streaming) is an error, so a
+    /// buggy/compromised server can't OOM the hook — the caller falls back.
+    async fn read_body_capped(&self, mut resp: reqwest::Response) -> Result<String, OpenVikingError> {
+        let cap = self.max_response_bytes;
+        if resp.content_length().map(|l| l as usize > cap).unwrap_or(false) {
+            return Err(OpenVikingError::Transport(format!(
+                "openviking response exceeds {cap}-byte cap (Content-Length)"
+            )));
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| OpenVikingError::Transport(e.to_string()))?
+        {
+            if buf.len() + chunk.len() > cap {
+                return Err(OpenVikingError::Transport(format!(
+                    "openviking response exceeds {cap}-byte cap"
+                )));
+            }
+            buf.extend_from_slice(chunk.as_ref());
+        }
+        String::from_utf8(buf).map_err(|e| OpenVikingError::Parse(e.to_string()))
     }
 
     fn with_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -236,10 +284,7 @@ impl OpenVikingClient {
             .await
             .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
+        let body = self.read_body_capped(resp).await?;
         if !status.is_success() {
             return Err(OpenVikingError::Http {
                 status: status.as_u16(),
@@ -300,7 +345,7 @@ impl OpenVikingClient {
             .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = self.read_body_capped(resp).await.unwrap_or_default();
             return Err(OpenVikingError::Http {
                 status: status.as_u16(),
                 body,
@@ -325,10 +370,7 @@ impl OpenVikingClient {
             .await
             .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
+        let body = self.read_body_capped(resp).await?;
         if !status.is_success() {
             return Err(OpenVikingError::Http {
                 status: status.as_u16(),
@@ -661,6 +703,45 @@ mod tests {
             "two stalled rankings under a SHARED 600ms budget must finish well under the 5s host \
              timeout (per-namespace deadlines would be ~6s); took {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn oversize_search_find_body_is_rejected_and_falls_back() {
+        // A fast but OVERSIZED /search/find body must be rejected (not buffered
+        // unboundedly) so the caller falls back, never OOMing the hook
+        // (/codex:adversarial-review).
+        let big = "x".repeat(5000);
+        let endpoint = spawn_stub(serde_json::json!({
+            "result": { "results": [ { "score": 0.9, "content": big } ] }
+        }))
+        .await;
+        let cl = client(endpoint).with_max_response_bytes(500);
+        let budget = SelectionBudget::default();
+        let out =
+            rank_gate_bounded(&cl, "q", &lines(), &budget, std::time::Duration::from_secs(5)).await;
+        assert!(out.is_none(), "oversized search/find body must be rejected → None");
+    }
+
+    #[tokio::test]
+    async fn oversize_content_read_body_is_rejected_and_falls_back() {
+        // find is small (a URI-only hit) but content/read is OVERSIZED → the read is
+        // rejected, the hit drops, and ranking falls back (/codex:adversarial-review).
+        let find = serde_json::json!({
+            "result": { "memories": [
+                { "score": 0.9, "uri": "viking://user/default/memories/travel/m0.md", "abstract": "" }
+            ]}
+        });
+        let big = "y".repeat(5000);
+        let read = serde_json::json!({ "result": { "content": big } });
+        let endpoint = spawn_find_read_stub(find, read).await;
+        let cl = client(endpoint).with_max_response_bytes(500);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await;
+        assert!(out.is_none(), "oversized content/read body must be rejected → None");
     }
 
     #[test]

@@ -197,16 +197,17 @@ impl HermesAdapter {
              \x20 pre_tool_call:\n\
              \x20   - matcher: \"(?i)(pay|order|purchase|spend|checkout)\"\n\
              \x20     command: \"{pretool}\"\n\
-             \x20     timeout: 5\n\
+             \x20     timeout: {hook_timeout}\n\
              \x20 post_tool_call:\n\
              \x20   - matcher: \".*\"\n\
              \x20     command: \"{posttool}\"\n\
-             \x20     timeout: 5\n\
+             \x20     timeout: {hook_timeout}\n\
              \x20 pre_llm_call:\n\
              \x20   - command: \"{prellm}\"\n\
-             \x20     timeout: 5\n\
+             \x20     timeout: {hook_timeout}\n\
              hooks_auto_accept: true\n\
              {BLOCK_END}",
+            hook_timeout = HOST_PRELLM_HOOK_TIMEOUT_SECS,
             pretool = p("agentkeys-pretool-permission-gate.sh"),
             posttool = p("agentkeys-posttool-audit.sh"),
             prellm = p("agentkeys-prellm-memory-inject.sh"),
@@ -490,6 +491,13 @@ fn adapter_for(runtime: &str) -> Result<Box<dyn RuntimeAdapter>> {
 }
 
 /// Drive `agentkeys wire <runtime>`. Returns the multi-line operator log.
+/// Host `pre_llm_call` (and pre/post-tool) hook timeout, in seconds, baked into
+/// the generated runtime config (`managed_block`). SINGLE SOURCE: hook.rs clamps
+/// the OpenViking ranking budget below this so a misconfigured
+/// `OPENVIKING_RANK_DEADLINE_MS` can't outlive the host timeout and starve the
+/// deterministic fallback (/codex:adversarial-review).
+pub(crate) const HOST_PRELLM_HOOK_TIMEOUT_SECS: u64 = 5;
+
 /// Normalize + validate a `--memory-engine` value: trim, lowercase, reject
 /// anything unsupported; returns the canonical name. Pure — unit-tested. Called
 /// by `cmd_wire` BEFORE the endpoint guard and script generation so validation,
