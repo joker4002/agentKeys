@@ -255,6 +255,7 @@ Re-run it any time — every step pre-checks and short-circuits (`ok` / `skip` /
 | `search/find` returns score+uri but blank `abstract` | **Skip VLM** mode — no model to write the L0 abstract | ranking is fine; read verbatim with `content/read <uri>` |
 | `content/write` says "exists" on a re-run | `mode:"create"` on an already-loaded URI | expected/idempotent — the loader counts it as loaded; no duplicate is created |
 | hook hangs on a manual call | reading an open stdin | the hook is `is_terminal()`-guarded; always **pipe** the payload (`printf … \| …`) |
+| `pre_llm_call` hook slow when OpenViking is slow/stalled | every OpenViking request (find + per-hit `content/read`) is bounded by a per-request timeout, and Skip-VLM URI reads are capped — a slow/stalled server falls back to the lexical engine instead of hanging the turn | tune `OPENVIKING_TIMEOUT_MS` (default 4000) and `OPENVIKING_MAX_URI_READS` (default 8); a fully-down server fails the first `search/find` and falls back at once |
 | LLM has `viking_*` tools / memory double-injects | you ran `hermes memory setup` (provider is on) | undo it — see the ⛔ callout above (remove `memory.provider`); keep the `agentkeys wire` block |
 
 ## References

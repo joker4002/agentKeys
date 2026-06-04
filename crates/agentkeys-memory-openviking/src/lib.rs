@@ -35,6 +35,38 @@ use agentkeys_memory_engine::{MemoryLine, SelectionBudget};
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
 
+/// Per-request timeout (env `OPENVIKING_TIMEOUT_MS`). Bounds EVERY OpenViking
+/// call — find, content/read, write, health — so a stalled server can never
+/// hang the `pre_llm_call` hook past the host deadline; the caller falls back to
+/// a built-in engine instead (OpenViking is never load-bearing — arch.md §22).
+const DEFAULT_TIMEOUT_MS: u64 = 4000;
+/// Cap on per-turn `content/read` fan-out (env `OPENVIKING_MAX_URI_READS`). With
+/// the per-request timeout this bounds worst-case URI-resolution wall-clock to
+/// `cap × timeout` for Skip-VLM (URI-only) hits, which are resolved in OpenViking
+/// rank order so the most relevant lines are the ones fetched.
+const DEFAULT_MAX_URI_READS: usize = 8;
+
+fn http_client(timeout_ms: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenVikingClient {
     endpoint: String,
@@ -128,13 +160,14 @@ impl OpenVikingClient {
         let endpoint = std::env::var("OPENVIKING_ENDPOINT")
             .ok()
             .filter(|s| !s.is_empty())?;
-        Some(Self::new(
+        let client = Self::new(
             endpoint,
             std::env::var("OPENVIKING_API_KEY").unwrap_or_default(),
             std::env::var("OPENVIKING_ACCOUNT").unwrap_or_else(|_| "default".to_string()),
             std::env::var("OPENVIKING_USER").unwrap_or_else(|_| "default".to_string()),
             std::env::var("OPENVIKING_AGENT").unwrap_or_else(|_| "hermes".to_string()),
-        ))
+        );
+        Some(client.with_request_timeout_ms(env_u64("OPENVIKING_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)))
     }
 
     pub fn new(
@@ -150,8 +183,15 @@ impl OpenVikingClient {
             account,
             user,
             agent,
-            http: reqwest::Client::new(),
+            http: http_client(DEFAULT_TIMEOUT_MS),
         }
+    }
+
+    /// Override the per-request timeout (rebuilds the HTTP client). Used by
+    /// `from_env` for `OPENVIKING_TIMEOUT_MS` and by tests for a short bound.
+    pub fn with_request_timeout_ms(mut self, ms: u64) -> Self {
+        self.http = http_client(ms);
+        self
     }
 
     fn with_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -216,6 +256,8 @@ impl OpenVikingClient {
             });
         }
         let hits = envelope.result.map(FindResult::all_hits).unwrap_or_default();
+        let max_uri_reads = env_usize("OPENVIKING_MAX_URI_READS", DEFAULT_MAX_URI_READS);
+        let mut uri_reads = 0usize;
         let mut ranked: Vec<(f64, String)> = Vec::with_capacity(hits.len());
         for hit in hits {
             if let Some(body) = hit.inline_body() {
@@ -223,7 +265,14 @@ impl OpenVikingClient {
             } else if let Some(uri) = hit.uri.as_deref() {
                 // Skip-VLM / URI-only hit: fetch the verbatim stored line so the
                 // gate text-match has something to compare. Best-effort — a failed
-                // read drops just that hit, never aborts the whole ranking.
+                // OR timed-out read drops just that hit, never aborts the ranking.
+                // Capped at `max_uri_reads` and each bounded by the client timeout,
+                // so a stalled OpenViking can't hang the hook: the read errors, the
+                // hit drops, and an empty result falls back to the lexical engine.
+                if uri_reads >= max_uri_reads {
+                    continue;
+                }
+                uri_reads += 1;
                 if let Ok(line) = self.read_content(uri).await {
                     let line = line.trim();
                     if !line.is_empty() {
@@ -422,6 +471,30 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Stub whose `/content/read` STALLS (sleeps), to prove a missing per-request
+    /// timeout would hang the caller. `/search/find` returns `find` instantly.
+    async fn spawn_slow_read_stub(find: serde_json::Value) -> String {
+        async fn slow_read() -> Json<serde_json::Value> {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            // Body WOULD match a gate line — so a None result proves the read was
+            // dropped by the timeout, not a no-match.
+            Json(serde_json::json!({ "result": { "content": "Allergic to peanuts." } }))
+        }
+        let app = Router::new()
+            .route(
+                "/api/v1/search/find",
+                post(|State(s): State<serde_json::Value>| async move { Json(s) }),
+            )
+            .route("/api/v1/content/read", post(slow_read))
+            .with_state(find);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
     fn client(endpoint: String) -> OpenVikingClient {
         OpenVikingClient::new(
             endpoint,
@@ -470,6 +543,32 @@ mod tests {
         assert_eq!(
             out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             vec!["Allergic to peanuts."]
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_content_read_times_out_and_falls_back() {
+        // A URI-only hit whose content/read STALLS (3s). With a short per-request
+        // timeout the read errors → the hit drops → rank_gate_bounded returns None
+        // → the caller falls back to lexical. Without the timeout (codex finding)
+        // this would hang past the host hook deadline. The stalled read returns a
+        // body that WOULD match a gate line, so a None result proves the timeout
+        // fired (not a no-match).
+        let find = serde_json::json!({
+            "result": { "memories": [
+                { "score": 0.9, "uri": "viking://user/default/memories/travel/m0.md", "abstract": "" }
+            ]}
+        });
+        let endpoint = spawn_slow_read_stub(find).await;
+        let cl = client(endpoint).with_request_timeout_ms(200);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget).await;
+        assert!(
+            out.is_none(),
+            "a stalled content/read must time out and fall back to None, not hang"
         );
     }
 

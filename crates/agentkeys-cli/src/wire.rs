@@ -490,13 +490,32 @@ fn adapter_for(runtime: &str) -> Result<Box<dyn RuntimeAdapter>> {
 }
 
 /// Drive `agentkeys wire <runtime>`. Returns the multi-line operator log.
+/// Normalize + validate a `--memory-engine` value: trim, lowercase, reject
+/// anything unsupported; returns the canonical name. Pure — unit-tested. Called
+/// by `cmd_wire` BEFORE the endpoint guard and script generation so validation,
+/// baking, and the runtime hook (which also trims) all agree on the engine —
+/// otherwise " openviking " would skip the guard yet still be treated as
+/// OpenViking at runtime (/codex:adversarial-review).
+fn validated_engine(raw: &str) -> Result<String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "passthrough" | "lexical" | "openviking" => Ok(normalized),
+        other => anyhow::bail!(
+            "unknown --memory-engine '{other}' — supported: passthrough (default), lexical, openviking"
+        ),
+    }
+}
+
 pub fn cmd_wire(runtime: &str, mut req: WireRequest) -> Result<String> {
-    // /codex:adversarial-review: never bake AGENTKEYS_MEMORY_ENGINE=openviking
-    // WITHOUT an endpoint — at runtime OpenVikingClient::from_env() would return
-    // None and the hook would silently fall back to lexical, defeating the engine
-    // the operator asked for. Default from OPENVIKING_ENDPOINT if exported; else
-    // hard-error with the fix.
-    if req.memory_engine.eq_ignore_ascii_case("openviking") {
+    // Normalize + validate the engine name ONCE so the endpoint guard below,
+    // script generation, and the runtime hook all agree on it.
+    req.memory_engine = validated_engine(&req.memory_engine)?;
+
+    // Never bake AGENTKEYS_MEMORY_ENGINE=openviking WITHOUT an endpoint — at
+    // runtime OpenVikingClient::from_env() would return None and the hook would
+    // silently fall back to lexical, defeating the engine the operator asked for.
+    // Default from OPENVIKING_ENDPOINT if exported; else hard-error with the fix.
+    if req.memory_engine == "openviking" {
         let have_endpoint = req
             .memory_engine_endpoint
             .as_deref()
@@ -600,6 +619,44 @@ mod tests {
             msg.contains("openviking") && msg.contains("endpoint"),
             "expected an actionable openviking-endpoint error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn wire_normalizes_whitespace_case_engine_then_guards_endpoint() {
+        // " OpenViking " (whitespace + case) must NOT bypass the endpoint guard —
+        // wire normalizes (trim+lowercase) like the runtime hook trims
+        // (/codex:adversarial-review). Without normalization this baked a hook with
+        // no endpoint that the runtime still treated as OpenViking.
+        std::env::remove_var("OPENVIKING_ENDPOINT");
+        let mut r = req();
+        r.memory_engine = "  OpenViking  ".into();
+        r.memory_engine_endpoint = None;
+        let err =
+            cmd_wire("hermes", r).expect_err("whitespace/case openviking w/o endpoint must reject");
+        assert!(err.to_string().contains("endpoint"), "got: {err}");
+    }
+
+    #[test]
+    fn wire_rejects_unknown_engine() {
+        let mut r = req();
+        r.memory_engine = "mem0".into();
+        let err = cmd_wire("hermes", r).expect_err("unknown engine must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown") && msg.contains("mem0"),
+            "expected an unknown-engine error naming mem0, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn engine_validation_normalizes_and_rejects() {
+        // Normalization is endpoint-independent — the "with and without an
+        // endpoint" coverage at the name level (/codex:adversarial-review).
+        assert_eq!(validated_engine("  OpenViking  ").unwrap(), "openviking");
+        assert_eq!(validated_engine("LEXICAL").unwrap(), "lexical");
+        assert_eq!(validated_engine("   ").unwrap(), "");
+        assert_eq!(validated_engine("passthrough").unwrap(), "passthrough");
+        assert!(validated_engine("mem0").is_err());
     }
 
     #[test]
