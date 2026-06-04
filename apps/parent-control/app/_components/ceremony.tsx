@@ -17,9 +17,18 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<'r
   const begin = await client.enrollK11Begin({ userName: email, userDisplayName: email });
   if (!begin.ok) return 'fallback'; // EmptyBackend → disconnected → narrated fallback
   try {
+    // The macOS/Safari passkey dialog quotes user.name ("A passkey for '…'") and
+    // the saved Passwords.app entry uses these fields. When the privacy toggle is
+    // on, replace them with a generic label — display-only: WebAuthn registration
+    // never returns user.name to the daemon (it's absent from clientDataJSON + the
+    // attestation), so the real email sent at enroll/begin stays the identity
+    // anchor and the daemon's finish verification is unaffected. user.id (the
+    // stable handle) is left untouched.
+    const masked = getMaskEmail();
+    const label = (raw: string) => (masked ? 'AgentKeys master device' : raw);
     const opts = jsonToCreationOptions({
       rp: { id: begin.data.rpId, name: begin.data.rpName },
-      user: { id: begin.data.userId, name: begin.data.userName, displayName: begin.data.userDisplayName },
+      user: { id: begin.data.userId, name: label(begin.data.userName), displayName: label(begin.data.userDisplayName) },
       challenge: begin.data.challenge,
       pubKeyCredParams: begin.data.pubKeyCredParams,
       timeout: begin.data.timeout,
