@@ -50,6 +50,7 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
 
   const [onboarded, setOnboarded] = useState(false);
+  const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
   const [memories, setMemories] = useState<PreservedMemory[]>([]);
   const [planting, setPlanting] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
@@ -64,8 +65,12 @@ export function App() {
       // the local flag only for the offline/demo path (no daemon to ask).
       const r = await client.getOnboardingState();
       let on = false;
-      if (r.ok && r.data.identity === 'verified') on = true;
-      else { try { on = localStorage.getItem('ak_onboarded') === '1'; } catch {} }
+      if (r.ok && r.data.identity === 'verified') {
+        on = true;
+        if (!cancelled) setIdentity({ email: r.data.email, omni: r.data.omni });
+      } else {
+        try { on = localStorage.getItem('ak_onboarded') === '1'; } catch {}
+      }
       if (!cancelled) setOnboarded(on);
     })();
     return () => { cancelled = true; };
@@ -134,6 +139,7 @@ export function App() {
     void client.logout(); // W1: clear the daemon-held session (the real re-test reset)
     try { localStorage.removeItem('ak_onboarded'); } catch {}
     setOnboarded(false);
+    setIdentity(null);
     setActors([]);
     setEvents([]);
     setMemories([]);
@@ -265,6 +271,18 @@ export function App() {
     );
   }
 
+  // Privacy-preserving identity for the header: a public omni hash is truncated
+  // (full value in the title/hover), and we prefer the on-chain actor omni
+  // (`master.omni`) once it exists, falling back to the email-identity omni held
+  // after login. No secret (J1/K10/K11) is ever in the browser to show.
+  const shortOmni = (o?: string) => {
+    if (!o) return '';
+    const h = o.startsWith('0x') ? o.slice(2) : o;
+    return h.length <= 12 ? o : `0x${h.slice(0, 6)}…${h.slice(-4)}`;
+  };
+  const whoOmni = master?.omni ?? identity?.omni;
+  const whoLabel = master?.label ?? identity?.email ?? 'O_master';
+
   return (
     <div className="app">
       <header className="app-head">
@@ -285,7 +303,7 @@ export function App() {
           >
             ◉{pairingRequests.length > 0 && <span className="badge">{pairingRequests.length}</span>}
           </button>
-          <span className="who"><span className="who-text">{master ? `${master.label} · ${master.omni}` : 'O_master'}</span></span>
+          <span className="who" title={whoOmni ?? ''}><span className="who-text">{whoOmni ? `${whoLabel} · ${shortOmni(whoOmni)}` : whoLabel}</span></span>
           <button className="btn sm" onClick={logout} title="Clear this session and return to login">log out</button>
         </div>
       </header>
