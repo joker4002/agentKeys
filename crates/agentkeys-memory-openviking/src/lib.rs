@@ -41,9 +41,11 @@ pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
 /// load-bearing — arch.md §22).
 const DEFAULT_TIMEOUT_MS: u64 = 2000;
 /// Cap on per-turn `content/read` fan-out (env `OPENVIKING_MAX_URI_READS`).
-/// Defense-in-depth alongside the overall deadline; URI-only (Skip-VLM) hits are
-/// resolved in OpenViking rank order so the most relevant lines are fetched first.
-const DEFAULT_MAX_URI_READS: usize = 8;
+/// A SAFETY bound alongside the overall deadline + early-stop: reads happen in rank
+/// order and stop once the output budget is filled, so this only bounds the
+/// pathological scan (many out-of-gate URI hits). Kept generous so authorized lines
+/// ranked past the first few URI hits are still reached (/codex:adversarial-review).
+const DEFAULT_MAX_URI_READS: usize = 64;
 /// Max bytes buffered from ANY OpenViking response (env `OPENVIKING_MAX_RESPONSE_BYTES`).
 /// A larger body is treated as an error so a buggy/compromised/oversized server
 /// can't OOM or stall the hook before the timeout + read cap help — the caller
@@ -143,10 +145,10 @@ impl FindResult {
     }
 }
 
+// A single ranked hit. Consumed in the server's array (rank) order, so the
+// numeric `score` is intentionally not parsed.
 #[derive(Debug, Deserialize)]
 struct FindHit {
-    #[serde(default)]
-    score: f64,
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
@@ -289,13 +291,10 @@ impl OpenVikingClient {
             .unwrap_or(false)
     }
 
-    /// `POST /api/v1/search/find` — semantic ranking. Returns `(score, text)`
-    /// hits in OpenViking's ranked order.
-    pub async fn search_find(
-        &self,
-        query: &str,
-        top_k: usize,
-    ) -> Result<Vec<(f64, String)>, OpenVikingError> {
+    /// `POST /api/v1/search/find` — fetch RAW ranked hits (HTTP + parse only, no
+    /// content/read). Gate-aware resolution + matching happens in
+    /// [`OpenVikingClient::match_gate_authorized`].
+    async fn fetch_hits(&self, query: &str, top_k: usize) -> Result<Vec<FindHit>, OpenVikingError> {
         let url = format!("{}/api/v1/search/find", self.endpoint);
         let resp = self
             .with_headers(
@@ -322,39 +321,77 @@ impl OpenVikingClient {
                 body,
             });
         }
-        let hits = envelope.result.map(FindResult::all_hits).unwrap_or_default();
-        let max_uri_reads = env_usize("OPENVIKING_MAX_URI_READS", DEFAULT_MAX_URI_READS);
-        let mut uri_reads = 0usize;
-        let mut ranked: Vec<(f64, String)> = Vec::with_capacity(hits.len());
+        Ok(envelope.result.map(FindResult::all_hits).unwrap_or_default())
+    }
+
+    /// Fetch ranked hits and resolve + gate-match them IN RANK ORDER, returning the
+    /// authorized lines (gate-bounded, deduped, in OpenViking's order). URI-only
+    /// hits are resolved via content/read up to a budget, but with EARLY-STOP once
+    /// enough authorized lines fill `budget.max_lines` — so a few high-ranked
+    /// out-of-gate URI hits can't consume the read budget before authorized lines
+    /// ranked below them are even seen (/codex:adversarial-review).
+    async fn match_gate_authorized(
+        &self,
+        query: &str,
+        top_k: usize,
+        lines: &[MemoryLine],
+        budget: &SelectionBudget,
+    ) -> Vec<MemoryLine> {
+        let hits = match self.fetch_hits(query, top_k).await {
+            Ok(h) => h,
+            Err(_) => return Vec::new(),
+        };
+        let read_cap = env_usize("OPENVIKING_MAX_URI_READS", DEFAULT_MAX_URI_READS);
+        let mut reads = 0usize;
+        let mut out: Vec<MemoryLine> = Vec::new();
+        let mut taken = std::collections::HashSet::new();
         for hit in hits {
-            if let Some(body) = hit.verbatim_inline_body() {
+            // Early stop: enough authorized lines to fill the output line budget.
+            if budget.max_lines.is_some_and(|max| out.len() >= max) {
+                break;
+            }
+            let text = if let Some(body) = hit.verbatim_inline_body() {
                 // Verbatim inline body (content/text) — use directly.
-                ranked.push((hit.score, body.to_string()));
+                body.to_string()
             } else if let Some(uri) = hit.uri.as_deref() {
-                // No verbatim inline body. Resolve the verbatim stored line via
-                // content/read — for BOTH Skip-VLM (uri-only) hits AND VLM hits whose
-                // only inline body is an L0 `abstract` (a summary that won't gate-match
-                // the stored line). Best-effort — a failed/timed-out read drops just
-                // this hit; capped at `max_uri_reads`, each bounded by the client
-                // timeout, so a stalled OpenViking can't hang the hook (empty →
-                // lexical fallback).
-                if uri_reads >= max_uri_reads {
+                // Resolve the verbatim stored line via content/read — for BOTH
+                // Skip-VLM (uri-only) hits AND VLM hits whose only inline body is an
+                // L0 `abstract` (a summary that won't gate-match). Capped + each read
+                // bounded by the client timeout; spent in rank order with early-stop,
+                // not wasted on out-of-gate hits. A failed/timed-out read drops just
+                // this hit.
+                if reads >= read_cap {
                     continue;
                 }
-                uri_reads += 1;
-                if let Ok(line) = self.read_content(uri).await {
-                    let line = line.trim();
-                    if !line.is_empty() {
-                        ranked.push((hit.score, line.to_string()));
-                    }
+                reads += 1;
+                match self.read_content(uri).await {
+                    Ok(line) => line,
+                    Err(_) => continue,
                 }
             } else if let Some(abstract_body) = hit.abstract_body() {
-                // No content/text and no uri to resolve — use the abstract as a last
-                // resort (still gate-bounded by rank_gate_bounded's text match).
-                ranked.push((hit.score, abstract_body.to_string()));
+                // No content/text and no uri — use the abstract as a last resort.
+                abstract_body.to_string()
+            } else {
+                continue;
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            // Gate-bound: only ever return lines that were in the authorized set.
+            let hit_norm = normalize(text);
+            if let Some(line) = lines.iter().find(|l| {
+                let line_norm = normalize(&l.text);
+                line_norm == hit_norm
+                    || hit_norm.contains(&line_norm)
+                    || line_norm.contains(&hit_norm)
+            }) {
+                if taken.insert(line.seq) {
+                    out.push(line.clone());
+                }
             }
         }
-        Ok(ranked)
+        out
     }
 
     /// `POST /api/v1/content/write` — mirror one gate-authorized line into
@@ -476,36 +513,26 @@ pub async fn rank_gate_bounded(
         return None;
     }
     // Fetch a generous window DECOUPLED from the output budget so unauthorized
-    // index records can't crowd out lower-ranked authorized lines — the budget is
-    // applied to the matched output below (/codex:adversarial-review).
+    // index records can't crowd out lower-ranked authorized lines.
     let top_k = openviking_fetch_top_k(lines.len());
-    let hits = match tokio::time::timeout(deadline, client.search_find(query, top_k)).await {
-        Ok(Ok(hits)) => hits,
-        Ok(Err(_)) => return None, // OpenViking error → fall back
-        Err(_) => return None,     // overall deadline exceeded → fall back NOW
+    // The WHOLE phase — fetch + every content/read + gate matching — is bounded by
+    // ONE deadline. match_gate_authorized reads IN RANK ORDER with early-stop, so a
+    // few high-ranked out-of-gate URI hits can't consume the read budget before
+    // authorized lines are seen (/codex:adversarial-review).
+    let out = match tokio::time::timeout(
+        deadline,
+        client.match_gate_authorized(query, top_k, lines, budget),
+    )
+    .await
+    {
+        Ok(out) => out,        // gate-matched authorized lines (possibly empty)
+        Err(_) => return None, // overall deadline exceeded → fall back NOW
     };
-    if hits.is_empty() {
-        return None;
-    }
-    let mut out: Vec<MemoryLine> = Vec::new();
-    let mut taken = std::collections::HashSet::new();
-    for (_score, hit_text) in hits {
-        let hit_norm = normalize(&hit_text);
-        if let Some(line) = lines.iter().find(|l| {
-            let line_norm = normalize(&l.text);
-            line_norm == hit_norm || hit_norm.contains(&line_norm) || line_norm.contains(&hit_norm)
-        }) {
-            if taken.insert(line.seq) {
-                out.push(line.clone());
-            }
-        }
-    }
     if out.is_empty() {
         return None;
     }
-    // Apply the SAME line + byte budget the built-in engines use (apply_budget),
-    // so the ranked OpenViking output honors AGENTKEYS_MEMORY_MAX_BYTES / _LINES
-    // too — not just max_lines (/codex:adversarial-review).
+    // Apply the SAME line + byte budget the built-in engines use, so the ranked
+    // OpenViking output honors AGENTKEYS_MEMORY_MAX_BYTES / _LINES.
     let out = agentkeys_memory_engine::apply_budget(out, budget);
     if out.is_empty() {
         None
@@ -917,6 +944,78 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct FindUriReadState {
+        find: serde_json::Value,
+        reads: std::collections::HashMap<String, String>,
+    }
+
+    /// Stub whose `/content/read` returns DIFFERENT content per uri, so a scan over
+    /// many uri-only hits (most out-of-gate) can be exercised.
+    async fn spawn_find_uri_read_stub(
+        find: serde_json::Value,
+        reads: std::collections::HashMap<String, String>,
+    ) -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/search/find",
+                post(|State(s): State<FindUriReadState>| async move { Json(s.find) }),
+            )
+            .route(
+                "/api/v1/content/read",
+                post(
+                    |State(s): State<FindUriReadState>, Json(req): Json<serde_json::Value>| async move {
+                        let uri =
+                            req.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let content = s.reads.get(&uri).cloned().unwrap_or_default();
+                        Json(serde_json::json!({ "result": { "content": content } }))
+                    },
+                ),
+            )
+            .with_state(FindUriReadState { find, reads });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn read_budget_scans_past_unauthorized_uri_hits_to_authorized() {
+        // 12 UNAUTHORIZED URI-only hits rank ABOVE the authorized one (all Skip-VLM,
+        // uri-only). A fixed read cap of 8 would never read the authorized line at
+        // position 13; the gate-aware scan (rank order, early-stop, generous cap +
+        // deadline) must recover it (/codex:adversarial-review).
+        use std::collections::HashMap;
+        let mut hits = Vec::new();
+        let mut reads = HashMap::new();
+        for i in 0..12 {
+            let uri = format!("viking://user/default/memories/other/u{i}.md");
+            hits.push(serde_json::json!({
+                "score": 0.99 - (i as f64) * 0.01, "uri": uri.clone(), "abstract": ""
+            }));
+            reads.insert(uri, format!("unauthorized record {i} not in the gate"));
+        }
+        let auth_uri = "viking://user/default/memories/travel/m0.md".to_string();
+        hits.push(serde_json::json!({ "score": 0.5, "uri": auth_uri.clone(), "abstract": "" }));
+        reads.insert(auth_uri, "Allergic to peanuts.".to_string());
+        let find = serde_json::json!({ "result": { "memories": hits } });
+        let endpoint = spawn_find_uri_read_stub(find, reads).await;
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await
+            .expect("must scan past 12 unauthorized URI hits and recover the authorized one");
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."]
+        );
+    }
+
     #[test]
     fn extract_read_content_handles_envelope_shapes() {
         let r = |v: serde_json::Value| extract_read_content(&v);
@@ -937,7 +1036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_find_parses_score_ordered_hits() {
+    async fn fetch_hits_parses_score_ordered_hits() {
         let endpoint = spawn_stub(serde_json::json!({
             "result": {"results": [
                 {"score": 0.9, "content": "Allergic to peanuts."},
@@ -945,9 +1044,13 @@ mod tests {
             ]}
         }))
         .await;
-        let hits = client(endpoint).search_find("peanut", 5).await.unwrap();
+        let hits = client(endpoint).fetch_hits("peanut", 5).await.unwrap();
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].1, "Allergic to peanuts.");
+        assert_eq!(hits[0].verbatim_inline_body(), Some("Allergic to peanuts."));
+        assert_eq!(
+            hits[1].verbatim_inline_body(),
+            Some("Chengdu trip — Apr 12 to 16.")
+        );
     }
 
     #[tokio::test]
