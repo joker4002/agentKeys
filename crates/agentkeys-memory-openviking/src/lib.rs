@@ -12,7 +12,13 @@
 //!           `Authorization: Bearer <key>` when OPENVIKING_API_KEY is set
 //!   GET  /health                       -> 200 when up
 //!   POST /api/v1/search/find {query, top_k}
-//!        -> {result:{results:[{score, content|text, uri}]}}
+//!        -> {result:{memories|resources|skills|results:
+//!              [{score, uri, content|text|abstract}]}}
+//!           The live server groups hits by kind (`memories` for our use);
+//!           Skip-VLM mode leaves `abstract` blank, so a hit carries only
+//!           score + uri and the body must be read back by uri.
+//!   POST /api/v1/content/read  {uri}   -> the stored line for a uri; used to
+//!        resolve URI-only / blank-abstract hits before gate text-matching.
 //!   POST /api/v1/content/write {uri, content, mode:"create"}
 //!   error envelope: HTTP >= 400, or {status:"error", error:{code,message}}
 //!
@@ -59,8 +65,28 @@ struct FindEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct FindResult {
+    // The real server groups hits by kind (`memories` for our use); the
+    // Hermes-doc'd shape uses `results`. Accept ALL documented arrays so a
+    // live OpenViking is never silently treated as empty/no-match.
     #[serde(default)]
     results: Vec<FindHit>,
+    #[serde(default)]
+    memories: Vec<FindHit>,
+    #[serde(default)]
+    resources: Vec<FindHit>,
+    #[serde(default)]
+    skills: Vec<FindHit>,
+}
+
+impl FindResult {
+    /// Every hit across all documented arrays, in a stable kind order.
+    fn all_hits(self) -> Vec<FindHit> {
+        let mut hits = self.results;
+        hits.extend(self.memories);
+        hits.extend(self.resources);
+        hits.extend(self.skills);
+        hits
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,11 +97,27 @@ struct FindHit {
     content: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    /// L0 summary — BLANK in Skip-VLM mode (no model to generate it).
+    #[serde(default, rename = "abstract")]
+    abstract_: Option<String>,
+    /// Stable id; often the only body a Skip-VLM hit carries. Resolved to the
+    /// verbatim stored line via `content/read` when no inline body is present.
+    #[serde(default)]
+    uri: Option<String>,
 }
 
 impl FindHit {
-    fn body(&self) -> Option<&str> {
-        self.content.as_deref().or(self.text.as_deref())
+    /// A non-blank inline body carried by the hit itself (no network call).
+    fn inline_body(&self) -> Option<&str> {
+        [
+            self.content.as_deref(),
+            self.text.as_deref(),
+            self.abstract_.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
     }
 }
 
@@ -173,13 +215,24 @@ impl OpenVikingClient {
                 body,
             });
         }
-        Ok(envelope
-            .result
-            .map(|r| r.results)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|hit| hit.body().map(|b| (hit.score, b.to_string())))
-            .collect())
+        let hits = envelope.result.map(FindResult::all_hits).unwrap_or_default();
+        let mut ranked: Vec<(f64, String)> = Vec::with_capacity(hits.len());
+        for hit in hits {
+            if let Some(body) = hit.inline_body() {
+                ranked.push((hit.score, body.to_string()));
+            } else if let Some(uri) = hit.uri.as_deref() {
+                // Skip-VLM / URI-only hit: fetch the verbatim stored line so the
+                // gate text-match has something to compare. Best-effort — a failed
+                // read drops just that hit, never aborts the whole ranking.
+                if let Ok(line) = self.read_content(uri).await {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        ranked.push((hit.score, line.to_string()));
+                    }
+                }
+            }
+        }
+        Ok(ranked)
     }
 
     /// `POST /api/v1/content/write` — mirror one gate-authorized line into
@@ -207,10 +260,76 @@ impl OpenVikingClient {
         }
         Ok(())
     }
+
+    /// `POST /api/v1/content/read` — fetch the verbatim stored line for a
+    /// `uri`. Used to resolve URI-only / blank-abstract `search/find` hits
+    /// (Skip-VLM mode) back to text before gate matching. Tolerant of the
+    /// response envelope shape (see [`extract_read_content`]).
+    pub async fn read_content(&self, uri: &str) -> Result<String, OpenVikingError> {
+        let url = format!("{}/api/v1/content/read", self.endpoint);
+        let resp = self
+            .with_headers(
+                self.http
+                    .post(&url)
+                    .json(&serde_json::json!({ "uri": uri })),
+            )
+            .send()
+            .await
+            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            return Err(OpenVikingError::Http {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| OpenVikingError::Parse(e.to_string()))?;
+        extract_read_content(&value)
+            .ok_or_else(|| OpenVikingError::Parse(format!("content/read: no text in {body}")))
+    }
 }
 
 fn normalize(text: &str) -> String {
     text.trim().to_lowercase()
+}
+
+/// Pull the stored line text out of a `content/read` response, tolerant of the
+/// exact envelope shape: `result.{content|text|body|abstract}`, a grouped
+/// `result.<kind>[0].{...}`, or a top-level field. Pure helper, unit-tested.
+fn extract_read_content(value: &serde_json::Value) -> Option<String> {
+    fn probe(obj: &serde_json::Value) -> Option<String> {
+        for key in ["content", "text", "body", "abstract"] {
+            if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+                let s = s.trim();
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        None
+    }
+    if let Some(result) = value.get("result") {
+        if let Some(s) = probe(result) {
+            return Some(s);
+        }
+        for kind in ["memories", "resources", "skills", "results"] {
+            if let Some(first) = result
+                .get(kind)
+                .and_then(|a| a.as_array())
+                .and_then(|a| a.first())
+            {
+                if let Some(s) = probe(first) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    probe(value)
 }
 
 /// Rank gate-authorized `lines` via OpenViking, bounded by the gate.
@@ -276,6 +395,33 @@ mod tests {
         format!("http://{addr}")
     }
 
+    #[derive(Clone)]
+    struct FindReadState {
+        find: serde_json::Value,
+        read: serde_json::Value,
+    }
+
+    /// Stub serving BOTH `/search/find` and `/content/read` — for the Skip-VLM
+    /// path where find returns URI-only hits the adapter resolves via read.
+    async fn spawn_find_read_stub(find: serde_json::Value, read: serde_json::Value) -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/search/find",
+                post(|State(s): State<FindReadState>| async move { Json(s.find) }),
+            )
+            .route(
+                "/api/v1/content/read",
+                post(|State(s): State<FindReadState>| async move { Json(s.read) }),
+            )
+            .with_state(FindReadState { find, read });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
     fn client(endpoint: String) -> OpenVikingClient {
         OpenVikingClient::new(
             endpoint,
@@ -297,6 +443,53 @@ mod tests {
                 seq: 1,
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn memories_array_with_blank_abstract_resolves_via_content_read() {
+        // The DOCUMENTED live shape (issue #147 / codex finding): hits arrive
+        // under `result.memories` (not `results`), and in Skip-VLM mode the
+        // `abstract` is blank — so the only body is the `uri`. The adapter MUST
+        // (a) read the `memories` array and (b) content/read the uri to recover
+        // the verbatim line for gate-matching. Before this fix the adapter saw
+        // an empty `results` array → no hits → None → silent fallback.
+        let find = serde_json::json!({
+            "result": { "memories": [
+                { "score": 0.9, "uri": "viking://user/default/memories/travel/m0.md", "abstract": "" }
+            ]}
+        });
+        let read = serde_json::json!({ "result": { "content": "Allergic to peanuts." } });
+        let endpoint = spawn_find_read_stub(find, read).await;
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&client(endpoint), "peanut", &lines(), &budget)
+            .await
+            .expect("memories hit resolved via content/read must rank a gate line");
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."]
+        );
+    }
+
+    #[test]
+    fn extract_read_content_handles_envelope_shapes() {
+        let r = |v: serde_json::Value| extract_read_content(&v);
+        assert_eq!(
+            r(serde_json::json!({"result": {"content": "x"}})),
+            Some("x".to_string())
+        );
+        assert_eq!(
+            r(serde_json::json!({"result": {"text": " y "}})),
+            Some("y".to_string())
+        );
+        assert_eq!(
+            r(serde_json::json!({"result": {"memories": [{"content": "z"}]}})),
+            Some("z".to_string())
+        );
+        assert_eq!(r(serde_json::json!({"content": "top"})), Some("top".to_string()));
+        assert_eq!(r(serde_json::json!({"result": {"abstract": ""}})), None);
     }
 
     #[tokio::test]

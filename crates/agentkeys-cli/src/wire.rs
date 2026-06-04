@@ -490,7 +490,32 @@ fn adapter_for(runtime: &str) -> Result<Box<dyn RuntimeAdapter>> {
 }
 
 /// Drive `agentkeys wire <runtime>`. Returns the multi-line operator log.
-pub fn cmd_wire(runtime: &str, req: WireRequest) -> Result<String> {
+pub fn cmd_wire(runtime: &str, mut req: WireRequest) -> Result<String> {
+    // /codex:adversarial-review: never bake AGENTKEYS_MEMORY_ENGINE=openviking
+    // WITHOUT an endpoint — at runtime OpenVikingClient::from_env() would return
+    // None and the hook would silently fall back to lexical, defeating the engine
+    // the operator asked for. Default from OPENVIKING_ENDPOINT if exported; else
+    // hard-error with the fix.
+    if req.memory_engine.eq_ignore_ascii_case("openviking") {
+        let have_endpoint = req
+            .memory_engine_endpoint
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !have_endpoint {
+            let env_ep = std::env::var("OPENVIKING_ENDPOINT").unwrap_or_default();
+            if env_ep.trim().is_empty() {
+                anyhow::bail!(
+                    "wire --memory-engine openviking needs an endpoint, but neither \
+                     --openviking-endpoint nor OPENVIKING_ENDPOINT is set. Without it the baked \
+                     hook cannot reach OpenViking and would silently fall back to the lexical \
+                     engine — pass --openviking-endpoint http://<host>:1933 (or export \
+                     OPENVIKING_ENDPOINT)."
+                );
+            }
+            req.memory_engine_endpoint = Some(env_ep);
+        }
+    }
     let adapter = adapter_for(runtime)?;
     let bin = agentkeys_bin();
     let mut out = Vec::new();
@@ -557,6 +582,24 @@ mod tests {
             memory_engine_api_key: None,
             check_only: false,
         }
+    }
+
+    #[test]
+    fn wire_rejects_openviking_without_endpoint() {
+        // /codex:adversarial-review: engine=openviking with no endpoint (and no
+        // OPENVIKING_ENDPOINT) must hard-error, not bake a hook that silently
+        // falls back to lexical. The guard runs before runtime detection, so this
+        // holds whether or not a runtime is installed.
+        std::env::remove_var("OPENVIKING_ENDPOINT");
+        let mut r = req();
+        r.memory_engine = "openviking".into();
+        r.memory_engine_endpoint = None;
+        let err = cmd_wire("hermes", r).expect_err("must reject openviking without an endpoint");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("openviking") && msg.contains("endpoint"),
+            "expected an actionable openviking-endpoint error, got: {msg}"
+        );
     }
 
     #[test]

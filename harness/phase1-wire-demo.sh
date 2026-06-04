@@ -1222,20 +1222,33 @@ phase_openviking() {
     return
   fi
 
-  # STRICT mode (AGENTKEYS_MEMORY_ENGINE_STRICT) disables the lexical fallback,
-  # so a non-empty .context here can ONLY have come from OpenViking's gate-matched
-  # ranking — not the fallback masquerading as it. (A plain run would go green via
-  # fallback even with OpenViking broken; that is the trap codex flagged.) The
-  # deep proof + direct /search/find assertion live in openviking-sandbox-setup.sh
-  # Phase 7 / docs/operator-runbook-openviking.md; OV.3 here is the lighter gate.
+  # OV.3a — does OpenViking ITSELF rank the query? Direct /search/find (inside
+  # the sandbox, like OV.1), counting hits across all documented arrays. Zero
+  # hits ⇒ nothing mirrored for this query ⇒ a setup-not-done SKIP (legit per
+  # codex: reserve skip for server-absent / setup-not-requested). One+ hits ⇒
+  # OpenViking CAN rank, so the strict hook MUST deliver or it is a real bug.
+  local q='what about my peanut allergy?'
+  local find_n
+  find_n="$(sbx_exec "curl -sS -m 8 -X POST $ovurl/api/v1/search/find -H 'content-type: application/json' -d '{\"query\":\"$q\",\"top_k\":5}' 2>/dev/null | jq '[.result.memories[]?, .result.results[]?, .result.skills[]?] | length' 2>/dev/null")"
+  find_n="$(printf '%s' "$find_n" | tr -dc '0-9')"; [[ -n "$find_n" ]] || find_n=0
+  if [[ "$find_n" -lt 1 ]]; then
+    skip "OV.3 query inject (strict)" "OpenViking has no ranking for \"$q\" ($find_n hits) — $MEMORY_NS not mirrored into OpenViking, or its content doesn't match this query. Mirror it first (runbook steps 4-5); the deep, self-contained proof is harness/openviking-sandbox-setup.sh Phase 7."
+    return
+  fi
+  ok "OV.3a openviking-find" "OpenViking ranks \"$q\" → $find_n hit(s) direct from /search/find"
+
+  # OV.3b — STRICT mode (AGENTKEYS_MEMORY_ENGINE_STRICT) disables the lexical
+  # fallback, so a non-empty .context can ONLY come from OpenViking's gate-matched
+  # ranking — not the fallback masquerading as it. 3a proved OpenViking ranks this
+  # query, so an EMPTY strict injection here is a real integration bug (adapter /
+  # gate text-match), NOT a setup gap → FAIL (this is the false-green codex flagged;
+  # a non-strict run would have gone green via fallback even with OpenViking broken).
   local out
-  out="$(sbx_exec "printf '%s' '{\"query\":\"what about my peanut allergy?\"}' | AGENTKEYS_MEMORY_ENGINE_STRICT=1 bash \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh 2>/dev/null")"
+  out="$(sbx_exec "printf '%s' '{\"query\":\"$q\"}' | AGENTKEYS_MEMORY_ENGINE_STRICT=1 bash \$HOME/.hermes/agent-hooks/agentkeys-prellm-memory-inject.sh 2>/dev/null")"
   if echo "$out" | jq -e '.context' >/dev/null 2>&1; then
     ok "OV.3 query inject (strict)" "OpenViking-ranked, NO fallback → $(echo "$out" | jq -r '.context' | tr '\n' ' ' | cut -c1-46)…"
-  elif [[ "$(echo "$out" | tr -d '[:space:]')" == "{}" ]]; then
-    skip "OV.3 query inject (strict)" "empty {} in strict mode — OpenViking produced no gate-matched ranking (fallback disabled). Mirror the namespace lines into OpenViking + seed $MEMORY_NS (runbook steps 4-5); deep proof: harness/openviking-sandbox-setup.sh / docs/operator-runbook-openviking.md"
   else
-    fail "OV.3 query inject (strict)" "unexpected: $(echo "$out" | tr '\n' ' ' | cut -c1-100)"
+    fail "OV.3 query inject (strict)" "OpenViking ranks \"$q\" ($find_n direct hits) but the STRICT hook injected nothing (fallback disabled) — gate text-match / adapter failure between /search/find and the hook. Raw: $(echo "$out" | tr '\n' ' ' | cut -c1-100)"
   fi
 }
 

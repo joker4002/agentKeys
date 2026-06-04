@@ -253,7 +253,12 @@ pub async fn memory_inject(
     // rule for the default engines is preserved). When OpenViking is
     // unconfigured / has no query / errors, we fall back to a deterministic
     // engine, so OpenViking is never load-bearing for availability.
-    let openviking = if engine_name.trim().eq_ignore_ascii_case("openviking") {
+    // Whether OpenViking was *requested* (the engine name) — distinct from
+    // whether a client was actually built (which also needs OPENVIKING_ENDPOINT).
+    // The strict proof keys off the REQUEST so a misconfigured hook (engine set,
+    // endpoint missing) can't fall through to a vacuous non-empty injection.
+    let openviking_requested = engine_name.trim().eq_ignore_ascii_case("openviking");
+    let openviking = if openviking_requested {
         agentkeys_memory_openviking::OpenVikingClient::from_env()
     } else {
         None
@@ -269,13 +274,15 @@ pub async fn memory_inject(
         agentkeys_memory_engine::engine_from_env()
     };
 
-    // Test/proof-only (`/codex:adversarial-review`): with the openviking engine,
-    // a turn where OpenViking produces no gate-matched ranking injects NOTHING
-    // rather than silently falling back to lexical — so a harness can PROVE the
-    // OpenViking path ran (a non-empty injection ⇒ OpenViking, not the fallback
-    // masquerading as it). Unset in production wiring, so OpenViking stays
-    // non-load-bearing for availability (arch.md §22).
-    let strict_openviking = openviking.is_some() && env_flag("AGENTKEYS_MEMORY_ENGINE_STRICT");
+    // Test/proof-only (`/codex:adversarial-review`): when OpenViking is the
+    // REQUESTED engine, a turn that produces no gate-matched ranking injects
+    // NOTHING rather than silently falling back to lexical — so a harness can
+    // PROVE the OpenViking path ran (a non-empty injection ⇒ OpenViking, not the
+    // fallback masquerading as it). Keyed on the REQUEST, not on whether a client
+    // was built, so a misconfigured hook (engine=openviking but OPENVIKING_ENDPOINT
+    // unset → no client) still can't pass via fallback. Unset in production
+    // wiring, so OpenViking stays non-load-bearing for availability (arch.md §22).
+    let strict_openviking = openviking_requested && env_flag("AGENTKEYS_MEMORY_ENGINE_STRICT");
 
     let mut chunks = Vec::new();
     for ns in namespaces
@@ -322,10 +329,15 @@ pub async fn memory_inject(
                         Some(_) => {}
                         None => {
                             eprintln!(
-                                "[agentkeys hook memory-inject] ns={ns}: OpenViking produced no \
-                                 gate-matched ranking (query={query:?}); \
+                                "[agentkeys hook memory-inject] ns={ns}: no OpenViking \
+                                 gate-matched ranking (query={query:?}, client={}); \
                                  AGENTKEYS_MEMORY_ENGINE_STRICT on — NOT falling back to lexical, \
-                                 injecting nothing for this namespace"
+                                 injecting nothing for this namespace",
+                                if openviking.is_some() {
+                                    "built"
+                                } else {
+                                    "absent (OPENVIKING_ENDPOINT unset?)"
+                                }
                             );
                         }
                     }
