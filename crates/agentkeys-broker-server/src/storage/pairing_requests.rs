@@ -186,36 +186,46 @@ impl PairingRequestStore {
                 ON pairing_requests(expires_at);",
         )
         .map_err(|e| BrokerError::Internal(format!("init pairing_requests schema: {e}")))?;
-        // Migrate a pre-existing deployed DB: the CREATE TABLE above only adds
-        // `minted_at` to a FRESH DB. Run the ALTER + legacy backfill as ONE atomic
-        // transaction (SQLite has transactional DDL) so a crash / disk-full between
-        // them can't leave the column added but un-backfilled — a rollback undoes
-        // the ALTER and the next startup re-runs the whole unit. Driven off a
-        // pragma check (not the ALTER error) so "column present" reliably implies
-        // the backfill already committed.
-        if !Self::has_minted_at_column(&conn)? {
+        // Migrate a pre-existing deployed DB to the one-time-retrieve schema. Gate
+        // the WHOLE migration on `PRAGMA user_version` — a DURABLE, transaction-
+        // committed marker — NOT mere column presence: a DB could have `minted_at`
+        // without a committed backfill (e.g. a crashed earlier migration), and
+        // column presence alone would wrongly take the skip path and leave legacy
+        // claimed rows replay-mintable. While user_version < 1 the broker has never
+        // served post-migration, so EVERY claimed row with minted_at NULL is
+        // genuinely legacy and is conservatively marked consumed (it re-pairs
+        // instead of replay-minting J1_agent). The conditional ALTER + backfill +
+        // version bump COMMIT as one transaction (SQLite has transactional DDL +
+        // header writes), so the marker is set IFF the backfill committed; any
+        // failure rolls back and the next startup re-runs the whole unit.
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|e| {
+                BrokerError::Internal(format!("read pairing_requests user_version: {e}"))
+            })?;
+        if version < 1 {
             let tx = conn
                 .transaction()
                 .map_err(|e| BrokerError::Internal(format!("begin minted_at migration: {e}")))?;
+            if !Self::has_minted_at_column(&tx)? {
+                tx.execute(
+                    "ALTER TABLE pairing_requests ADD COLUMN minted_at INTEGER",
+                    [],
+                )
+                .map_err(|e| BrokerError::Internal(format!("add minted_at column: {e}")))?;
+            }
             tx.execute(
-                "ALTER TABLE pairing_requests ADD COLUMN minted_at INTEGER",
-                [],
-            )
-            .map_err(|e| BrokerError::Internal(format!("add minted_at column: {e}")))?;
-            // Legacy claimed rows may have minted J1_agent before this patch → mark
-            // them consumed so they re-pair instead of replay-minting after the
-            // upgrade. Fresh (post-migration) claims keep minted_at NULL → mint once.
-            tx.execute(
-                "UPDATE pairing_requests SET minted_at = claimed_at WHERE claimed_at IS NOT NULL",
+                "UPDATE pairing_requests SET minted_at = claimed_at \
+                 WHERE claimed_at IS NOT NULL AND minted_at IS NULL",
                 [],
             )
             .map_err(|e| BrokerError::Internal(format!("backfill minted_at on migration: {e}")))?;
+            tx.pragma_update(None, "user_version", 1i64)
+                .map_err(|e| BrokerError::Internal(format!("set user_version: {e}")))?;
             tx.commit()
                 .map_err(|e| BrokerError::Internal(format!("commit minted_at migration: {e}")))?;
         }
-        // Defense-in-depth: the column MUST be present before serving (a partial
-        // migration rolled back above → fail loud rather than defer a schema error
-        // to the first poll()).
+        // Defense-in-depth: the column MUST be present before serving.
         if !Self::has_minted_at_column(&conn)? {
             return Err(BrokerError::Internal(
                 "pairing_requests is missing the minted_at column after migration".into(),
@@ -679,6 +689,49 @@ mod tests {
             PairingPoll::RetrieveExpired
         );
         drop(s2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn migration_repairs_column_present_without_backfill() {
+        // The exact state a CRASHED prior migration could leave: minted_at column
+        // already PRESENT, but a legacy claimed row still has minted_at NULL and
+        // user_version is still 0 (the backfill never committed). Column presence
+        // alone would wrongly skip the consume; gating on user_version<1 catches it.
+        let path = std::env::temp_dir().join(format!("akb-repair-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE pairing_requests (
+                    request_id TEXT PRIMARY KEY, pairing_code TEXT NOT NULL UNIQUE,
+                    device_pubkey TEXT NOT NULL, pop_sig TEXT NOT NULL,
+                    created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+                    claimed_at INTEGER, operator_omni TEXT, child_omni TEXT,
+                    label TEXT, requested_scope TEXT, bound_at INTEGER, minted_at INTEGER
+                 );",
+            )
+            .unwrap();
+            // Legacy claimed row with minted_at NULL; user_version left at 0.
+            conn.execute(
+                "INSERT INTO pairing_requests
+                    (request_id, pairing_code, device_pubkey, pop_sig, created_at,
+                     expires_at, claimed_at, operator_omni, child_omni, label, requested_scope)
+                 VALUES ('req-legacy','code-legacy','0xdev','0xpop',100,100000,1000,
+                         'op','child','agent-a','memory')",
+                [],
+            )
+            .unwrap();
+        }
+        // Open via the store → user_version (0) < 1 → migration repairs: ALTER is
+        // skipped (column present) but the backfill marks the legacy NULL row
+        // consumed, so it CANNOT replay-mint.
+        let s = PairingRequestStore::open(&path).unwrap();
+        assert_eq!(
+            s.poll("req-legacy", "0xdev", 1_100).unwrap(),
+            PairingPoll::RetrieveExpired
+        );
+        drop(s);
         let _ = std::fs::remove_file(&path);
     }
 
