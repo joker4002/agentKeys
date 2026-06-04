@@ -206,15 +206,15 @@ POST /v1/agents/pair/bind                  — P.2: master binds the sandbox-gen
   → 4xx { "error": "pop-sig-invalid" }             # the agent's proof-of-possession didn't verify
 
 POST /v1/agents/pair/approve-scope/begin   — P.3: build the K11 challenge for the scope grant
-  body: { "pair_id": "...", "services": ["travel"] }
+  body: { "pair_id": "...", "services": ["memory:travel"] }   # namespace-qualified memory:<ns> (arch.md §896, #177); bare "travel"/"memory" fails cap-mint
   → 200 { "challenge": "...", "assertion_id": "..." }   # reuses the /v1/k11/assert pattern
 POST /v1/agents/pair/approve-scope/submit  — P.3: submit Touch ID assertion → heima-scope-set --webauthn
   body: { "assertion_id": "...", "authenticatorData": "...", "clientDataJSON": "...", "signature": "..." }
-  → 200 { "tx_hash": "0x...", "granted": ["travel"] }
+  → 200 { "tx_hash": "0x...", "granted": ["memory:travel"] }
 
 POST /v1/agents/:id/seed-memory            — step 1.5: seed a fresh actor's empty namespace
-  body: { "namespace": "travel", "content": "..." }    # operator-supplied; optional
-  → 200 { "ok": true, "s3_key": "bots/<actor>/memory/..." }
+  body: { "namespace": "travel", "content": "..." }    # operator-supplied; optional (bare ns here; the worker signs it as service memory:<ns>)
+  → 200 { "ok": true, "s3_key": "bots/<actor>/memory/memory:travel.enc" }   # per-namespace object (arch.md §896)
 ```
 
 **Wire (Phase 2).** The hook scripts install into the *runtime's* config, which for a remote runtime lives in the sandbox — so the daemon drives `agentkeys wire` over the runtime's exec channel and reports the per-step `ok/skip/fail`.
@@ -236,12 +236,12 @@ POST /v1/agents/:id/unwire                 — remove the managed hooks block fr
 
 ```
 POST /v1/agents/:id/verify/memory-inject   — runs `hermes hooks test pre_llm_call` via the runtime's dispatcher
-  → 200 { "injected": true, "context": "## Memory: travel\nChengdu trip — …" }   # the authoritative Act-1 signal
+  → 200 { "injected": true, "context": "## Memory: travel\nChengdu trip — …" }   # the authoritative Act-1 signal; gate-bounded lines, engine-ranked per query (#177)
   → 200 { "injected": false, "reason": "mcp-unreachable" | "scope-missing" | "session-bad" }
 
 GET  /v1/agents/:id/guarantee-health       — the §2.2 health panel
   → 200 { "wired": "hermes 3/3", "mcp_reachable": true, "fail_closed_armed": true,
-          "last_check": {...}, "last_block": {...}, "last_memory_inject": {...}, "scope_on_chain": ["travel"] }
+          "last_check": {...}, "last_block": {...}, "last_memory_inject": {...}, "scope_on_chain": ["memory:travel"] }
 
 GET  /v1/audit/stream?hook=check|audit|memory-inject   — the existing SSE feed (PR-C), now hook-tagged
   # each event carries { hook: "pre_tool_call|post_tool_call|pre_llm_call", action: "check|audit|memory-inject",

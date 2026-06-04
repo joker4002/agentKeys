@@ -27,6 +27,10 @@ This directory contains the design. Implementation lands as separate PRs that re
 | [`input-discipline.md`](input-discipline.md) | Which inputs the operator types vs the system derives vs the system auto-generates. Resolves the operator-login-email vs agent-inbox-address distinction explicitly. |
 | [`data-model.md`](data-model.md) | The HTTP surface the daemon must expose for the UI to drive these flows. Concrete request/response shapes, persistence boundaries, what's local vs chain-anchored. |
 | [`deferred-and-followups.md`](deferred-and-followups.md) | What stays shell-only forever (operator power-user paths). Open questions for review. Implementation sequencing if approved. |
+| [`wire-real-paths.md`](wire-real-paths.md) | The "wire to real backends" implementation plan (W/X phases): replace stubs with real broker/worker/chain calls; the phone-first WASM-core path. |
+| [`wire-real-paths-security-review.md`](wire-real-paths-security-review.md) | Security review of the wire-real-paths plan (trust boundaries, bearer handling, CORS). |
+| [`issue-9step-flow.md`](issue-9step-flow.md) | The 9-step operator flow mapped to issues #149/#137/#138. |
+| [`web-wire-test-runbook.md`](web-wire-test-runbook.md) | **Test runbook**: how to exercise the web app against the live broker/workers/Heima, mirroring [`harness/phase1-wire-demo.sh`](../../../harness/phase1-wire-demo.sh). Honest map of what's UI-wired today (daemon mode: onboarding K11, memory plant/list, revoke, audit reads) vs the task-2 gaps (pairing / cap-mint / scope-grant / wallet-activation screens), with the on-chain/S3/CLI cross-checks. |
 
 ## How to read
 
