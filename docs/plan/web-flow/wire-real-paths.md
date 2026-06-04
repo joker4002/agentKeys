@@ -83,7 +83,7 @@ Audited from `apps/parent-control/app/_components/ceremony.tsx`, `lib/client/dae
 | Onboarding · "Generate K10" | progress-bar text | ❌ narration |
 | Onboarding · "Verify email" | `submitEmail` just advances the phase | ❌ narration — **no broker call**, no magic link |
 | Onboarding · "Bind passkey K11 · Touch ID" | `enrollK11Begin/Finish` → daemon `/v1/k11/enroll/*` → real `webauthn-rs` verify, stored in `RwLock` | ⚠️ **real WebAuthn**, daemon-only; **`chain_tx_hash=None`** (`ui_bridge.rs:376-378` TODO) |
-| Onboarding · "Derive wallet + SIWE → session" | progress-bar text | ❌ narration — no signer, no SIWE, no J1 |
+| Onboarding · "Activate managed wallet → session" | progress-bar text | ❌ narration — no signer, no managed-wallet attestation, no J1 |
 | Onboarding · "Register master device on chain" | progress-bar text + **mock txHash** | ❌ narration — no `registerFirstMasterDevice` |
 | "logged in" gate | `localStorage.ak_onboarded='1'` | ❌ local flag, not a session JWT |
 | Memory plant | `plantMemory` → daemon `/v1/master/memory/plant` → in-memory dedup map | ⚠️ real HTTP + real dedup, **in-memory only** — no cap-mint, no STS, no worker, no S3 |
@@ -107,7 +107,7 @@ Condensed from `phase1-wire-demo.sh` + helper scripts. **This is the call list t
 
 ### 3a. Master init / onboarding (arch §9 stages 0–4) — done by `scripts/setup-heima.sh` + CLI
 1. **Stage 1 — identity.** `agentkeys init --email <addr>` → broker `POST /v1/auth/email/request` → operator clicks magic link → CLI polls `GET /v1/auth/email/status/:request_id` → session JWT. *(arch §9 calls the broker output `binding_nonce`; the broker exposes it as the email-status / wallet-start nonce, not a literal `/v1/auth/bind` route.)*
-2. **Stage 3 — wallet + SIWE → J1.** `POST /v1/wallet/link` → `POST /v1/auth/wallet/start` (returns `siwe_message` + `nonce`) → sign EIP-191 → `POST /v1/auth/wallet/verify` → **J1** (`omni_account == operator_omni`).
+2. **Stage 3 — wallet + managed-wallet attestation → J1.** `POST /v1/wallet/link` → `POST /v1/auth/wallet/start` (returns `siwe_message` + `nonce`) → signer EIP-191-signs → `POST /v1/auth/wallet/verify` → **J1** (`omni_account == operator_omni`).
 3. **Stage 2 — K11 enroll.** `agentkeys k11 enroll --webauthn --rp-id <h> --operator-omni 0x<op>` → real WebAuthn create → `~/.agentkeys/k11/<omni>.json`.
 4. **Stage 4 — register master on chain.** `scripts/heima-device-register.sh` → `heima-register-first-master.sh` → `cast send <SidecarRegistry> registerFirstMasterDevice(...)` (first device: roles=7, no K11 sig).
 
@@ -180,7 +180,7 @@ Each row: **UI surface → daemon ui-bridge endpoint (from `data-model.md`) → 
 |---|---|---|---|
 | 1 identity | "Verify email" — real email entry → magic link | ✚ `POST /v1/auth/email/start`, ✚ `POST /v1/auth/email/verify`, ✚ `GET /v1/auth/email/status` (`data-model.md:77-97`) | broker email triad → session JWT + `binding_nonce` |
 | 2 binding | "Bind passkey K11 · Touch ID" (mid-ceremony) | ✔ `POST /v1/k11/enroll/{begin,finish}` | real WebAuthn; **the K11 pubkey also derives the `P256Account` address** (CREATE2 via `P256AccountFactory`, salt = passkey pubkey) — known pre-deploy (chain-plan E7) |
-| 3 wallet | "Derive wallet + SIWE → session" | ✚ `POST /v1/wallet/link` + wallet start/verify (fold into onboarding) | broker SIWE → **J1** (replaces the `localStorage` flag as the real session) |
+| 3 wallet | "Activate managed wallet → session" | ✚ `POST /v1/wallet/link` + wallet start/verify (fold into onboarding) | broker managed-wallet attestation → **J1** (replaces the `localStorage` flag as the real session) |
 | 4 chain | "Register master device on chain" | ✚ `POST /v1/onboarding/chain/register-master` | **one ERC-4337 UserOp** = `initCode` (factory-deploy the account) + `registerFirstMasterDevice(...)`, passkey-signed (§4.3); #166's self-attestation binds the deterministic account address. **This is chain-plan E7's "parent-control onboarding" binding** + one-time ~0.1 HEI ED funding. |
 | — | onboarding gate / resume | ✚ `GET /v1/onboarding/state` (`data-model.md:29-75`) | aggregate of local files + broker + chain reads; **replaces `ak_onboarded` localStorage** |
 
@@ -218,7 +218,7 @@ Replace the in-memory audit ring with real reads: `GET /v1/audit/recent` ← bro
 Mirrors `deferred-and-followups.md` Phases D–J and `issue-9step-flow.md` P2.1–P2.4; each phase is independently shippable and ends green on a harness check.
 
 - **W0 — daemon broker-client refactor.** Factor `proxy.rs` → `daemon::broker` shared client. No UI change. Unit-test against a mock broker. *(unblocks everything)*
-- **W1 — onboarding identity + session (§5a stages 1+3).** Email triad + SIWE → real J1; `GET /v1/onboarding/state`; drop `ak_onboarded`. Touch ID enroll already real. *(arch §9.1–9.3)*
+- **W1 — onboarding identity + session (§5a stages 1+3).** Email triad + managed-wallet attestation → real J1; `GET /v1/onboarding/state`; drop `ak_onboarded`. Touch ID enroll already real. *(arch §9.1–9.3)*
 - **W2 — master register on chain (§5a stage 4).** Build the onboarding **register-master UserOp** (`initCode` factory-deploy + `registerFirstMasterDevice`, passkey-signed per §4.3) → broker-gated bundler; `POST /v1/onboarding/chain/register-master`; un-stub `chain_tx_hash`. **This IS chain-plan E7** (the onboarding↔account binding the chain plan routes through #163). *(arch §9.4)*
 - **W3 — memory through the worker (§5c).** Rework plant/list to the real cap→STS→worker→S3 chain. *(highest "is it real?" payoff; coherent with the agent demo)*
 - **W4 — pairing (§5b).** Proxy the broker pairing endpoints + bind/grant chain writes (one K11). *(arch §10.2; reconcile per §7)*
@@ -333,7 +333,7 @@ The portable core (§0.5) compiles to WASM for the web host. **In scope:** the m
 
 **Concretely:**
 - **`agentkeys-core` carve-out (X0, prerequisite):** lift the master-plane functions into `agentkeys-core` with a host-agnostic API (no `axum` / daemon deps), so the daemon, WASM, and mobile-UniFFI shells all bind the same surface. `init_flow` already lives there — extend it with pairing + cap + onboarding-state.
-- **`wasm-bindgen` exports (X1):** email auth (`start`/`verify`/`status`), wallet SIWE (`start`/`verify`), pairing (`claim`/`pending`/`ack`), cap-mint, `onboarding/state` aggregation. Build a `pkg` via `wasm-pack`; smoke-test one call (email start) from a throwaway page.
+- **`wasm-bindgen` exports (X1):** email auth (`start`/`verify`/`status`), wallet attestation (`start`/`verify`), pairing (`claim`/`pending`/`ack`), cap-mint, `onboarding/state` aggregation. Build a `pkg` via `wasm-pack`; smoke-test one call (email start) from a throwaway page.
 - **`CoreBackend` (X2):** a new `AgentKeysClient` implementation (next to `empty`/`daemon`) that calls the WASM exports instead of HTTP-to-daemon. `NEXT_PUBLIC_AGENTKEYS_BACKEND=core`. The existing UI works unchanged — same interface.
 - **WebAuthn interop (X3):** the core asks the JS host to run `navigator.credentials.{create,get}`; the assertion flows back into the core (K11 enroll + assert).
 - **Chain-write submission (X4):** **ERC-4337, landed #171** — the core builds the UserOp + the JS host passkey-signs the `userOpHash` (`navigator.credentials.get`), then the daemon/broker relays it to the **broker-gated bundler** (`scripts/erc4337-bundler.sh`, unsafe-mode) or `EntryPoint.handleOps`. Reference signer: `harness/scripts/erc4337-webauthn-sign.py`; reference flow: `harness/erc4337-master-e8.sh` (passkey-only, green on Heima mainnet). The account/EntryPoint/factory/paymaster are **live** (#171 E1/E2/E6) — no longer gated.

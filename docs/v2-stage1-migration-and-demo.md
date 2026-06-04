@@ -333,7 +333,7 @@ If the curl errors or the decimal doesn't match the profile's `chain_id`, fix th
 | Component | Source | Stage 1 status |
 |---|---|---|
 | Broker host (`broker.<zone>` + signer-only `signer.<zone>`, nginx, certbot, systemd units) | Stage 7 demo §0 prereqs | **Inherited unchanged.** Skip ahead to §0 of this doc to verify it's up. |
-| `agentkeys init --email` / `--oauth2-google` identity ceremony + SIWE round-trip | Stage 7 demo §1, §2 | **Inherited with an addition** — stage 1 inserts the WebAuthn binding ceremony (K11) between identity verify and SIWE. See §1 below. |
+| `agentkeys init --email` / `--oauth2-google` identity ceremony + managed-wallet attestation | Stage 7 demo §1, §2 | **Inherited with an addition** — stage 1 inserts the WebAuthn binding ceremony (K11) between identity verify and the managed-wallet attestation. See §1 below. |
 | AWS prereqs (OIDC provider, `agentkeys-data-role` trust policy, bucket policy with PrincipalTag isolation) | [cloud-bootstrap.md](cloud-bootstrap.md) §3-§4 | **Inherited with a one-line policy change**: PrincipalTag key is `agentkeys_actor_omni` (was `agentkeys_user_wallet`) and the resource path keys on `bots/<actor_omni_hex>/` (was `bots/<wallet>/`). See §3 below. |
 | `--credential-backend=s3 --envelope-version=v2` writing to `bots/<actor_omni_hex>/credentials/<service>.enc` | PR #87 + the stage-1-step-1 commit on this branch | **Live now** — works against the existing S3 backend; no chain or sidecar required. See §4 below. |
 | Sidecar daemon (localhost proxy + cap-token cache + host-local policy) | Stage 1 new | **In progress** (see §6 below). Today's stub error from `--credential-backend=sidecar` is the placeholder until the daemon ships. |
@@ -518,7 +518,7 @@ sequenceDiagram
   CLI->>Brk: POST /v1/auth/bind/<request_id> {attestation, D_pub}
   Brk-->>CLI: J0 (claims: device_pubkey, webauthn_cred_id)
 
-  Note over CLI,Sig: Stage 3 — derive + link + SIWE → J1 (inherited)
+  Note over CLI,Sig: Stage 3 — derive + link + managed-wallet attestation → J1 (inherited)
   CLI->>Sig: POST /dev/derive-address {O_master} (Bearer J0)
   Sig-->>CLI: {address: initial_master_wallet}
   CLI->>Brk: POST /v1/wallet/link {evm, initial_master_wallet}
@@ -549,11 +549,11 @@ bash scripts/agentkeys-init-email-demo.sh --session-id alice
 # → mints J1 at ~/.agentkeys/alice/session.json
 ```
 
-The stage-7 demo's §1-§2 walk through magic-link click, signer-derived wallet, SIWE-verify, and J1 persistence — none of which change in stage 1.
+The stage-7 demo's §1-§2 walk through magic-link click, signer-derived wallet, the managed-wallet attestation (SIWE-verify), and J1 persistence — none of which change in stage 1.
 
 ### §1.2 — Stage 2: WebAuthn enrollment (NEW)
 
-Stage 1 inserts a WebAuthn binding ceremony between identity-verify and SIWE. The CLI prompts the platform authenticator (Touch ID on macOS, Hello on Windows, StrongBox on Android via mobile companion app) to generate K11 and bind D_pub atomically inside the WebAuthn challenge.
+Stage 1 inserts a WebAuthn binding ceremony between identity-verify and the managed-wallet attestation. The CLI prompts the platform authenticator (Touch ID on macOS, Hello on Windows, StrongBox on Android via mobile companion app) to generate K11 and bind D_pub atomically inside the WebAuthn challenge.
 
 ```bash
 # === ON OPERATOR WORKSTATION ===
@@ -586,7 +586,7 @@ agentkeys init --email demo-1@bots.litentry.org
 # === ON OPERATOR WORKSTATION ===
 agentkeys --session-id alice whoami
 # session_wallet:        0x5a0c3df691d55008d88a17e06710b6b28718ec4d
-# agentkeys_actor_omni:  3a4f...   <-- Layer 1 anchor; frozen at first SIWE
+# agentkeys_actor_omni:  3a4f...   <-- Layer 1 anchor; frozen at first managed-wallet attestation
 # scope:                 (none — master session)
 
 # Persist actor_omni for the rest of the demo
