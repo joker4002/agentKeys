@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::{
     auth::{extract_bearer_token, is_owner_of, now_secs, validate_session},
     error::{AppError, AppResult},
-    state::SharedState,
+    state::{SharedState, TokenBucket},
 };
 use agentkeys_types::Scope;
 
@@ -80,6 +80,35 @@ pub struct ReadCredentialQuery {
     pub service: String,
 }
 
+fn consume_read_token(
+    state: &SharedState,
+    session_token: &str,
+    read_rate_limit: u32,
+) -> Result<u32, crate::state::RateLimitRejection> {
+    let mut buckets = state.read_buckets.lock().unwrap();
+    let bucket = buckets
+        .entry(session_token.to_string())
+        .or_insert_with(|| TokenBucket::new(read_rate_limit));
+    bucket.consume()
+}
+
+fn audit_rate_limit_rejection(
+    state: &SharedState,
+    session_token: &str,
+    agent_id: &str,
+    service: &str,
+    attempted_rate: u32,
+) -> AppResult<()> {
+    let db = state.db.lock().unwrap();
+    db.execute(
+        "INSERT INTO audit_events (action, session_id, agent_id, service, timestamp, attempted_rate)
+         VALUES ('rate_limit_exceeded', ?1, ?2, ?3, ?4, ?5)",
+        params![session_token, agent_id, service, now_secs(), attempted_rate],
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    Ok(())
+}
+
 pub async fn read_credential(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -95,6 +124,20 @@ pub async fn read_credential(
 
     let agent_id = &query.agent_id;
     let service = &query.service;
+
+    if let Err(rejection) = consume_read_token(&state, &session.token, session.read_rate_limit) {
+        audit_rate_limit_rejection(
+            &state,
+            &session.token,
+            agent_id,
+            service,
+            rejection.attempted_rate,
+        )?;
+        return Err(AppError::rate_limit_exceeded(
+            session.read_rate_limit,
+            rejection.retry_after_secs,
+        ));
+    }
 
     let db = state.db.lock().unwrap();
 

@@ -21,7 +21,18 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             scope_json TEXT,
             created_at INTEGER NOT NULL,
             ttl_seconds INTEGER NOT NULL,
+            read_rate_limit INTEGER NOT NULL DEFAULT 100,
             revoked INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_id TEXT,
+            service TEXT,
+            timestamp INTEGER NOT NULL,
+            attempted_rate INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS credentials (
@@ -88,5 +99,11 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_inbox_msgs_addr_time ON inbox_messages(address, received_at DESC);
         ",
-    )
+    )?;
+
+    let _ = conn.execute(
+        "ALTER TABLE sessions ADD COLUMN read_rate_limit INTEGER NOT NULL DEFAULT 100",
+        [],
+    );
+    Ok(())
 }

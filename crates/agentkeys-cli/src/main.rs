@@ -2,7 +2,7 @@ use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init_with_force,
     cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
     cmd_signer_preview_7730, cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown,
-    cmd_whoami, CommandContext, CredentialBackendKind, EnvelopeVersionFlag, InitMode,
+    cmd_usage, cmd_whoami, CommandContext, CredentialBackendKind, EnvelopeVersionFlag, InitMode,
 };
 
 use clap::{Parser, Subcommand};
@@ -190,6 +190,15 @@ enum Commands {
     )]
     Teardown {
         #[arg(help = "Agent wallet address")]
+        agent: String,
+    },
+
+    #[command(
+        about = "Show credential-read usage events for an agent",
+        long_about = "List audit events for an agent, including rate_limit_exceeded rows emitted by the mock backend.\n\nExamples:\n  agentkeys usage 0xAGENT\n  agentkeys --json usage 0xAGENT"
+    )]
+    Usage {
+        #[arg(help = "Agent wallet address, alias, or email")]
         agent: String,
     },
 
@@ -1040,6 +1049,7 @@ async fn main() {
         Commands::Run { agent, env, cmd } => cmd_run(&ctx, agent.as_deref(), env, cmd).await,
         Commands::Revoke { agent } => cmd_revoke(&ctx, agent.as_deref()).await,
         Commands::Teardown { agent } => cmd_teardown(&ctx, agent).await,
+        Commands::Usage { agent } => cmd_usage(&ctx, agent).await,
         Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
         Commands::Scope {
             agent,

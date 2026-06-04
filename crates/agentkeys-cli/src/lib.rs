@@ -68,6 +68,16 @@ fn format_backend_error(err: &BackendError) -> String {
         BackendError::AuthFailed(msg) => {
             format!("Error: AUTH_FAILED\n  {}", msg)
         }
+        BackendError::RateLimitExceeded {
+            session_wallet,
+            read_rate_limit,
+            retry_after_secs,
+        } => {
+            let session = session_wallet.as_deref().unwrap_or("current session");
+            format!(
+                "Error: RATE_LIMIT. Session {session} has exceeded {read_rate_limit} reads/minute. Retry after {retry_after_secs} seconds."
+            )
+        }
         BackendError::Transport(msg) => {
             format!("Error: UNREACHABLE\n  Backend unreachable: {}", msg)
         }
@@ -77,6 +87,26 @@ fn format_backend_error(err: &BackendError) -> String {
 
 fn wrap_backend_error(err: BackendError) -> anyhow::Error {
     anyhow!("{}", format_backend_error(&err))
+}
+
+async fn read_credential_with_rate_limit_retry(
+    backend: &Arc<dyn CredentialBackend>,
+    session: &Session,
+    agent_id: &WalletAddress,
+    service: &ServiceName,
+) -> Result<Vec<u8>, BackendError> {
+    let mut attempts = 0u8;
+    loop {
+        match backend.read_credential(session, agent_id, service).await {
+            Err(BackendError::RateLimitExceeded {
+                retry_after_secs, ..
+            }) if attempts < 3 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(retry_after_secs)).await;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Which `CredentialBackend` impl `agentkeys` should route credential CRUD
@@ -867,8 +897,7 @@ pub async fn cmd_run(
     let mut credential_errors: Vec<String> = Vec::new();
     for service in &services_to_try {
         let service_name = ServiceName(service.clone());
-        match backend
-            .read_credential(&session, &agent_id, &service_name)
+        match read_credential_with_rate_limit_retry(&backend, &session, &agent_id, &service_name)
             .await
         {
             Ok(bytes) => {
@@ -907,10 +936,10 @@ pub async fn cmd_run(
             cached.clone()
         } else {
             let service_name = ServiceName(service.to_string());
-            let bytes = backend
-                .read_credential(&session, &agent_id, &service_name)
-                .await
-                .map_err(wrap_backend_error)?;
+            let bytes =
+                read_credential_with_rate_limit_retry(&backend, &session, &agent_id, &service_name)
+                    .await
+                    .map_err(wrap_backend_error)?;
             let v = String::from_utf8_lossy(&bytes).to_string();
             fetched.insert(service.to_string(), v.clone());
             v
@@ -1037,6 +1066,75 @@ pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
         .map_err(wrap_backend_error)?;
 
     Ok(format!("Torn down agent={}", agent))
+}
+
+pub async fn cmd_usage(ctx: &CommandContext, agent: &str) -> Result<String> {
+    let session = ctx
+        .load_session()
+        .context("load session (run `agentkeys init` first)")?;
+    let id_backend = ctx.backend();
+    let agent_id = resolve_agent(&id_backend, &session, Some(agent))?;
+    let url = format!(
+        "{}/audit/events?agent_id={}",
+        ctx.backend_url.trim_end_matches('/'),
+        agent_id.0
+    );
+
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(&session.token)
+        .send()
+        .await
+        .map_err(|e| anyhow!("usage request failed: {e}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("usage response parse failed: {e}"))?;
+
+    if !status.is_success() {
+        let msg = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(anyhow!("usage request failed: HTTP {status}: {msg}"));
+    }
+
+    if ctx.json_output {
+        return Ok(serde_json::to_string_pretty(&body).unwrap());
+    }
+
+    let events = body
+        .get("events")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if events.is_empty() {
+        return Ok(format!("No usage events for {}", agent_id.0));
+    }
+
+    let mut lines = vec![format!(
+        "Usage events for {}\nACTION\tSERVICE\tTIMESTAMP\tATTEMPTED_RATE",
+        agent_id.0
+    )];
+    for event in events {
+        let action = event.get("action").and_then(|v| v.as_str()).unwrap_or("-");
+        let service = event.get("service").and_then(|v| v.as_str()).unwrap_or("-");
+        let timestamp = event
+            .get("timestamp")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let attempted_rate = event
+            .get("attempted_rate")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(format!(
+            "{action}\t{service}\t{timestamp}\t{attempted_rate}"
+        ));
+    }
+    Ok(lines.join("\n"))
 }
 
 pub async fn cmd_approve(ctx: &CommandContext, pair_code: &str, auto_yes: bool) -> Result<String> {

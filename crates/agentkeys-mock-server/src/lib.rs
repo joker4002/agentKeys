@@ -69,6 +69,7 @@ pub fn create_router(state: SharedState) -> Router {
         )
         // Shielding key
         .route("/shielding-key", get(handlers::audit::shielding_key))
+        .route("/audit/events", get(handlers::audit::audit_events))
         // Rendezvous
         .route(
             "/rendezvous/register",

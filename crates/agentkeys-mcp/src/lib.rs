@@ -30,6 +30,8 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 impl JsonRpcResponse {
@@ -49,6 +51,25 @@ impl JsonRpcResponse {
             error: Some(JsonRpcError {
                 code,
                 message: message.into(),
+                data: None,
+            }),
+            id,
+        }
+    }
+
+    pub fn error_with_data(
+        id: Option<Value>,
+        code: i64,
+        message: impl Into<String>,
+        data: Value,
+    ) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: Some(data),
             }),
             id,
         }
@@ -253,6 +274,23 @@ impl McpHandler {
             Err(BackendError::AuthFailed(msg)) => {
                 JsonRpcResponse::error(id, -32603, format!("DENIED: {msg}"))
             }
+            Err(BackendError::RateLimitExceeded {
+                read_rate_limit,
+                retry_after_secs,
+                ..
+            }) => {
+                emit_rate_limit_audit_line(&self.session, &self.agent_id, &service.0);
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32603,
+                    "rate_limit_exceeded",
+                    json!({
+                        "code": "rate_limit_exceeded",
+                        "retry_after_secs": retry_after_secs,
+                        "read_rate_limit": read_rate_limit,
+                    }),
+                )
+            }
             Err(e) => JsonRpcResponse::error(id, -32603, e.to_string()),
         }
     }
@@ -360,6 +398,24 @@ impl McpHandler {
             }
         }
     }
+}
+
+fn emit_rate_limit_audit_line(session: &Session, agent_id: &WalletAddress, service: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    eprintln!(
+        "{}",
+        json!({
+            "ts": ts,
+            "action": "rate_limit_exceeded",
+            "session_id": session.token,
+            "agent_id": agent_id.0,
+            "service": service,
+            "source": "agentkeys-daemon",
+        })
+    );
 }
 
 impl McpHandler {

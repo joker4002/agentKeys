@@ -148,6 +148,38 @@ async fn create_test_session(app: Router) -> (String, String, Router) {
     (session, wallet, app)
 }
 
+async fn create_test_session_with_limit(
+    app: Router,
+    read_rate_limit: u32,
+) -> (String, String, Router) {
+    let (status, json) = post_json(
+        app.clone(),
+        "/session/create",
+        json!({
+            "auth_token": format!("test-token-limit-{read_rate_limit}"),
+            "read_rate_limit": read_rate_limit,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create session failed: {json}");
+    let session = json["session"].as_str().unwrap().to_string();
+    let wallet = json["wallet"].as_str().unwrap().to_string();
+    (session, wallet, app)
+}
+
+async fn store_test_credential(app: Router, session: &str, wallet: &str, service: &str) {
+    use base64::Engine;
+    let ct = base64::engine::general_purpose::STANDARD.encode(b"secret");
+    let (status, json) = post_json_auth(
+        app,
+        "/credential/store",
+        session,
+        json!({ "agent_id": wallet, "service": service, "ciphertext": ct }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "store credential failed: {json}");
+}
+
 fn make_fake_pubkey_b64() -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(&[0u8; 32])
@@ -381,6 +413,162 @@ async fn credential_read_not_provisioned() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn credential_rate_limit_default_100_per_minute() {
+    let app = setup();
+    let (session, wallet, app) = create_test_session(app).await;
+    store_test_credential(app.clone(), &session, &wallet, "openai").await;
+
+    for i in 0..100 {
+        let (status, json) = get_json_auth(
+            app.clone(),
+            &format!("/credential/read?agent_id={wallet}&service=openai"),
+            &session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "read {i} failed: {json}");
+    }
+
+    let (status, json) = get_json_auth(
+        app,
+        &format!("/credential/read?agent_id={wallet}&service=openai"),
+        &session,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{json}");
+    assert_eq!(json["code"], "rate_limit_exceeded");
+    assert!(json["retry_after_secs"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn credential_rate_limit_refills_linearly() {
+    let app = setup();
+    let (session, wallet, app) = create_test_session(app).await;
+    store_test_credential(app.clone(), &session, &wallet, "openai").await;
+
+    for _ in 0..100 {
+        let (status, json) = get_json_auth(
+            app.clone(),
+            &format!("/credential/read?agent_id={wallet}&service=openai"),
+            &session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+
+    let (status, _) = get_json_auth(
+        app.clone(),
+        &format!("/credential/read?agent_id={wallet}&service=openai"),
+        &session,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(6100)).await;
+
+    for i in 0..10 {
+        let (status, json) = get_json_auth(
+            app.clone(),
+            &format!("/credential/read?agent_id={wallet}&service=openai"),
+            &session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "refill read {i} failed: {json}");
+    }
+}
+
+#[tokio::test]
+async fn credential_rate_limit_per_session_not_global() {
+    let app = setup();
+    let (session_a, wallet_a, app) = create_test_session_with_limit(app, 3).await;
+    let (session_b, wallet_b, app) = create_test_session_with_limit(app, 3).await;
+    store_test_credential(app.clone(), &session_a, &wallet_a, "openai").await;
+    store_test_credential(app.clone(), &session_b, &wallet_b, "openai").await;
+
+    for _ in 0..3 {
+        let (status, json) = get_json_auth(
+            app.clone(),
+            &format!("/credential/read?agent_id={wallet_a}&service=openai"),
+            &session_a,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+    let (status_a, _) = get_json_auth(
+        app.clone(),
+        &format!("/credential/read?agent_id={wallet_a}&service=openai"),
+        &session_a,
+    )
+    .await;
+    assert_eq!(status_a, StatusCode::TOO_MANY_REQUESTS);
+
+    for i in 0..3 {
+        let (status, json) = get_json_auth(
+            app.clone(),
+            &format!("/credential/read?agent_id={wallet_b}&service=openai"),
+            &session_b,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "session B read {i} failed: {json}");
+    }
+}
+
+#[tokio::test]
+async fn credential_rate_limit_configurable_at_creation() {
+    let app = setup();
+    let (session, wallet, app) = create_test_session_with_limit(app, 500).await;
+    store_test_credential(app.clone(), &session, &wallet, "openai").await;
+
+    for i in 0..500 {
+        let (status, json) = get_json_auth(
+            app.clone(),
+            &format!("/credential/read?agent_id={wallet}&service=openai"),
+            &session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "read {i} failed: {json}");
+    }
+}
+
+#[tokio::test]
+async fn credential_rate_limit_emits_audit_event() {
+    let (app, state) = setup_with_state();
+    let (session, wallet, app) = create_test_session_with_limit(app, 1).await;
+    store_test_credential(app.clone(), &session, &wallet, "openai").await;
+
+    let (status, _) = get_json_auth(
+        app.clone(),
+        &format!("/credential/read?agent_id={wallet}&service=openai"),
+        &session,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, json) = get_json_auth(
+        app.clone(),
+        &format!("/credential/read?agent_id={wallet}&service=openai"),
+        &session,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{json}");
+
+    let action: String = state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT action FROM audit_events WHERE session_id = ?1 AND service = 'openai'",
+            rusqlite::params![session],
+            |row| row.get(0),
+        )
+        .expect("audit row");
+    assert_eq!(action, "rate_limit_exceeded");
+
+    let (usage_status, usage_json) =
+        get_json_auth(app, &format!("/audit/events?agent_id={wallet}"), &session).await;
+    assert_eq!(usage_status, StatusCode::OK, "{usage_json}");
+    assert_eq!(usage_json["events"][0]["action"], "rate_limit_exceeded");
 }
 
 // ---------------------------------------------------------------------------

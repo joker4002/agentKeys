@@ -18,6 +18,12 @@ pub enum BackendError {
     AlreadyConsumed,
     #[error("expired")]
     Expired,
+    #[error("rate limit exceeded: retry after {retry_after_secs}s")]
+    RateLimitExceeded {
+        session_wallet: Option<String>,
+        read_rate_limit: u32,
+        retry_after_secs: u64,
+    },
     #[error("agent not found: {0}")]
     AgentNotFound(String),
     #[error("transport error: {0}")]

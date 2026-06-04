@@ -124,6 +124,11 @@ impl InProcessBackend {
                 404 => Err(BackendError::NotFound(msg)),
                 409 => Err(BackendError::AlreadyConsumed),
                 410 => Err(BackendError::Expired),
+                429 => Err(BackendError::RateLimitExceeded {
+                    session_wallet: None,
+                    read_rate_limit: json_body["read_rate_limit"].as_u64().unwrap_or(100) as u32,
+                    retry_after_secs: json_body["retry_after_secs"].as_u64().unwrap_or(1),
+                }),
                 _ => Err(BackendError::Transport(format!("HTTP {}: {}", status, msg))),
             }
         }

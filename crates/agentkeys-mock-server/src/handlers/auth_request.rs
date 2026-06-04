@@ -13,7 +13,7 @@ use tokio::time::sleep;
 use crate::{
     auth::{extract_bearer_token, generate_nonce, generate_token, now_secs, validate_session},
     error::{AppError, AppResult},
-    state::SharedState,
+    state::{SharedState, DEFAULT_READ_RATE_LIMIT_PER_MINUTE},
 };
 use agentkeys_core::otp::derive_otp;
 
@@ -55,9 +55,16 @@ fn mint_pair_session(
     .map_err(|e| AppError::internal(e.to_string()))?;
 
     db.execute(
-        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-         VALUES (?1, ?2, ?3, NULL, ?4, ?5, 0)",
-        params![child_token, child_wallet, parent_token, now, ttl],
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, read_rate_limit, revoked)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, 0)",
+        params![
+            child_token,
+            child_wallet,
+            parent_token,
+            now,
+            ttl,
+            DEFAULT_READ_RATE_LIMIT_PER_MINUTE
+        ],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
@@ -97,9 +104,17 @@ fn mint_recover_session(
         .flatten();
 
     db.execute(
-        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-        params![child_token, wallet, parent_token, scope_json, now, ttl],
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, read_rate_limit, revoked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+        params![
+            child_token,
+            wallet,
+            parent_token,
+            scope_json,
+            now,
+            ttl,
+            DEFAULT_READ_RATE_LIMIT_PER_MINUTE
+        ],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 

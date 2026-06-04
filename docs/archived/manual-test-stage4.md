@@ -158,6 +158,25 @@ cargo run -p agentkeys-cli -- --backend http://localhost:8090 usage $WALLET
 
 ---
 
+## Test 1a: Credential Read Rate Limit
+
+**What you're testing:** the mock backend enforces the default
+100 reads/minute/session cap at the credential-read layer and records a
+distinguishable `rate_limit_exceeded` usage row.
+
+```bash
+cd ~/Projects/agentkeys
+unset AGENTKEYS_SESSION_STORE
+
+cargo test -p agentkeys-mock-server credential_rate_limit -- --nocapture
+# Expected: all credential_rate_limit_* tests pass, including:
+# - 100 quick reads succeed and the 101st returns rate_limit_exceeded
+# - separate sessions have separate buckets
+# - /audit/events contains a rate_limit_exceeded row
+```
+
+---
+
 ## Test 1: Full Pair Flow (the core demo)
 
 **What you're testing:** a daemon starts cold, displays a pair code, you
@@ -841,4 +860,3 @@ security delete-generic-password -s agentkeys -a session 2>/dev/null || true
 ak-keychain-meta
 ls ~/.agentkeys/ 2>&1
 ```
-

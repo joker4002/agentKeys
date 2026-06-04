@@ -13,12 +13,13 @@ pub struct ValidatedSession {
     pub token: String,
     pub wallet_address: String,
     pub scope_json: Option<String>,
+    pub read_rate_limit: u32,
 }
 
 pub fn validate_session(state: &AppState, token: &str) -> Result<ValidatedSession, AppError> {
     let db = state.db.lock().unwrap();
     let result = db.query_row(
-        "SELECT token, wallet_address, scope_json, created_at, ttl_seconds, revoked
+        "SELECT token, wallet_address, scope_json, created_at, ttl_seconds, revoked, read_rate_limit
          FROM sessions WHERE token = ?1",
         params![token],
         |row| {
@@ -29,13 +30,14 @@ pub fn validate_session(state: &AppState, token: &str) -> Result<ValidatedSessio
                 row.get::<_, u64>(3)?,
                 row.get::<_, u64>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, u32>(6)?,
             ))
         },
     );
 
     match result {
         Err(_) => Err(AppError::unauthorized("session not found")),
-        Ok((token, wallet, scope_json, created_at, ttl_seconds, revoked)) => {
+        Ok((token, wallet, scope_json, created_at, ttl_seconds, revoked, read_rate_limit)) => {
             if revoked != 0 {
                 return Err(AppError::unauthorized("session revoked"));
             }
@@ -47,6 +49,7 @@ pub fn validate_session(state: &AppState, token: &str) -> Result<ValidatedSessio
                 token,
                 wallet_address: wallet,
                 scope_json,
+                read_rate_limit,
             })
         }
     }

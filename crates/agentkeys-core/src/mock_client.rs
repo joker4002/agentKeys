@@ -26,6 +26,13 @@ impl MockHttpClient {
     }
 
     async fn map_error(resp: reqwest::Response) -> BackendError {
+        Self::map_error_with_session(resp, None).await
+    }
+
+    async fn map_error_with_session(
+        resp: reqwest::Response,
+        session_wallet: Option<String>,
+    ) -> BackendError {
         let status = resp.status();
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         let msg = body["message"]
@@ -38,6 +45,11 @@ impl MockHttpClient {
             404 => BackendError::NotFound(msg),
             409 => BackendError::AlreadyConsumed,
             410 => BackendError::Expired,
+            429 => BackendError::RateLimitExceeded {
+                session_wallet,
+                read_rate_limit: body["read_rate_limit"].as_u64().unwrap_or(100) as u32,
+                retry_after_secs: body["retry_after_secs"].as_u64().unwrap_or(1),
+            },
             _ => BackendError::Transport(format!("HTTP {}: {}", status, msg)),
         }
     }
@@ -164,7 +176,7 @@ impl CredentialBackend for MockHttpClient {
             .map_err(|e| BackendError::Transport(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(Self::map_error(resp).await);
+            return Err(Self::map_error_with_session(resp, Some(session.wallet.0.clone())).await);
         }
         Ok(())
     }

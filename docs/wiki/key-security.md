@@ -217,6 +217,7 @@ Important distinction: this applies only to **user-stored credentials** (tier 2)
 A malicious process running as the user can call `agentkeys read --agent 0xAGENT anthropic` and exfiltrate the key. This is **mitigated, not eliminated**:
 
 - **Audit log** — every `read` writes a row to `audit_log`. See the five `INSERT INTO audit_log` sites in `crates/agentkeys-mock-server/src/handlers/credential.rs`. Compromise leaves a trail.
+- **Read rate limiting** — each session has a token bucket at the credential-read layer. The v0 mock default is 100 reads/minute/session, configurable at session creation up to a hard cap. Excess reads return `rate_limit_exceeded` with `retry_after_secs` and emit an audit/usage row, so abusive agents cannot spin unbounded credential fetches or downstream audit submissions.
 - **Session scope** — `session.scope.services` limits which services the session can read. A session scoped to `openrouter` cannot pull `anthropic`.
 - **TTL** — stolen sessions expire in 24h (v0 mock backend default); 30 days under the v0.1 AgentKeys policy on Heima.
 - **Revocation** — `agentkeys revoke` kills a session instantly on the v0 mock (SQLite flag flip); ~6s on v0.1 Heima (one block to update the on-chain revocation list). See [#17](https://github.com/litentry/agentKeys/issues/17) for the pending CLI fix.
@@ -529,4 +530,3 @@ Both should be fixed together. The right fix is to add `agentkeys whoami` (see h
 - `keyring` crate v2.3.3 — [https://docs.rs/keyring/2.3.3/](https://docs.rs/keyring/2.3.3/)
 - `security-framework::passwords::set_generic_password` — the source of the find-then-update double-prompt on macOS
 - Apple `security(1)` man page — the CLI `ak-keychain-show` shells out to
-

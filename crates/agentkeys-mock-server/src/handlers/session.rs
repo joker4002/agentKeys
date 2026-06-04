@@ -13,7 +13,7 @@ use crate::{
         validate_session,
     },
     error::{AppError, AppResult},
-    state::SharedState,
+    state::{SharedState, DEFAULT_READ_RATE_LIMIT_PER_MINUTE, MAX_READ_RATE_LIMIT_PER_MINUTE},
 };
 use agentkeys_types::Scope;
 use ed25519_dalek::SigningKey;
@@ -26,6 +26,26 @@ use ed25519_dalek::SigningKey;
 /// sessions may be introduced later as a defense-in-depth tweak, but they
 /// MUST align with the policy doc before being applied here.
 const DEFAULT_SESSION_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+fn read_rate_limit_from_body(body: &Value) -> AppResult<u32> {
+    match body.get("read_rate_limit") {
+        None | Some(Value::Null) => Ok(DEFAULT_READ_RATE_LIMIT_PER_MINUTE),
+        Some(v) => {
+            let limit = v
+                .as_u64()
+                .ok_or_else(|| AppError::bad_request("read_rate_limit must be an integer"))?;
+            if limit == 0 {
+                return Err(AppError::bad_request("read_rate_limit must be at least 1"));
+            }
+            if limit > MAX_READ_RATE_LIMIT_PER_MINUTE as u64 {
+                return Err(AppError::bad_request(format!(
+                    "read_rate_limit must be <= {MAX_READ_RATE_LIMIT_PER_MINUTE}"
+                )));
+            }
+            Ok(limit as u32)
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
@@ -51,6 +71,7 @@ pub async fn create_session(
     if auth_token.is_empty() || auth_token == "invalid" {
         return Err(AppError::unauthorized("invalid auth token"));
     }
+    let read_rate_limit = read_rate_limit_from_body(&body)?;
 
     let db = state.db.lock().unwrap();
     let now = now_secs();
@@ -68,9 +89,15 @@ pub async fn create_session(
         // Return existing session or create a new one for the existing account
         let session_token = generate_token();
         db.execute(
-            "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-             VALUES (?1, ?2, NULL, NULL, ?3, ?4, 0)",
-            params![session_token, wallet_address, now, DEFAULT_SESSION_TTL_SECONDS],
+            "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, read_rate_limit, revoked)
+             VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, 0)",
+            params![
+                session_token,
+                wallet_address,
+                now,
+                DEFAULT_SESSION_TTL_SECONDS,
+                read_rate_limit
+            ],
         )
         .map_err(|e| AppError::internal(e.to_string()))?;
         return Ok(Json(CreateSessionResponse {
@@ -101,9 +128,15 @@ pub async fn create_session(
 
     let session_token = generate_token();
     db.execute(
-        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-         VALUES (?1, ?2, NULL, NULL, ?3, ?4, 0)",
-        params![session_token, wallet_address, now, DEFAULT_SESSION_TTL_SECONDS],
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, read_rate_limit, revoked)
+         VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, 0)",
+        params![
+            session_token,
+            wallet_address,
+            now,
+            DEFAULT_SESSION_TTL_SECONDS,
+            read_rate_limit
+        ],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
@@ -136,6 +169,7 @@ pub async fn create_child_session(
         .ok_or_else(|| AppError::unauthorized("missing Authorization header"))?;
 
     let parent = validate_session(&state, token)?;
+    let read_rate_limit = read_rate_limit_from_body(&body)?;
 
     let scope: Scope = serde_json::from_value(
         body.get("scope")
@@ -170,9 +204,17 @@ pub async fn create_child_session(
     .map_err(|e| AppError::internal(e.to_string()))?;
 
     db.execute(
-        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-        params![child_token, child_wallet, parent.token, scope_json, now, DEFAULT_SESSION_TTL_SECONDS],
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, read_rate_limit, revoked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+        params![
+            child_token,
+            child_wallet,
+            parent.token,
+            scope_json,
+            now,
+            DEFAULT_SESSION_TTL_SECONDS,
+            read_rate_limit
+        ],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
@@ -239,9 +281,16 @@ pub async fn recover_session(
     let now = now_secs();
 
     db.execute(
-        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, revoked)
-         VALUES (?1, ?2, NULL, ?3, ?4, ?5, 0)",
-        params![session_token, wallet_address, scope_json, now, DEFAULT_SESSION_TTL_SECONDS],
+        "INSERT INTO sessions (token, wallet_address, parent_token, scope_json, created_at, ttl_seconds, read_rate_limit, revoked)
+         VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, 0)",
+        params![
+            session_token,
+            wallet_address,
+            scope_json,
+            now,
+            DEFAULT_SESSION_TTL_SECONDS,
+            DEFAULT_READ_RATE_LIMIT_PER_MINUTE
+        ],
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
 
