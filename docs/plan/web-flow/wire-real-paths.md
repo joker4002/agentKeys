@@ -203,7 +203,9 @@ The existing `App.tsx` pairing ceremony UI (CeremonyRunner) maps 1:1 onto these 
 | "plant prepared memory" | ✚ rework `POST /v1/master/memory/plant` to worker-backed (§4.4) | per entry: `/v1/cap/memory-put` → `/v1/mint-oidc-jwt` → STS → `POST {MEMORY_URL}/v1/memory/put` → S3 |
 | memory list / view | ✚ rework `GET /v1/master/memory` to worker-backed | `/v1/cap/memory-get` → STS → `POST {MEMORY_URL}/v1/memory/get` (metadata-only listing per spec) |
 
-The `lib/preparedMemory.ts` archive (the Chengdu trip + IAM-strategy items) is unchanged — it's the *payload*; only the transport flips from in-memory to the real worker. This makes the master-plant and the agent-side demo read **the same S3 bytes** (the coherent end-to-end story).
+The `lib/preparedMemory.ts` archive (the Chengdu trip + IAM-strategy items) is unchanged — it's the *payload*; only the transport flips from in-memory to the real worker.
+
+> **Per-actor correction (W3, [`w3-real-memory.md`](w3-real-memory.md) §1):** the master plants under **its own** `actor_omni` (`bots/<O_master>/memory/…`) — the cap-mint invariant `device.actor_omni == req.actor_omni` lets it write only its own prefix. An agent reads **its own** prefix (`bots/<O_agent>/…`); cross-actor reads are denied by the per-actor IAM PrincipalTag (issue #90). So the master-plant and an agent do **not** read the same S3 bytes. Giving an agent the master's curated memory is a write under the *agent's* cap at pairing time = **W4**, not a shared read.
 
 ### 5d. Mutations (scope / payment-cap / revoke)
 Extend the shipped `POST /v1/actors/:id/{scope,payment-cap,revoke}` (`data-model.md:249-261`) to take a `k11_assertion_id` and submit the real chain tx via §4.2/§4.3 instead of mutating the in-memory map.
