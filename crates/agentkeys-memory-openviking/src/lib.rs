@@ -153,9 +153,6 @@ struct FindHit {
     content: Option<String>,
     #[serde(default)]
     text: Option<String>,
-    /// L0 summary — BLANK in Skip-VLM mode (no model to generate it).
-    #[serde(default, rename = "abstract")]
-    abstract_: Option<String>,
     /// Stable id; often the only body a Skip-VLM hit carries. Resolved to the
     /// verbatim stored line via `content/read` when no inline body is present.
     #[serde(default)]
@@ -164,23 +161,15 @@ struct FindHit {
 
 impl FindHit {
     /// A non-blank VERBATIM inline body (content/text — what content/write stores).
-    /// Excludes `abstract`, which is an L0 SUMMARY that won't gate-match the stored
-    /// line; an abstract-only hit is resolved via content/read instead.
+    /// Excludes any `abstract` summary, which is NOT the stored line: an
+    /// abstract-only hit is resolved via content/read instead, and is never matched
+    /// directly (it could map onto the wrong authorized line).
     fn verbatim_inline_body(&self) -> Option<&str> {
         [self.content.as_deref(), self.text.as_deref()]
             .into_iter()
             .flatten()
             .map(str::trim)
             .find(|s| !s.is_empty())
-    }
-
-    /// The non-blank L0 `abstract`, if any — used only as a last resort when there
-    /// is no verbatim body AND no uri to resolve to the verbatim line.
-    fn abstract_body(&self) -> Option<&str> {
-        self.abstract_
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
     }
 }
 
@@ -369,10 +358,12 @@ impl OpenVikingClient {
                     Ok(line) => line,
                     Err(_) => continue,
                 }
-            } else if let Some(abstract_body) = hit.abstract_body() {
-                // No content/text and no uri — use the abstract as a last resort.
-                abstract_body.to_string()
             } else {
+                // No verbatim body (content/text) and no uri to resolve to the
+                // verbatim line — drop. An L0 `abstract` is a SUMMARY, not the stored
+                // line; matching it risks mapping onto the WRONG authorized line
+                // (e.g. a negation), so abstract-only hits are never matched
+                // (/codex:adversarial-review).
                 continue;
             };
             let text = text.trim();
@@ -380,13 +371,13 @@ impl OpenVikingClient {
                 continue;
             }
             // Gate-bound: only ever return lines that were in the authorized set.
+            // EXACT normalized match (case/whitespace-insensitive) — NOT substring
+            // containment, which could map a partial hit onto the WRONG authorized
+            // line (e.g. "allergic to peanuts" → "Not allergic to peanuts"). The
+            // verbatim line comes from content/read, so exact equality is the right,
+            // safe join (/codex:adversarial-review).
             let hit_norm = normalize(text);
-            if let Some(line) = lines.iter().find(|l| {
-                let line_norm = normalize(&l.text);
-                line_norm == hit_norm
-                    || hit_norm.contains(&line_norm)
-                    || line_norm.contains(&hit_norm)
-            }) {
+            if let Some(line) = lines.iter().find(|l| normalize(&l.text) == hit_norm) {
                 if !taken.contains(&line.seq) {
                     // Apply the byte budget INLINE (not deferred to a later pass), so
                     // an oversized matched line is SKIPPED — and does NOT count toward
@@ -1051,6 +1042,41 @@ mod tests {
         assert_eq!(
             out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             vec!["Allergic to peanuts."]
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_match_does_not_map_hit_onto_negated_line() {
+        // A hit must EXACT-match its authorized line, never substring-match a
+        // different (e.g. negated) line that merely contains it. "Allergic to
+        // peanuts." must map to "Allergic to peanuts." — NOT the earlier "Not
+        // allergic to peanuts." (/codex:adversarial-review).
+        let endpoint = spawn_stub(serde_json::json!({
+            "result": { "results": [ { "content": "Allergic to peanuts." } ] }
+        }))
+        .await;
+        let gate = vec![
+            MemoryLine {
+                text: "Not allergic to peanuts.".into(),
+                seq: 0,
+            },
+            MemoryLine {
+                text: "Allergic to peanuts.".into(),
+                seq: 1,
+            },
+        ];
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &gate, &budget, std::time::Duration::from_secs(5))
+            .await
+            .expect("exact hit must map to the matching authorized line");
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."],
+            "must NOT map onto the negated line that merely contains the hit"
         );
     }
 
