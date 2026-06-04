@@ -576,6 +576,21 @@ if ! have rustup; then
   # shellcheck disable=SC1091
   source "$HOME/.cargo/env"
 fi
+# Toolchain health gate (idempotent self-heal). A partial/corrupt ~/.rustup can
+# leave `rustup` on PATH (or freshly "updated") while the stable `rustc` binary
+# is missing — cargo then dies mid-build with:
+#   error: could not execute process `…/toolchains/stable-…/bin/rustc` (never
+#   executed) … No such file or directory (os error 2)
+# (observed in the test-EC2 deploy, issue #153 CI). Force-install stable and
+# PROVE rustc actually runs before building; repair once (uninstall+reinstall)
+# if it doesn't. No-op on a healthy host (prod included).
+rustup toolchain install stable --profile minimal --no-self-update >/dev/null 2>&1 || true
+rustup default stable >/dev/null 2>&1 || true
+if ! rustc --version >/dev/null 2>&1; then
+  warn "stable rustc not runnable after install — repairing toolchain (uninstall + reinstall)"
+  rustup toolchain uninstall stable >/dev/null 2>&1 || true
+  rustup toolchain install stable --profile minimal --no-self-update
+fi
 log "Rust: $(rustc --version)"
 
 # ─── 2. Build binaries ────────────────────────────────────────────────────────
