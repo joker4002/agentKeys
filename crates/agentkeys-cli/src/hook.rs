@@ -25,6 +25,7 @@
 //!   - `memory-inject` → pre_llm_call context injection (never blocks)
 
 use std::io::{IsTerminal, Read};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -284,6 +285,15 @@ pub async fn memory_inject(
     // wiring, so OpenViking stays non-load-bearing for availability (arch.md §22).
     let strict_openviking = openviking_requested && env_flag("AGENTKEYS_MEMORY_ENGINE_STRICT");
 
+    // Hook-WIDE OpenViking budget SHARED across ALL namespaces (NOT per namespace),
+    // kept below the host pre_llm_call timeout (wire.rs bakes `timeout: 5`s) so the
+    // deterministic fallback still runs in time even with several namespaces. Each
+    // namespace's rank_gate_bounded gets the REMAINING budget; once it's spent we
+    // skip OpenViking entirely and fall back (/codex:adversarial-review).
+    let openviking_budget =
+        Duration::from_millis(env_u64("OPENVIKING_RANK_DEADLINE_MS", DEFAULT_OPENVIKING_BUDGET_MS));
+    let openviking_started = Instant::now();
+
     let mut chunks = Vec::new();
     for ns in namespaces
         .split(',')
@@ -301,16 +311,27 @@ pub async fn memory_inject(
                     // rank_gate_bounded), or when not in openviking mode / no query.
                     let openviking_ranked = match (&openviking, &query) {
                         (Some(ov), Some(q)) => {
-                            let lines = agentkeys_memory_engine::MemoryLine::from_blob(&text);
-                            agentkeys_memory_openviking::rank_gate_bounded(ov, q, &lines, &budget)
-                                .await
-                                .map(|ranked| {
-                                    ranked
-                                        .into_iter()
-                                        .map(|l| l.text)
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                })
+                            match openviking_remaining(openviking_started, openviking_budget) {
+                                // Shared budget spent by earlier namespaces → skip
+                                // OpenViking and fall back now, keeping the whole hook
+                                // under the host timeout.
+                                None => None,
+                                Some(remaining) => {
+                                    let lines =
+                                        agentkeys_memory_engine::MemoryLine::from_blob(&text);
+                                    agentkeys_memory_openviking::rank_gate_bounded(
+                                        ov, q, &lines, &budget, remaining,
+                                    )
+                                    .await
+                                    .map(|ranked| {
+                                        ranked
+                                            .into_iter()
+                                            .map(|l| l.text)
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    })
+                                }
+                            }
                         }
                         _ => None,
                     };
@@ -451,6 +472,35 @@ fn env_flag(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Hook-wide OpenViking ranking budget (env `OPENVIKING_RANK_DEADLINE_MS`),
+/// SHARED across all namespaces in one `memory_inject` call. Default kept below
+/// the host `pre_llm_call` timeout (wire.rs bakes `timeout: 5`s) so the
+/// deterministic fallback still runs in time (/codex:adversarial-review).
+const DEFAULT_OPENVIKING_BUDGET_MS: u64 = 3000;
+/// Don't start an OpenViking call with less than this left — skip + fall back.
+const OPENVIKING_BUDGET_FLOOR_MS: u64 = 100;
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Remaining time in the hook-wide OpenViking budget, or `None` once it's spent
+/// (within a floor). `memory_inject` calls this before each namespace and passes
+/// the result to `rank_gate_bounded` (skipping OpenViking when `None`), so N
+/// namespaces SHARE one budget instead of each getting a fresh per-namespace
+/// deadline that could overrun the host hook timeout. Pure — unit-tested.
+fn openviking_remaining(started: Instant, budget: Duration) -> Option<Duration> {
+    let remaining = budget.saturating_sub(started.elapsed());
+    if remaining <= Duration::from_millis(OPENVIKING_BUDGET_FLOOR_MS) {
+        None
+    } else {
+        Some(remaining)
+    }
+}
+
 /// Decide the injected text for ONE namespace from whether OpenViking produced
 /// a gate-matched ranking this turn.
 ///
@@ -478,6 +528,21 @@ fn resolve_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openviking_remaining_shares_one_budget_and_skips_when_spent() {
+        // The hook-wide budget bookkeeping: plenty left → Some(remaining); a spent
+        // (or sub-floor) budget → None so memory_inject skips OpenViking for the
+        // remaining namespaces and falls back — the budget is SHARED, not reset per
+        // namespace (/codex:adversarial-review).
+        let started = Instant::now();
+        let r = openviking_remaining(started, Duration::from_secs(5));
+        assert!(r.is_some() && r.unwrap() <= Duration::from_secs(5));
+        // Already spent (zero budget) → None.
+        assert!(openviking_remaining(started, Duration::from_millis(0)).is_none());
+        // Below the floor → None.
+        assert!(openviking_remaining(started, Duration::from_millis(50)).is_none());
+    }
 
     #[test]
     fn strict_openviking_blocks_lexical_fallback() {
