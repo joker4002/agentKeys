@@ -177,7 +177,8 @@ impl PairingRequestStore {
                 child_omni      TEXT,
                 label           TEXT,
                 requested_scope TEXT,
-                bound_at        INTEGER
+                bound_at        INTEGER,
+                minted_at       INTEGER
              );
              CREATE INDEX IF NOT EXISTS idx_pairing_requests_operator
                 ON pairing_requests(operator_omni);
@@ -185,6 +186,14 @@ impl PairingRequestStore {
                 ON pairing_requests(expires_at);",
         )
         .map_err(|e| BrokerError::Internal(format!("init pairing_requests schema: {e}")))?;
+        // Idempotent migration for pre-existing deployed DBs: the CREATE TABLE
+        // above only adds `minted_at` to a fresh DB. SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so attempt the ALTER and ignore the
+        // "duplicate column name" error (already present on fresh/re-run DBs).
+        let _ = conn.execute(
+            "ALTER TABLE pairing_requests ADD COLUMN minted_at INTEGER",
+            [],
+        );
         Ok(())
     }
 
@@ -348,13 +357,31 @@ impl PairingRequestStore {
             return Ok(PairingPoll::Pending);
         }
         // Claimed rows persist for the master's pending-bindings list + ack, but
-        // the agent's RETRIEVE window is bounded: once PAIRING_RETRIEVE_WINDOW_SECS
-        // have elapsed since the claim, the row no longer mints J1_agent, so a
-        // leaked (request_id, device_pubkey, pop_sig) tuple can't replay-mint
-        // indefinitely (codex #182). The agent retrieves within seconds of the
-        // claim, so this never gates the legitimate flow.
+        // the agent's RETRIEVE is bounded two ways so a leaked static tuple
+        // (request_id, device_pubkey, pop_sig) can't replay-mint J1_agent (codex
+        // #182). (1) WINDOW: a row no longer mints once PAIRING_RETRIEVE_WINDOW_SECS
+        // have elapsed since the claim (bounds the never-retrieved case). The
+        // agent retrieves within seconds of the claim, so this never gates the
+        // legitimate flow.
         let claimed_ts = claimed_at.unwrap_or(0);
         if now.saturating_sub(claimed_ts) > PAIRING_RETRIEVE_WINDOW_SECS {
+            return Ok(PairingPoll::RetrieveExpired);
+        }
+        // (2) ONE-TIME: atomically flip minted_at NULL→now. Only the FIRST poll
+        // after the claim wins the mint; any later poll (a replay, or a retry)
+        // affects 0 rows → RetrieveExpired. So the tuple mints AT MOST ONE
+        // J1_agent, and a replay can't mint a SECOND token that would outlive the
+        // window via its normal TTL. (A lost mint-response → the agent re-requests
+        // with --request-pairing; the harness re-pairs on failure.) Race-safe
+        // across processes via `WHERE minted_at IS NULL`, mirroring claim().
+        let won = conn
+            .execute(
+                "UPDATE pairing_requests SET minted_at = ?1
+                 WHERE request_id = ?2 AND claimed_at IS NOT NULL AND minted_at IS NULL",
+                params![now, request_id],
+            )
+            .map_err(|e| BrokerError::Internal(format!("consume pairing retrieve: {e}")))?;
+        if won == 0 {
             return Ok(PairingPoll::RetrieveExpired);
         }
         Ok(PairingPoll::Claimed {
@@ -529,19 +556,35 @@ mod tests {
     }
 
     #[test]
-    fn poll_claimed_retrieve_window_expires() {
+    fn poll_claimed_retrieve_is_one_time() {
         let s = store();
         s.issue("req-1", "code-1", "0xdev", "0xpop", 100, 100_000)
             .unwrap();
         s.claim("code-1", "op", "child", "agent-a", "memory", 1_000)
             .unwrap();
-        // Within PAIRING_RETRIEVE_WINDOW_SECS (600) of the claim → still mints.
+        // First poll after the claim mints (atomically consumes minted_at).
         assert!(matches!(
-            s.poll("req-1", "0xdev", 1_500).unwrap(),
+            s.poll("req-1", "0xdev", 1_100).unwrap(),
             PairingPoll::Claimed { .. }
         ));
-        // Just past the window after the CLAIM → no longer mints, so a leaked
-        // (request_id, device_pubkey, pop_sig) tuple can't replay-mint forever.
+        // A SECOND poll — a replay of the static tuple, or a retry — is refused
+        // even within the window, so the tuple mints AT MOST one J1_agent (and no
+        // second token that could outlive the window via its normal TTL).
+        assert_eq!(
+            s.poll("req-1", "0xdev", 1_200).unwrap(),
+            PairingPoll::RetrieveExpired
+        );
+    }
+
+    #[test]
+    fn poll_claimed_window_expires_if_never_retrieved() {
+        let s = store();
+        s.issue("req-1", "code-1", "0xdev", "0xpop", 100, 100_000)
+            .unwrap();
+        s.claim("code-1", "op", "child", "agent-a", "memory", 1_000)
+            .unwrap();
+        // FIRST poll past the retrieve window (never minted) → refused, so a
+        // never-retrieved claimed row can't be replay-minted long after the claim.
         assert_eq!(
             s.poll("req-1", "0xdev", 1_000 + 601).unwrap(),
             PairingPoll::RetrieveExpired
