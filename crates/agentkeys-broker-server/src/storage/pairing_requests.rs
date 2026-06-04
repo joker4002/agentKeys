@@ -186,14 +186,52 @@ impl PairingRequestStore {
                 ON pairing_requests(expires_at);",
         )
         .map_err(|e| BrokerError::Internal(format!("init pairing_requests schema: {e}")))?;
-        // Idempotent migration for pre-existing deployed DBs: the CREATE TABLE
-        // above only adds `minted_at` to a fresh DB. SQLite has no
-        // ADD COLUMN IF NOT EXISTS, so attempt the ALTER and ignore the
-        // "duplicate column name" error (already present on fresh/re-run DBs).
-        let _ = conn.execute(
+        // Migration for pre-existing deployed DBs: the CREATE TABLE above only
+        // adds `minted_at` to a FRESH DB. SQLite has no ADD COLUMN IF NOT EXISTS,
+        // so attempt the ALTER and branch on the outcome.
+        match conn.execute(
             "ALTER TABLE pairing_requests ADD COLUMN minted_at INTEGER",
             [],
-        );
+        ) {
+            // Column was just ADDED → an OLD DB is being upgraded. Conservatively
+            // mark every already-claimed row as retrieved (minted_at = claimed_at):
+            // such a row may have minted J1_agent before this patch, so it must NOT
+            // be replay-mintable after the upgrade — it re-pairs instead. New
+            // (post-migration) claims keep minted_at NULL and mint exactly once.
+            Ok(_) => {
+                conn.execute(
+                    "UPDATE pairing_requests SET minted_at = claimed_at
+                     WHERE claimed_at IS NOT NULL AND minted_at IS NULL",
+                    [],
+                )
+                .map_err(|e| {
+                    BrokerError::Internal(format!("backfill minted_at on migration: {e}"))
+                })?;
+            }
+            // Already migrated (column present on a fresh/re-run DB) — nothing to do.
+            Err(e) if e.to_string().contains("duplicate column") => {}
+            // Any OTHER ALTER failure (locked / read-only / corrupt / no space) MUST
+            // fail startup, not defer a runtime schema error to the first poll().
+            Err(e) => {
+                return Err(BrokerError::Internal(format!(
+                    "migrate pairing_requests.minted_at: {e}"
+                )));
+            }
+        }
+        // Defense-in-depth: confirm the column is actually present before serving.
+        let has_minted: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('pairing_requests') \
+                 WHERE name = 'minted_at'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| BrokerError::Internal(format!("verify minted_at column: {e}")))?;
+        if has_minted == 0 {
+            return Err(BrokerError::Internal(
+                "pairing_requests is missing the minted_at column after migration".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -589,6 +627,47 @@ mod tests {
             s.poll("req-1", "0xdev", 1_000 + 601).unwrap(),
             PairingPoll::RetrieveExpired
         );
+    }
+
+    #[test]
+    fn migration_marks_legacy_claimed_rows_consumed() {
+        // Simulate a PRE-PATCH deployed DB: OLD schema (no minted_at column) with
+        // an already-claimed row (which may have minted J1_agent before the patch).
+        let path =
+            std::env::temp_dir().join(format!("akb-migration-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE pairing_requests (
+                    request_id TEXT PRIMARY KEY, pairing_code TEXT NOT NULL UNIQUE,
+                    device_pubkey TEXT NOT NULL, pop_sig TEXT NOT NULL,
+                    created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+                    claimed_at INTEGER, operator_omni TEXT, child_omni TEXT,
+                    label TEXT, requested_scope TEXT, bound_at INTEGER
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pairing_requests
+                    (request_id, pairing_code, device_pubkey, pop_sig, created_at,
+                     expires_at, claimed_at, operator_omni, child_omni, label, requested_scope)
+                 VALUES ('req-old','code-old','0xdev','0xpop',100,100000,1000,
+                         'op','child','agent-a','memory')",
+                [],
+            )
+            .unwrap();
+        }
+        // Open via the store → init_schema runs the ALTER + backfill. The legacy
+        // claimed row is marked retrieved (minted_at = claimed_at), so a replay
+        // within the window CANNOT mint a fresh J1_agent after the upgrade.
+        let s = PairingRequestStore::open(&path).unwrap();
+        assert_eq!(
+            s.poll("req-old", "0xdev", 1_100).unwrap(),
+            PairingPoll::RetrieveExpired
+        );
+        drop(s);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
