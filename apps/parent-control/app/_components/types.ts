@@ -25,6 +25,12 @@ export interface Actor {
   timeWindow?: { start: string; end: string; tz: string };
   services?: string[];
   justPaired?: boolean;
+  pathPolicy?: {
+    active: boolean;
+    derivationPath: string;
+    scope: string;
+    defaultDeny: boolean;
+  };
 }
 
 export type ChipKind =

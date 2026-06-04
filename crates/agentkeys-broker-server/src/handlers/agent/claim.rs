@@ -91,6 +91,17 @@ pub async fn pairing_claim(
     // round-tripped through /request) degrades to empty rather than failing.
     let device_key_hash =
         agentkeys_core::device_crypto::device_key_hash(&device_pubkey).unwrap_or_default();
+    let derivation_path = format!("//{}", body.label);
+    state
+        .grant_store
+        .activate_child_path(
+            &master_omni,
+            &child_omni,
+            &derivation_path,
+            &requested_scope,
+            now,
+        )
+        .map_err(|e| BrokerError::Internal(format!("activate child path policy: {e}")))?;
 
     tracing::info!(
         operator_omni = %master_omni,
@@ -108,6 +119,11 @@ pub async fn pairing_claim(
             "operator_omni": master_omni,
             "label": body.label,
             "requested_scope": requested_scope,
+            "path_policy": {
+                "derivation_path": derivation_path,
+                "active": true,
+                "default": "deny",
+            },
             "device_pubkey": device_pubkey,
             "pop_sig": pop_sig,
             "device_key_hash": device_key_hash,

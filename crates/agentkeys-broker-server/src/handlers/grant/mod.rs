@@ -8,6 +8,7 @@
 
 pub mod create;
 pub mod list;
+pub mod path_policy;
 pub mod revoke;
 
 use axum::http::HeaderMap;

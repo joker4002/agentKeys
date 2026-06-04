@@ -120,6 +120,7 @@ pub async fn mint_oidc_jwt(
     // Same on-chain check the cap-mint path uses (SidecarRegistry.getDevice).
     if let Some(device_pubkey) = session_claims.agentkeys.device_pubkey.as_deref() {
         use crate::handlers::cap::{call_get_device, ChainContracts, ROLE_CAP_MINT};
+        use crate::storage::PathPolicyCheck;
         // Mirror the FULL cap-mint invariant (cap.rs verify_chain): the device must
         // be active AND bound to BOTH the session's operator (parent_omni) and actor
         // (omni_account), with the CAP_MINT role. Checking only actor would let any
@@ -130,6 +131,44 @@ pub async fn mint_oidc_jwt(
             .parent_omni
             .as_deref()
             .unwrap_or("");
+        let derivation_path = session_claims
+            .agentkeys
+            .derivation_path
+            .as_deref()
+            .unwrap_or("");
+        let policy_denied = if parent_omni.is_empty() || derivation_path.is_empty() {
+            Some("agent session missing parent_omni or derivation_path lineage — cannot verify child path policy")
+        } else {
+            match state
+                .grant_store
+                .check_child_path_policy(parent_omni, &actor_omni, derivation_path)
+                .map_err(|e| BrokerError::Internal(format!("child path policy read: {e}")))?
+            {
+                PathPolicyCheck::Active => None,
+                PathPolicyCheck::Suspended => {
+                    Some("child derivation path is suspended by TEE-side path policy")
+                }
+                PathPolicyCheck::Missing => {
+                    Some("child derivation path has no active policy — default deny")
+                }
+            }
+        };
+        if let Some(reason) = policy_denied {
+            let _ = state.audit.record_mint(
+                MintRecord {
+                    requester_token: token,
+                    requester_wallet: &report_id,
+                    requested_role: "oidc_jwt",
+                    session_duration_seconds: state.config.oidc_jwt_ttl_seconds as i32,
+                    sts_session_name: "(path-policy-deny)",
+                    outcome: MintOutcome::AuthFailed,
+                },
+                Some(reason),
+            );
+            tracing::Span::current().record("outcome", "path_policy_deny");
+            return Err(BrokerError::Forbidden(reason.into()));
+        }
+
         let chain = ChainContracts::from_state(&state)
             .map_err(|e| BrokerError::Internal(format!("chain config for agent gate: {e:?}")))?;
         let dkh = agentkeys_core::device_crypto::device_key_hash(device_pubkey).map_err(|e| {

@@ -356,6 +356,12 @@ interface ApiActor {
   payment_cap?: { per_tx: number; daily: number; currency: string };
   time_window?: { start: string; end: string; tz: string };
   services?: string[];
+  path_policy?: {
+    active: boolean;
+    derivation_path: string;
+    scope: string;
+    default_deny: boolean;
+  };
 }
 
 interface ApiAuditEvent {
@@ -403,6 +409,14 @@ function apiToActor(a: ApiActor): Actor {
       : undefined,
     timeWindow: a.time_window,
     services: a.services,
+    pathPolicy: a.path_policy
+      ? {
+          active: a.path_policy.active,
+          derivationPath: a.path_policy.derivation_path,
+          scope: a.path_policy.scope,
+          defaultDeny: a.path_policy.default_deny,
+        }
+      : undefined,
   };
 }
 

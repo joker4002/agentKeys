@@ -40,6 +40,17 @@ pub enum GrantConsumeOutcome {
     Exhausted,
 }
 
+/// Result of checking the TEE-side child-path access-control policy.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PathPolicyCheck {
+    /// Path has an explicit active policy; JWT issuance may continue.
+    Active,
+    /// Path exists but is suspended.
+    Suspended,
+    /// No path policy exists. This is deny-by-default.
+    Missing,
+}
+
 /// Public-shape grant row. Used by `list` and the audit-proof verifier.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Grant {
@@ -54,6 +65,19 @@ pub struct Grant {
     pub used_count: i64,
     pub revoked_at: Option<i64>,
     pub audit_proof: String,
+}
+
+/// Security-group-like policy attached to an HDKD child derivation path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChildPathPolicy {
+    pub master_omni_account: String,
+    pub child_omni: String,
+    pub derivation_path: String,
+    pub active: bool,
+    pub scope: String,
+    pub rate_limit_per_min: Option<i64>,
+    pub valid_until_block: Option<i64>,
+    pub updated_at: i64,
 }
 
 pub struct GrantStore {
@@ -111,7 +135,22 @@ impl GrantStore {
              );
              CREATE INDEX IF NOT EXISTS idx_grants_master ON grants(master_omni_account);
              CREATE INDEX IF NOT EXISTS idx_grants_daemon ON grants(daemon_address);
-             CREATE INDEX IF NOT EXISTS idx_grants_service ON grants(service);",
+             CREATE INDEX IF NOT EXISTS idx_grants_service ON grants(service);
+             CREATE TABLE IF NOT EXISTS child_path_policies (
+                master_omni_account TEXT NOT NULL,
+                child_omni          TEXT NOT NULL,
+                derivation_path     TEXT NOT NULL,
+                active              INTEGER NOT NULL DEFAULT 0,
+                scope               TEXT NOT NULL DEFAULT '',
+                rate_limit_per_min  INTEGER,
+                valid_until_block   INTEGER,
+                updated_at          INTEGER NOT NULL,
+                PRIMARY KEY (master_omni_account, child_omni, derivation_path)
+             );
+             CREATE INDEX IF NOT EXISTS idx_child_path_policies_master
+                ON child_path_policies(master_omni_account);
+             CREATE INDEX IF NOT EXISTS idx_child_path_policies_path
+                ON child_path_policies(master_omni_account, derivation_path);",
         )
         .map_err(|e| AuthError::Internal(format!("init grants schema: {}", e)))?;
         Ok(())
@@ -152,6 +191,125 @@ impl GrantStore {
         )
         .map_err(|e| AuthError::Internal(format!("insert grant: {}", e)))?;
         Ok(())
+    }
+
+    /// Activate a child path during the pair-approval flow. This is the explicit
+    /// approval point that turns the default-deny policy into an allowed path.
+    pub fn activate_child_path(
+        &self,
+        master_omni_account: &str,
+        child_omni: &str,
+        derivation_path: &str,
+        scope: &str,
+        updated_at: i64,
+    ) -> Result<(), AuthError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO child_path_policies
+                (master_omni_account, child_omni, derivation_path, active, scope, updated_at)
+             VALUES (?1, ?2, ?3, 1, ?4, ?5)
+             ON CONFLICT(master_omni_account, child_omni, derivation_path)
+             DO UPDATE SET active = 1, scope = excluded.scope, updated_at = excluded.updated_at",
+            params![
+                master_omni_account,
+                child_omni,
+                derivation_path,
+                scope,
+                updated_at,
+            ],
+        )
+        .map_err(|e| AuthError::Internal(format!("activate child path policy: {}", e)))?;
+        Ok(())
+    }
+
+    /// Suspend or resume a path. Missing rows remain denied-by-default and return
+    /// `false` so callers can surface a non-enumerating owner-scoped error.
+    pub fn set_child_path_active(
+        &self,
+        master_omni_account: &str,
+        derivation_path: &str,
+        active: bool,
+        updated_at: i64,
+    ) -> Result<bool, AuthError> {
+        let conn = self.lock()?;
+        let n = conn
+            .execute(
+                "UPDATE child_path_policies
+                 SET active = ?1, updated_at = ?2
+                 WHERE master_omni_account = ?3 AND derivation_path = ?4",
+                params![
+                    if active { 1 } else { 0 },
+                    updated_at,
+                    master_omni_account,
+                    derivation_path,
+                ],
+            )
+            .map_err(|e| AuthError::Internal(format!("set child path active: {}", e)))?;
+        Ok(n > 0)
+    }
+
+    /// Check whether JWT issuance is currently allowed for a child path. Absence
+    /// is intentionally a hard deny: knowing a derivable path is not enough.
+    pub fn check_child_path_policy(
+        &self,
+        master_omni_account: &str,
+        child_omni: &str,
+        derivation_path: &str,
+    ) -> Result<PathPolicyCheck, AuthError> {
+        let conn = self.lock()?;
+        let active: Option<i64> = conn
+            .query_row(
+                "SELECT active
+                 FROM child_path_policies
+                 WHERE master_omni_account = ?1
+                   AND child_omni = ?2
+                   AND derivation_path = ?3",
+                params![master_omni_account, child_omni, derivation_path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AuthError::Internal(format!("check child path policy: {}", e)))?;
+        match active {
+            Some(1) => Ok(PathPolicyCheck::Active),
+            Some(_) => Ok(PathPolicyCheck::Suspended),
+            None => Ok(PathPolicyCheck::Missing),
+        }
+    }
+
+    pub fn list_child_path_policies(
+        &self,
+        master_omni_account: &str,
+    ) -> Result<Vec<ChildPathPolicy>, AuthError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT master_omni_account, child_omni, derivation_path, active, scope,
+                        rate_limit_per_min, valid_until_block, updated_at
+                 FROM child_path_policies
+                 WHERE master_omni_account = ?1
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|e| AuthError::Internal(format!("prepare list child path policies: {}", e)))?;
+        let rows = stmt
+            .query_map(params![master_omni_account], |row| {
+                let active: i64 = row.get(3)?;
+                Ok(ChildPathPolicy {
+                    master_omni_account: row.get(0)?,
+                    child_omni: row.get(1)?,
+                    derivation_path: row.get(2)?,
+                    active: active == 1,
+                    scope: row.get(4)?,
+                    rate_limit_per_min: row.get(5)?,
+                    valid_until_block: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| AuthError::Internal(format!("query child path policies: {}", e)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| AuthError::Internal(format!("row child path policy: {}", e)))?);
+        }
+        Ok(out)
     }
 
     /// Mark a grant `revoked` (sets `revoked_at`). Idempotent — re-revoke
@@ -361,6 +519,49 @@ mod tests {
         assert_eq!(g.max_uses, 10);
         assert_eq!(g.used_count, 0);
         assert!(g.revoked_at.is_none());
+    }
+
+    #[test]
+    fn child_path_policy_defaults_to_deny_until_pair_activation() {
+        let s = store();
+        assert_eq!(
+            s.check_child_path_policy("om", "child", "//agent-a")
+                .unwrap(),
+            PathPolicyCheck::Missing
+        );
+
+        s.activate_child_path("om", "child", "//agent-a", "memory,openrouter", 200)
+            .unwrap();
+        assert_eq!(
+            s.check_child_path_policy("om", "child", "//agent-a")
+                .unwrap(),
+            PathPolicyCheck::Active
+        );
+    }
+
+    #[test]
+    fn child_path_policy_suspend_resume_controls_jwt_gate() {
+        let s = store();
+        s.activate_child_path("om", "child", "//agent-a", "memory", 200)
+            .unwrap();
+
+        assert!(s
+            .set_child_path_active("om", "//agent-a", false, 300)
+            .unwrap());
+        assert_eq!(
+            s.check_child_path_policy("om", "child", "//agent-a")
+                .unwrap(),
+            PathPolicyCheck::Suspended
+        );
+
+        assert!(s
+            .set_child_path_active("om", "//agent-a", true, 400)
+            .unwrap());
+        assert_eq!(
+            s.check_child_path_policy("om", "child", "//agent-a")
+                .unwrap(),
+            PathPolicyCheck::Active
+        );
     }
 
     #[test]

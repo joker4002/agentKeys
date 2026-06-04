@@ -112,9 +112,34 @@ export function PermissionList({
   const vaultForActor = vaultItems.filter((v) => v.actor === actor.id);
   const hasEmail = services.includes('email');
   const hasPay = (actor.paymentCap?.perTx ?? 0) > 0;
+  const pathPolicy = actor.pathPolicy ?? (
+    actor.role === 'agent'
+      ? {
+          active: actor.status !== 'bad',
+          derivationPath: actor.derivation,
+          scope: services.join(', ') || memGranted.join(', ') || 'paired',
+          defaultDeny: true,
+        }
+      : undefined
+  );
 
   return (
     <div className="perm-list">
+      {/* TEE CHILD PATH POLICY */}
+      {pathPolicy && (
+        <PermSection title="TEE child path policy" summary={pathPolicy.active ? 'active' : 'suspended'}>
+          <PermRow
+            icon="∴"
+            title={pathPolicy.derivationPath}
+            why="Security-group gate before JWT issuance. Unknown paths are denied even though HDKD can derive them."
+            state={`${pathPolicy.defaultDeny ? 'default deny' : 'custom default'} · scope ${pathPolicy.scope || 'none'}`}
+            risk="high"
+            granted={pathPolicy.active}
+            control={<span className={`perm-readonly ${pathPolicy.active ? 'on' : 'off'}`}>{pathPolicy.active ? 'jwt:on' : 'jwt:deny'}</span>}
+          />
+        </PermSection>
+      )}
+
       {/* MEMORY */}
       <PermSection title="Memory access" summary={`${memGranted.length} of ${NAMESPACES.length} namespaces`}>
         {NAMESPACES.map((ns) => {

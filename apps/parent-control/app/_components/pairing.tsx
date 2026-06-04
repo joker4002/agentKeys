@@ -125,6 +125,8 @@ export function PairingPage({
                     .map(([ns, v]) => `${ns}:${v.write ? 'rw' : 'r'}`)
                     .join(' · ') || 'none'}
                 </dd>
+                <dt>path policy</dt>
+                <dd>{(a.pathPolicy?.active ?? a.status !== 'bad') ? 'active · default deny' : 'suspended · jwt denied'}</dd>
                 <dt>active</dt><dd className="muted">{a.lastActive}</dd>
               </dl>
             </div>
