@@ -1180,12 +1180,14 @@ IoT model). The broker never writes chain — the **master** submits `registerAg
 agentkeys-daemon --request-pairing --broker-url "https://$BROKER_HOST"
 
 # Output (stdout is JSON; logs go to stderr):
-#   request_id:      <secret retrieval ticket — keep on the agent>
 #   pairing_code:    <high-entropy; SHOW this to your owner (QR / screen)>
 #   agent_address:   0x...   (D_pub_agent)
 #   device_key_hash: 0x...
-# The daemon also wrote ~/.agentkeys/pairing-request.json (0600) so the
-# follow-up --retrieve-pairing can resolve request_id automatically.
+#   state_file:      ~/.agentkeys/pairing-request-<device_pubkey>.json
+# The daemon also wrote ~/.agentkeys/pairing-request-<device_pubkey>.json (0600,
+# per-device) so the follow-up --retrieve-pairing resolves request_id
+# automatically (request_id is kept OFF stdout — it is half the replayable poll
+# tuple; the state_file path is emitted in the artifact instead).
 ```
 
 ### §7.2 — The master claims the code (J1_master-gated; no K11 yet)
@@ -1216,7 +1218,7 @@ agentkeys-daemon --retrieve-pairing --broker-url "https://$BROKER_HOST"
 
 # Output:
 # [INFO] Polling /v1/agent/pairing/poll ... pending ... claimed
-# [INFO] J1_agent minted at retrieval; persisted at ~/.agentkeys/agent-session.jwt (0600)
+# [INFO] J1_agent minted at retrieval; persisted at ~/.agentkeys/agent-session-<actor_omni>.jwt (0600, per-actor)
 # [INFO] Binding artifact emitted on stdout (agent_address, actor_omni, device_key_hash, pop_sig)
 ```
 

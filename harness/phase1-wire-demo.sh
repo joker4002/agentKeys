@@ -603,13 +603,18 @@ phase1_sandbox() {
       # displays a one-time pairing_code. 2>/dev/null drops the daemon's stderr
       # logs so stdout is clean artifact JSON for jq. Resolve a LOCAL host binary
       # (release→debug→PATH order) for the MASTER's claim step below.
-      local la rq pairing_code request_id rq_addr rq_dkh
+      local la rq rq_state pairing_code request_id rq_addr rq_dkh
       if [[ -x "$REPO_ROOT/target/release/agentkeys" ]]; then la="$REPO_ROOT/target/release/agentkeys"
       elif [[ -x "$REPO_ROOT/target/debug/agentkeys" ]]; then la="$REPO_ROOT/target/debug/agentkeys"
       else la="$(command -v agentkeys 2>/dev/null || true)"; fi
       rq="$(sbx_exec "$DAEMON_BIN_DST --request-pairing --broker-url ${BROKER_URL:-} 2>/dev/null")"
       pairing_code="$(echo "$rq" | jq -r '.pairing_code // empty' 2>/dev/null)"
-      request_id="$(echo "$rq" | jq -r '.request_id // empty' 2>/dev/null)"
+      # request_id is no longer on --request-pairing stdout (it is half the
+      # replayable broker-poll tuple) — read it from the 0600 sandbox state file
+      # whose absolute path the artifact prints (cat in-sandbox, parse on host,
+      # so no jq-in-sandbox dependency). Used below for retrieve + the P.2 ack.
+      rq_state="$(echo "$rq" | jq -r '.state_file // empty' 2>/dev/null)"
+      request_id="$(sbx_exec "cat '$rq_state' 2>/dev/null" 2>/dev/null | jq -r '.request_id // empty' 2>/dev/null)"
       rq_addr="$(echo "$rq" | jq -r '.agent_address // empty' 2>/dev/null)"
       rq_dkh="$(echo "$rq" | jq -r '.device_key_hash // empty' 2>/dev/null)"
       if [[ -z "$pairing_code" || -z "$request_id" || -z "$rq_addr" || -z "$rq_dkh" ]]; then
