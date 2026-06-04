@@ -96,6 +96,15 @@ export interface EmailVerifyStatus {
   omniAccount?: string;
 }
 
+export interface OnboardingState {
+  /** "verified" once the magic link is clicked + held by the daemon; else "none". */
+  identity: string;
+  email?: string;
+  omni?: string;
+  /** "enrolled" if a K11 passkey was registered this session, else "none". */
+  k11: string;
+}
+
 export interface AgentKeysClient {
   status(): Promise<ConnectionStatus>;
 
@@ -121,6 +130,9 @@ export interface AgentKeysClient {
   // browser starts it, then polls until the operator clicks the link.
   startEmailVerify(email: string): Promise<Result<EmailVerifyStart>>;
   pollEmailVerify(requestId: string): Promise<Result<EmailVerifyStatus>>;
+  // Real "logged in" state, held by the daemon (replaces the ak_onboarded flag).
+  getOnboardingState(): Promise<Result<OnboardingState>>;
+  logout(): Promise<Result<void>>;
 
   // §2 — master memory (real list + idempotent plant; server dedups by content-hash).
   // Per namespace; an agent reads a namespace only with a `memory:<ns>` scope

@@ -10,6 +10,7 @@ import type {
   K11EnrollFinishInput,
   K11EnrollResult,
   MasterMemoryEntry,
+  OnboardingState,
   PlantResult,
   Result,
   RevokeIntent,
@@ -231,6 +232,15 @@ export class DaemonBackend implements AgentKeysClient {
       `/v1/auth/email/status?request_id=${encodeURIComponent(requestId)}`,
     );
     return r.ok ? { ok: true, data: { status: r.data.status, omniAccount: r.data.omni_account } } : r;
+  }
+
+  async getOnboardingState(): Promise<Result<OnboardingState>> {
+    return this.getJson<OnboardingState>('/v1/onboarding/state');
+  }
+
+  async logout(): Promise<Result<void>> {
+    const r = await this.postJson<{ ok: boolean }>('/v1/auth/logout', {});
+    return r.ok ? { ok: true, data: undefined } : r;
   }
 
   async enrollK11Begin(input: { userName: string; userDisplayName: string }): Promise<Result<K11EnrollBegin>> {

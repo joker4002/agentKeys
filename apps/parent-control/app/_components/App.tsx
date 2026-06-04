@@ -58,8 +58,18 @@ export function App() {
   const [memoryView, setMemoryView] = useState<PreservedMemory | null>(null);
 
   useEffect(() => {
-    try { setOnboarded(localStorage.getItem('ak_onboarded') === '1'); } catch {}
-  }, []);
+    let cancelled = false;
+    (async () => {
+      // Real "logged in" = the daemon holds a verified session (W1). Fall back to
+      // the local flag only for the offline/demo path (no daemon to ask).
+      const r = await client.getOnboardingState();
+      let on = false;
+      if (r.ok && r.data.identity === 'verified') on = true;
+      else { try { on = localStorage.getItem('ak_onboarded') === '1'; } catch {} }
+      if (!cancelled) setOnboarded(on);
+    })();
+    return () => { cancelled = true; };
+  }, [client]);
 
   // §2: list the master's real memory once onboarded. EmptyBackend returns
   // disconnected → stays empty → the memory page renders its empty state.
@@ -121,6 +131,7 @@ export function App() {
   // Log out: clear the local session flag and reset all in-memory view state so
   // the next login starts clean. Returns to the §9 onboarding (email) screen.
   const logout = () => {
+    void client.logout(); // W1: clear the daemon-held session (the real re-test reset)
     try { localStorage.removeItem('ak_onboarded'); } catch {}
     setOnboarded(false);
     setActors([]);

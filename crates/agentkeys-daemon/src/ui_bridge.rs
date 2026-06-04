@@ -83,6 +83,14 @@ pub struct UiBridgeState {
     /// mismatched `Origin` header even though browser CORS already would, so a
     /// cross-origin page can't trigger magic-link emails.
     pub allowed_origin: String,
+    /// W1 onboarding: request_id → email, recorded at email/start so email/status
+    /// knows which identity verified. Cleared on logout.
+    pub pending_email: RwLock<HashMap<String, String>>,
+    /// The verified operator identity, held in the daemon once the magic link is
+    /// clicked (never handed to the browser — the daemon is the authenticated
+    /// proxy). `None` until verified / after logout; this is the real "logged in"
+    /// signal that replaces the browser's `ak_onboarded` localStorage flag.
+    pub onboarding_session: RwLock<Option<OnboardingSession>>,
 }
 
 /// A master-actor memory entry. `content_hash` is the dedup key —
@@ -275,6 +283,26 @@ pub struct EmailStatusResponse {
     pub omni_account: Option<String>,
 }
 
+/// The verified operator identity held in the daemon after the magic link is
+/// clicked. Held server-side; never handed to the browser.
+#[derive(Clone, Debug, Serialize)]
+pub struct OnboardingSession {
+    pub email: String,
+    pub omni: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OnboardingStateResponse {
+    /// "verified" once the magic link is clicked + held; else "none".
+    pub identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omni: Option<String>,
+    /// "enrolled" if a K11 passkey was registered this session, else "none".
+    pub k11: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -313,6 +341,8 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/k11/enroll/finish", post(enroll_finish))
         .route("/v1/auth/email/start", post(auth_email_start))
         .route("/v1/auth/email/status", get(auth_email_status))
+        .route("/v1/onboarding/state", get(onboarding_state))
+        .route("/v1/auth/logout", post(logout))
         .route("/v1/actors", get(list_actors))
         .route("/v1/actors/:id", get(get_actor))
         .route("/v1/actors/:id/caps", get(list_caps))
@@ -358,6 +388,8 @@ pub fn build_state(
         master_memory: RwLock::new(HashMap::new()),
         broker_url,
         allowed_origin: rp_origin.to_string(),
+        pending_email: RwLock::new(HashMap::new()),
+        onboarding_session: RwLock::new(None),
     }))
 }
 
@@ -416,6 +448,11 @@ async fn auth_email_start(
                 "broker-email-failed",
             )
         })?;
+    state
+        .pending_email
+        .write()
+        .await
+        .insert(request_id.clone(), req.email.trim().to_string());
     Ok(Json(EmailStartResponse { request_id }))
 }
 
@@ -448,16 +485,65 @@ async fn auth_email_status(
             status: "pending".into(),
             omni_account: None,
         },
-        init_flow::AuthStatus::Verified { identity_omni, .. } => EmailStatusResponse {
-            status: "verified".into(),
-            omni_account: Some(identity_omni),
-        },
+        init_flow::AuthStatus::Verified { identity_omni, .. } => {
+            // Record the verified identity in the daemon (request_id → email map
+            // was set at email/start). This is the real "logged in" state.
+            let email = state
+                .pending_email
+                .read()
+                .await
+                .get(&q.request_id)
+                .cloned()
+                .unwrap_or_default();
+            *state.onboarding_session.write().await = Some(OnboardingSession {
+                email,
+                omni: identity_omni.clone(),
+            });
+            EmailStatusResponse {
+                status: "verified".into(),
+                omni_account: Some(identity_omni),
+            }
+        }
         init_flow::AuthStatus::Failed(reason) => EmailStatusResponse {
             status: format!("failed:{reason}"),
             omni_account: None,
         },
     };
     Ok(Json(resp))
+}
+
+/// W1: aggregate onboarding state — the real "are we logged in" signal that
+/// replaces the browser's `ak_onboarded` localStorage flag. Identity is held in
+/// the daemon (never the browser); `k11` reflects the in-memory enroll store.
+async fn onboarding_state(
+    State(state): State<SharedUiBridgeState>,
+) -> Json<OnboardingStateResponse> {
+    let session = state.onboarding_session.read().await.clone();
+    let k11 = if state.enroll.read().await.registered.is_empty() {
+        "none"
+    } else {
+        "enrolled"
+    };
+    let (identity, email, omni) = match session {
+        Some(s) => ("verified".to_string(), Some(s.email), Some(s.omni)),
+        None => ("none".to_string(), None, None),
+    };
+    Json(OnboardingStateResponse {
+        identity,
+        email,
+        omni,
+        k11: k11.to_string(),
+    })
+}
+
+/// W1: clear the held onboarding session (logout / reset) so re-onboarding
+/// starts clean. Re-testability per arch.md §6: the same email re-verifies to the
+/// same `actor_omni`, and the device key + encryption are untouched — only the
+/// session is dropped.
+async fn logout(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
+    *state.onboarding_session.write().await = None;
+    state.pending_email.write().await.clear();
+    Json(serde_json::json!({ "ok": true }))
 }
 
 async fn enroll_begin(
@@ -1074,6 +1160,28 @@ mod tests {
         .expect_err("cross-origin should be rejected");
         assert_eq!(e.0, StatusCode::FORBIDDEN);
         assert_eq!(e.1 .0.reason, "bad-origin");
+    }
+
+    #[tokio::test]
+    async fn onboarding_state_reflects_session_and_logout() {
+        let state = make_state();
+        // No session held yet → identity "none".
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.identity,
+            "none"
+        );
+        // Simulate a verified magic-link click.
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "sara@example.com".into(),
+            omni: "0xabc123".into(),
+        });
+        let s = onboarding_state(State(state.clone())).await;
+        assert_eq!(s.0.identity, "verified");
+        assert_eq!(s.0.email.as_deref(), Some("sara@example.com"));
+        assert_eq!(s.0.omni.as_deref(), Some("0xabc123"));
+        // Logout clears it → re-testable.
+        let _ = logout(State(state.clone())).await;
+        assert_eq!(onboarding_state(State(state)).await.0.identity, "none");
     }
 
     #[tokio::test]

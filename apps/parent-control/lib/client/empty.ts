@@ -10,6 +10,7 @@ import type {
   K11EnrollFinishInput,
   K11EnrollResult,
   MasterMemoryEntry,
+  OnboardingState,
   PlantResult,
   Result,
   RevokeIntent,
@@ -37,6 +38,14 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async pollEmailVerify(): Promise<Result<EmailVerifyStatus>> {
+    return disconnected();
+  }
+
+  async getOnboardingState(): Promise<Result<OnboardingState>> {
+    return disconnected();
+  }
+
+  async logout(): Promise<Result<void>> {
     return disconnected();
   }
 
