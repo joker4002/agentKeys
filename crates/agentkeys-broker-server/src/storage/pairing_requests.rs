@@ -161,7 +161,7 @@ impl PairingRequestStore {
     }
 
     fn init_schema(&self) -> BrokerResult<()> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -186,40 +186,47 @@ impl PairingRequestStore {
                 ON pairing_requests(expires_at);",
         )
         .map_err(|e| BrokerError::Internal(format!("init pairing_requests schema: {e}")))?;
-        // Migration for pre-existing deployed DBs: the CREATE TABLE above only
-        // adds `minted_at` to a FRESH DB. SQLite has no ADD COLUMN IF NOT EXISTS,
-        // so attempt the ALTER and branch on the outcome.
-        match conn.execute(
-            "ALTER TABLE pairing_requests ADD COLUMN minted_at INTEGER",
-            [],
-        ) {
-            // Column was just ADDED → an OLD DB is being upgraded. Conservatively
-            // mark every already-claimed row as retrieved (minted_at = claimed_at):
-            // such a row may have minted J1_agent before this patch, so it must NOT
-            // be replay-mintable after the upgrade — it re-pairs instead. New
-            // (post-migration) claims keep minted_at NULL and mint exactly once.
-            Ok(_) => {
-                conn.execute(
-                    "UPDATE pairing_requests SET minted_at = claimed_at
-                     WHERE claimed_at IS NOT NULL AND minted_at IS NULL",
-                    [],
-                )
-                .map_err(|e| {
-                    BrokerError::Internal(format!("backfill minted_at on migration: {e}"))
-                })?;
-            }
-            // Already migrated (column present on a fresh/re-run DB) — nothing to do.
-            Err(e) if e.to_string().contains("duplicate column") => {}
-            // Any OTHER ALTER failure (locked / read-only / corrupt / no space) MUST
-            // fail startup, not defer a runtime schema error to the first poll().
-            Err(e) => {
-                return Err(BrokerError::Internal(format!(
-                    "migrate pairing_requests.minted_at: {e}"
-                )));
-            }
+        // Migrate a pre-existing deployed DB: the CREATE TABLE above only adds
+        // `minted_at` to a FRESH DB. Run the ALTER + legacy backfill as ONE atomic
+        // transaction (SQLite has transactional DDL) so a crash / disk-full between
+        // them can't leave the column added but un-backfilled — a rollback undoes
+        // the ALTER and the next startup re-runs the whole unit. Driven off a
+        // pragma check (not the ALTER error) so "column present" reliably implies
+        // the backfill already committed.
+        if !Self::has_minted_at_column(&conn)? {
+            let tx = conn
+                .transaction()
+                .map_err(|e| BrokerError::Internal(format!("begin minted_at migration: {e}")))?;
+            tx.execute(
+                "ALTER TABLE pairing_requests ADD COLUMN minted_at INTEGER",
+                [],
+            )
+            .map_err(|e| BrokerError::Internal(format!("add minted_at column: {e}")))?;
+            // Legacy claimed rows may have minted J1_agent before this patch → mark
+            // them consumed so they re-pair instead of replay-minting after the
+            // upgrade. Fresh (post-migration) claims keep minted_at NULL → mint once.
+            tx.execute(
+                "UPDATE pairing_requests SET minted_at = claimed_at WHERE claimed_at IS NOT NULL",
+                [],
+            )
+            .map_err(|e| BrokerError::Internal(format!("backfill minted_at on migration: {e}")))?;
+            tx.commit()
+                .map_err(|e| BrokerError::Internal(format!("commit minted_at migration: {e}")))?;
         }
-        // Defense-in-depth: confirm the column is actually present before serving.
-        let has_minted: i64 = conn
+        // Defense-in-depth: the column MUST be present before serving (a partial
+        // migration rolled back above → fail loud rather than defer a schema error
+        // to the first poll()).
+        if !Self::has_minted_at_column(&conn)? {
+            return Err(BrokerError::Internal(
+                "pairing_requests is missing the minted_at column after migration".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// True iff the `pairing_requests` table has the `minted_at` column.
+    fn has_minted_at_column(conn: &Connection) -> BrokerResult<bool> {
+        let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('pairing_requests') \
                  WHERE name = 'minted_at'",
@@ -227,12 +234,7 @@ impl PairingRequestStore {
                 |r| r.get(0),
             )
             .map_err(|e| BrokerError::Internal(format!("verify minted_at column: {e}")))?;
-        if has_minted == 0 {
-            return Err(BrokerError::Internal(
-                "pairing_requests is missing the minted_at column after migration".into(),
-            ));
-        }
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Open a new **unbound** pairing request (agent ran `/v1/agent/pairing/request`).
@@ -667,6 +669,16 @@ mod tests {
             PairingPoll::RetrieveExpired
         );
         drop(s);
+        // Reopen (minted_at now present → migration skipped): the backfill
+        // committed atomically with the ALTER, so the legacy row is STILL
+        // consumed — "column present" reliably implies the backfill ran, so the
+        // skip-on-present path can't resurrect a replay-mintable legacy row.
+        let s2 = PairingRequestStore::open(&path).unwrap();
+        assert_eq!(
+            s2.poll("req-old", "0xdev", 1_200).unwrap(),
+            PairingPoll::RetrieveExpired
+        );
+        drop(s2);
         let _ = std::fs::remove_file(&path);
     }
 
