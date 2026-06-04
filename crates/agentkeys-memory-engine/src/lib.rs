@@ -78,8 +78,10 @@ pub trait MemoryEngine: Send + Sync {
     ) -> Vec<MemoryLine>;
 }
 
-/// Keep a prefix of a priority-ordered list within the budget.
-fn apply_budget(ordered: Vec<MemoryLine>, budget: &SelectionBudget) -> Vec<MemoryLine> {
+/// Keep a prefix of a priority-ordered list within the budget (line + byte caps).
+/// `pub` so external providers (e.g. the OpenViking adapter) apply the SAME budget
+/// to their ranked output as the built-in engines do (/codex:adversarial-review).
+pub fn apply_budget(ordered: Vec<MemoryLine>, budget: &SelectionBudget) -> Vec<MemoryLine> {
     let line_capped = match budget.max_lines {
         Some(max) => ordered.into_iter().take(max).collect(),
         None => ordered,

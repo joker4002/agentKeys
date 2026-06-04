@@ -145,17 +145,24 @@ struct FindHit {
 }
 
 impl FindHit {
-    /// A non-blank inline body carried by the hit itself (no network call).
-    fn inline_body(&self) -> Option<&str> {
-        [
-            self.content.as_deref(),
-            self.text.as_deref(),
-            self.abstract_.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
+    /// A non-blank VERBATIM inline body (content/text — what content/write stores).
+    /// Excludes `abstract`, which is an L0 SUMMARY that won't gate-match the stored
+    /// line; an abstract-only hit is resolved via content/read instead.
+    fn verbatim_inline_body(&self) -> Option<&str> {
+        [self.content.as_deref(), self.text.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+    }
+
+    /// The non-blank L0 `abstract`, if any — used only as a last resort when there
+    /// is no verbatim body AND no uri to resolve to the verbatim line.
+    fn abstract_body(&self) -> Option<&str> {
+        self.abstract_
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -304,15 +311,17 @@ impl OpenVikingClient {
         let mut uri_reads = 0usize;
         let mut ranked: Vec<(f64, String)> = Vec::with_capacity(hits.len());
         for hit in hits {
-            if let Some(body) = hit.inline_body() {
+            if let Some(body) = hit.verbatim_inline_body() {
+                // Verbatim inline body (content/text) — use directly.
                 ranked.push((hit.score, body.to_string()));
             } else if let Some(uri) = hit.uri.as_deref() {
-                // Skip-VLM / URI-only hit: fetch the verbatim stored line so the
-                // gate text-match has something to compare. Best-effort — a failed
-                // OR timed-out read drops just that hit, never aborts the ranking.
-                // Capped at `max_uri_reads` and each bounded by the client timeout,
-                // so a stalled OpenViking can't hang the hook: the read errors, the
-                // hit drops, and an empty result falls back to the lexical engine.
+                // No verbatim inline body. Resolve the verbatim stored line via
+                // content/read — for BOTH Skip-VLM (uri-only) hits AND VLM hits whose
+                // only inline body is an L0 `abstract` (a summary that won't gate-match
+                // the stored line). Best-effort — a failed/timed-out read drops just
+                // this hit; capped at `max_uri_reads`, each bounded by the client
+                // timeout, so a stalled OpenViking can't hang the hook (empty →
+                // lexical fallback).
                 if uri_reads >= max_uri_reads {
                     continue;
                 }
@@ -323,6 +332,10 @@ impl OpenVikingClient {
                         ranked.push((hit.score, line.to_string()));
                     }
                 }
+            } else if let Some(abstract_body) = hit.abstract_body() {
+                // No content/text and no uri to resolve — use the abstract as a last
+                // resort (still gate-bounded by rank_gate_bounded's text match).
+                ranked.push((hit.score, abstract_body.to_string()));
             }
         }
         Ok(ranked)
@@ -471,10 +484,15 @@ pub async fn rank_gate_bounded(
     if out.is_empty() {
         return None;
     }
-    if let Some(max) = budget.max_lines {
-        out.truncate(max);
+    // Apply the SAME line + byte budget the built-in engines use (apply_budget),
+    // so the ranked OpenViking output honors AGENTKEYS_MEMORY_MAX_BYTES / _LINES
+    // too — not just max_lines (/codex:adversarial-review).
+    let out = agentkeys_memory_engine::apply_budget(out, budget);
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
-    Some(out)
 }
 
 #[cfg(test)]
@@ -742,6 +760,62 @@ mod tests {
         let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
             .await;
         assert!(out.is_none(), "oversized content/read body must be rejected → None");
+    }
+
+    #[tokio::test]
+    async fn ranked_output_respects_max_bytes() {
+        // max_bytes set WITHOUT max_lines: the ranked OpenViking output must be
+        // byte-budgeted like the built-in engines, not inject every matching line
+        // (/codex:adversarial-review).
+        let endpoint = spawn_stub(serde_json::json!({
+            "result": { "results": [
+                { "score": 0.9, "content": "Allergic to peanuts." },
+                { "score": 0.7, "content": "Chengdu trip — Apr 12 to 16." }
+            ]}
+        }))
+        .await;
+        let cl = client(endpoint);
+        // Bytes for exactly the first ranked line (text + newline), no line cap.
+        let budget = SelectionBudget {
+            max_lines: None,
+            max_bytes: Some("Allergic to peanuts.".len() + 1),
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."],
+            "max_bytes must cap the ranked output to the top line that fits"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_verbatim_abstract_is_resolved_via_content_read() {
+        // VLM-enabled server: the hit carries a non-blank `abstract` (an L0 summary
+        // that does NOT match the gate line) plus a uri. The adapter must content/read
+        // the uri for the verbatim line, not gate-match the summary
+        // (/codex:adversarial-review).
+        let find = serde_json::json!({
+            "result": { "memories": [
+                { "score": 0.9, "uri": "viking://user/default/memories/travel/m0.md",
+                  "abstract": "a short note about the traveler's food allergies" }
+            ]}
+        });
+        let read = serde_json::json!({ "result": { "content": "Allergic to peanuts." } });
+        let endpoint = spawn_find_read_stub(find, read).await;
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await
+            .expect("a non-verbatim abstract + uri must resolve the verbatim line via content/read");
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."]
+        );
     }
 
     #[test]
