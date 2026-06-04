@@ -35,15 +35,22 @@ use agentkeys_memory_engine::{MemoryLine, SelectionBudget};
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
 
-/// Per-request timeout (env `OPENVIKING_TIMEOUT_MS`). Bounds EVERY OpenViking
-/// call — find, content/read, write, health — so a stalled server can never
-/// hang the `pre_llm_call` hook past the host deadline; the caller falls back to
-/// a built-in engine instead (OpenViking is never load-bearing — arch.md §22).
-const DEFAULT_TIMEOUT_MS: u64 = 4000;
-/// Cap on per-turn `content/read` fan-out (env `OPENVIKING_MAX_URI_READS`). With
-/// the per-request timeout this bounds worst-case URI-resolution wall-clock to
-/// `cap × timeout` for Skip-VLM (URI-only) hits, which are resolved in OpenViking
-/// rank order so the most relevant lines are the ones fetched.
+/// Overall deadline for ONE `rank_gate_bounded` call — the WHOLE OpenViking
+/// phase (find + every content/read) must finish within this or it returns
+/// `None` and the caller falls back to a built-in engine. MUST stay comfortably
+/// below the host `pre_llm_call` hook timeout (wire.rs bakes 5s) so the fallback
+/// actually runs before the host kills the hook. This — NOT per-request timeout
+/// × read cap — is the hard wall-clock bound (/codex:adversarial-review).
+/// Env `OPENVIKING_RANK_DEADLINE_MS`.
+const DEFAULT_RANK_DEADLINE_MS: u64 = 3000;
+/// Per-request timeout (env `OPENVIKING_TIMEOUT_MS`). Secondary bound on a single
+/// find/read/write/health call; the overall deadline above caps their sum so a
+/// stalled server can never hang the hook (OpenViking is never load-bearing —
+/// arch.md §22).
+const DEFAULT_TIMEOUT_MS: u64 = 2000;
+/// Cap on per-turn `content/read` fan-out (env `OPENVIKING_MAX_URI_READS`).
+/// Defense-in-depth alongside the overall deadline; URI-only (Skip-VLM) hits are
+/// resolved in OpenViking rank order so the most relevant lines are fetched first.
 const DEFAULT_MAX_URI_READS: usize = 8;
 
 fn http_client(timeout_ms: u64) -> reqwest::Client {
@@ -75,6 +82,8 @@ pub struct OpenVikingClient {
     user: String,
     agent: String,
     http: reqwest::Client,
+    /// Overall deadline (ms) for one ranking call — see [`DEFAULT_RANK_DEADLINE_MS`].
+    rank_deadline_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,7 +176,14 @@ impl OpenVikingClient {
             std::env::var("OPENVIKING_USER").unwrap_or_else(|_| "default".to_string()),
             std::env::var("OPENVIKING_AGENT").unwrap_or_else(|_| "hermes".to_string()),
         );
-        Some(client.with_request_timeout_ms(env_u64("OPENVIKING_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)))
+        Some(
+            client
+                .with_request_timeout_ms(env_u64("OPENVIKING_TIMEOUT_MS", DEFAULT_TIMEOUT_MS))
+                .with_rank_deadline_ms(env_u64(
+                    "OPENVIKING_RANK_DEADLINE_MS",
+                    DEFAULT_RANK_DEADLINE_MS,
+                )),
+        )
     }
 
     pub fn new(
@@ -184,6 +200,7 @@ impl OpenVikingClient {
             user,
             agent,
             http: http_client(DEFAULT_TIMEOUT_MS),
+            rank_deadline_ms: DEFAULT_RANK_DEADLINE_MS,
         }
     }
 
@@ -191,6 +208,13 @@ impl OpenVikingClient {
     /// `from_env` for `OPENVIKING_TIMEOUT_MS` and by tests for a short bound.
     pub fn with_request_timeout_ms(mut self, ms: u64) -> Self {
         self.http = http_client(ms);
+        self
+    }
+
+    /// Override the overall ranking deadline (env `OPENVIKING_RANK_DEADLINE_MS`).
+    /// Used by `from_env` and by tests for a short bound.
+    pub fn with_rank_deadline_ms(mut self, ms: u64) -> Self {
+        self.rank_deadline_ms = ms;
         self
     }
 
@@ -398,7 +422,16 @@ pub async fn rank_gate_bounded(
         return None;
     }
     let top_k = budget.max_lines.unwrap_or(lines.len()).max(1);
-    let hits = client.search_find(query, top_k).await.ok()?;
+    // Overall deadline on the WHOLE OpenViking phase (find + every content/read).
+    // On elapse, return None so the caller falls back to a built-in engine BEFORE
+    // the host pre_llm_call hook timeout — the hard wall-clock bound a per-request
+    // timeout × read cap could otherwise blow past (/codex:adversarial-review).
+    let deadline = std::time::Duration::from_millis(client.rank_deadline_ms);
+    let hits = match tokio::time::timeout(deadline, client.search_find(query, top_k)).await {
+        Ok(Ok(hits)) => hits,
+        Ok(Err(_)) => return None, // OpenViking error → fall back
+        Err(_) => return None,     // overall deadline exceeded → fall back NOW
+    };
     if hits.is_empty() {
         return None;
     }
@@ -569,6 +602,34 @@ mod tests {
         assert!(
             out.is_none(),
             "a stalled content/read must time out and fall back to None, not hang"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_read_respects_overall_deadline_and_falls_back() {
+        // find returns a URI-only hit FAST; content/read stalls (3s). The OVERALL
+        // ranking deadline (300ms here) must make rank_gate_bounded return None
+        // well under the host pre_llm_call timeout (5s), so the caller falls back
+        // to lexical in time — the bound is the overall deadline, NOT per-request
+        // timeout × read cap (/codex:adversarial-review).
+        let find = serde_json::json!({
+            "result": { "memories": [
+                { "score": 0.9, "uri": "viking://user/default/memories/travel/m0.md", "abstract": "" }
+            ]}
+        });
+        let endpoint = spawn_slow_read_stub(find).await;
+        let cl = client(endpoint).with_rank_deadline_ms(300);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let start = std::time::Instant::now();
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget).await;
+        let elapsed = start.elapsed();
+        assert!(out.is_none(), "stalled read must hit the overall deadline → None");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "overall deadline (300ms) must return well under the 5s host hook timeout; took {elapsed:?}"
         );
     }
 
