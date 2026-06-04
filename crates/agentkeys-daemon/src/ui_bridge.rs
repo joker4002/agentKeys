@@ -391,6 +391,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 /// Build the bridge state. `rp_id` is the WebAuthn relying-party id —
 /// always "localhost" for dev, "agentkeys.io" (or operator domain) in
 /// production. `rp_origin` is the browser's window.location.origin.
+// Runtime-config constructor: the params ARE the daemon's config surface (RP +
+// broker/signer + chain + W3 memory). Bundling into a config struct is deferred
+// (W2 adds more chain config here); clippy's documented escape for constructors.
+#[allow(clippy::too_many_arguments)]
 pub fn build_state(
     rp_id: &str,
     rp_origin: &str,
