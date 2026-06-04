@@ -458,12 +458,16 @@ fn normalize(text: &str) -> String {
     text.trim().to_lowercase()
 }
 
-/// Pull the stored line text out of a `content/read` response, tolerant of the
-/// exact envelope shape: `result.{content|text|body|abstract}`, a grouped
-/// `result.<kind>[0].{...}`, or a top-level field. Pure helper, unit-tested.
+/// Pull the VERBATIM stored line text out of a `content/read` response, tolerant
+/// of the envelope shape: `result.{content|text|body}`, a grouped
+/// `result.<kind>[0].{...}`, or a top-level field. Deliberately does NOT accept
+/// `abstract` — a summary is not the stored line, and treating it as verbatim could
+/// inject the WRONG authorized line under the URI's authority; an abstract-only read
+/// returns None and the hit is dropped (/codex:adversarial-review). Pure helper,
+/// unit-tested.
 fn extract_read_content(value: &serde_json::Value) -> Option<String> {
     fn probe(obj: &serde_json::Value) -> Option<String> {
-        for key in ["content", "text", "body", "abstract"] {
+        for key in ["content", "text", "body"] {
             if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
                 let s = s.trim();
                 if !s.is_empty() {
@@ -1096,7 +1100,36 @@ mod tests {
             Some("z".to_string())
         );
         assert_eq!(r(serde_json::json!({"content": "top"})), Some("top".to_string()));
-        assert_eq!(r(serde_json::json!({"result": {"abstract": ""}})), None);
+        // A non-empty `abstract` (a summary) is NOT verbatim content → not accepted.
+        assert_eq!(
+            r(serde_json::json!({"result": {"abstract": "a short summary"}})),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn abstract_only_content_read_is_dropped_not_injected() {
+        // content/read returns ONLY an abstract (a summary) that even happens to
+        // exact-match a gate line. It must NOT be injected — an abstract isn't the
+        // verbatim stored line, so the URI hit is dropped (/codex:adversarial-review).
+        let find = serde_json::json!({
+            "result": { "memories": [
+                { "uri": "viking://user/default/memories/travel/m0.md" }
+            ]}
+        });
+        let read = serde_json::json!({ "result": { "abstract": "Allergic to peanuts." } });
+        let endpoint = spawn_find_read_stub(find, read).await;
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await;
+        assert!(
+            out.is_none(),
+            "an abstract-only content/read must be dropped, never injected as verbatim"
+        );
     }
 
     #[tokio::test]

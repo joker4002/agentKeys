@@ -439,29 +439,59 @@ fn read_turn_query() -> Option<String> {
 
 /// Pull the user's latest message from a host hook payload. Hermes'
 /// `pre_llm_call` payload shape is not pinned, so we try several common field
-/// names and a `messages: [{role, content}]` array (last user turn). Pure
-/// helper, unit-tested.
+/// names and a `messages: [{role, content}]` array (last user turn) — at the TOP
+/// level AND nested under the documented `extra` envelope — and handle `content`
+/// that is either a plain string OR an array of `{type:"text", text:"..."}` blocks
+/// (the common structured shape). Pure helper, unit-tested. (A live
+/// `hermes hooks test pre_llm_call` validation against the real payload needs
+/// Hermes — see docs/operator-runbook-openviking.md.)
 pub fn extract_query(payload: &Value) -> Option<String> {
+    // Try the payload itself, then its `extra` sub-object (the documented hook
+    // envelope nests the turn under `extra`).
+    extract_query_from(payload).or_else(|| payload.get("extra").and_then(extract_query_from))
+}
+
+fn extract_query_from(obj: &Value) -> Option<String> {
     for key in ["query", "prompt", "input", "user_message", "text"] {
-        if let Some(s) = payload.get(key).and_then(|v| v.as_str()) {
-            if !s.trim().is_empty() {
-                return Some(s.trim().to_string());
+        if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
             }
         }
     }
-    if let Some(messages) = payload.get("messages").and_then(|v| v.as_array()) {
+    if let Some(messages) = obj.get("messages").and_then(|v| v.as_array()) {
         for message in messages.iter().rev() {
             let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
             if role == "user" || role.is_empty() {
-                if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
-                    if !content.trim().is_empty() {
-                        return Some(content.trim().to_string());
-                    }
+                if let Some(text) = message_content_text(message.get("content")) {
+                    return Some(text);
                 }
             }
         }
     }
     None
+}
+
+/// Text of a message `content` that is either a plain string or an array of
+/// `{type:"text", text:"..."}` blocks (concatenated). `None` if blank/absent.
+fn message_content_text(content: Option<&Value>) -> Option<String> {
+    match content {
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            (!s.is_empty()).then(|| s.to_string())
+        }
+        Some(Value::Array(blocks)) => {
+            let joined = blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let joined = joined.trim();
+            (!joined.is_empty()).then(|| joined.to_string())
+        }
+        _ => None,
+    }
 }
 
 /// `AGENTKEYS_MEMORY_ENGINE_STRICT=1|true` — test/proof-only flag (see
@@ -677,6 +707,34 @@ mod tests {
         assert_eq!(
             extract_query(&json!({"hook_event_name": "pre_llm_call"})),
             None
+        );
+        // the documented hook envelope nests the turn under `extra`
+        assert_eq!(
+            extract_query(&json!({
+                "hook_event_name": "pre_llm_call",
+                "extra": {"messages": [{"role": "user", "content": "what about my peanut allergy?"}]}
+            }))
+            .as_deref(),
+            Some("what about my peanut allergy?")
+        );
+        // structured content blocks: `content` is an array of {type, text}
+        assert_eq!(
+            extract_query(&json!({
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"}
+                ]}]
+            }))
+            .as_deref(),
+            Some("first second")
+        );
+        // structured content nested under `extra`
+        assert_eq!(
+            extract_query(&json!({
+                "extra": {"messages": [{"role": "user", "content": [{"type": "text", "text": "nested block"}]}]}
+            }))
+            .as_deref(),
+            Some("nested block")
         );
     }
 }
