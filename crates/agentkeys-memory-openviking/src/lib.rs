@@ -71,6 +71,22 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// OpenViking `search/find` window sizing — DECOUPLED from the output budget.
+/// OpenViking's index can hold records OUTSIDE the gate-authorized set (other
+/// namespaces, the sample corpus, resources); sizing the fetch from
+/// `SelectionBudget` lets those crowd out authorized lines ranked just below the
+/// window, silently degrading to lexical. So overfetch a generous (bounded)
+/// window, gate-match, THEN budget the matched output (/codex:adversarial-review).
+const OVERFETCH_FACTOR: usize = 8;
+const MIN_FETCH_TOP_K: usize = 32;
+const MAX_FETCH_TOP_K: usize = 256;
+
+fn openviking_fetch_top_k(authorized_lines: usize) -> usize {
+    authorized_lines
+        .saturating_mul(OVERFETCH_FACTOR)
+        .clamp(MIN_FETCH_TOP_K, MAX_FETCH_TOP_K)
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenVikingClient {
     endpoint: String,
@@ -459,7 +475,10 @@ pub async fn rank_gate_bounded(
     if lines.is_empty() {
         return None;
     }
-    let top_k = budget.max_lines.unwrap_or(lines.len()).max(1);
+    // Fetch a generous window DECOUPLED from the output budget so unauthorized
+    // index records can't crowd out lower-ranked authorized lines — the budget is
+    // applied to the matched output below (/codex:adversarial-review).
+    let top_k = openviking_fetch_top_k(lines.len());
     let hits = match tokio::time::timeout(deadline, client.search_find(query, top_k)).await {
         Ok(Ok(hits)) => hits,
         Ok(Err(_)) => return None, // OpenViking error → fall back
@@ -558,6 +577,32 @@ mod tests {
             )
             .route("/api/v1/content/read", post(slow_read))
             .with_state(find);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// Stub whose `/search/find` RESPECTS `top_k` — returns only the first `top_k`
+    /// of a canned ranked list, so a too-small fetch window is observable.
+    async fn spawn_topk_stub(ranked: Vec<serde_json::Value>) -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/search/find",
+                post(
+                    |State(ranked): State<Vec<serde_json::Value>>,
+                     Json(req): Json<serde_json::Value>| async move {
+                        let top_k =
+                            req.get("top_k").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        let hits: Vec<serde_json::Value> =
+                            ranked.into_iter().take(top_k).collect();
+                        Json(serde_json::json!({ "result": { "results": hits } }))
+                    },
+                ),
+            )
+            .with_state(ranked);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -816,6 +861,38 @@ mod tests {
             out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             vec!["Allergic to peanuts."]
         );
+    }
+
+    #[tokio::test]
+    async fn overfetch_recovers_authorized_hit_below_unauthorized() {
+        // OpenViking's index also holds UNAUTHORIZED records that can rank above an
+        // authorized line. With max_lines=1, sizing the fetch from the output budget
+        // would pull only the unauthorized hit and silently fall back. Overfetch must
+        // pull the authorized line too, then budget the OUTPUT (/codex:adversarial-review).
+        let ranked = vec![
+            serde_json::json!({ "score": 0.9, "content": "SECRET unauthorized record not in the gate" }),
+            serde_json::json!({ "score": 0.7, "content": "Allergic to peanuts." }),
+        ];
+        let endpoint = spawn_topk_stub(ranked).await;
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: Some(1),
+            max_bytes: None,
+        };
+        let out = rank_gate_bounded(&cl, "peanut", &lines(), &budget, std::time::Duration::from_secs(5))
+            .await
+            .expect("overfetch must recover the authorized hit ranked below an unauthorized one");
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."]
+        );
+    }
+
+    #[test]
+    fn fetch_top_k_overfetches_independent_of_output_budget() {
+        assert_eq!(openviking_fetch_top_k(1), MIN_FETCH_TOP_K); // tiny gate set still overfetches
+        assert_eq!(openviking_fetch_top_k(10), 10 * OVERFETCH_FACTOR); // 80
+        assert_eq!(openviking_fetch_top_k(1000), MAX_FETCH_TOP_K); // capped
     }
 
     #[test]
