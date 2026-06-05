@@ -2,15 +2,35 @@
 # scripts/heima-register-first-master.sh — bootstrap the operator's first
 # master device against the v2 stage-2 SidecarRegistry (arch.md §10.1).
 #
+# ⚠️ DEPRECATED (old-model EOA register). This signs registerFirstMasterDevice
+# DIRECTLY with the deployer EOA, so operatorMasterWallet = a raw EOA — it does
+# NOT follow the #164 passkey-account pattern. The harness register helper
+# (register_first_master in _lib.sh) NO LONGER uses this automatically; the only
+# supported register is the #164 passkey-account path (erc4337-register-master.sh).
+# This script survives as a loud, explicit emergency escape (AGENTKEYS_REGISTER_MODE=eoa)
+# and for any not-yet-migrated callers (setup-heima.sh / heima-device-register.sh).
+# Do not add new callers — use erc4337-register-master.sh.
+#
 # Idempotent: pre-reads `getDevice(deviceKeyHash).registeredAt` and exits 0
 # with skip when the device is already registered.
 #
 # Usage:
+#   # CLI / harness path (operator == deployer; reads the disk K11 file):
 #   bash scripts/heima-register-first-master.sh \
 #        [--registry-address 0x...] [--dry-run]
 #
+#   # Web-onboarding path (issue #196 — daemon ui-bridge shells out here):
+#   bash scripts/heima-register-first-master.sh \
+#        --operator-omni 0x<session_omni> [--actor-omni 0x<session_omni>] \
+#        --k11-cose-hex <130-hex SEC1 pubkey> --k11-cred-id <b64url> [--rp-id localhost]
+#
 # Reads primary master K11 pubkey + cred-id from
-# `~/.agentkeys/k11/<omni>.json` (must be `mode: "webauthn"`).
+# `~/.agentkeys/k11/<omni>.json` (must be `mode: "webauthn"`) UNLESS the web
+# overrides (--operator-omni + --k11-cose-hex) are passed, in which case the
+# omni is the managed-wallet *session* omni and the K11 pubkey comes from the
+# browser passkey (no disk file; the deployer key still signs = msg.sender).
+# device_key_hash defaults to keccak(operator_omni) on the web path so one
+# deployer key signing for many session omnis never collides.
 #
 # ⚠️ ANTI-FRONT-RUN (issue #165) — REDEPLOY-COORDINATED CHANGE PENDING.
 # The hardened SidecarRegistry now requires a K11 *self-attestation* at
@@ -36,12 +56,43 @@ DRY_RUN=0
 DEPLOYER_KEY_FILE="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/heima-deployer.key}"
 ROLES=7   # CAP_MINT | RECOVERY | SCOPE_MGMT = full powers for first master
 
+# Web-onboarding overrides (issue #196). When the daemon ui-bridge shells out
+# here after a browser K11 enrollment, the master's operator/actor omni is the
+# managed-wallet *session* omni (cap.rs forces device.operator_omni ==
+# J1.omni_account == req.operator_omni), NOT the deployer-derived omni. The
+# deployer key still SIGNS the tx (msg.sender = gas payer = operatorMasterWallet
+# value) — issue #196 option (α): the stored wallet diverges from the managed
+# wallet, which is fine for cap-mint (it checks the device, not msg.sender).
+# All overrides default to the legacy deployer-derived values so existing CLI /
+# harness callers (no flags) behave identically.
+OPERATOR_OMNI_OVERRIDE=""   # bare or 0x-prefixed 32-byte hex
+ACTOR_OMNI_OVERRIDE=""      # defaults to operator omni (master-self)
+DEVICE_KEY_HASH_OVERRIDE="" # defaults to keccak(operator_omni) when omni overridden, else keccak(deployer_addr)
+K11_COSE_HEX_OVERRIDE=""    # 130-hex SEC1 uncompressed P-256 pubkey from the web passkey (no disk K11 file)
+K11_CRED_ID_OVERRIDE=""     # WebAuthn credential id (b64url); sha256-hashed for on-chain storage
+RP_ID_OVERRIDE=""           # WebAuthn rp_id the passkey was enrolled under (sha256'd to k11RpIdHash)
+RP_ID_HASH_OVERRIDE=""      # k11RpIdHash directly (authData[0:32]); preferred over --rp-id on the web path
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --registry-address)   REGISTRY="$2"; shift 2 ;;
     --registry-address=*) REGISTRY="${1#*=}"; shift ;;
     --roles)              ROLES="$2"; shift 2 ;;
     --roles=*)            ROLES="${1#*=}"; shift ;;
+    --operator-omni)      OPERATOR_OMNI_OVERRIDE="$2"; shift 2 ;;
+    --operator-omni=*)    OPERATOR_OMNI_OVERRIDE="${1#*=}"; shift ;;
+    --actor-omni)         ACTOR_OMNI_OVERRIDE="$2"; shift 2 ;;
+    --actor-omni=*)       ACTOR_OMNI_OVERRIDE="${1#*=}"; shift ;;
+    --device-key-hash)    DEVICE_KEY_HASH_OVERRIDE="$2"; shift 2 ;;
+    --device-key-hash=*)  DEVICE_KEY_HASH_OVERRIDE="${1#*=}"; shift ;;
+    --k11-cose-hex)       K11_COSE_HEX_OVERRIDE="$2"; shift 2 ;;
+    --k11-cose-hex=*)     K11_COSE_HEX_OVERRIDE="${1#*=}"; shift ;;
+    --k11-cred-id)        K11_CRED_ID_OVERRIDE="$2"; shift 2 ;;
+    --k11-cred-id=*)      K11_CRED_ID_OVERRIDE="${1#*=}"; shift ;;
+    --rp-id)              RP_ID_OVERRIDE="$2"; shift 2 ;;
+    --rp-id=*)            RP_ID_OVERRIDE="${1#*=}"; shift ;;
+    --rp-id-hash)         RP_ID_HASH_OVERRIDE="$2"; shift 2 ;;
+    --rp-id-hash=*)       RP_ID_HASH_OVERRIDE="${1#*=}"; shift ;;
     --dry-run)            DRY_RUN=1; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
@@ -110,9 +161,74 @@ else
 fi
 MASTER_ADDR=$(cast wallet address --private-key "$MASTER_KEY")
 MASTER_ADDR_LC=$(printf '%s' "$MASTER_ADDR" | tr '[:upper:]' '[:lower:]')
-OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
-DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
 
+# normalize_omni: strip 0x, lowercase, require exactly 64 hex chars (32 bytes).
+normalize_omni() {
+  local v
+  v=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  v="${v#0x}"
+  case "$v" in *[!0-9a-f]*) die "omni '$1' is not hex" ;; esac
+  [ "${#v}" = "64" ] || die "omni '$1' must be 32 bytes (64 hex), got ${#v}"
+  printf '%s' "$v"
+}
+
+# operator_omni: --operator-omni override (web path: the managed-wallet session
+# omni) else legacy deployer-derived. actor_omni defaults to operator (master-self).
+if [ -n "$OPERATOR_OMNI_OVERRIDE" ]; then
+  OPERATOR_OMNI=$(normalize_omni "$OPERATOR_OMNI_OVERRIDE")
+else
+  OPERATOR_OMNI=$(printf 'agentkeysevm%s' "$MASTER_ADDR_LC" | shasum -a 256 | awk '{print $1}')
+fi
+if [ -n "$ACTOR_OMNI_OVERRIDE" ]; then
+  ACTOR_OMNI=$(normalize_omni "$ACTOR_OMNI_OVERRIDE")
+else
+  ACTOR_OMNI="$OPERATOR_OMNI"
+fi
+
+# device_key_hash: explicit override > keccak(operator_omni) when the omni is
+# overridden (web path — distinct per session omni so one deployer key signing
+# for many masters can't collide on a single keccak(deployer_addr)) > legacy
+# keccak(deployer_addr) (CLI/harness, operator == deployer).
+if [ -n "$DEVICE_KEY_HASH_OVERRIDE" ]; then
+  DEVICE_KEY_HASH=$(printf '%s' "$DEVICE_KEY_HASH_OVERRIDE" | tr '[:upper:]' '[:lower:]')
+  case "$DEVICE_KEY_HASH" in 0x*) ;; *) DEVICE_KEY_HASH="0x$DEVICE_KEY_HASH" ;; esac
+elif [ -n "$OPERATOR_OMNI_OVERRIDE" ]; then
+  DEVICE_KEY_HASH=$(cast keccak "0x$OPERATOR_OMNI")
+else
+  DEVICE_KEY_HASH=$(cast keccak "$MASTER_ADDR_LC")
+fi
+
+# K11 pubkey + cred id + rp-id come from one of two sources:
+#   (a) --k11-cose-hex (web path, issue #196): the daemon ui-bridge passes the
+#       browser passkey's SEC1 pubkey directly — there is no
+#       ~/.agentkeys/k11/<omni>.json on disk (web K11 enrollment is in-memory).
+#       This IS a real WebAuthn key (the H2 disk-stub gate guards the disk path,
+#       which a synthetic key could poison; an explicit caller-supplied web key
+#       does not go through disk so that attack surface doesn't apply here).
+#   (b) disk file (CLI/harness path) — unchanged, still mode-gated (H2).
+USE_DISK_K11=1
+if [ -n "$K11_COSE_HEX_OVERRIDE" ]; then
+  USE_DISK_K11=0
+  COSE_NOPREFIX="${K11_COSE_HEX_OVERRIDE#0x}"
+  [ "${#COSE_NOPREFIX}" = "130" ] \
+    || die "--k11-cose-hex unexpected length ${#COSE_NOPREFIX} (expected 130 hex = SEC1 uncompressed P-256)"
+  K11_PUB_X="0x${COSE_NOPREFIX:2:64}"
+  K11_PUB_Y="0x${COSE_NOPREFIX:66:64}"
+  [ -n "$K11_CRED_ID_OVERRIDE" ] || die "--k11-cose-hex requires --k11-cred-id"
+  K11_CRED_ID=$(printf '%s' "$K11_CRED_ID_OVERRIDE" | shasum -a 256 | awk '{print "0x"$1}')
+  if [ -n "$RP_ID_HASH_OVERRIDE" ]; then
+    # k11RpIdHash straight from the credential's authData[0:32] — exact match to
+    # the authenticator-bound rpIdHash (forward-compatible with the hardened
+    # contract that checks authData[0:32] == k11RpIdHash).
+    K11_RP_ID_HASH=$(printf '%s' "$RP_ID_HASH_OVERRIDE" | tr '[:upper:]' '[:lower:]')
+    case "$K11_RP_ID_HASH" in 0x*) ;; *) K11_RP_ID_HASH="0x$K11_RP_ID_HASH" ;; esac
+  else
+    RP_ID="${RP_ID_OVERRIDE:-localhost}"
+    K11_RP_ID_HASH=$(printf '%s' "$RP_ID" | shasum -a 256 | awk '{print "0x"$1}')
+  fi
+fi
+
+if [ "$USE_DISK_K11" = "1" ]; then
 # Load primary K11 pubkey + cred id from disk.
 K11_FILE="$HOME/.agentkeys/k11/${OPERATOR_OMNI}.json"
 [ -f "$K11_FILE" ] || die "K11 enrollment not found at $K11_FILE — run \`agentkeys k11 enroll --webauthn --rp-id localhost --operator-omni 0x$OPERATOR_OMNI\` first"
@@ -158,12 +274,14 @@ K11_CRED_ID=$(printf '%s' "$CRED_B64URL" | shasum -a 256 | awk '{print "0x"$1}')
 RP_ID=$(jq -r .rp_id "$K11_FILE")
 [ -n "$RP_ID" ] && [ "$RP_ID" != "null" ] || RP_ID="localhost"
 K11_RP_ID_HASH=$(printf '%s' "$RP_ID" | shasum -a 256 | awk '{print "0x"$1}')
+fi
 
 log "Inputs"
 echo "    chain         = $AGENTKEYS_CHAIN (chain_id $LIVE_CHAIN_ID)" >&2
 echo "    registry      = $REGISTRY" >&2
-echo "    master        = $MASTER_ADDR" >&2
+echo "    signer (gas)  = $MASTER_ADDR (msg.sender = operatorMasterWallet)" >&2
 echo "    operator_omni = 0x$OPERATOR_OMNI" >&2
+echo "    actor_omni    = 0x$ACTOR_OMNI" >&2
 echo "    deviceKeyHash = $DEVICE_KEY_HASH" >&2
 echo "    roles         = $ROLES (CAP_MINT|RECOVERY|SCOPE_MGMT = 7)" >&2
 
@@ -180,7 +298,7 @@ if [ -n "$EXISTING" ] && [ "$EXISTING" != "0x" ]; then
     ACTIVE=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$DEVICE_KEY_HASH" --rpc-url "$RPC_HTTP" 2>/dev/null || echo "false")
     if [ "$ACTIVE" = "true" ]; then
       skip "first master already registered + active"
-      echo "{\"ok\":true,\"skipped\":\"already-registered\",\"device_key_hash\":\"$DEVICE_KEY_HASH\"}"
+      echo "{\"ok\":true,\"skipped\":\"already-registered\",\"device_key_hash\":\"$DEVICE_KEY_HASH\",\"operator_omni\":\"0x$OPERATOR_OMNI\",\"actor_omni\":\"0x$ACTOR_OMNI\"}"
       exit 0
     fi
   fi
@@ -190,7 +308,7 @@ ok "first master not yet registered → proceeding"
 CAST_ARGS=(
   send "$REGISTRY"
   "registerFirstMasterDevice(bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,bytes,uint8)"
-  "$DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$OPERATOR_OMNI" "$K11_CRED_ID" "$K11_RP_ID_HASH" \
+  "$DEVICE_KEY_HASH" "0x$OPERATOR_OMNI" "0x$ACTOR_OMNI" "$K11_CRED_ID" "$K11_RP_ID_HASH" \
   "$K11_PUB_X" "$K11_PUB_Y" "0x00" "$ROLES"
   --rpc-url "$RPC_HTTP" --chain-id "$LIVE_CHAIN_ID" --private-key "$MASTER_KEY"
 )
@@ -205,7 +323,7 @@ if [ "$DRY_RUN" = "1" ]; then
     esac
   done
   printf '\n' >&2
-  echo "{\"ok\":true,\"dry_run\":true,\"device_key_hash\":\"$DEVICE_KEY_HASH\"}"
+  echo "{\"ok\":true,\"dry_run\":true,\"device_key_hash\":\"$DEVICE_KEY_HASH\",\"operator_omni\":\"0x$OPERATOR_OMNI\",\"actor_omni\":\"0x$ACTOR_OMNI\"}"
   exit 0
 fi
 
@@ -224,4 +342,4 @@ ACTIVE=$(cast call "$REGISTRY" "isActive(bytes32)(bool)" "$DEVICE_KEY_HASH" --rp
 [ "$ACTIVE" = "true" ] || die "post-tx isActive($DEVICE_KEY_HASH) = $ACTIVE"
 
 ok "first master registered — tx=$TX_HASH block=$BLOCK_NUM"
-echo "{\"ok\":true,\"device_key_hash\":\"$DEVICE_KEY_HASH\",\"operator_omni\":\"0x$OPERATOR_OMNI\",\"tx_hash\":\"$TX_HASH\",\"block_number\":\"$BLOCK_NUM\"}"
+echo "{\"ok\":true,\"device_key_hash\":\"$DEVICE_KEY_HASH\",\"operator_omni\":\"0x$OPERATOR_OMNI\",\"actor_omni\":\"0x$ACTOR_OMNI\",\"tx_hash\":\"$TX_HASH\",\"block_number\":\"$BLOCK_NUM\"}"

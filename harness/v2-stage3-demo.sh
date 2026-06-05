@@ -52,8 +52,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Shared helper: resolve_active_master_dkh (detect the operator's active master
+# device hash — #164 keccak(omni) or legacy EOA keccak(deployer_addr)). Used by
+# step 16. Defines functions only (safe to source before env). See harness/scripts/_lib.sh.
+. "$REPO_ROOT/harness/scripts/_lib.sh"
 STEP_NUM=0
-STEP_TOTAL=16
+STEP_TOTAL=19
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
@@ -70,6 +74,10 @@ ONLY_STEP=""
 #   --allow-skip                         → legacy: all reasons allowed (dev only)
 #   --allow-skip=scope-not-set           → only the scope-not-set prereq may skip
 #   --allow-skip=scope-not-set,broker-misconfig  → comma-separated set
+#   --ci                                 CI run: tolerate skip when the #164
+#                                        passkey-register prereqs are unavailable
+#                                        (never the deprecated EOA path); local
+#                                        (no --ci) requires the passkey register.
 #
 # Codex H1 (2026-05-23): blanket --allow-skip in CI lets stage 3 report success
 # while bypassing the four-layer isolation invariants it's supposed to test
@@ -84,8 +92,16 @@ ONLY_STEP=""
 #   broker-misconfig         broker missing chain RPC or contract addresses
 #   device-role-missing      device not granted ROLE_CAP_MINT on chain
 #   agent-sts-mint-failed    auth chain broken upstream of this stage's checks
+#   master-not-registered    master device not on chain w/ CAP_MINT (step 16, #196)
+#   agent-not-registered     agent device not on chain (step 17 cross-actor scope)
 ALLOW_SKIP_REASONS=""   # empty = strict mode (every prereq dies); * = all
 STEP_OUTCOMES=()        # filled in per-step: "ok|skip|fail" — drives final summary
+# Steps 11-12 sign STS creds AS the agent, so they need a MASTER-HELD agent key.
+# A real §10.2-paired agent keeps its key in the sandbox (the operator path: prove
+# the roundtrip in-sandbox via phase1-wire-demo.sh). MOCK_AGENT auto-provisions a
+# master-held DEV agent that MOCKS the sandbox actor so 11-12 run unattended — the
+# CI path. Auto-on under --ci; opt-in elsewhere via --mock-agent.
+MOCK_AGENT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -93,6 +109,8 @@ while [ $# -gt 0 ]; do
     --to-step)          TO_STEP="$2"; shift 2 ;;
     --only-step)        ONLY_STEP="$2"; shift 2 ;;
     --allow-skip)       ALLOW_SKIP_REASONS="*"; shift ;;
+    --ci)               export AGENTKEYS_CI=1; shift ;;   # CI run: tolerate skip when #164 passkey prereqs absent (never EOA)
+    --mock-agent)       MOCK_AGENT=1; shift ;;            # auto-provision a master-held dev agent for steps 11-12 (mocks the sandbox actor)
     --allow-skip=*)     ALLOW_SKIP_REASONS="${1#--allow-skip=}"; shift ;;
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; exit 0 ;;
@@ -103,6 +121,9 @@ done
 # Back-compat alias for code paths that still test $ALLOW_SKIP (boolean).
 # 1 when any reason is allowed; 0 in strict mode.
 if [ -n "$ALLOW_SKIP_REASONS" ]; then ALLOW_SKIP=1; else ALLOW_SKIP=0; fi
+# CI mocks the sandbox agent (no real sandbox in CI). Operator runs (no --ci) keep
+# MOCK_AGENT off → a sandbox-paired agent routes to the in-sandbox proof instead.
+[ -n "${AGENTKEYS_CI:-}" ] && MOCK_AGENT=1
 
 if [ -n "$ONLY_STEP" ]; then FROM_STEP="$ONLY_STEP"; TO_STEP="$ONLY_STEP"; fi
 STEP_NUM=$((FROM_STEP - 1))
@@ -162,6 +183,16 @@ prereq_missing() {
   return 1
 }
 record_ok() { STEP_OUTCOMES+=("$STEP_NUM:ok:$1"); }
+# A step that is CORRECTLY run elsewhere (the sandbox), not a missing prereq. On the
+# operator, the agent-side roundtrip (steps 11-12) can't run — the §10.2 agent's key
+# lives in the sandbox — so it is DEFERRED there, not failed. `deferred` is counted
+# separately and NEVER triggers FAILED/INCOMPLETE: the operator demo stays GREEN, and
+# the agent-side coverage is proven by the sandbox harness (phase1-wire-demo.sh --real
+# → sandbox-agent-isolation.sh). Returns 0.
+defer_to_sandbox() {
+  printf "    ${C_WARN}defer${C_RESET} %s\n" "$1 — run on the sandbox (see the runbook On Sandbox)" >&2
+  STEP_OUTCOMES+=("$STEP_NUM:deferred:sandbox:$1")
+}
 should_run_step() { [ "$1" -ge "$FROM_STEP" ] && [ "$1" -le "$TO_STEP" ]; }
 
 # ─── Env ────────────────────────────────────────────────────────────────────
@@ -183,13 +214,18 @@ set -a; . "$ENV_FILE"; set +a
 # HEIMA_DEPLOYER_KEY_FILE=/path/to/0x-key.txt to skip the mnemonic derive.
 # Mnemonic fallback preserves the existing operator dogfood flow that uses
 # ./test-hei in the repo root.
-DEPLOYER_KEY_FILE="${HEIMA_DEPLOYER_KEY_FILE:-}"
+# Default to the canonical key location ~/.agentkeys/heima-deployer.key (what
+# _lib.sh::resolve_master_key + every other heima-*.sh script use) so stage 3
+# finds the operator's deployer key without requiring HEIMA_DEPLOYER_KEY_FILE to
+# be set every run. Override with HEIMA_DEPLOYER_KEY_FILE; ./test-hei mnemonic
+# remains the fallback.
+DEPLOYER_KEY_FILE="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/heima-deployer.key}"
 MNEMONIC_FILE="${HEIMA_DEPLOYER_MNEMONIC_FILE:-$REPO_ROOT/test-hei}"
-if [ -n "$DEPLOYER_KEY_FILE" ] && [ -f "$DEPLOYER_KEY_FILE" ]; then
+if [ -f "$DEPLOYER_KEY_FILE" ]; then
   USE_KEY_FILE=1
 else
   USE_KEY_FILE=0
-  [ -f "$MNEMONIC_FILE" ] || die "no HEIMA_DEPLOYER_KEY_FILE set and no mnemonic at $MNEMONIC_FILE — set one or the other"
+  [ -f "$MNEMONIC_FILE" ] || die "no deployer key at $DEPLOYER_KEY_FILE (override with HEIMA_DEPLOYER_KEY_FILE) and no mnemonic at $MNEMONIC_FILE — set one or the other"
 fi
 
 # Hold state across steps in a temp dir so steps are individually re-runnable.
@@ -533,8 +569,53 @@ mint_cap() {
     -d "$body" 2>&1 || echo "000"
 }
 
+# MOCK_AGENT (CI path): provision a master-held DEV agent that MOCKS the sandbox
+# actor so steps 11-12 can sign STS creds as the agent unattended (a real §10.2
+# agent keeps its key in the sandbox). Idempotent — heima-agent-create +
+# heima-scope-set both short-circuit when already on chain. Echoes the agent file
+# path on stdout; all logs to stderr. Mirrors stage-1 step 12/13.
+# Stage 3 uploads the in-sandbox agent-isolation test (harness/scripts/sandbox-
+# agent-isolation.sh) so the operator can run the REAL §10.2 proof THERE — the
+# master can't sign STS creds for a sandbox-held key, so the genuine agent test must
+# run in the sandbox. Runs in phase 3 regardless of the mock/operator path below;
+# skips quietly when no sandbox is reachable. One-time log via SANDBOX_TEST_UPLOADED.
+SANDBOX_TEST_UPLOADED=0
+upload_sandbox_isolation_test() {
+  [ "$SANDBOX_TEST_UPLOADED" = 1 ] && return 0
+  local sbx="${SANDBOX_URL:-http://localhost:8080}"
+  local script="$REPO_ROOT/harness/scripts/sandbox-agent-isolation.sh"
+  [ -f "$script" ] || return 0
+  curl -fsS --max-time 8 "$sbx/healthz" >/dev/null 2>&1 || curl -fsS --max-time 8 "$sbx/v1/sandbox" >/dev/null 2>&1 || return 0
+  if curl -sS --max-time 30 -X POST "$sbx/v1/file/upload" -F "file=@$script" -F "path=sandbox-agent-isolation.sh" >/dev/null 2>&1; then
+    SANDBOX_TEST_UPLOADED=1
+    info "uploaded sandbox-agent-isolation.sh → the sandbox ($sbx). REAL agent test (sandbox-held key) runs THERE: bash \$HOME/sandbox-agent-isolation.sh"
+  fi
+}
+
+ensure_mock_agent() {
+  local label="${AGENTKEYS_MOCK_AGENT_LABEL:-demo-agent-dev}"
+  local rr profile_uc registry_addr scope_addr
+  rr="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+  profile_uc=$(printf '%s' "${AGENTKEYS_CHAIN:-heima}" | tr 'a-z-' 'A-Z_')
+  registry_addr=$(eval "echo \${SIDECAR_REGISTRY_ADDRESS_${profile_uc}:-}")
+  scope_addr=$(eval "echo \${SCOPE_CONTRACT_ADDRESS_${profile_uc}:-}")
+  [ -n "$registry_addr" ] && [ "$registry_addr" != 0x0 ] || { echo "ensure_mock_agent: no SidecarRegistry address in env" >&2; return 1; }
+  bash "$rr/scripts/heima-agent-create.sh" --label "$label" --registry-address "$registry_addr" >&2 \
+    || { echo "ensure_mock_agent: heima-agent-create.sh failed" >&2; return 1; }
+  if [ -n "$scope_addr" ] && [ "$scope_addr" != 0x0 ]; then
+    local args=(--agent "$label" --services "$SMOKE_SERVICE" --scope-address "$scope_addr")
+    [ "${WEBAUTHN_MODE:-0}" = 1 ] && args+=(--webauthn)
+    bash "$rr/scripts/heima-scope-set.sh" "${args[@]}" >&2 \
+      || { echo "ensure_mock_agent: heima-scope-set.sh failed" >&2; return 1; }
+  fi
+  printf '%s\n' "$HOME/.agentkeys/agents/${label}.json"
+}
+
 cred_memory_roundtrip() {
   local kind="$1"            # cred | memory
+  # Phase 3 stages the in-sandbox real-agent test ANYWAY (once, when a sandbox is up)
+  # — independent of this run's agent custody — so the operator can run it there.
+  upload_sandbox_isolation_test
   local cap_store_url cap_fetch_url worker_url store_route fetch_route
   if [ "$kind" = "cred" ]; then
     cap_store_url="cred-store"
@@ -562,8 +643,29 @@ cred_memory_roundtrip() {
   local agent_pk
   agent_pk=$(jq -r '.agent_private_key // empty' "$AGENT_FILE")
   if [ -z "$agent_pk" ] || [ "$agent_pk" = "null" ]; then
-    prereq_missing agent-file-invalid "agent file missing agent_private_key — cannot mint agent STS creds" || return 1
-    return 0
+    # The configured agent is sandbox-paired (§10.2 — key never on the master).
+    # (The in-sandbox real-agent test was already staged at the top of this function.)
+    # TWO ways to satisfy steps 11-12 (per issue: operator-sandbox vs CI-mock):
+    if [ "$MOCK_AGENT" = 1 ]; then
+      # CI: provision a master-held DEV agent that mocks the sandbox actor here.
+      info "agent '$AGENT_LABEL' is sandbox-paired (key_custody=$(jq -r '.key_custody // "?"' "$AGENT_FILE" 2>/dev/null)) — MOCK_AGENT: provisioning a master-held dev agent to mock it for steps 11-12"
+      local mock_file
+      mock_file=$(ensure_mock_agent) || { prereq_missing agent-file-invalid "mock-agent provision failed (heima-agent-create/scope-set)" || return 1; return 0; }
+      AGENT_FILE="$mock_file"
+      AGENT_LABEL=$(jq -r '.label // "demo-agent-dev"' "$AGENT_FILE" 2>/dev/null)
+      agent_pk=$(jq -r '.agent_private_key // empty' "$AGENT_FILE")
+      [ -n "$agent_pk" ] && [ "$agent_pk" != null ] || { prereq_missing agent-file-invalid "mock agent '$AGENT_LABEL' still has no master-held key (heima-agent-create ran in §10.2 mode?)" || return 1; return 0; }
+      ok "mock agent ready ($AGENT_LABEL, master-held key) — steps 11-12 sign as this actor"
+    else
+      # OPERATOR: steps 11-12 are AGENT-side. The §10.2 agent's key lives in the
+      # sandbox, so the master cannot sign STS creds for it — this is by design, NOT a
+      # failure. DEFER to the sandbox: `phase1-wire-demo.sh --real` pairs the agent and
+      # stage 3 uploads `sandbox-agent-isolation.sh`; run it THERE (see runbook On
+      # Sandbox). The operator demo stays GREEN. (CI has no sandbox → it mocks instead,
+      # via --mock-agent / --ci.)
+      defer_to_sandbox "step $STEP_NUM ($kind worker, signed AS the agent): agent '$AGENT_LABEL' is §10.2-paired (key in the sandbox)"
+      return 0
+    fi
   fi
   local agent_addr
   agent_addr=$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE")
@@ -899,6 +1001,15 @@ cross_class_rejection() {
     prereq_missing agent-file-missing "no demo-agent file — run stage-1 step 12 first" || return 1
     return 0
   fi
+  # Steps 14-15 prove the cross-class denial by acting AS the agent (mint_agent_sts_for_role
+  # below signs the SIWE). On the OPERATOR a §10.2 agent's key is in the sandbox → the master
+  # can't sign → DEFER (not fail; the sandbox harness covers it). CI mocks (the mock agent,
+  # provisioned at step 11, has a master-held key, so this gate doesn't fire there).
+  local _apk; _apk=$(jq -r '.agent_private_key // empty' "$AGENT_FILE")
+  if { [ -z "$_apk" ] || [ "$_apk" = "null" ]; } && [ "$MOCK_AGENT" != 1 ]; then
+    defer_to_sandbox "step $STEP_NUM (cross-class $art rejection, signed AS the agent): agent '$AGENT_LABEL' is §10.2-paired (key in the sandbox)"
+    return 0
+  fi
   local a_actor a_dkh cap_body
   a_actor=$(jq -r .actor_omni "$AGENT_FILE")
   a_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
@@ -984,8 +1095,143 @@ if should_run_step 15; then
   cross_class_rejection memory-put "${AGENTKEYS_WORKER_CRED_URL}/v1/cred/store" cred memory mem-to-cred
 fi
 
-# ─── Step 16: Cleanup with admin profile ───────────────────────────────────
+# ─── Step 16: POSITIVE — master-self cap mints with NO scope grant ─────────
+# Issue #196 + #195. The master accessing its OWN data (operator == actor ==
+# O_master) must mint a cap WITHOUT any on-chain scope grant: cap.rs skips the
+# isServiceInScope check when operator == actor (#195), and #196 guarantees the
+# master device is registered on chain with CAP_MINT. This is the POSITIVE
+# counterpart to step 13's cross-actor negative — together they prove the skip
+# is scoped to master-self only.
+#
+# In the harness the session wallet IS the deployer, so OWN_ACTOR_OMNI is the
+# omni the first-master device was registered under. The master is registered by
+# register_first_master() in stage 1 (step 10) / stage 2 — the #164
+# passkey-account ERC-4337 path (EOA fallback), BOTH of which register
+# device_key_hash = keccak(operator_omni). So this cap-mint sends
+# keccak(0x$OWN_ACTOR_OMNI). No setScope ceremony is run before this.
 if should_run_step 16; then
+  step "POSITIVE: master-self cap mints with NO scope grant (operator==actor — #195 skip + #196/#164 device)"
+  [ -f "$STATE_DIR/session.jwt" ] || die "no session.jwt — re-run step 1"
+  MASTER_SELF_SERVICE="${MASTER_SELF_SERVICE:-memory:stage3self}"
+  # The operator's ACTIVE master device — #164 keccak(operator_omni) or the legacy
+  # EOA keccak(deployer_addr), whichever is on chain (the deployer may be
+  # bootstrapped via either path). Falls back to keccak(omni) → the
+  # not-registered branch below then guides the operator.
+  master_dkh="$(resolve_active_master_dkh "$OWN_ACTOR_OMNI" "$WALLET_LC" 2>/dev/null || cast keccak "0x$OWN_ACTOR_OMNI")"
+  self_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "0x$OWN_ACTOR_OMNI" \
+                     --arg svc "$MASTER_SELF_SERVICE" --arg dkh "$master_dkh" \
+     '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+  rc=$(mint_cap memory-put "$self_body")
+  body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+  if [ "$rc" = "200" ]; then
+    ok "master-self memory cap minted with NO scope grant (operator==actor) — #195 skip + #196 registered device both proven"
+    record_ok "master-self cap mints with no scope grant ($MASTER_SELF_SERVICE, device $master_dkh)"
+  elif echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope"; then
+    die "master-self cap returned ServiceNotInScope — operator==actor must skip the scope check (#195). The repo + origin/main HAVE the skip (crates/agentkeys-broker-server/src/handlers/cap.rs '#195'), so this is a STALE DEPLOYED broker (deployed before #195 landed) — NOT a harness step you missed. FIX (operational): the broker builds+restarts LOCALLY, so SSH into the host FIRST (ssh-agentkeys, or 'bash scripts/ssh-broker.sh prod'), then ON THE HOST run: sudo bash scripts/setup-broker-host.sh --ref main. Resume here after: bash harness/v2-demo.sh --from 3. body: $body"
+  elif echo "$body" | grep -qiE "DeviceNotActive|device.*not.*active|DeviceBindingMismatch|binding.*mismatch|DeviceRoleMissing|role_missing|cap_mint role"; then
+    prereq_missing master-not-registered "master device $master_dkh not registered with CAP_MINT under 0x$OWN_ACTOR_OMNI (HTTP $rc) — run stage 1 step 10 / stage 2 (register_first_master), or directly: bash harness/scripts/erc4337-register-master.sh --operator-omni 0x$OWN_ACTOR_OMNI. body: $body" || true
+  elif echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP|SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA"; then
+    prereq_missing broker-misconfig "broker missing chain config (HTTP $rc) — redeploy broker host. body: $body" || true
+  else
+    die "master-self cap-mint returned HTTP $rc — body: $body"
+  fi
+fi
+
+# ─── Step 17: NEGATIVE — cross-actor cap still returns ServiceNotInScope ────
+# Issue #196 + #195. The mirror of step 16: when operator != actor, the scope
+# check is NOT skipped. A cap for the agent actor against a service the agent
+# was NOT granted MUST be rejected with ServiceNotInScope — proving #195's skip
+# did not accidentally open the gate for cross-actor caps. Uses the demo agent
+# (operator == OWN, actor == agent_omni, a registered device) + a deliberately
+# un-granted service so the device-binding check passes and the SCOPE gate is
+# the one that fires.
+if should_run_step 17; then
+  step "NEGATIVE: cross-actor cap (operator!=actor) still returns ServiceNotInScope"
+  [ -f "$STATE_DIR/session.jwt" ] || die "no session.jwt — re-run step 1"
+  if [ ! -f "$AGENT_FILE" ]; then
+    prereq_missing agent-file-missing "no demo-agent file at $AGENT_FILE — run stage-1 step 12 first (cross-actor scope test needs a registered agent device)" || true
+  else
+    a_actor=$(jq -r .actor_omni "$AGENT_FILE")
+    a_dkh=$(jq -r '.device_key_hash // empty' "$AGENT_FILE")
+    [ -z "$a_dkh" ] && a_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$AGENT_FILE" | tr '[:upper:]' '[:lower:]')")
+    UNSCOPED_SERVICE="memory:__ak196_unscoped__"
+    xa_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$a_actor" \
+                     --arg svc "$UNSCOPED_SERVICE" --arg dkh "$a_dkh" \
+       '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+    rc=$(mint_cap memory-put "$xa_body")
+    body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+    if [ "$rc" = "200" ]; then
+      die "REGRESSION (#195): cross-actor cap (operator 0x$OWN_ACTOR_OMNI != actor $a_actor) for an UN-granted service was accepted — the scope-skip leaked to cross-actor caps. body: $body"
+    elif echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope"; then
+      ok "cross-actor cap correctly returned ServiceNotInScope — #195 skip is scoped to master-self only"
+      record_ok "cross-actor cap rejected with ServiceNotInScope ($rc)"
+    elif echo "$body" | grep -qiE "DeviceNotActive|device.*not.*active|DeviceBindingMismatch|binding.*mismatch|DeviceRoleMissing|role_missing"; then
+      prereq_missing agent-not-registered "agent device not registered under 0x$OWN_ACTOR_OMNI (HTTP $rc) — device-binding fired before the scope gate; run stage-1 step 12. body: $body" || true
+    elif echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP|SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA"; then
+      prereq_missing broker-misconfig "broker missing chain config (HTTP $rc) — redeploy broker host. body: $body" || true
+    else
+      die "cross-actor cap-mint returned unexpected HTTP $rc — body: $body"
+    fi
+  fi
+fi
+
+# ─── Step 18: POSITIVE — granted agent (operator!=actor) mints a cap for the GRANTED service ───
+# Completes the scope-semantics triad with step 16 (master-self SKIP) and step 17
+# (cross-actor un-granted DENIED): here the master GRANTED the agent scope for
+# $SMOKE_SERVICE in stage-1 step 13, so the agent (actor != operator) must now mint a
+# memory cap for that service → 200, proving isServiceInScope(O_master, agent, service)
+# is honoured (delegation works). Stands ALONE (no STS/worker roundtrip): the cap-mint
+# is operator-authenticated (mint_cap sends session.jwt), so it needs NO agent key —
+# only the agent's on-chain device + the grant.
+if should_run_step 18; then
+  step "POSITIVE: granted agent (operator!=actor) mints memory cap for the GRANTED service → 200"
+  [ -f "$STATE_DIR/session.jwt" ] || die "no session.jwt — re-run step 1"
+  # CI mocks the §10.2 agent with a master-held, scope-granted dev agent; the operator's
+  # real agent carries its device + grant on chain (stage-1 / sandbox pairing).
+  pg_file="$AGENT_FILE"
+  if [ "$MOCK_AGENT" = 1 ]; then
+    pg_file=$(ensure_mock_agent) || { prereq_missing agent-file-invalid "mock-agent provision failed (heima-agent-create/scope-set)" || true; pg_file=""; }
+  fi
+  if [ -z "$pg_file" ] || [ ! -f "$pg_file" ]; then
+    prereq_missing agent-file-missing "no granted-agent file ($AGENT_FILE) — run stage-1 step 12/13 (create agent + setScope) first" || true
+  else
+    pg_actor=$(jq -r '.actor_omni // empty' "$pg_file")
+    pg_dkh=$(jq -r '.device_key_hash // empty' "$pg_file")
+    [ -z "$pg_dkh" ] && pg_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$pg_file" | tr '[:upper:]' '[:lower:]')")
+    pg_actor_lc=$(printf '%s' "${pg_actor#0x}" | tr '[:upper:]' '[:lower:]')
+    own_lc=$(printf '%s' "${OWN_ACTOR_OMNI#0x}" | tr '[:upper:]' '[:lower:]')
+    if [ -z "$pg_actor" ]; then
+      prereq_missing agent-file-invalid "granted-agent file missing actor_omni ($pg_file)" || true
+    elif [ "$pg_actor_lc" = "$own_lc" ]; then
+      prereq_missing agent-is-operator "configured agent actor == operator omni — this positive test needs a DISTINCT agent (operator!=actor)" || true
+    else
+      pg_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$pg_actor" \
+                       --arg svc "$SMOKE_SERVICE" --arg dkh "$pg_dkh" \
+         '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+      rc=$(mint_cap memory-put "$pg_body")
+      body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+      if [ "$rc" = "200" ]; then
+        ok "granted agent (actor $pg_actor != operator 0x$OWN_ACTOR_OMNI) minted a memory cap for delegated service '$SMOKE_SERVICE' — isServiceInScope honoured"
+        record_ok "granted-agent positive: memory cap minted for delegated service '$SMOKE_SERVICE' (operator!=actor, HTTP 200)"
+      elif echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope"; then
+        prereq_missing scope-not-set "agent scope for '$SMOKE_SERVICE' not granted on chain — run \`bash harness/v2-stage1-demo.sh --webauthn\` (step 13 setScope) first. body: $body" || true
+      elif echo "$body" | grep -qiE "DeviceNotActive|device.*not.*active|DeviceBindingMismatch|binding.*mismatch|DeviceRoleMissing|role_missing"; then
+        if [ "$MOCK_AGENT" = 1 ]; then
+          prereq_missing agent-not-registered "mock agent device not registered with CAP_MINT (HTTP $rc) — heima-agent-create. body: $body" || true
+        else
+          defer_to_sandbox "step $STEP_NUM (granted-agent positive cap-mint): agent '$pg_actor' device is §10.2-paired in the sandbox (not on chain until pairing)"
+        fi
+      elif echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP|SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA"; then
+        prereq_missing broker-misconfig "broker missing chain config (HTTP $rc) — redeploy broker host. body: $body" || true
+      else
+        die "granted-agent positive cap-mint returned unexpected HTTP $rc — body: $body"
+      fi
+    fi
+  fi
+fi
+
+# ─── Step 19: Cleanup with admin profile ───────────────────────────────────
+if should_run_step 19; then
   step "Cleanup test objects + summary"
   # Use the laptop's admin profile (NOT the STS creds) to delete the
   # objects we wrote. Only the POSITIVE-step objects exist — every
@@ -1010,7 +1256,7 @@ if should_run_step 16; then
   printf "  wallet         : %s\n" "$WALLET_ADDR" >&2
   printf "  own omni       : 0x%s\n\n" "$OWN_ACTOR_OMNI" >&2
 
-  nstep=""; noutcome=""; nreason=""; nmsg=""; rest=""; nok=0; nskip=0; nfail=0
+  nstep=""; noutcome=""; nreason=""; nmsg=""; rest=""; nok=0; nskip=0; nfail=0; ndeferred=0
   printf "  Per-step outcome (from actual execution, not claimed coverage):\n" >&2
   # Entry format:
   #   ok:   "<step>:ok:<msg>"                       (record_ok — no reason tag)
@@ -1031,14 +1277,23 @@ if should_run_step 16; then
         nreason="${rest%%:*}"; nmsg="${rest#*:}"
         printf "    [%2s] ${C_WARN}skip${C_RESET}  [%s] %s\n" "$nstep" "$nreason" "$nmsg" >&2
         nskip=$((nskip+1)) ;;
+      deferred)
+        nreason="${rest%%:*}"; nmsg="${rest#*:}"
+        printf "    [%2s] ${C_WARN}defer${C_RESET} [%s] %s\n" "$nstep" "$nreason" "$nmsg" >&2
+        ndeferred=$((ndeferred+1)) ;;
       fail)
         nreason="${rest%%:*}"; nmsg="${rest#*:}"
         printf "    [%2s] ${C_ERR}fail${C_RESET}  [%s] %s\n" "$nstep" "$nreason" "$nmsg" >&2
         nfail=$((nfail+1)) ;;
     esac
   done
-  printf "\n  Totals: %sok=%d%s  %sskip=%d%s  %sfail=%d%s\n" \
-    "$C_OK" "$nok" "$C_RESET" "$C_WARN" "$nskip" "$C_RESET" "$C_ERR" "$nfail" "$C_RESET" >&2
+  printf "\n  Totals: %sok=%d%s  %sskip=%d%s  %sdefer=%d%s  %sfail=%d%s\n" \
+    "$C_OK" "$nok" "$C_RESET" "$C_WARN" "$nskip" "$C_RESET" "$C_WARN" "$ndeferred" "$C_RESET" "$C_ERR" "$nfail" "$C_RESET" >&2
+
+  # `deferred` steps (agent-side → the sandbox) are EXPECTED on the operator and never
+  # fail/incomplete the demo. They become real coverage when the On-Sandbox harness runs.
+  defer_note=""
+  [ "$ndeferred" -gt 0 ] && defer_note=" ($ndeferred agent-side step(s) deferred to the sandbox — run the On-Sandbox harness to cover them)"
 
   if [ "$nfail" -gt 0 ]; then
     printf "\n${C_ERR}DEMO FAILED${C_RESET}: %d step(s) failed.\n" "$nfail" >&2
@@ -1049,10 +1304,10 @@ if should_run_step 16; then
     exit 1
   fi
   if [ "$nskip" -gt 0 ]; then
-    printf "\n${C_WARN}DEMO PARTIAL${C_RESET}: %d step(s) skipped (--allow-skip mode). Coverage is NOT complete; do not treat this run as a release gate.\n" "$nskip" >&2
+    printf "\n${C_WARN}DEMO PARTIAL${C_RESET}: %d step(s) skipped (--allow-skip mode). Coverage is NOT complete; do not treat this run as a release gate.%s\n" "$nskip" "$defer_note" >&2
   elif [ "$nok" -gt 0 ]; then
-    printf "\n${C_OK}DEMO COMPLETE${C_RESET}: %d steps exercised — full isolation + roundtrip coverage proven.\n" "$nok" >&2
+    printf "\n${C_OK}DEMO COMPLETE${C_RESET}: %d steps exercised — operator-side isolation proven.%s\n" "$nok" "$defer_note" >&2
   else
-    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 16); run full demo to prove coverage.\n" >&2
+    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 19); run full demo to prove coverage.\n" >&2
   fi
 fi

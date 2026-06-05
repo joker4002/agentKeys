@@ -71,6 +71,26 @@ MCP_BACKEND="${MCP_BACKEND:-in-memory}"
 DAEMON_BIN="$REPO_ROOT/target/debug/agentkeys-daemon"
 MCP_BIN="$REPO_ROOT/target/debug/agentkeys-mcp-server"
 
+# ─── Real on-chain + S3 wiring (the onboarding ceremony must NOT be deferred, and
+# the memory plant must hit the real worker) ──────────────────────────────────────
+# Source the operator env so BOTH the daemon and the register script it shells out
+# to inherit the chain RPC + contract addresses + bucket/role ARNs + deployer key
+# path. Absent file ⇒ the chain steps surface a clear chain_error, never a silent skip.
+AGENTKEYS_ENV_FILE="${AGENTKEYS_ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
+if [ -f "$AGENTKEYS_ENV_FILE" ]; then
+  set -a; . "$AGENTKEYS_ENV_FILE"; set +a
+fi
+# Onboarding register: ALWAYS wired (the daemon skips on-chain register ONLY when this
+# is unset → "chain: none"). The script is in-repo; a missing deployer key / chain
+# config surfaces chain_error (fund + retry), not a silent defer.
+DAEMON_REGISTER_SCRIPT="${AGENTKEYS_REGISTER_MASTER_SCRIPT:-$REPO_ROOT/harness/scripts/heima-register-first-master.sh}"
+# Real memory plant (button → cap-mint → STS → worker → S3). The daemon reads the worker
+# URL from AGENTKEYS_MEMORY_URL; operator-workstation.env spells it AGENTKEYS_WORKER_MEMORY_URL
+# (name drift — bridge here, pass via the flag). MEMORY_ROLE_ARN + REGION names already match.
+DAEMON_MEMORY_URL="${AGENTKEYS_MEMORY_URL:-${AGENTKEYS_WORKER_MEMORY_URL:-${MEMORY_WORKER_URL:-}}}"
+DAEMON_MEMORY_ROLE="${MEMORY_ROLE_ARN:-}"
+DAEMON_REGION="${REGION:-us-east-1}"
+
 say()  { printf "%b[dev]%b %s\n" "$C_INFO"  "$C_RESET" "$*"; }
 warn() { printf "%b[dev]%b %s\n" "$C_INFO"  "$C_RESET" "$*" >&2; }
 err()  { printf "%b[dev]%b %s\n" "$C_ERR"   "$C_RESET" "$*" >&2; }
@@ -306,14 +326,29 @@ disown "$PREFIX_DAEMON_PID" 2>/dev/null || true
 # with AGENTKEYS_BROKER_URL=…; defaults to prod so onboarding works out of the box.
 DAEMON_BROKER_URL="${AGENTKEYS_BROKER_URL:-https://broker.litentry.org}"
 say "  daemon onboarding broker: ${DAEMON_BROKER_URL}"
-"$DAEMON_BIN" --ui-bridge \
-  --ui-bridge-bind   "$DAEMON_BIND" \
-  --ui-bridge-origin "$DAEMON_ORIGIN" \
-  --ui-bridge-rp-id  "$DAEMON_RP_ID" \
-  --ui-bridge-rp-name "$DAEMON_RP_NAME" \
-  --broker-url       "$DAEMON_BROKER_URL" \
-  --signer-url       "${AGENTKEYS_SIGNER_URL:-https://signer.litentry.org}" \
-  > "$FIFO_DAEMON" 2>&1 &
+# --register-master-script is ALWAYS passed so the on-chain ceremony is never silently
+# deferred; the memory flags only when the operator env supplies them (else the daemon's
+# in-memory fallback, logged below).
+DAEMON_ARGS=(
+  --ui-bridge
+  --ui-bridge-bind    "$DAEMON_BIND"
+  --ui-bridge-origin  "$DAEMON_ORIGIN"
+  --ui-bridge-rp-id   "$DAEMON_RP_ID"
+  --ui-bridge-rp-name "$DAEMON_RP_NAME"
+  --broker-url        "$DAEMON_BROKER_URL"
+  --signer-url        "${AGENTKEYS_SIGNER_URL:-https://signer.litentry.org}"
+  --register-master-script "$DAEMON_REGISTER_SCRIPT"
+  --region            "$DAEMON_REGION"
+)
+if [ -n "$DAEMON_MEMORY_URL" ];  then DAEMON_ARGS+=( --memory-url "$DAEMON_MEMORY_URL" ); fi
+if [ -n "$DAEMON_MEMORY_ROLE" ]; then DAEMON_ARGS+=( --memory-role-arn "$DAEMON_MEMORY_ROLE" ); fi
+say "  daemon onboarding register: on-chain (not deferred) → $DAEMON_REGISTER_SCRIPT"
+if [ -n "$DAEMON_MEMORY_URL" ] && [ -n "$DAEMON_MEMORY_ROLE" ]; then
+  say "  daemon memory plant: REAL → $DAEMON_MEMORY_URL"
+else
+  say "  daemon memory plant: in-memory fallback (set AGENTKEYS_WORKER_MEMORY_URL + MEMORY_ROLE_ARN in $AGENTKEYS_ENV_FILE for real S3)"
+fi
+"$DAEMON_BIN" "${DAEMON_ARGS[@]}" > "$FIFO_DAEMON" 2>&1 &
 DAEMON_PID=$!
 disown "$DAEMON_PID" 2>/dev/null || true
 
@@ -357,6 +392,28 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ "$ready" = "0" ] && { err "mcp-server did not respond on / within 5 s"; exit 1; }
 say "mcp-server ready."
+
+# ─── Ensure frontend deps (fresh clone / git worktree has no node_modules) ─────
+# node_modules is gitignored, so a fresh clone OR a git worktree (e.g.
+# .claude/worktrees/*) starts with none. Without it `npx next dev` can't resolve
+# `next` and Next.js 16/Turbopack fails with a confusing "inferred your workspace
+# root … couldn't find next/package.json" error. Install once here — idempotent:
+# skips when `next` is already present (mirrors how this script ensures the Rust
+# binaries + WASM core, so `dev.sh` is genuinely one-command on a fresh checkout).
+if [ ! -d "$APP_DIR/node_modules/next" ]; then
+  say "installing frontend deps in apps/parent-control (no node_modules — fresh clone / worktree)…"
+  if [ -f "$APP_DIR/package-lock.json" ] && ( cd "$APP_DIR" && npm ci ); then
+    :
+  elif ( cd "$APP_DIR" && npm install ); then
+    :
+  else
+    err "npm install in $APP_DIR failed — run it manually: (cd apps/parent-control && npm install)"
+    exit 1
+  fi
+  say "frontend deps installed."
+else
+  say "frontend deps present — skipping npm install."
+fi
 
 # ─── Start Next.js dev server ──────────────────────────────────────
 #

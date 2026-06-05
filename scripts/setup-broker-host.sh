@@ -297,8 +297,13 @@ if [[ -n "$PULL_REF" ]]; then
   # unrelated untracked files (env files, keys, certs — all gitignored) intact.
   log "git checkout -f $PULL_REF"
   ( cd "$REPO_ROOT" && git checkout -f "$PULL_REF" )
-  log "git pull --ff-only"
-  ( cd "$REPO_ROOT" && git pull --ff-only )
+  # `git pull --ff-only` can no-op against a stale local branch tip, or leave a
+  # build-modified Cargo.lock in the working tree — which then trips a `--locked`
+  # cargo build with "cannot update the lock file because --locked was passed".
+  # A deploy target must match origin EXACTLY, so hard-reset HEAD + index + the
+  # working tree to the freshly-fetched ref (Cargo.lock included). Idempotent.
+  log "git reset --hard origin/$PULL_REF"
+  ( cd "$REPO_ROOT" && git reset --hard "origin/$PULL_REF" )
 fi
 
 # ─── Interactive walk-through ─────────────────────────────────────────────────

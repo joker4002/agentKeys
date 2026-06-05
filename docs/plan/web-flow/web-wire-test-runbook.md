@@ -102,7 +102,7 @@ Drive the browser manually, or with the [`/browse`](../../../) skill / a chrome-
 ### Step B — onboarding: email → WebAuthn K11  ✅ (daemon)
 - **Action:** onboarding screen ([`ceremony.tsx`](../../../apps/parent-control/app/_components/ceremony.tsx)) → enter the master email → run the ceremony. At the **"bind passkey"** stage the browser invokes `navigator.credentials.create()`.
   - **Real Touch ID:** approve on the Mac.
-  - **Headless / CI:** attach a CDP **virtual authenticator** first — see §4. (This is the web analog of the harness's software passkey `harness/scripts/erc4337-webauthn-sign.py`.)
+  - **Headless / CI:** attach a CDP **virtual authenticator** first — see §4. (This is the web analog of the harness's software passkey — the Rust `agentkeys k11 software-{keygen,sign}` signer.)
 - **Expect:** ceremony completes; `enrollK11Begin` → `enrollK11Finish` hit the daemon (`/v1/k11/enroll/{begin,finish}`); `ak_onboarded` set.
 - **⛔ not-wired note:** the ceremony's *email→managed-wallet attestation→J1* and *register-master-on-chain* stages are **narrated only** in the UI (see §6). They do not mint a session or submit a tx.
 - **Cross-check (the real proof):** the K11 credential is registered on-chain for the master.
@@ -168,7 +168,7 @@ This is the web counterpart to watching phase1 Phases 2–4 (the agent's `wire` 
 
 ## 4. Driving WebAuthn (and the WASM core) headlessly
 
-The harness drives WebAuthn with a software passkey ([`erc4337-webauthn-sign.py`](../../../harness/scripts/erc4337-webauthn-sign.py)). The browser analog is a **CDP virtual authenticator** — no Touch ID hardware needed, so Step B runs in CI.
+The harness drives WebAuthn with a software passkey — the Rust `agentkeys k11 software-{keygen,sign}` signer ([`k11_webauthn.rs`](../../../crates/agentkeys-cli/src/k11_webauthn.rs); the [`erc4337-webauthn-sign.py`](../../../harness/scripts/erc4337-webauthn-sign.py) it replaced survives as a byte-spec reference). The browser analog is a **CDP virtual authenticator** — no Touch ID hardware needed, so Step B runs in CI.
 
 Via a chrome-devtools / CDP session, before Step B:
 ```

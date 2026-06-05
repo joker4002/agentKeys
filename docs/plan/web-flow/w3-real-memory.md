@@ -49,36 +49,45 @@ cap-mint sends `device_key_hash`; the broker resolves the on-chain device by it 
 
 ---
 
-## 4. Bootstrap (W3 prerequisites — documented, CLI, no cutover needed)
+## 4. Bootstrap — folded into onboarding by #196 (was: two manual CLI steps)
 
-The master must be on-chain with `CAP_MINT` **and** self-scoped, using the existing (old-model) live contracts:
+> **Operator runbook:** [`docs/operator-runbook-web-memory.md`](../../operator-runbook-web-memory.md) — the single doc to follow; it drives the idempotent `harness/web-memory-bootstrap.sh` (build → contracts → fund → register → broker proof → web-demo guidance).
+>
+> **Updated for #195 + #196.** The two manual steps below are no longer the operator path. The master device registration is now submitted **automatically on K11-finish** by the daemon ui-bridge (issue #196), and the self-scope step is **retired** by #195. Only the one-time local gas subsidy remains operator-run.
+
+The master must be on-chain with `CAP_MINT` (the self-scope requirement is gone — see below). Using the existing (old-model) live contracts:
 
 ```bash
-# 1. Register the master device on-chain (grants CAP_MINT|RECOVERY|SCOPE_MGMT).
-#    The device key MUST be the K10 the daemon will use for cap-mint (§3.5).
-bash scripts/heima-register-first-master.sh   # see script for device-key/omni args
+# (one-time, local, operator-run) Fund the master's register-tx gas payer.
+#   Idempotent — skips if already ≥ threshold. NOT a broker endpoint / not
+#   auto-on-login (a broker auto-fund every login would be a Sybil drain).
+bash scripts/heima-fund-master.sh            # deployer → master, ~0.2 HEI
 
-# 2. Self-grant the master's own memory namespace scope (operator == actor == O_master).
-#    Sets (O_master, O_master, memory:<ns>) so isServiceInScope passes at broker + worker.
-bash scripts/heima-scope-set.sh --self --services memory:travel   # --self flag added in this PR
+# Register: AUTOMATIC. On K11-finish the daemon ui-bridge shells out to
+# harness/scripts/heima-register-first-master.sh (--register-master-script),
+# registering the device under the SESSION omni (operator == actor == O_master),
+# signed by the local deployer key. chain_tx_hash is un-stubbed; GET
+# /v1/onboarding/state reports chain: master-registered. No manual CLI step.
 ```
 
-`heima-scope-set.sh` is currently agent-oriented (`--agent <label>` → child omni); W3 adds a `--self` mode that targets the operator's own `O_master` as the actor. (`setScopeWithWebauthn(operator, actor, …)` already accepts any actor; only the CLI wrapper assumes a child.)
+**Why the self-scope step (`heima-scope-set.sh --self`) is gone:** #195 makes the broker (`cap.rs`) and worker (`verify.rs`) **skip** `isServiceInScope` when `operator == actor` — the master accessing its own data classes is not gated by scope (scope gates *agents*). So `(O_master, O_master, memory:<ns>)` no longer needs an on-chain grant. The `--self` scope mode was therefore never added; the device registration (§3.5 / #196) is the **only** remaining on-chain prerequisite for master-self memory.
+
+**`device_key_hash` (§3.5):** the daemon registers under the session omni and uses the device hash the register script returns (`keccak(operator_omni)` on the web path), so the hash sent in cap-mint always matches the on-chain device — no manual `--master-device-key-hash` needed (it stays as a fallback/override).
 
 ---
 
 ## 5. Testing & parity
 
-- **Unit (daemon):** the in-memory fallback path keeps its existing tests (dedup, empty-by-default). Add a test that the real path is selected only when fully configured, and that a partial config (`memory_url` without `memory_role_arn`) **fails loud** (mirrors `http_backend::sts_headers`).
-- **E2E procedure (documented):** with the bootstrap done, plant from the web Memory page → assert the S3 object `bots/<O_master>/memory/memory:<ns>.enc` exists; read back → same bytes. Cross-check via the live object + `agentkeys hook memory-inject` is **not** valid here (that reads the *agent's* prefix — different actor; see §1).
-- **Harness (W6 later):** folds into `harness/web-wire-demo.sh` (plant→read same bytes under `O_master`).
+- **Unit (daemon):** the in-memory fallback path keeps its existing tests (dedup, empty-by-default). The real path is selected only when fully configured, and a partial config (`memory_url` without `memory_role_arn`) **fails loud** (mirrors `http_backend::sts_headers`). #196 adds tests for the register shell-out parse (success / idempotent-skip / non-zero-exit) and the `chain` onboarding field (`ui_bridge.rs` tests).
+- **E2E procedure (#196 — no manual bootstrap):** after login + the one-time `heima-fund-master.sh`, plant from the web Memory page → registration happens automatically on K11-finish → assert the S3 object `bots/<O_master>/memory/memory:<ns>.enc` exists; read back → same bytes. Cross-check via the live object + `agentkeys hook memory-inject` is **not** valid here (that reads the *agent's* prefix — different actor; see §1).
+- **Harness (#196):** `harness/v2-stage3-demo.sh` step 16 asserts a master-self cap mints with **no** scope grant (proves #195 skip + #196 device), and step 17 asserts a cross-actor cap still returns `ServiceNotInScope` (proves the skip is master-self-only). The live register makes both runnable.
 
 ---
 
 ## 6. Deferred / out of scope (called out per plan-completion policy)
 
 - **Agent-inheritance of master-curated memory → W4.** Needs the agent actor (pairing) + a seed written under the *agent's* cap. The §5c "same bytes" story lives there.
-- **Web-native master on-chain registration → W2 (chain-plan E7).** Blocked on the registry cutover; until then the daemon's K10 is registered out-of-band via the CLI bootstrap (§4).
+- **Master on-chain registration → SHIPPED by #196 (old-model interim).** The daemon ui-bridge shells out to `heima-register-first-master.sh` on K11-finish (registers under the session omni, deployer key signs), un-stubbing `chain_tx_hash`. The **web-native ERC-4337 register UserOp** (W2 / chain-plan E7 — passkey signs the register as a UserOp, `msg.sender == P256Account`) remains **cutover-blocked** on the thinned account-auth registry not being deployed to mainnet; #196 is the interim until that lands.
 - **Lifting `namespace` into a SIGNED CapPayload field → M4** (today it's a request-body field, per `mcp-server/src/backend/memory.rs`).
 
 ---
