@@ -1496,8 +1496,11 @@ if should_run_step 22; then
         nfail=$((nfail+1)) ;;
     esac
   done
-  printf "\n  Totals: %sok=%d%s  %sskip=%d%s  %sdefer=%d%s  %sfail=%d%s\n" \
-    "$C_OK" "$nok" "$C_RESET" "$C_WARN" "$nskip" "$C_RESET" "$C_WARN" "$ndeferred" "$C_RESET" "$C_ERR" "$nfail" "$C_RESET" >&2
+  # Colors MUST sit in the format string (printf interprets \033 there, NOT in %s
+  # args — the C_* vars hold literal "\033[…" so passing them as %s printed raw
+  # escapes). Matches the ${C_*}-in-format pattern used everywhere else here.
+  printf "\n  Totals: ${C_OK}ok=%d${C_RESET}  ${C_WARN}skip=%d${C_RESET}  ${C_WARN}defer=%d${C_RESET}  ${C_ERR}fail=%d${C_RESET}\n" \
+    "$nok" "$nskip" "$ndeferred" "$nfail" >&2
 
   # `deferred` steps (agent-side → the sandbox) are EXPECTED on the operator and never
   # fail/incomplete the demo. They become real coverage when the On-Sandbox harness runs.
