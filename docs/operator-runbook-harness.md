@@ -27,7 +27,7 @@ covers those deferred steps. **Both succeed without error.** `v2-demo.sh` is the
 # Phase 5 wires the §10.2 agent INTO the aiosandbox (agent container), so it must be
 # running first. Start it if it isn't (override the endpoint with SANDBOX_URL):
 docker run --security-opt seccomp=unconfined -d -p 8080:8080 ghcr.io/agent-infra/sandbox:latest
-bash harness/v2-demo.sh   # phases 1→2→3 (Touch ID) + 4 (memory plant) + 5 (wire — pairs the agent)
+bash harness/v2-demo.sh   # phases 1→2→3 (Touch ID) + 4 (memory plant) + 5 (wire — pairs the agent + Touch ID to grant its memory scope)
 ```
 
 Phase 5 **auto-detects** the aiosandbox (probes `$SANDBOX_URL/healthz`): up → it wires; down →
@@ -107,10 +107,12 @@ semantics. The mock agent tests the worker **plumbing only** — not the real §
   form of the web "⊕ plant prepared memory" button. **Re-testable**: idempotent (one blob per
   namespace), writes only to the master's own reserved prefix `bots/0x<O_master>/memory/`.
   Re-run with `--from 4.1`.
-- **phase 5 — wire** (`phase1-wire-demo.sh --real`): the agent inside the sandbox reads + writes
-  its real memory through `agentkeys wire` — cap-mint → STS relay (`X-Aws-*`) → `memory.litentry.org`
-  → S3 `bots/<actor>/memory/`, passively injected each turn by the `pre_llm_call` hook. **Pairs
-  the §10.2 agent** so the On-Sandbox proof can run. The **only** real-memory proof (never `--light`).
+- **phase 5 — wire** (`phase1-wire-demo.sh --real --webauthn`): the agent inside the sandbox reads +
+  writes its real memory through `agentkeys wire` — cap-mint → STS relay (`X-Aws-*`) → `memory.litentry.org`
+  → S3 `bots/<actor>/memory/`, passively injected each turn by the `pre_llm_call` hook. **Pairs the
+  §10.2 agent AND the master grants its `memory:<ns>` scope via Touch ID** (`--webauthn`; the agent's
+  cap service is `memory:<ns>`, so without the grant `memory.get` → `service_not_in_scope`). The
+  **only** real-memory proof (never `--light`).
 
 ### The master register — #164 ERC-4337 (EOA deprecated)
 

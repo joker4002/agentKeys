@@ -119,6 +119,8 @@ preflight() {
 
 # Phase 5 — the agent-side wire demo. Special (no --from-step; WIRE_MODE-driven).
 # Pairs the §10.2 agent so the sandbox shell can then run sandbox-agent-isolation.sh.
+# Runs --webauthn so the MASTER grants the agent's memory:<ns> scope (one Touch ID, like
+# phases 1-2); WITHOUT the grant the agent pairs but memory.get → service_not_in_scope.
 # Sets WIRE_RESULT so the final summary can tell a real PASS apart from an auto-skip:
 #   wired    — the wire actually ran (proof executed)
 #   disabled — intentionally off (--wire none / CI has no sandbox) → clean
@@ -131,14 +133,14 @@ run_wire_phase() {
     none)  phase "5 — wire (disabled: --wire none / CI has no sandbox)"; WIRE_RESULT=disabled; return 0 ;;
     auto)
       if sandbox_present; then
-        phase "5 — phase1-wire-demo.sh --real"; WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --real
+        phase "5 — phase1-wire-demo.sh --real --webauthn"; WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --real --webauthn
       else
         phase "5 — wire (SKIPPED: no aiosandbox — proof did NOT run)"
         say "$(c '1;33' 'wire skipped') — no aiosandbox reachable at ${SANDBOX_URL:-http://localhost:8080}. The wire/pairing proof did NOT run."
         WIRE_RESULT=skipped
         return 0
       fi ;;
-    real)  phase "5 — phase1-wire-demo.sh --real";  WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --real ;;
+    real)  phase "5 — phase1-wire-demo.sh --real --webauthn";  WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --real --webauthn ;;
     light) phase "5 — phase1-wire-demo.sh --light"; WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --light ;;
     *) echo "v2-demo: --wire wants real|light|none (got '$WIRE_MODE')" >&2; return 1 ;;
   esac
