@@ -655,15 +655,19 @@ do_step_12() {
 do_step_13() {
   CUR_STEP=13; step "Per-data-class buckets + roles (delegates to provision-*.sh)"
   if [ "$DRY_RUN" = "1" ]; then
-    warn "DRY: would run provision-{vault,memory}-{bucket,role}.sh + apply-{vault,memory}-bucket-policy.sh"
+    warn "DRY: would run provision-{vault,memory,config}-{bucket,role}.sh + apply-{vault,memory,config}-bucket-policy.sh"
     return
   fi
   bash "$SCRIPT_DIR/provision-vault-bucket.sh"
   bash "$SCRIPT_DIR/provision-vault-role.sh"
   bash "$SCRIPT_DIR/provision-memory-bucket.sh"
   bash "$SCRIPT_DIR/provision-memory-role.sh"
+  # Config data class (#201) — master-only policy / memory-types taxonomy.
+  bash "$SCRIPT_DIR/provision-config-bucket.sh"
+  bash "$SCRIPT_DIR/provision-config-role.sh"
   bash "$SCRIPT_DIR/apply-vault-bucket-policy.sh"
   bash "$SCRIPT_DIR/apply-memory-bucket-policy.sh"
+  bash "$SCRIPT_DIR/apply-config-bucket-policy.sh"
   ok "per-data-class provisioning complete"
 }
 

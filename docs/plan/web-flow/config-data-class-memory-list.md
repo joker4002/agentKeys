@@ -1,6 +1,14 @@
 # Config data class + lazy, config-driven memory list
 
-**Status:** plan (pre-code, 2026-06). Builds on #191 (W3 master-self memory chain), #196 (auto-register on K11-finish), #178 ([`classifier-service.md`](../classifier-service.md) — memory types come from a user config), and the per-data-class isolation invariants ([`../../arch.md`](../../arch.md) §17). Promote to `spec/` once Phase 4 ships.
+**Status:** Phases 0–3 LANDED (2026-06, #200 + #201 PR1); Phases 4–5 follow-up (gated on the operator deploying Phase 1 AWS + Phase 2 broker redeploy, per the dependency chain below). Builds on #191 (W3 master-self memory chain), #196 (auto-register on K11-finish), #178 ([`classifier-service.md`](../classifier-service.md) — memory types come from a user config), and the per-data-class isolation invariants ([`../../arch.md`](../../arch.md) §17). Promote to `spec/` once Phase 4 ships.
+
+> **Phase status (2026-06):**
+> - ✅ **Phase 0 — cap layer** (#200): `DataClass::Config` + broker `/v1/cap/config-{store,fetch}` + `check_data_class`.
+> - ✅ **Phase 1 — infra** (#201 PR1): `provision-config-{bucket,role}.sh` + `apply-config-bucket-policy.sh` (idempotent mirrors) + `CONFIG_BUCKET`/`CONFIG_ROLE_ARN` in `operator-workstation.env` + wired into `setup-cloud.sh` step 13. **Operator runs on AWS.**
+> - ✅ **Phase 2 — config worker** (#201 PR1): `agentkeys-worker-config` crate (mirror of `agentkeys-worker-memory`, `config/` prefix, port 9096, `DataClass::Config`) + full `setup-broker-host.sh` wiring (build/install/env/systemd/nginx/firewall/certbot/summary). **Operator redeploys the broker host.**
+> - ✅ **Phase 3 — isolation tests** (#201 PR1): `harness/v2-stage3-demo.sh` steps 19–21 — config layer-3/4 (own-prefix write OK + cross-bucket AccessDenied) + cap data-class-mismatch (config↔memory, config↔cred), all master-self. Run green once Phases 1–2 are deployed.
+> - ⏳ **Phase 4 — daemon** (follow-up): read/write the taxonomy via config-fetch/store; `GET /v1/master/memory` → categories (no decrypt); lazy detail endpoint; **plant → per-ns JSON arrays** (the cross-cutting on-disk format change also touches the MCP `http_backend` + CLI `hook memory-inject` + `harness/memory-plant-demo.sh` for agent parity).
+> - ⏳ **Phase 5 — frontend** (follow-up): `apps/parent-control` list shows categories; clicking fetches detail on demand.
 
 > **In one line:** the web `/memory` list should resolve **categories from the user's memory-types config** (not by decrypting every blob or enumerating S3), reflect the **durable S3 store** (survive daemon restarts), and decrypt an entry's **detail only on click** — which requires standing up the `DataClass::Config` substrate (the taxonomy's encrypted, master-only home, #178 §7 P1) and fixing per-namespace storage to hold multiple classified memory lines.
 

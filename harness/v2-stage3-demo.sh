@@ -34,11 +34,21 @@
 #      in envelope.rs cover the primitive; this proves the HTTP path).
 #  12. (NEW) Worker encrypt/decrypt roundtrip — memory: same shape
 #      against the memory worker (/v1/memory/put + /v1/memory/get).
-#  13. Cleanup with admin creds — delete the test objects
+#  13-18. Negative cap data-class-mismatch (cred↔memory) + #195/#196
+#      master-self + cross-actor scope semantics.
+#  19-21. (NEW, #201) Config data class isolation (master-only taxonomy):
+#      19 = config creds write own bots/<O_master>/config/ prefix (200) but
+#           are AccessDenied at the memory + vault buckets, and memory creds
+#           are AccessDenied at the config bucket (per-data-class layer 4);
+#      20 = a config-class cap is rejected by the memory + cred workers, and
+#      21 = a memory/cred-class cap is rejected by the config worker — both
+#           with cap_data_class_mismatch (the cap-authz isolation gate).
+#  22. Cleanup with admin creds — delete the test objects
 #
 # Proves OIDC + IAM-tag-based S3 scoping works at the AWS layer:
 #  - per-actor isolation within a bucket (steps 5, 6, 8, 9)
-#  - per-data-class isolation across buckets (step 10)
+#  - per-data-class isolation across buckets (step 10 cred↔memory; step 19 config)
+#  - per-data-class cap-authz isolation (steps 14-15 cred↔memory; steps 20-21 config)
 #
 # The workers are separately wired to accept these STS creds (X-Aws-*
 # headers, code change in this PR) — full worker-integrated test is a
@@ -57,7 +67,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # step 16. Defines functions only (safe to source before env). See harness/scripts/_lib.sh.
 . "$REPO_ROOT/harness/scripts/_lib.sh"
 STEP_NUM=0
-STEP_TOTAL=19
+STEP_TOTAL=22
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
@@ -1230,8 +1240,188 @@ if should_run_step 18; then
   fi
 fi
 
-# ─── Step 19: Cleanup with admin profile ───────────────────────────────────
+# ─── Config data class (#201) — master-only taxonomy isolation ─────────────
+# The Config data class (policy / memory-types taxonomy, #178 §7) is MASTER-ONLY
+# (operator == actor == O_master). Unlike the agent-side cred/memory cross-class
+# tests (steps 14-15, which defer to the sandbox), these run on the OPERATOR —
+# the master signs for itself, no §10.2 agent key needed. They prove, for the
+# new config worker + DataClass::Config, the four-layer + cap-layer isolation:
+#   • layer 3+4 (step 19): the master's own config prefix is writable; config
+#     creds are rejected at the memory + vault buckets, and memory creds are
+#     rejected at the config bucket (per-data-class bucket separation).
+#   • cap data-class-mismatch (steps 20-21): a config cap is rejected by the
+#     memory + cred workers, and a memory/cred cap is rejected by the config
+#     worker — symmetric with steps 14-15 but at the master-self cap-authz layer.
+# All gracefully prereq_missing (never silently pass) until the operator has run
+# provision-config-{bucket,role}.sh + apply-config-bucket-policy.sh on AWS AND
+# redeployed the broker host (config worker + #200 Phase-0 cap routes).
+
+# Tolerant master STS minter (no die) — the config role may not be provisioned
+# until the operator runs provision-config-role.sh. Writes creds to
+# $STATE_DIR/{aki,sak,sst}.$label; returns 1 on any failure.
+mint_sts_for_role_tol() {
+  local role_arn="$1" label="$2"
+  [ -f "$STATE_DIR/oidc.jwt" ] || return 1
+  local resp aki
+  resp=$(aws sts assume-role-with-web-identity \
+    --region "$REGION" --role-arn "$role_arn" \
+    --role-session-name "stage3-${label}-$(date +%s)" \
+    --web-identity-token "$(cat "$STATE_DIR/oidc.jwt")" \
+    --duration-seconds 900 --output json 2>&1) \
+    || { printf '%s\n' "$resp" >"$STATE_DIR/sts.$label.err"; return 1; }
+  aki=$(echo "$resp" | jq -r '.Credentials.AccessKeyId // empty')
+  [ -z "$aki" ] && return 1
+  echo -n "$aki" > "$STATE_DIR/aki.$label"
+  echo -n "$(echo "$resp" | jq -r '.Credentials.SecretAccessKey')" > "$STATE_DIR/sak.$label"
+  echo -n "$(echo "$resp" | jq -r '.Credentials.SessionToken')" > "$STATE_DIR/sst.$label"
+  return 0
+}
+
+# role ARN for a worker class — the cross-class STS that passes the
+# OptionalStsCreds extractor BEFORE the data-class guard runs (the guard runs
+# after the extractor, so valid target-role creds are required to exercise it).
+worker_role_arn() {
+  case "$1" in
+    memory) echo "$MEMORY_ROLE_ARN" ;;
+    cred)   echo "$VAULT_ROLE_ARN" ;;
+    config) echo "$CONFIG_ROLE_ARN" ;;
+  esac
+}
+
+# Master-self cross-data-class rejection. Mints a $cap_label-class cap as
+# master-self (operator==actor==O_master), POSTs it to $worker_label's worker
+# with that worker's role STS, asserts cap_data_class_mismatch. Args:
+#   $1 cap_url (config-store|memory-put|cred-store)  $2 cap service string
+#   $3 worker full URL   $4 worker_label   $5 cap_label   $6 artifact basename
+master_cross_class_rejection() {
+  local cap_url="$1" cap_svc="$2" worker_full_url="$3" worker_label="$4" cap_label="$5" art="$6"
+  [ -f "$STATE_DIR/session.jwt" ] || { prereq_missing no-session "no session.jwt — re-run step 1" || return 1; return 0; }
+  local master_dkh self_body rc capjson
+  master_dkh="$(resolve_active_master_dkh "$OWN_ACTOR_OMNI" "$WALLET_LC" 2>/dev/null || cast keccak "0x$OWN_ACTOR_OMNI")"
+  self_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "0x$OWN_ACTOR_OMNI" \
+                    --arg svc "$cap_svc" --arg dkh "$master_dkh" \
+     '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+  rc=$(mint_cap "$cap_url" "$self_body")
+  capjson=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+  if [ "$rc" != "200" ]; then
+    if echo "$capjson" | grep -qiE "no route|Cannot POST|not found|404"; then
+      prereq_missing broker-no-config-route "broker has no /v1/cap/$cap_url route — redeploy broker host (origin/main has the #200 Phase-0 config routes). body: $capjson" || return 1
+      return 0
+    fi
+    if echo "$capjson" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP|SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA"; then
+      prereq_missing broker-misconfig "broker missing chain config (HTTP $rc) — redeploy broker host. body: $capjson" || return 1
+      return 0
+    fi
+    if echo "$capjson" | grep -qiE "DeviceNotActive|DeviceBindingMismatch|DeviceRoleMissing|role_missing"; then
+      prereq_missing master-not-registered "master device $master_dkh not registered with CAP_MINT (HTTP $rc) — run register_first_master. body: $capjson" || return 1
+      return 0
+    fi
+    die "$cap_url master-self cap-mint returned HTTP $rc — body: $capjson"
+  fi
+  # Mint STS for the TARGET worker's role so the OptionalStsCreds extractor
+  # passes (REQUIRE_STS) and check_data_class is the gate that fires.
+  local role sts_label aki sak sst art_path body
+  role="$(worker_role_arn "$worker_label")"; sts_label="xclass-$worker_label"
+  if ! mint_sts_for_role_tol "$role" "$sts_label"; then
+    prereq_missing "${worker_label}-role-missing" "could not mint STS for the $worker_label role ($role) — run provision-${worker_label}-role.sh / provision-config-role.sh first. The data-class guard runs AFTER the STS extractor, so valid creds are required to exercise it." || return 1
+    return 0
+  fi
+  aki=$(cat "$STATE_DIR/aki.$sts_label"); sak=$(cat "$STATE_DIR/sak.$sts_label"); sst=$(cat "$STATE_DIR/sst.$sts_label")
+  art_path="$STATE_DIR/cross.${art}.json"
+  rc=$(post_cross_class "$capjson" "$worker_full_url" "$art_path" "$aki" "$sak" "$sst")
+  body=$(cat "$art_path" 2>/dev/null || true)
+  if [ "$rc" = "200" ]; then
+    cat "$art_path" >&2
+    die "CRITICAL: $worker_label worker accepted a $cap_label-class cap — data-class isolation broken!"
+  fi
+  case "$rc" in
+    000|502|503|504)
+      prereq_missing "${worker_label}-worker-unreachable" "$worker_label worker unreachable at $worker_full_url (HTTP $rc) — deploy it via setup-broker-host.sh. body: $body" || return 1
+      ;;
+    400|401|403)
+      if echo "$body" | grep -qiE "cap_data_class_mismatch|data_class.*mismatch|DataClassMismatch"; then
+        ok "$worker_label worker correctly rejected $cap_label-class cap with cap_data_class_mismatch ($rc)"
+        record_ok "$worker_label worker rejected $cap_label-class cap ($rc cap_data_class_mismatch)"
+        return 0
+      fi
+      if echo "$body" | grep -qiE "broker_sig_invalid|signature"; then
+        prereq_missing broker-sig-mismatch "$worker_label worker rejected with broker_sig_invalid ($rc) — the deployed worker's BROKER_CAP_PUBKEY_PEM doesn't match this broker. Redeploy broker host. body: $body" || return 1
+        return 0
+      fi
+      die "$worker_label worker rejected with HTTP $rc but error is NOT canonical cap_data_class_mismatch (body: $body) — cannot confirm the data-class isolation gate fired"
+      ;;
+    *)
+      die "$worker_label worker returned unexpected HTTP $rc (expected 400/401/403 with cap_data_class_mismatch) — body: $body"
+      ;;
+  esac
+}
+
+# ─── Step 19: Config layers 3+4 — own-prefix write OK + cross-bucket AccessDenied ──
+# Master-self (operator==actor): config creds reach ONLY bots/<O_master>/config/.
 if should_run_step 19; then
+  step "Config data class: own-prefix write OK + cross-bucket AccessDenied (layers 3+4, master-self #201)"
+  if ! mint_sts_for_role_tol "$CONFIG_ROLE_ARN" config; then
+    prereq_missing config-role-missing "could not mint STS for the config role ($CONFIG_ROLE_ARN) — run provision-config-role.sh + apply-config-bucket-policy.sh (AWS) first. $(cat "$STATE_DIR/sts.config.err" 2>/dev/null | head -1)" || true
+  else
+    CONFIG_POS_FILE="$STATE_DIR/payload.config.positive.bin"
+    echo "stage3 config positive $(date -u)" > "$CONFIG_POS_FILE"
+    OWN_CONFIG_KEY="bots/${OWN_ACTOR_OMNI}/config/stage3-positive.bin"
+    # layer 3 — POSITIVE: the master writes its OWN config prefix.
+    if run_with_sts config aws s3api put-object \
+        --bucket "$CONFIG_BUCKET" --key "$OWN_CONFIG_KEY" \
+        --body "$CONFIG_POS_FILE" --output json >"$STATE_DIR/put.config.positive.json" 2>&1; then
+      ok "PUT succeeded at s3://$CONFIG_BUCKET/$OWN_CONFIG_KEY"
+      record_ok "config PUT own prefix (200)"
+    else
+      cat "$STATE_DIR/put.config.positive.json" >&2
+      die "config PUT to own prefix FAILED — config IAM role/bucket-policy misconfigured (apply-config-bucket-policy.sh?)"
+    fi
+    # layer 4 — config creds must NOT reach the memory or vault buckets.
+    if run_with_sts config aws s3api put-object --bucket "$MEMORY_BUCKET" \
+        --key "bots/${OWN_ACTOR_OMNI}/memory/stage3-config-cross.bin" \
+        --body "$CONFIG_POS_FILE" >"$STATE_DIR/cross.config-to-memory.json" 2>&1; then
+      die "config creds wrote to the MEMORY bucket — per-data-class bucket isolation broken!"
+    else
+      expect_access_denied "$STATE_DIR/cross.config-to-memory.json" "config creds → memory bucket"
+    fi
+    if run_with_sts config aws s3api put-object --bucket "$VAULT_BUCKET" \
+        --key "bots/${OWN_ACTOR_OMNI}/credentials/stage3-config-cross.bin" \
+        --body "$CONFIG_POS_FILE" >"$STATE_DIR/cross.config-to-vault.json" 2>&1; then
+      die "config creds wrote to the VAULT bucket — per-data-class bucket isolation broken!"
+    else
+      expect_access_denied "$STATE_DIR/cross.config-to-vault.json" "config creds → vault bucket"
+    fi
+    # layer 4 reverse — memory creds must NOT reach the config bucket (needs step 3).
+    if [ -f "$STATE_DIR/aki.memory" ]; then
+      if run_with_sts memory aws s3api put-object --bucket "$CONFIG_BUCKET" \
+          --key "bots/${OWN_ACTOR_OMNI}/config/stage3-mem-cross.bin" \
+          --body "$CONFIG_POS_FILE" >"$STATE_DIR/cross.memory-to-config.json" 2>&1; then
+        die "memory creds wrote to the CONFIG bucket — per-data-class bucket isolation broken!"
+      else
+        expect_access_denied "$STATE_DIR/cross.memory-to-config.json" "memory creds → config bucket"
+      fi
+    fi
+  fi
+fi
+
+# ─── Step 20: NEGATIVE — config-class cap → memory + cred workers reject ────
+# Symmetric with steps 14-15 but for the new Config data class (master-self).
+if should_run_step 20; then
+  step "NEGATIVE: config-class cap → memory worker + cred worker reject (cap_data_class_mismatch, #201)"
+  master_cross_class_rejection config-store memory-taxonomy "${AGENTKEYS_WORKER_MEMORY_URL}/v1/memory/put" memory config config-to-mem
+  master_cross_class_rejection config-store memory-taxonomy "${AGENTKEYS_WORKER_CRED_URL}/v1/cred/store"  cred   config config-to-cred
+fi
+
+# ─── Step 21: NEGATIVE — memory + cred caps → config worker reject ──────────
+# The reverse direction: the config worker rejects any non-Config cap.
+if should_run_step 21; then
+  step "NEGATIVE: memory-class + cred-class cap → config worker reject (cap_data_class_mismatch, #201)"
+  master_cross_class_rejection memory-put memory:stage3self "${AGENTKEYS_WORKER_CONFIG_URL}/v1/config/put" config memory mem-to-config
+  master_cross_class_rejection cred-store "$SMOKE_SERVICE"   "${AGENTKEYS_WORKER_CONFIG_URL}/v1/config/put" config cred   cred-to-config
+fi
+
+# ─── Step 22: Cleanup with admin profile ───────────────────────────────────
+if should_run_step 22; then
   step "Cleanup test objects + summary"
   # Use the laptop's admin profile (NOT the STS creds) to delete the
   # objects we wrote. Only the POSITIVE-step objects exist — every
@@ -1246,6 +1436,13 @@ if should_run_step 19; then
         --key "bots/${OWN_ACTOR_OMNI}/memory/stage3-positive.bin" >/dev/null 2>&1; then
     ok "deleted s3://$MEMORY_BUCKET/bots/${OWN_ACTOR_OMNI}/memory/stage3-positive.bin"
   fi
+  # Config positive object (#201, step 19). Best-effort — absent when the config
+  # infra wasn't provisioned yet (step 19 prereq_missing'd).
+  if aws --region "$REGION" s3api delete-object \
+        --bucket "$CONFIG_BUCKET" \
+        --key "bots/${OWN_ACTOR_OMNI}/config/stage3-positive.bin" >/dev/null 2>&1; then
+    ok "deleted s3://$CONFIG_BUCKET/bots/${OWN_ACTOR_OMNI}/config/stage3-positive.bin"
+  fi
   # Codex review fix: print ACTUAL outcomes per step, not a static
   # "coverage" table that lies about what ran.
   printf "\n${C_OK}=== v2 stage-3 demo summary ===${C_RESET}\n" >&2
@@ -1253,6 +1450,7 @@ if should_run_step 19; then
   printf "  issuer         : %s\n" "$OIDC_ISSUER" >&2
   printf "  vault bucket   : %s   (role: %s)\n" "$VAULT_BUCKET" "$VAULT_ROLE_ARN" >&2
   printf "  memory bucket  : %s  (role: %s)\n" "$MEMORY_BUCKET" "$MEMORY_ROLE_ARN" >&2
+  printf "  config bucket  : %s  (role: %s · master-only #201)\n" "${CONFIG_BUCKET:-<unset>}" "${CONFIG_ROLE_ARN:-<unset>}" >&2
   printf "  wallet         : %s\n" "$WALLET_ADDR" >&2
   printf "  own omni       : 0x%s\n\n" "$OWN_ACTOR_OMNI" >&2
 
@@ -1308,6 +1506,6 @@ if should_run_step 19; then
   elif [ "$nok" -gt 0 ]; then
     printf "\n${C_OK}DEMO COMPLETE${C_RESET}: %d steps exercised — operator-side isolation proven.%s\n" "$nok" "$defer_note" >&2
   else
-    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 19); run full demo to prove coverage.\n" >&2
+    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 22); run full demo to prove coverage.\n" >&2
   fi
 fi
