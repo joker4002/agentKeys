@@ -225,7 +225,7 @@ Mirrors `deferred-and-followups.md` Phases D–J and `issue-9step-flow.md` P2.1�
 - **W3 — memory through the worker (§5c).** Rework plant/list to the real cap→STS→worker→S3 chain. *(highest "is it real?" payoff; coherent with the agent demo)*
 - **W4 — pairing (§5b).** Proxy the broker pairing endpoints + bind/grant chain writes (one K11). *(arch §10.2; reconcile per §7)*
 - **W5 — real actors/audit reads + mutations (§5d/§5e).** `/v1/actors`, `/v1/audit/*` from chain+broker; scope/revoke as real txs.
-- **W6 — harness parity test.** A `harness/` script that drives the daemon ui-bridge through onboarding→pair→plant→read and asserts the same artifacts `phase1-wire-demo.sh` asserts (see §8).
+- **W6 — harness parity test. ✅ SHIPPED as `v2-demo.sh` phase 6** (`harness/web-parity-demo.sh`, #200) — NOT a standalone script. Boots the daemon ui-bridge SEEDED with the master's J1 + device (via the `--ui-bridge-seed-*` seam, skipping re-onboarding) + plants via the web endpoint, asserting the daemon's chain matches the agent/harness path. Reuses phases 1-2's setup (see §8).
 
 Estimated ordering rationale: W0 is the keystone; W1+W3 give the most visible "it's real now" wins; W4 is the largest (chain + browser-assertion bridge); W5 broadens coverage.
 
@@ -246,7 +246,7 @@ The wire demo *is* the test oracle. For each phase, add a deterministic assertio
 - **Onboarding:** after W1+W2, `GET /v1/onboarding/state` reports `identity:verified, k10:present, k11:enrolled, chain:master-registered`; the `register-master` tx hash resolves on-chain (`verify-heima-contracts.sh`-style read).
 - **Memory:** after W3, plant then read returns the same bytes; assert the S3 object `bots/<actor>/memory/memory.enc` exists (the demo's Phase 1.5 + 4.2 check). Cross-check: the agent-side `hook memory-inject --namespaces travel` reads what the UI planted.
 - **Pairing:** after W4, the bind tx + scope tx confirm on-chain; `isServiceInScope(operator, actor, "memory") == true` (the demo's P.3 post-check); the agent can then `memory.get`.
-- **Harness script (W6):** `harness/web-wire-demo.sh` that boots `agentkeys-daemon --ui-bridge` against the live broker + Heima and curls the ui-bridge endpoints in order, reusing `operator-workstation.env` and the same env vars the wire demo threads (`OPERATOR_KEY_FILE`, `BROKER_URL`, `MEMORY_ROLE_ARN`, `AGENTKEYS_CHAIN`, …). Idempotent + green/red per step, so it can gate regressions like `v2-stage3-demo.sh` does.
+- **Harness script (W6) — SHIPPED as `v2-demo.sh` phase 6** (`harness/web-parity-demo.sh`, #200): boots `agentkeys-daemon --ui-bridge` against the live broker + Heima, SEEDED with the master's existing J1 + device-hash via the `--ui-bridge-seed-*` daemon seam (so it skips re-onboarding — the cost optimization), then plants a probe ns via `POST /v1/master/memory/plant`. A 200 proves the daemon's chain (cap-mint→STS→worker→S3) == the agent/harness path. Folded into v2-demo (not a standalone front door); reuses `operator-workstation.env`; gates regressions like the other phases. Stronger read-back/cross-impl parity = follow-up.
 
 Existing daemon ui-bridge Rust unit tests stay; add tests against a mock broker for the new `daemon::broker` client.
 

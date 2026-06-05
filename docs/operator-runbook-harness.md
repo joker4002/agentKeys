@@ -27,7 +27,7 @@ covers those deferred steps. **Both succeed without error.** `v2-demo.sh` is the
 # Phase 5 wires the §10.2 agent INTO the aiosandbox (agent container), so it must be
 # running first. Start it if it isn't (override the endpoint with SANDBOX_URL):
 docker run --security-opt seccomp=unconfined -d -p 8080:8080 ghcr.io/agent-infra/sandbox:latest
-bash harness/v2-demo.sh   # phases 1→2→3 (Touch ID) + 4 (memory plant) + 5 (wire — pairs the agent + Touch ID to grant its memory scope)
+bash harness/v2-demo.sh   # phases 1→2→3 (Touch ID) + 4 (memory plant) + 5 (wire — pairs the agent + Touch ID) + 6 (web↔agent parity)
 ```
 
 Phase 5 **auto-detects** the aiosandbox (probes `$SANDBOX_URL/healthz`): up → it wires; down →
@@ -113,6 +113,12 @@ semantics. The mock agent tests the worker **plumbing only** — not the real §
   §10.2 agent AND the master grants its `memory:<ns>` scope via Touch ID** (`--webauthn`; the agent's
   cap service is `memory:<ns>`, so without the grant `memory.get` → `service_not_in_scope`). The
   **only** real-memory proof (never `--light`).
+- **phase 6 — web↔agent parity** (`web-parity-demo.sh`): boots `agentkeys-daemon --ui-bridge` (seeded
+  with the master's J1 + device via the `--ui-bridge-seed-*` seam, so it skips re-onboarding) and
+  plants a probe namespace through the **web** endpoint `POST /v1/master/memory/plant`. A 200 proves
+  the daemon's chain (cap-mint → STS → worker → S3) matches the agent/harness path, so the web flow
+  can't silently drift from the harness. **Reuses** the build/chain/broker/master from phases 1–2 —
+  one daemon boot, no re-bootstrap. Real-only; skips cleanly without a broker.
 
 ### The master register — #164 ERC-4337 (EOA deprecated)
 
@@ -142,6 +148,7 @@ bash harness/v2-demo.sh --from 3.11    # resume AT phase 3 step 11, continue to 
 bash harness/v2-demo.sh --from 4.1     # re-test memory planting (phase 4), then wire (phase 5)
 bash harness/v2-demo.sh --only 4.1     # run ONLY phase 4 step 1
 bash harness/v2-demo.sh --from 5       # just the wire phase (phase 5 — re-pairs the agent; no sub-steps)
+bash harness/v2-demo.sh --stage 6      # just web↔agent parity (phase 6 — boots the seeded daemon, plants via the web endpoint)
 ```
 
 `--from 2` means "phase 2 step 1 onward". The individual `v2-stage{1,2,3}-demo.sh` also

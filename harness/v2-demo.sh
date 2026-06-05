@@ -38,7 +38,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"      # the harness/ dir
 PROJECT_ROOT="$(cd "$REPO_ROOT/.." && pwd)"     # the repo root (Cargo.toml, scripts/)
-STAGES="1,2,3,4,5"      # default phase set: 1-3 stages, 4 memory-plant, 5 wire
+STAGES="1,2,3,4,5,6"    # 1-3 stages, 4 memory-plant, 5 wire, 6 web↔agent parity
 WIRE_MODE=""            # '' (auto: real if the sandbox is up, else skip), 'real', 'light', or 'none'
 FROM_PHASE=""; FROM_STEP=""   # --from P.S : resume from phase P step S, continue to the end
 ONLY_PHASE=""; ONLY_STEP=""   # --only P.S : run only phase P (step S)
@@ -69,7 +69,7 @@ done
 
 # --from P.S → run phase P (from step S) through the end; --only P.S → just phase P.
 if [ -n "$FROM_PHASE" ]; then
-  s=""; for ph in 1 2 3 4 5; do [ "$ph" -ge "$FROM_PHASE" ] && s="${s:+$s,}$ph"; done; STAGES="$s"
+  s=""; for ph in 1 2 3 4 5 6; do [ "$ph" -ge "$FROM_PHASE" ] && s="${s:+$s,}$ph"; done; STAGES="$s"
 fi
 [ -n "$ONLY_PHASE" ] && STAGES="$ONLY_PHASE"
 
@@ -156,7 +156,8 @@ run_phase() {
     3) script="v2-stage3-demo.sh" ;;
     4) script="memory-plant-demo.sh" ;;
     5) run_wire_phase; return $? ;;   # wire — special handling above
-    *) echo "v2-demo: unknown phase '$p' (want 1-5)" >&2; return 2 ;;
+    6) script="web-parity-demo.sh" ;; # web↔agent parity — boots the seeded daemon
+    *) echo "v2-demo: unknown phase '$p' (want 1-6)" >&2; return 2 ;;
   esac
   # `${PASS[@]+...}` keeps an EMPTY array safe under `set -u` on macOS bash 3.2.
   for f in ${PASS[@]+"${PASS[@]}"}; do
