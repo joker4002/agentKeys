@@ -178,7 +178,14 @@ export function App() {
       if (listed.ok) setMemories(listed.data.map(toPreserved));
       showToast(`Prepared memory planted · ${r.data.planted} new, ${r.data.skipped} deduped.`);
     } else {
-      showToast('Connect a daemon to plant prepared memory.');
+      // The plant button only renders when the daemon is connected, so a failure
+      // here is almost never "no daemon" — surface the daemon's ACTUAL reason
+      // (e.g. 409 "no master session — complete onboarding first" / "master device
+      // not registered on chain yet", or a 502 worker error) instead of masking it.
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      const reason = m ? m[1] : detail || 'connect a daemon, then complete onboarding (login + K11 enroll) first';
+      showToast(`Plant failed — ${reason}`);
     }
   };
 
