@@ -95,8 +95,10 @@ semantics. The mock agent tests the worker **plumbing only** — not the real §
   first master + the companion (second-master M-of-N) daemon.
 - **phase 3 — OIDC + isolation proof** (`v2-stage3-demo.sh`): SIWE → OIDC JWT → per-actor
   STS → S3 positive/negative, cross-actor + cross-data-class denials, the four issue-#90
-  isolation layers, and **step 16 master-self cap (no scope) + step 17 cross-actor →
-  ServiceNotInScope** (#195/#196 gate). Per-step `ok`/`skip`/`fail`; strict by default.
+  isolation layers, and the **scope triad** — step 16 master-self cap (operator==actor, no
+  scope → 200), step 17 cross-actor un-granted → ServiceNotInScope, step 18 granted agent
+  (operator≠actor, master granted the scope → 200; the positive delegation proof) — the
+  #195/#196 gate. Per-step `ok`/`skip`/`fail`; strict by default.
   **Steps 11-12 / 14-15** sign STS creds AS the agent → `defer` to the sandbox on the operator.
 - **phase 4 — memory plant** (`memory-plant-demo.sh`): the master plants its prepared archive
   through the real master-self chain (cap-mint → STS → worker `/v1/memory/put` → S3) — the CLI

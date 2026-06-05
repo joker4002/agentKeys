@@ -57,7 +57,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # step 16. Defines functions only (safe to source before env). See harness/scripts/_lib.sh.
 . "$REPO_ROOT/harness/scripts/_lib.sh"
 STEP_NUM=0
-STEP_TOTAL=18
+STEP_TOTAL=19
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
@@ -1175,8 +1175,63 @@ if should_run_step 17; then
   fi
 fi
 
-# ─── Step 18: Cleanup with admin profile ───────────────────────────────────
+# ─── Step 18: POSITIVE — granted agent (operator!=actor) mints a cap for the GRANTED service ───
+# Completes the scope-semantics triad with step 16 (master-self SKIP) and step 17
+# (cross-actor un-granted DENIED): here the master GRANTED the agent scope for
+# $SMOKE_SERVICE in stage-1 step 13, so the agent (actor != operator) must now mint a
+# memory cap for that service → 200, proving isServiceInScope(O_master, agent, service)
+# is honoured (delegation works). Stands ALONE (no STS/worker roundtrip): the cap-mint
+# is operator-authenticated (mint_cap sends session.jwt), so it needs NO agent key —
+# only the agent's on-chain device + the grant.
 if should_run_step 18; then
+  step "POSITIVE: granted agent (operator!=actor) mints memory cap for the GRANTED service → 200"
+  [ -f "$STATE_DIR/session.jwt" ] || die "no session.jwt — re-run step 1"
+  # CI mocks the §10.2 agent with a master-held, scope-granted dev agent; the operator's
+  # real agent carries its device + grant on chain (stage-1 / sandbox pairing).
+  pg_file="$AGENT_FILE"
+  if [ "$MOCK_AGENT" = 1 ]; then
+    pg_file=$(ensure_mock_agent) || { prereq_missing agent-file-invalid "mock-agent provision failed (heima-agent-create/scope-set)" || true; pg_file=""; }
+  fi
+  if [ -z "$pg_file" ] || [ ! -f "$pg_file" ]; then
+    prereq_missing agent-file-missing "no granted-agent file ($AGENT_FILE) — run stage-1 step 12/13 (create agent + setScope) first" || true
+  else
+    pg_actor=$(jq -r '.actor_omni // empty' "$pg_file")
+    pg_dkh=$(jq -r '.device_key_hash // empty' "$pg_file")
+    [ -z "$pg_dkh" ] && pg_dkh=$(cast keccak "$(jq -r '.agent_address // .wallet_address' "$pg_file" | tr '[:upper:]' '[:lower:]')")
+    pg_actor_lc=$(printf '%s' "${pg_actor#0x}" | tr '[:upper:]' '[:lower:]')
+    own_lc=$(printf '%s' "${OWN_ACTOR_OMNI#0x}" | tr '[:upper:]' '[:lower:]')
+    if [ -z "$pg_actor" ]; then
+      prereq_missing agent-file-invalid "granted-agent file missing actor_omni ($pg_file)" || true
+    elif [ "$pg_actor_lc" = "$own_lc" ]; then
+      prereq_missing agent-is-operator "configured agent actor == operator omni — this positive test needs a DISTINCT agent (operator!=actor)" || true
+    else
+      pg_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "$pg_actor" \
+                       --arg svc "$SMOKE_SERVICE" --arg dkh "$pg_dkh" \
+         '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+      rc=$(mint_cap memory-put "$pg_body")
+      body=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+      if [ "$rc" = "200" ]; then
+        ok "granted agent (actor $pg_actor != operator 0x$OWN_ACTOR_OMNI) minted a memory cap for delegated service '$SMOKE_SERVICE' — isServiceInScope honoured"
+        record_ok "granted-agent positive: memory cap minted for delegated service '$SMOKE_SERVICE' (operator!=actor, HTTP 200)"
+      elif echo "$body" | grep -qiE "not.*scope|NotInScope|service_not_in_scope"; then
+        prereq_missing scope-not-set "agent scope for '$SMOKE_SERVICE' not granted on chain — run \`bash harness/v2-stage1-demo.sh --webauthn\` (step 13 setScope) first. body: $body" || true
+      elif echo "$body" | grep -qiE "DeviceNotActive|device.*not.*active|DeviceBindingMismatch|binding.*mismatch|DeviceRoleMissing|role_missing"; then
+        if [ "$MOCK_AGENT" = 1 ]; then
+          prereq_missing agent-not-registered "mock agent device not registered with CAP_MINT (HTTP $rc) — heima-agent-create. body: $body" || true
+        else
+          defer_to_sandbox "step $STEP_NUM (granted-agent positive cap-mint): agent '$pg_actor' device is §10.2-paired in the sandbox (not on chain until pairing)"
+        fi
+      elif echo "$body" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP|SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA"; then
+        prereq_missing broker-misconfig "broker missing chain config (HTTP $rc) — redeploy broker host. body: $body" || true
+      else
+        die "granted-agent positive cap-mint returned unexpected HTTP $rc — body: $body"
+      fi
+    fi
+  fi
+fi
+
+# ─── Step 19: Cleanup with admin profile ───────────────────────────────────
+if should_run_step 19; then
   step "Cleanup test objects + summary"
   # Use the laptop's admin profile (NOT the STS creds) to delete the
   # objects we wrote. Only the POSITIVE-step objects exist — every
@@ -1253,6 +1308,6 @@ if should_run_step 18; then
   elif [ "$nok" -gt 0 ]; then
     printf "\n${C_OK}DEMO COMPLETE${C_RESET}: %d steps exercised — operator-side isolation proven.%s\n" "$nok" "$defer_note" >&2
   else
-    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 18); run full demo to prove coverage.\n" >&2
+    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 19); run full demo to prove coverage.\n" >&2
   fi
 fi

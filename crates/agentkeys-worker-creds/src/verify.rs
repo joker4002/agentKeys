@@ -441,6 +441,61 @@ mod tests {
         assert!(r.is_err(), "operator!=actor must still consult the chain");
     }
 
+    // Minimal in-process JSON-RPC mock: one std TCP listener that answers every
+    // eth_call with a fixed `result`. Uses std::net (NOT tokio::net) so it needs no
+    // extra tokio feature + no new dev-dependency (keeps Cargo.lock untouched).
+    fn spawn_mock_rpc(result_hex: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf); // drain the request; we don't parse it
+                let json = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{result_hex}\"}}");
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json.len(),
+                    json
+                );
+                let _ = s.write_all(resp.as_bytes());
+                let _ = s.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn check_chain_scope_ok_when_chain_grants() {
+        // POSITIVE delegation: master GRANTED the agent scope (operator != actor,
+        // chain returns true) → the agent's cap passes the scope gate. This is the
+        // positive counterpart the suite previously lacked — proves "granted ->
+        // success", not just "the gate is consulted".
+        let url = spawn_mock_rpc(
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let token = sample_token(CapOp::Fetch); // operator 0xaa…, actor 0xbb… (distinct)
+        let client = reqwest::Client::new();
+        let r = check_chain_scope(&client, &url, "0xscope", &token).await;
+        assert!(r.is_ok(), "granted cross-actor scope must pass (got {r:?})");
+    }
+
+    #[tokio::test]
+    async fn check_chain_scope_rejects_when_chain_denies() {
+        // NEGATIVE: operator != actor, chain returns false (NOT granted) → NotInScope.
+        let url = spawn_mock_rpc(
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let token = sample_token(CapOp::Fetch);
+        let client = reqwest::Client::new();
+        let r = check_chain_scope(&client, &url, "0xscope", &token).await;
+        assert!(
+            matches!(r, Err(VerifyError::NotInScope)),
+            "ungranted cross-actor scope must be NotInScope (got {r:?})"
+        );
+    }
+
     #[test]
     fn data_class_serializes_snake_case() {
         assert_eq!(
