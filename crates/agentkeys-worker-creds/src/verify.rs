@@ -46,6 +46,9 @@ pub enum CapOp {
 pub enum DataClass {
     Credentials,
     Memory,
+    /// Policy / memory-types taxonomy (#178 §7). Master-only; own bucket + role.
+    /// A Config cap presented to the cred or memory worker fails check_data_class.
+    Config,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,6 +509,31 @@ mod tests {
             serde_json::to_string(&DataClass::Memory).unwrap(),
             "\"memory\""
         );
+        assert_eq!(
+            serde_json::to_string(&DataClass::Config).unwrap(),
+            "\"config\""
+        );
+    }
+
+    #[test]
+    fn check_data_class_rejects_config_at_cred_and_memory() {
+        // A Config cap (the taxonomy data class, #178) must be rejected by both
+        // the cred and memory workers — it belongs only to the config worker.
+        let config_cap = sample_token_with_class(CapOp::Store, DataClass::Config);
+        for expected in [DataClass::Credentials, DataClass::Memory] {
+            match check_data_class(&config_cap, expected) {
+                Err(VerifyError::DataClassMismatch { got, .. }) => {
+                    assert_eq!(got, DataClass::Config);
+                }
+                other => panic!("expected DataClassMismatch for {expected:?}, got {other:?}"),
+            }
+        }
+        // And a memory cap is rejected where Config is expected (the config worker).
+        let mem_cap = sample_token_with_class(CapOp::Store, DataClass::Memory);
+        assert!(matches!(
+            check_data_class(&mem_cap, DataClass::Config),
+            Err(VerifyError::DataClassMismatch { .. })
+        ));
     }
 
     #[test]
