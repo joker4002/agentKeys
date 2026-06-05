@@ -107,7 +107,7 @@ check_consumer() {
 }
 
 echo
-info "gating the two non-Rust consumers (the Rust source is pinned by the ui_bridge unit test)…"
+info "gating the two non-Rust consumers (the Rust source is pinned by the ui_bridge unit test)..."
 check_consumer "harness web-parity-demo" "$HARNESS"
 check_consumer "frontend daemon.ts" "$FRONTEND"
 

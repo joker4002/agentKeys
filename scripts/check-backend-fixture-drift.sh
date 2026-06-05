@@ -100,7 +100,7 @@ fails=0
 checked=0
 missing=0
 echo
-info "checking annotated cap/worker bodies under $SCAN_DIR…"
+info "checking annotated cap/worker bodies under ${SCAN_DIR}..."
 while IFS=$'\t' read -r shape file aline literal; do
   [ -n "$shape" ] || continue
   rel="${file#"$REPO_ROOT"/}"
