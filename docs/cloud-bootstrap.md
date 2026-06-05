@@ -14,7 +14,7 @@ The day-to-day broker re-deploys live in §10 below (`setup-broker-host.sh`); th
 
 ## Quick start — five steps to a running stack
 
-Tight five-step flow. Explanation + per-step reasoning are in §1–§11 below; the same flow works for prod (no `--test`) or test (`--test` swaps in `-test` identifiers everywhere). The orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) is idempotent — re-running is safe.
+Tight five-step flow. Explanation + per-step reasoning are in §1–§11 below; the same flow works for prod (**no flag**) or the CI/test stack (**`--ci`**, alias `--test`, swaps in `-test` identifiers everywhere + targets the test broker EIP `agentkeys-broker-eip-test`). The orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) is idempotent — re-running is safe. **Prod and the CI/test broker are SEPARATE EC2 machines with SEPARATE EIPs** — `--ci` is what keeps them apart; never mix the flag.
 
 ### 1. Get the EC2 + EIP (manual, ~5 min per stack)
 
@@ -50,12 +50,13 @@ In practice: paste `INSTANCE_ID` into the two broker env files. Done.
 ```bash
 awsp agentkeys-admin
 
-# Prod stack:
+# Prod stack (no env flag):
 bash scripts/setup-cloud.sh --yes
 
-# Test stack — --test auto-selects scripts/operator-workstation.test.env
-# + scripts/broker.test.env and suffixes IAM identifiers with -test:
-bash scripts/setup-cloud.sh --test --yes
+# CI/test stack — --ci (alias --test) auto-selects scripts/operator-workstation.test.env
+# + scripts/broker.test.env, suffixes IAM identifiers with -test, and targets the
+# test broker EIP (tag agentkeys-broker-eip-test):
+bash scripts/setup-cloud.sh --ci --yes
 ```
 
 The orchestrator walks 15 idempotent steps (cloud-side AWS resources + IAM users + per-data-class roles + bucket policies + DNS UPSERTs). Steps 10 (`agentkeys-daemon[-test]`) and 12 (`agentkeys-broker[-test]`) print **access keys** to copy off — they're shown ONCE.
@@ -101,18 +102,18 @@ ssh-agentkeys-test-fallback   # ssh -i ~/.ssh/your.pem ubuntu@<test EIP>
 git clone https://github.com/litentry/agentKeys.git
 cd agentKeys
 
-sudo bash scripts/setup-broker-host.sh --test --yes
+sudo bash scripts/setup-broker-host.sh --ci --yes
 ```
 
-Two flags. `--test` triggers the `-test` suffix on every derived hostname / bucket / email; `--issuer-url` + `--account-id` auto-derive from `ZONE` + `ACCOUNT_ID` in `scripts/operator-workstation.env` (which the repo clone ships with). Override any flag explicitly if you need a non-conventional name. For **prod**, drop `--test`:
+Two flags. `--ci` (alias `--test`) triggers the `-test` suffix on every derived hostname / bucket / email; `--issuer-url` + `--account-id` auto-derive from `ZONE` + `ACCOUNT_ID` in `scripts/operator-workstation.env` (which the repo clone ships with). Override any flag explicitly if you need a non-conventional name. For **prod**, drop `--ci`:
 
 ```bash
 sudo bash scripts/setup-broker-host.sh --yes
 ```
 
-What `--test` derives automatically:
+What `--ci` derives automatically:
 - `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`, `config-test.${ZONE}`
-- `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`
+- `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`, `agentkeys-config-test-${ACCOUNT_ID}`
 - `noreply-test@bots-test.${ZONE}`
 - `https://test-broker.${ZONE}` for the OIDC issuer URL
 
@@ -130,7 +131,7 @@ ssh-agentkeys-test         # Instance Connect, no .pem needed
 cd ~/agentKeys             # → /home/agentkey/agentKeys, files visible
 ```
 
-Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --test --yes`) happen from `/home/agentkey/agentKeys` — step 10's relocation is idempotent (existence check skips when already in place). The cargo build cache survives the move (it's inside `target/`). The Rust toolchain itself is **deleted from `/root/` at the end of the first run** to save ~1.5 GB — future re-runs reinstall it as part of the toolchain step automatically. This keeps the box clean and ensures only one canonical Rust install on disk at a time.
+Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --ci --yes`) happen from `/home/agentkey/agentKeys` — step 10's relocation is idempotent (existence check skips when already in place). The cargo build cache survives the move (it's inside `target/`). The Rust toolchain is **KEPT across runs by default** so re-deploys skip the slow rustup + crate-registry re-download (and sccache caches the compilations) — a no-source-change re-run drops to ~30-60s. Pass **`--reclaim-toolchain`** on a final deploy to delete `/root/.cargo` + `/root/.rustup` and free ~1.5 GB.
 
 For **prod**, the same flow applies — drop `--test` everywhere and the relocation moves the repo from whichever home dir you bootstrapped in to `/home/agentkey/`.
 

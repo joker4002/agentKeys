@@ -662,17 +662,19 @@ do_step_13() {
     warn "DRY: would run provision-{vault,memory,config}-{bucket,role}.sh + apply-{vault,memory,config}-bucket-policy.sh"
     return
   fi
-  bash "$SCRIPT_DIR/provision-vault-bucket.sh"
-  bash "$SCRIPT_DIR/provision-vault-role.sh"
-  bash "$SCRIPT_DIR/provision-memory-bucket.sh"
-  bash "$SCRIPT_DIR/provision-memory-role.sh"
-  # Config data class (#201) — master-only policy / memory-types taxonomy.
-  bash "$SCRIPT_DIR/provision-config-bucket.sh"
-  bash "$SCRIPT_DIR/provision-config-role.sh"
-  bash "$SCRIPT_DIR/apply-vault-bucket-policy.sh"
-  bash "$SCRIPT_DIR/apply-memory-bucket-policy.sh"
-  bash "$SCRIPT_DIR/apply-config-bucket-policy.sh"
-  ok "per-data-class provisioning complete"
+  # Pass ENV_FILE through so --ci/--test provisions the -test buckets/roles. Each
+  # provision/apply script defaults ENV_FILE to operator-workstation.env (prod) and
+  # `set -a; . "$ENV_FILE"` OVERWRITES any inherited CONFIG_BUCKET — so WITHOUT this
+  # passthrough a --ci run would silently provision the PROD buckets. config = #201
+  # (master-only policy / memory-types taxonomy).
+  local provisioner
+  for provisioner in provision-vault-bucket provision-vault-role \
+                     provision-memory-bucket provision-memory-role \
+                     provision-config-bucket provision-config-role \
+                     apply-vault-bucket-policy apply-memory-bucket-policy apply-config-bucket-policy; do
+    ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/$provisioner.sh"
+  done
+  ok "per-data-class provisioning complete (env: $(basename "$ENV_FILE"))"
 }
 
 do_step_14() {
