@@ -15,9 +15,12 @@
 //!   3. browser POST /v1/k11/enroll/finish  → daemon verifies
 //!      attestation via webauthn-rs, returns credentialId
 //!
-//! For M1 the on-chain SidecarRegistry.register_master_device() call
-//! is stubbed (returns chainTxHash=null). Real chain submission lands
-//! in PR-C alongside the audit-service SSE feed.
+//! The on-chain register (registerFirstMasterDevice) is WIRED (issue #196):
+//! K11-finish shells out to `--register-master-script` and returns the real
+//! `chain_tx_hash` + `chain` status (+ `chain_error` on failure). It is skipped
+//! (`chain: none`) ONLY when no register script is configured (dev/no-infra) —
+//! the web app launcher (`dev.sh`) always passes one, so the onboarding
+//! ceremony is NOT deferred.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
