@@ -81,7 +81,7 @@ fi
 if should_run 2; then
   step 2 "Wallet SIWE → session J1 (managed-wallet attestation)"
   start=$(curl -sSf -X POST "$BROKER/v1/auth/wallet/start" -H 'content-type: application/json' \
-    -d "$(jq -n --arg a "0x$DEPLOYER_ADDR" '{evm_address:$a}')" 2>&1) || die "wallet/start: $start"
+    -d "$(jq -n --arg a "0x$DEPLOYER_ADDR" --argjson c 1 '{address:$a, chain_id:$c}')" 2>&1) || die "wallet/start: $start"
   req_id=$(echo "$start" | jq -r '.request_id // empty'); msg=$(echo "$start" | jq -r '.siwe_message // empty')
   [ -n "$req_id" ] || die "wallet/start gave no request_id: $start"
   sig=$(cast wallet sign --private-key "$DEPLOYER_KEY" "$msg")
