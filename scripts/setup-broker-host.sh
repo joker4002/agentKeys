@@ -14,6 +14,9 @@
 #   Interactive when stdin is a TTY; pass --yes to skip the confirm.
 #   Pass --ref <branch-or-tag> to opt into an in-script git fetch+pull;
 #   otherwise builds whatever is currently checked out.
+#   The Rust toolchain (~1.5GB) is KEPT across runs by default so re-deploys are
+#   fast (no rustup/crate-registry re-download); pass --reclaim-toolchain on a
+#   final deploy to delete it and reclaim the disk.
 #
 # Out of scope (operator does these by hand): DNS A records, AWS IAM
 # role/policy creation, first-time cert issuance (see §7 manual steps),
@@ -62,6 +65,7 @@ CONFIG_BUCKET=""
 SCOPE_ADDR=""
 REGISTRY_ADDR=""
 K3_COUNTER_ADDR=""
+RECLAIM_TOOLCHAIN=false       # --reclaim-toolchain → delete /root/.cargo + /root/.rustup at the end (~1.5GB). DEFAULT false: KEEP the toolchain so re-deploys skip the slow rustup + crate-registry re-download (fast iteration). Pass it on a final/one-shot deploy to reclaim disk.
 WITH_WORKERS="yes"           # in-file constant: the 5 service workers (audit/email/cred/memory/config) are core — always built+installed. The build is idempotent (skips up-to-date crates), so there is no operator opt-out flag to remember.
 # Verified SES sender for email-link auth. Operator must register this
 # identity via scripts/ses-verify-sender.sh BEFORE booting the broker;
@@ -96,6 +100,7 @@ while (( $# > 0 )); do
     --upgrade|--skip-pull) shift ;;        # back-compat no-ops (script is idempotent; --ref drives any pull)
     --ref)                PULL_REF="$2"; shift 2 ;;
     --test)               TEST_MODE=true; shift ;;
+    --reclaim-toolchain)  RECLAIM_TOOLCHAIN=true; shift ;;
     --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
     --audit-host)         AUDIT_HOST="$2"; shift 2 ;;
     --email-host)         EMAIL_HOST="$2"; shift 2 ;;
@@ -555,6 +560,12 @@ case "$PM" in
   dnf) "${PM_INSTALL[@]}" curl gcc gcc-c++ make pkgconf-pkg-config openssl-devel ca-certificates ;;
 esac
 
+# Put an already-installed toolchain on PATH FIRST so re-deploys SKIP the slow
+# rustup reinstall + crate-registry re-download. The toolchain is kept across runs
+# by default (see --reclaim-toolchain); without this source, `have rustup` is false
+# on a non-login sudo shell even when /root/.cargo exists, forcing a full re-pull.
+# shellcheck disable=SC1091
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 if ! have rustup; then
   log "Installing rustup + stable toolchain"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -1904,21 +1915,24 @@ else
   REPO_MOVED=0
 fi
 
-# Free ~1.5GB by removing root's Rust toolchain (used only by this script to
-# build the broker binaries; the running services don't need it). Operators
-# who want interactive `cargo` as the agentkey user should install rustup
-# under their own $HOME — see the post-run NOTE below + docs/cloud-bootstrap.md
-# §5 "Optional: install rustup for dev-loop cargo runs as agentkey".
-#
-# Idempotent: rm -rf on a missing path is a no-op. Future re-runs of this
-# script will reinstall rustup as root automatically (the toolchain step
-# earlier in the script handles bootstrap from scratch).
-if [[ -d /root/.cargo ]] || [[ -d /root/.rustup ]]; then
-  log "Removing root's Rust toolchain (~1.5GB) — binaries are built + installed"
-  sudo rm -rf /root/.cargo /root/.rustup
-  ROOT_RUST_CLEANED=1
+# Root's Rust toolchain (/root/.cargo + /root/.rustup, ~1.5GB) is used only to
+# BUILD the broker binaries; the running services don't need it at runtime. BUT
+# deleting it forces every re-deploy to re-download the whole toolchain + all 372
+# crate sources (minutes of pure waste), so KEEP it by default for fast iteration
+# and only reclaim the disk when --reclaim-toolchain is passed (e.g. a final
+# deploy). Idempotent either way: rm -rf on a missing path is a no-op; a kept
+# toolchain is put back on PATH by `source "$HOME/.cargo/env"` in the prereqs step.
+if [[ "$RECLAIM_TOOLCHAIN" == "true" ]]; then
+  if [[ -d /root/.cargo ]] || [[ -d /root/.rustup ]]; then
+    log "Removing root's Rust toolchain (~1.5GB, --reclaim-toolchain) — binaries are built + installed"
+    sudo rm -rf /root/.cargo /root/.rustup
+    ROOT_RUST_CLEANED=1
+  else
+    ROOT_RUST_CLEANED=0
+  fi
 else
   ROOT_RUST_CLEANED=0
+  log "Keeping root's Rust toolchain (~1.5GB) for fast re-deploys — pass --reclaim-toolchain to free the disk on a final deploy"
 fi
 
 cat <<EOF
@@ -1943,10 +1957,10 @@ if [[ "$REPO_MOVED" == "1" ]]; then
     2. ssh-agentkeys-test   # from your laptop — lands as agentkey
     3. cd ~/agentKeys       # → /home/agentkey/agentKeys (with the repo)
 
-  Root's Rust toolchain has been removed (\`/root/.cargo\`, \`/root/.rustup\`)
-  to save ~1.5GB. If you want interactive \`cargo\` as the agentkey user
-  (e.g. for dev-loop clippy / test runs that mirror the CI Linux env),
-  install rustup under your own \$HOME once after reconnecting:
+  Root's Rust toolchain (\`/root/.cargo\`, \`/root/.rustup\`, ~1.5GB) is KEPT by
+  default so re-deploys stay fast (pass \`--reclaim-toolchain\` to free it). If
+  you want interactive \`cargo\` as the agentkey user (e.g. dev-loop clippy /
+  test runs that mirror the CI Linux env), install rustup under your own \$HOME:
 
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \\
       | sh -s -- -y --default-toolchain stable --profile minimal
