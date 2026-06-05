@@ -117,22 +117,29 @@ preflight() {
   export AGENTKEYS_HARNESS_PREFLIGHT_DONE=1 AGENTKEYS_SKIP_CLI_BUILD=1
 }
 
-# Phase 5 — the agent-side wire demo. Special (no --from-step; WIRE_MODE-driven;
-# auto-skips when no sandbox). Pairs the §10.2 agent so the sandbox shell can then
-# run sandbox-agent-isolation.sh directly. Returns 0 on success/skip, 1 on failure.
+# Phase 5 — the agent-side wire demo. Special (no --from-step; WIRE_MODE-driven).
+# Pairs the §10.2 agent so the sandbox shell can then run sandbox-agent-isolation.sh.
+# Sets WIRE_RESULT so the final summary can tell a real PASS apart from an auto-skip:
+#   wired    — the wire actually ran (proof executed)
+#   disabled — intentionally off (--wire none / CI has no sandbox) → clean
+#   skipped  — auto mode but NO aiosandbox → the proof did NOT run (NOT a pass)
+# Returns 0 on wired/disabled/auto-skip, non-zero only on a real wire failure. The
+# auto-skip is surfaced as DEMO INCOMPLETE (non-zero exit) by the summary, so an
+# unexecuted proof can never read as green.
 run_wire_phase() {
   case "$WIRE_MODE" in
-    none)  phase "5 — wire (skipped: --wire none / CI has no sandbox)"; return 0 ;;
+    none)  phase "5 — wire (disabled: --wire none / CI has no sandbox)"; WIRE_RESULT=disabled; return 0 ;;
     auto)
       if sandbox_present; then
-        phase "5 — phase1-wire-demo.sh --real"; bash "$REPO_ROOT/phase1-wire-demo.sh" --real
+        phase "5 — phase1-wire-demo.sh --real"; WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --real
       else
-        phase "5 — wire (skipped: no aiosandbox)"
-        say "$(c '1;33' 'wire skipped') — no aiosandbox detected. Set it up first: bash harness/openviking-sandbox-setup.sh, then re-run (or: bash harness/v2-demo.sh --from 5)."
+        phase "5 — wire (SKIPPED: no aiosandbox — proof did NOT run)"
+        say "$(c '1;33' 'wire skipped') — no aiosandbox reachable at ${SANDBOX_URL:-http://localhost:8080}. The wire/pairing proof did NOT run."
+        WIRE_RESULT=skipped
         return 0
       fi ;;
-    real)  phase "5 — phase1-wire-demo.sh --real";  bash "$REPO_ROOT/phase1-wire-demo.sh" --real ;;
-    light) phase "5 — phase1-wire-demo.sh --light"; bash "$REPO_ROOT/phase1-wire-demo.sh" --light ;;
+    real)  phase "5 — phase1-wire-demo.sh --real";  WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --real ;;
+    light) phase "5 — phase1-wire-demo.sh --light"; WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --light ;;
     *) echo "v2-demo: --wire wants real|light|none (got '$WIRE_MODE')" >&2; return 1 ;;
   esac
 }
@@ -176,16 +183,37 @@ OVERALL=0
 IFS=',' read -r -a WANT <<< "$STAGES"
 for p in ${WANT[@]+"${WANT[@]}"}; do   # ${..+..} keeps an empty STAGES safe under set -u (bash 3.2)
   p="$(printf '%s' "$p" | tr -d '[:space:]')"; [ -n "$p" ] || continue
-  if run_phase "$p"; then say "phase $p: $(c '1;32' ok)"; else
+  if run_phase "$p"; then
+    if [ "$p" = 5 ] && [ "${WIRE_RESULT:-}" = skipped ]; then say "phase $p: $(c '1;33' 'SKIPPED — wire proof did not run')"
+    else say "phase $p: $(c '1;32' ok)"; fi
+  else
     OVERALL=1; say "phase $p: $(c '1;31' FAILED)"
     [ "$CI" = 1 ] || { echo "$(c '1;31' '✗ stopping — fix phase '"$p"' before continuing (downstream phases depend on it)')" >&2; exit 1; }
   fi
 done
 
-if [ "$OVERALL" = 0 ]; then
-  printf '\n%s phases %s — all green.\n' "$(c '1;32' 'v2-demo DONE ·')" "$STAGES" >&2
-  case ",$STAGES," in *,5,*) [ "$WIRE_MODE" != none ] && say "agent paired in the sandbox → run the agent-side proof THERE: bash \$HOME/sandbox-agent-isolation.sh" ;; esac
-else
-  printf '\n%s some phases reported failures/skips — see the per-phase output above.\n' "$(c '1;33' 'v2-demo ·')" >&2
+if [ "$OVERALL" != 0 ]; then
+  printf '\n%s some phases reported failures — see the per-phase output above.\n' "$(c '1;33' 'v2-demo ·')" >&2
+  exit "$OVERALL"
 fi
-exit "$OVERALL"
+
+# Every explicitly-run phase passed. But an AUTO-SKIPPED wire is NOT a pass: the
+# pairing proof never ran, so don't let it read as green (codex finding 3). Make
+# the skip distinct + exit non-zero, with an explicit escape (--wire none).
+wire_requested=0; case ",$STAGES," in *,5,*) wire_requested=1 ;; esac
+if [ "$wire_requested" = 1 ] && [ "${WIRE_RESULT:-}" = skipped ]; then
+  printf '\n%s phases %s ran green, but phase 5 (wire) was SKIPPED — no aiosandbox, so the wire/pairing proof did NOT run.\n' \
+    "$(c '1;33' 'v2-demo INCOMPLETE ·')" "$STAGES" >&2
+  say "Bring up the aiosandbox + re-run the wire: docker run --security-opt seccomp=unconfined -d -p 8080:8080 ghcr.io/agent-infra/sandbox:latest  &&  bash harness/v2-demo.sh --from 5"
+  say "Or pass --wire none to intentionally skip the wire (then the run is a clean pass)."
+  exit 1
+fi
+
+printf '\n%s phases %s — all green.\n' "$(c '1;32' 'v2-demo DONE ·')" "$STAGES" >&2
+if [ "$wire_requested" = 1 ]; then
+  case "${WIRE_RESULT:-}" in
+    wired)    say "agent paired in the sandbox → run the agent-side proof THERE: bash \$HOME/sandbox-agent-isolation.sh" ;;
+    disabled) say "wire intentionally disabled (--wire none) — no §10.2 agent was paired this run." ;;
+  esac
+fi
+exit 0

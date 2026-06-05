@@ -1526,8 +1526,21 @@ async fn plant_master_memory_inner(
                 }
             }
         }
-        if planted == 0 && !errors.is_empty() {
-            return Err((axum::http::StatusCode::BAD_GATEWAY, errors.join("; ")));
+        // Any durable-write failure fails the whole plant — a partial plant must NOT
+        // read as success (the prepared archive would be partially persisted while the
+        // caller proceeds with missing memory). The successfully-written entries stay in
+        // `master_memory` so a re-plant is idempotent and resumes the failed namespaces.
+        // We early-return BEFORE the success audit + Ok response below.
+        if !errors.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!(
+                    "plant incomplete: {} of {} write(s) failed (planted {planted}, skipped {skipped}): {}",
+                    errors.len(),
+                    planted + skipped + errors.len(),
+                    errors.join("; ")
+                ),
+            ));
         }
     } else {
         // In-memory fallback (dev / no infra) — content-hash dedup.

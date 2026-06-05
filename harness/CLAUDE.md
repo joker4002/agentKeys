@@ -176,7 +176,7 @@ sandbox) is **GREEN**, never fail/incomplete.
 
 | Script | Goal | Entry |
 |---|---|---|
-| **`v2-demo.sh`** | **THE single entry point — no flags = phases 1→2→3→4 (memory plant)→5 (wire); wire auto-runs when the aiosandbox is up, else skip-with-note; fail-fast. `PHASE.STEP` addressing (`--from 4.1`, `--only 3.11`). Flags are CI/scoping only.** | (no flags) / `--ci` / `--stage N` / `--from P.S` / `--only P.S` / `--wire real\|light\|none` |
+| **`v2-demo.sh`** | **THE single entry point — no flags = phases 1→2→3→4 (memory plant)→5 (wire); wire auto-runs when the aiosandbox is up, else reports INCOMPLETE + exits non-zero (an unexecuted proof is never green — pass `--wire none` to intentionally skip); fail-fast. `PHASE.STEP` addressing (`--from 4.1`, `--only 3.11`). Flags are CI/scoping only.** | (no flags) / `--ci` / `--stage N` / `--from P.S` / `--only P.S` / `--wire real\|light\|none` |
 | `v2-stage1-demo.sh` | M1 foundation demo | `--only-step N` |
 | `v2-stage2-demo.sh` | hardening demo | `--only-step N` |
 | `v2-stage3-demo.sh` | OIDC + per-actor/data-class isolation proof (steps 16–17 = #196 master-self + cross-actor scope). **Steps 11-12 / 14-15 sign STS creds AS the agent: on the operator they `defer` to the sandbox (the §10.2 agent key lives in the sandbox) — GREEN, never fail. `--mock-agent` (CI-only, auto-on under `--ci`) provisions a master-held DEV agent so headless CI can prove the roundtrip; a real §10.2 agent proves it in-sandbox via `phase1-wire-demo.sh --real`.** | `--from/--to/--only-step` / `--mock-agent` |

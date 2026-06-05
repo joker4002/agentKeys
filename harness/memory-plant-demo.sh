@@ -114,11 +114,14 @@ sts_relay() {
 # ─── Step 3: cap-mint per namespace ────────────────────────────────────────
 if should_run 3; then
   step 3 "Cap-mint memory-put per namespace (master-self, no scope grant)"
-  declare -A CAP
+  # No associative array: `declare -A` is bash 4+, but the operator platform is
+  # macOS bash 3.2 (where it errors + `CAP[$ns]` under `set -u` treats the ns name
+  # as an unbound arithmetic var). This step just proves cap-mint works per
+  # namespace; step 4 re-mints fresh caps (they are short-TTL anyway).
   for ns in $NAMESPACES; do
     cap=$(mint_cap memory-put "$ns")
     echo "$cap" | jq -e '.cap // .payload // .signature' >/dev/null 2>&1 || die "cap-mint(memory:$ns) failed: $cap"
-    CAP[$ns]="$cap"; ok "cap memory:$ns minted"
+    ok "cap memory:$ns minted"
   done
 fi
 
@@ -127,7 +130,7 @@ if should_run 4; then
   step 4 "Plant → worker /v1/memory/put → S3 (the button's write, scripted)"
   sts_relay || die "STS relay failed"
   for ns in $NAMESPACES; do
-    cap="${CAP[$ns]:-$(mint_cap memory-put "$ns")}"
+    cap=$(mint_cap memory-put "$ns")   # re-mint fresh (short-TTL; no cross-step array — bash 3.2)
     b64=$(printf '%s' "$(plain_for "$ns")" | base64 | tr -d '\n')
     body=$(jq -n --argjson cap "$cap" --arg p "$b64" --arg n "$ns" '{cap:$cap, plaintext_b64:$p, namespace:$n}')
     resp=$(curl -sS -X POST "$MEMORY_URL/v1/memory/put" \

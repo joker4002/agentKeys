@@ -31,7 +31,9 @@ bash harness/v2-demo.sh   # phases 1→2→3 (Touch ID) + 4 (memory plant) + 5 (
 ```
 
 Phase 5 **auto-detects** the aiosandbox (probes `$SANDBOX_URL/healthz`): up → it wires; down →
-it prints `skipped — no aiosandbox` and the run still goes **green** (re-pair later with `--from 5`).
+it reports **`v2-demo INCOMPLETE`** and **exits non-zero** — the wire/pairing proof did NOT run, and
+an unexecuted proof is never reported green. Bring the sandbox up + re-run `--from 5`, or pass
+**`--wire none`** to intentionally skip the wire (then the run is a clean pass).
 Do **not** run `openviking-sandbox-setup.sh` here — that's the *optional* OpenViking memory-engine
 setup that runs **inside** the sandbox **after** wiring (see [Other entry points](#other-entry-points)).
 
