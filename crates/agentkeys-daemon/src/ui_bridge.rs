@@ -1380,7 +1380,15 @@ async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>,
         role_arn,
         region: state.region.clone(),
         j1: session.j1,
-        omni: session.omni,
+        // The broker cap-mint input-validates that operator_omni/actor_omni start with
+        // 0x, but the onboarding session stores the omni bare. Normalize ONCE here so
+        // both memory_put_real + memory_get_real send a 0x-prefixed omni (the broker
+        // normalize_hex32's it for the device-binding match either way).
+        omni: if session.omni.starts_with("0x") {
+            session.omni
+        } else {
+            format!("0x{}", session.omni)
+        },
         device_key_hash,
     }))
 }
