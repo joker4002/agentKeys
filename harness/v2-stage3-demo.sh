@@ -937,16 +937,27 @@ post_cross_class() {
   local aki="$4" sak="$5" sst="$6"
   local plaintext_b64
   plaintext_b64=$(printf 'cross-class probe' | base64 | tr -d '\n')
-  local body
+  local body err_file rc
   body=$(jq -n --argjson cap "$cap_blob" --arg pt "$plaintext_b64" \
             '{cap: $cap, plaintext_b64: $pt}')
+  # Keep the returned code CLEAN. Folding curl's stderr into rc via `2>&1`
+  # produced "curl: (35) …SSL_ERROR_SYSCALL…\n000000" for an UNDEPLOYED worker
+  # (e.g. config.litentry.org before the broker redeploy), which no longer
+  # matched the caller's `case "$rc" in 000|…)` and fell through to `die` instead
+  # of a graceful prereq_missing. Send curl's transport error to a side file so
+  # rc is just the 3-digit `-w '%{http_code}'` ("000" on transport failure), and
+  # surface that error as the body so the caller can still diagnose it.
+  err_file="${out_file}.curlerr"
   rc=$(curl -sS -o "$out_file" -w '%{http_code}' \
     -X POST "$worker_route" \
     -H 'content-type: application/json' \
     -H "x-aws-access-key-id: $aki" \
     -H "x-aws-secret-access-key: $sak" \
     -H "x-aws-session-token: $sst" \
-    -d "$body" 2>&1 || echo "000")
+    -d "$body" 2>"$err_file" || true)
+  [ -z "$rc" ] && rc="000"
+  if [ ! -s "$out_file" ] && [ -s "$err_file" ]; then cat "$err_file" >"$out_file"; fi
+  rm -f "$err_file"
   echo "$rc"
 }
 
