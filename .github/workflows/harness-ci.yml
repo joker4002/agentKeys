@@ -174,6 +174,13 @@ jobs:
         run: cargo run -q -p agentkeys-backend-client --bin dump-protocol-fixtures -- --check
       - name: No hand-rolled bash body drifted from the canonical shapes (issue #203)
         run: bash scripts/check-backend-fixture-drift.sh
+      # The daemon web-API plant contract: daemon.ts (React frontend) +
+      # web-parity-demo.sh must agree with the daemon's ApiMemoryEntry + route
+      # const (the #206 parity ladder, rung 2 — closes phase 6's frontend
+      # false-green). The Rust half is pinned by the ui_bridge unit test above
+      # (run by cargo test); this gates the two non-Rust consumers.
+      - name: Frontend↔harness plant contract has not drifted (issue #203 / #206)
+        run: bash scripts/check-web-api-drift.sh
 
   detect-changes:
     # Issue #101: path-conditional triggers for auto-deploy of the test broker.

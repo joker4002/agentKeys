@@ -123,9 +123,12 @@ fi
 if should_run 3; then
   step 3 "Web plant POST /v1/master/memory/plant → real chain (cap-mint → STS → worker → S3)"
   [ -n "${DAEMON_PID:-}" ] && kill -0 "$DAEMON_PID" 2>/dev/null || die "daemon not running — run step 2"
-  body=$(jq -n --arg ns "$PROBE_NS" --arg b "$PROBE_BODY" '{entries:[{
+  # @web-fixture: master_memory_plant — entry shape gated by scripts/check-web-api-drift.sh
+  # (must match the daemon's ApiMemoryEntry + daemon.ts; issue #203 / the #206 parity ladder).
+  entry=$(jq -n --arg ns "$PROBE_NS" --arg b "$PROBE_BODY" '{
       ns:$ns, key:"probe", title:"Web parity probe", bytes:($b|length),
-      version:"v1", updated:"2026-06-05", preview:"web-parity probe", body:$b, content_hash:""}]}')
+      version:"v1", updated:"2026-06-05", preview:"web-parity probe", body:$b, content_hash:""}')
+  body=$(jq -n --argjson e "$entry" '{entries:[$e]}')
   resp=$(curl -sS --fail-with-body -X POST "http://${DAEMON_BIND}/v1/master/memory/plant" \
     -H 'content-type: application/json' -d "$body" 2>&1) \
     || die "web plant failed (the daemon's chain diverged from the real broker/worker): $resp"

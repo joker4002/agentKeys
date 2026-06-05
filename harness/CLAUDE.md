@@ -226,30 +226,41 @@ forever — plan to **dissolve it into the type system** as
 [#203](https://github.com/litentry/agentKeys/issues/203) (the shared backend-client
 crate) lands.
 
-**Phase 6's honest blind spot today:** step 3 `curl`s the daemon endpoint directly
-(`POST /v1/master/memory/plant`) with a hand-built body; the real frontend
-(`apps/parent-control/lib/client/daemon.ts`) builds its OWN body at the same URL.
-They agree by manual coincidence — nothing enforces it, so a `daemon.ts`
-endpoint/shape change leaves phase 6 **green on the old path** (false-green). Phase 6
-proves "daemon → cap-mint → STS → worker → S3 is wired to real infra"; it does NOT
-prove "the React button sends what phase 6 sends."
+**Phase 6's old blind spot (now CLOSED by #203/#204):** step 3 `curl`s the daemon
+endpoint directly (`POST /v1/master/memory/plant`) with a hand-built body; the real
+frontend (`apps/parent-control/lib/client/daemon.ts`) builds its OWN body at the same
+URL. They used to agree by manual coincidence — a `daemon.ts` endpoint/shape change
+left phase 6 **green on the old path** (false-green). That gap is now gated: the route
++ the `ApiMemoryEntry` body shape have ONE source of truth (the daemon's
+`MASTER_MEMORY_{,PLANT_}ROUTE` const + the struct), pinned to
+[`fixtures/web-api/master_memory_plant.json`](fixtures/web-api/master_memory_plant.json)
+by a `ui_bridge` unit test, and BOTH consumers (`daemon.ts` + `web-parity-demo.sh`)
+are diffed against it by [`../scripts/check-web-api-drift.sh`](../scripts/check-web-api-drift.sh)
+in CI. A rename/added/dropped field or a route change on either side is now CI-red.
+What phase 6 still uniquely proves (and can't be compile-checked) is the **runtime
+wiring**: "daemon → cap-mint → STS → worker → S3 is reachable on real infra."
 
 **The ladder (weakest → strongest) — push a check DOWN it whenever it catches real drift:**
-1. **Runtime behavioral assertion** (run both, compare) — rots silently. ← phase 6 today.
-2. **Shared contract / golden fixture** — both sides derive from one serde schema
-   (`agentkeys-types` + the #203 crate); CI reddens loudly on shape drift, survives
-   cosmetic refactors.
+1. **Runtime behavioral assertion** (run both, compare) — rots silently.
+2. **Shared contract / golden fixture** — both sides derive from one serde schema;
+   CI reddens loudly on shape drift, survives cosmetic refactors. ← the daemon
+   web-API plant contract sits here now (the `master_memory_plant` fixture + the
+   `daemon.ts`/`web-parity-demo.sh` gate).
 3. **Shared implementation** — one code path; violating parity is a compile error.
    The runtime check shrinks to a thin "is the one client wired to real infra?" smoke.
-   ← where #203 lands (its approach steps 2–5 walk phase 6 down rungs 3→2→smoke).
+   ← the broker/worker chain is here (#203/#204: daemon + MCP share
+   `agentkeys-backend-client`). Phase 6's body shape is rung 2; its remaining job is
+   the rung-3-residual runtime-wiring smoke.
 
 **Operating rule:** every time phase 6 (or any parity/wiring check) catches a real
 drift, ask "could this have been a compile error or a fixture diff instead?" If yes,
 move the assertion down the ladder — the runtime check is *supposed* to get thinner.
 A parity check growing in scope is a smell; one shrinking toward a wiring smoke is
-healthy. **Until #203 lands**, plug the false-green cheaply: a single shared route
-constant referenced by both `daemon.ts` and `web-parity-demo.sh` + a CI grep guard
-that fails on divergence (fold-systemic-fixes-into-enforcement).
+healthy. **Done (#203/#204):** the false-green is plugged — the plant route + body
+shape are a single serde source of truth gated by `scripts/check-web-api-drift.sh`
+(fold-systemic-fixes-into-enforcement). The next rung-down for phase 6 is tier-3 for
+the frontend: compile the daemon ui-bridge plant types into the browser host via
+`agentkeys-web-core` (wasm) so `daemon.ts` stops hand-building the body at all.
 
 ---
 

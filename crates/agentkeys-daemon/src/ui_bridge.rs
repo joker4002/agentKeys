@@ -398,6 +398,17 @@ fn err(
 }
 
 /// Build the ui-bridge router with CORS open to the configured web-UI origin.
+/// Canonical master-memory web-API routes — the SINGLE source of truth for the
+/// path the React frontend (`apps/parent-control/lib/client/daemon.ts`) and the
+/// harness web-parity demo (`harness/web-parity-demo.sh`) both hit. They used to
+/// hardcode `/v1/master/memory/plant` independently → a rename here left phase 6
+/// green on the old path (false-green, issue #203 / the #206 parity ladder). The
+/// route + the `ApiMemoryEntry` body shape are now pinned to
+/// `harness/fixtures/web-api/master_memory_plant.json` (see the test below) and
+/// the two consumers are gated against it by `scripts/check-web-api-drift.sh`.
+pub const MASTER_MEMORY_ROUTE: &str = "/v1/master/memory";
+pub const MASTER_MEMORY_PLANT_ROUTE: &str = "/v1/master/memory/plant";
+
 pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(
@@ -429,8 +440,8 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/anchor/status", get(anchor_status))
         .route("/v1/workers", get(list_workers))
         .route("/v1/workers/:id", get(get_worker))
-        .route("/v1/master/memory", get(list_master_memory))
-        .route("/v1/master/memory/plant", post(plant_master_memory))
+        .route(MASTER_MEMORY_ROUTE, get(list_master_memory))
+        .route(MASTER_MEMORY_PLANT_ROUTE, post(plant_master_memory))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -1626,6 +1637,60 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the master-memory plant CONTRACT (the daemon's web API) to the
+    /// committed fixture that `daemon.ts` + `web-parity-demo.sh` are gated
+    /// against (issue #203 / the #206 parity ladder, rung 2). The Rust struct +
+    /// route const are the source of truth; this test fails the moment they
+    /// drift from the fixture, so a field rename or route change can't silently
+    /// leave phase 6 green on the old path. If you change `ApiMemoryEntry` or the
+    /// route on purpose, update `harness/fixtures/web-api/master_memory_plant.json`
+    /// to match (and the two consumers will be re-gated by the bash check).
+    #[test]
+    fn master_memory_plant_contract_matches_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../harness/fixtures/web-api/master_memory_plant.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw).expect("fixture is JSON");
+
+        assert_eq!(
+            fixture["route"].as_str().expect("fixture.route"),
+            MASTER_MEMORY_PLANT_ROUTE,
+            "route const drifted from the web-api fixture"
+        );
+
+        let sample = ApiMemoryEntry {
+            ns: "travel".into(),
+            key: "probe".into(),
+            title: "t".into(),
+            bytes: 1,
+            version: "v1".into(),
+            updated: "2026-06-05".into(),
+            preview: "p".into(),
+            body: "b".into(),
+            content_hash: String::new(),
+        };
+        let mut got: Vec<String> = serde_json::to_value(&sample)
+            .expect("entry serializes")
+            .as_object()
+            .expect("entry is an object")
+            .keys()
+            .cloned()
+            .collect();
+        got.sort();
+        let want: Vec<String> = fixture["entry_keys"]
+            .as_array()
+            .expect("fixture.entry_keys")
+            .iter()
+            .map(|v| v.as_str().expect("entry_key is str").to_string())
+            .collect();
+        assert_eq!(
+            got, want,
+            "ApiMemoryEntry keys drifted from the web-api fixture — regenerate \
+             harness/fixtures/web-api/master_memory_plant.json + re-gate daemon.ts/web-parity-demo.sh"
+        );
+    }
 
     fn make_state() -> SharedUiBridgeState {
         build_state(
