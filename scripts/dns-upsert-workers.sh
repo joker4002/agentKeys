@@ -43,7 +43,7 @@ while (( $# > 0 )); do
     --ttl)       TTL="$2"; shift 2 ;;
     --dry-run)   DRY_RUN=true; shift ;;
     --no-verify) NO_VERIFY=true; shift ;;
-    --test)      TEST_MODE=1; shift ;;
+    --ci|--test) TEST_MODE=1; shift ;;   # --ci = canonical CI-env flag; --test retained as alias
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0

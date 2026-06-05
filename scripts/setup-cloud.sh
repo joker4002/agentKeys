@@ -97,7 +97,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --env-file)         ENV_FILE="$2"; shift 2 ;;
     --broker-env-file)  BROKER_ENV_FILE="$2"; shift 2 ;;
-    --test)             TEST_MODE=1; shift ;;
+    --ci|--test)        TEST_MODE=1; shift ;;   # --ci = canonical CI-env flag; --test retained as alias
     --yes)              YES=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
     --from-step)        FROM_STEP="$2"; shift 2 ;;

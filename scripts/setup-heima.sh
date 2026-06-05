@@ -105,7 +105,7 @@ while [ $# -gt 0 ]; do
     --only-step)    FROM_STEP="$2"; TO_STEP="$2"; shift 2 ;;
     --env-file)     EXPLICIT_ENV_FILE="$2"; shift 2 ;;
     --env-file=*)   EXPLICIT_ENV_FILE="${1#*=}"; shift ;;
-    --test)         TEST_MODE=1; shift ;;
+    --ci|--test)    TEST_MODE=1; shift ;;   # --ci = canonical CI-env flag; --test retained as alias
     --help|-h)
       sed -n '2,55p' "$0" | sed 's/^# //; s/^#//'
       exit 0

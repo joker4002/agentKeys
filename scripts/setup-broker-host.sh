@@ -99,7 +99,7 @@ while (( $# > 0 )); do
     --yes|-y)             ASSUME_YES=true; shift ;;
     --upgrade|--skip-pull) shift ;;        # back-compat no-ops (script is idempotent; --ref drives any pull)
     --ref)                PULL_REF="$2"; shift 2 ;;
-    --test)               TEST_MODE=true; shift ;;
+    --ci|--test)          TEST_MODE=true; shift ;;   # --ci = canonical CI-env flag; --test retained as alias
     --reclaim-toolchain)  RECLAIM_TOOLCHAIN=true; shift ;;
     --signer-host)        SIGNER_HOST="$2"; shift 2 ;;
     --audit-host)         AUDIT_HOST="$2"; shift 2 ;;
