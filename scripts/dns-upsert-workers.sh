@@ -10,7 +10,7 @@
 # Idempotent: UPSERT replaces if exists, creates if not. Safe to re-run.
 #
 # Usage:
-#   bash scripts/dns-upsert-workers.sh                 # auto-derive EIP from AWS
+#   bash scripts/dns-upsert-workers.sh                 # auto-derive EIP from broker.${ZONE} A record
 #   bash scripts/dns-upsert-workers.sh --eip 1.2.3.4   # use a known EIP
 #   bash scripts/dns-upsert-workers.sh --dry-run       # print the change-batch only
 #   bash scripts/dns-upsert-workers.sh --no-verify     # UPSERT + exit (no INSYNC/DoH
@@ -89,15 +89,36 @@ validate_eip() {
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "EIP $ip doesn't look like an IPv4"
 }
 
-# Derive EIP from AWS if not passed via --eip. NEVER from `dig` (see signer §6.1).
+# Derive the workers' EIP from the BROKER's OWN A record when --eip isn't passed.
+# The workers co-locate with the broker, so their A records MUST equal the broker's.
+# Reading BROKER_HOST's A record is:
+#   - env-aware: BROKER_HOST is broker.${ZONE} (prod) vs test-broker.${ZONE} (test),
+#     so it picks the RIGHT EIP even when BOTH a prod and a test EIP are allocated.
+#   - authoritative: it mirrors the broker, not "some associated EIP".
+# The old `describe-addresses | first` could NOT tell prod from test and silently
+# grabbed whichever EIP the API returned first — which pointed all 5 worker records
+# at the TEST broker (3.214.219.209) while broker/signer stayed on prod, a
+# multi-round cert-issuance failure. NEVER derive from `dig` (the local resolver
+# lies behind a VPN — signer §6.1).
+: "${BROKER_HOST:?BROKER_HOST not set — source operator-workstation.env (or pass --eip)}"
+BROKER_A="$(aws route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" \
+  --query "ResourceRecordSets[?Name=='${BROKER_HOST}.' && Type=='A'].ResourceRecords[0].Value | [0]" \
+  --output text 2>/dev/null || true)"
+[[ "$BROKER_A" == "None" ]] && BROKER_A=""
 if [[ -z "$EIP" ]]; then
-  log "Deriving broker EIP from EC2 describe-addresses (region $REGION)"
-  EIP="$(aws ec2 describe-addresses --region "$REGION" \
-    --query 'Addresses[?AssociationId!=`null`].PublicIp' --output text 2>/dev/null \
-    | awk '{print $1}')"
-  [[ -n "$EIP" ]] || die "no associated EIP found in $REGION — pass --eip explicitly"
+  [[ -n "$BROKER_A" ]] || die "no A record for ${BROKER_HOST} in zone $ZONE_ID — create the broker A record first (setup-cloud.sh step 6) or pass --eip explicitly"
+  EIP="$BROKER_A"
+  log "Derived EIP from ${BROKER_HOST} A record: $EIP  (the 5 workers mirror the broker)"
 fi
 validate_eip "$EIP"
+
+# Co-location guard — catches a prod/test EIP mixup (the exact bug above). The
+# workers MUST sit on the same EIP as the broker today; if the chosen EIP disagrees
+# with the broker's A record it's almost certainly wrong. Warn loudly (not fatal —
+# a future split-host topology may legitimately differ, but today co-location holds).
+if [[ -n "$BROKER_A" && "$BROKER_A" != "$EIP" ]]; then
+  warn "EIP $EIP != ${BROKER_HOST} A record ($BROKER_A) — workers co-locate with the broker, so this points them at a DIFFERENT host. For a prod deploy pass --eip $BROKER_A (the broker's EIP)."
+fi
 
 # Zone sanity-check.
 log "Verifying hosted zone $ZONE_ID is reachable"
