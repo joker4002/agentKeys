@@ -483,8 +483,7 @@ pub async fn hardware_webauthn_keygen(
         Err(_) => enroll_webauthn_with_rp(operator_omni, rp_id).await?,
     };
     let pk = enrollment.cose_pubkey_hex.trim_start_matches("0x");
-    let pk_bytes =
-        hex::decode(pk).map_err(|e| WebauthnError::InvalidCosePubkey(e.to_string()))?;
+    let pk_bytes = hex::decode(pk).map_err(|e| WebauthnError::InvalidCosePubkey(e.to_string()))?;
     if pk_bytes.len() != 65 || pk_bytes[0] != 0x04 {
         return Err(WebauthnError::InvalidCosePubkey(format!(
             "expected 0x04 || X(32) || Y(32) = 65 bytes; got {}",
@@ -1725,8 +1724,8 @@ pub fn software_webauthn_sign(
     use p256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
     use p256::pkcs8::DecodePrivateKey;
     let pem = fs::read_to_string(key_file).map_err(|e| WebauthnError::Io(e.to_string()))?;
-    let signing =
-        SigningKey::from_pkcs8_pem(&pem).map_err(|e| WebauthnError::Io(format!("load key: {e}")))?;
+    let signing = SigningKey::from_pkcs8_pem(&pem)
+        .map_err(|e| WebauthnError::Io(format!("load key: {e}")))?;
     let uoh = hex::decode(userop_hash_hex.trim_start_matches("0x"))
         .map_err(|e| WebauthnError::Cbor(format!("userOpHash hex: {e}")))?;
     if uoh.len() != 32 {
@@ -1736,14 +1735,17 @@ pub fn software_webauthn_sign(
         )));
     }
     let challenge_b64 = URL_SAFE_NO_PAD.encode(&uoh); // 43 chars
-    let client_data =
-        format!(r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://{rp_id}"}}"#)
-            .into_bytes();
+    let client_data = format!(
+        r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://{rp_id}"}}"#
+    )
+    .into_bytes();
     // K11Verifier expects the challenge value at offset 36.
     if client_data.len() < 36 + challenge_b64.len()
         || &client_data[36..36 + challenge_b64.len()] != challenge_b64.as_bytes()
     {
-        return Err(WebauthnError::Cbor("challengeLocation drift (expected 36)".into()));
+        return Err(WebauthnError::Cbor(
+            "challengeLocation drift (expected 36)".into(),
+        ));
     }
     let mut auth_data = Sha256::digest(rp_id.as_bytes()).to_vec();
     auth_data.push(0x05); // flags: UP | UV
@@ -1886,11 +1888,14 @@ mod tests {
         // Idempotent: a second keygen loads the SAME key (never overwrites) — so a
         // reused account keeps its CREATE2 address.
         let (pubx2, puby2, _) = software_webauthn_keygen(&key, rp_id).expect("keygen reload");
-        assert_eq!((&pubx, &puby), (&pubx2, &puby2), "keygen must not overwrite");
+        assert_eq!(
+            (&pubx, &puby),
+            (&pubx2, &puby2),
+            "keygen must not overwrite"
+        );
 
         let uoh = format!("0x{}", "ab".repeat(32)); // a 32-byte userOpHash
-        let (authdata, cdj, loc, r, s) =
-            software_webauthn_sign(&key, &uoh, rp_id).expect("sign");
+        let (authdata, cdj, loc, r, s) = software_webauthn_sign(&key, &uoh, rp_id).expect("sign");
         assert_eq!(loc, 36, "K11Verifier requires challengeLocation == 36");
 
         let authdata_bytes = hex::decode(&authdata).unwrap();
@@ -1899,8 +1904,10 @@ mod tests {
         assert_eq!(authdata_bytes.len(), 37);
         assert!(authdata.starts_with(&rpid_hash));
         // clientDataJSON carries challenge == base64url(userOpHash).
-        let challenge_b64 = URL_SAFE_NO_PAD.encode(hex::decode(uoh.trim_start_matches("0x")).unwrap());
-        assert!(String::from_utf8_lossy(&cdj_bytes).contains(&format!("\"challenge\":\"{challenge_b64}\"")));
+        let challenge_b64 =
+            URL_SAFE_NO_PAD.encode(hex::decode(uoh.trim_start_matches("0x")).unwrap());
+        assert!(String::from_utf8_lossy(&cdj_bytes)
+            .contains(&format!("\"challenge\":\"{challenge_b64}\"")));
 
         // Reconstruct the verifying key from (x,y) and verify the (r,s) signature over
         // the exact prehash the on-chain K11Verifier computes.

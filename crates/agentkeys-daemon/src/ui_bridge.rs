@@ -792,8 +792,12 @@ async fn enroll_finish(
     // passkey just enrolled. Best-effort: a chain failure does NOT void the
     // passkey enrollment — it surfaces in `chain_error` so the operator funds +
     // retries instead of hitting a confusing cap-mint failure at plant time.
-    let (chain_tx_hash, chain, chain_error) =
-        finish_chain_register(&state, &credential_id_b64, attestation_object_b64.as_deref()).await;
+    let (chain_tx_hash, chain, chain_error) = finish_chain_register(
+        &state,
+        &credential_id_b64,
+        attestation_object_b64.as_deref(),
+    )
+    .await;
 
     Ok(Json(EnrollFinishResponse {
         credential_id: credential_id_b64,
@@ -842,7 +846,13 @@ async fn finish_chain_register(
     };
     let k11 = match decode_web_k11(att_b64) {
         Ok(k) => k,
-        Err(e) => return (None, "none".to_string(), Some(format!("K11 pubkey extract: {e}"))),
+        Err(e) => {
+            return (
+                None,
+                "none".to_string(),
+                Some(format!("K11 pubkey extract: {e}")),
+            )
+        }
     };
 
     match register_master_device(&script, &session.omni, &k11, credential_id_b64url).await {
@@ -867,7 +877,9 @@ async fn finish_chain_register(
 
 /// Decode the attestationObject (b64url) → the on-chain K11 material (pubkey +
 /// rpIdHash). Reuses the CLI's tested CBOR/COSE parser.
-fn decode_web_k11(att_obj_b64url: &str) -> Result<agentkeys_cli::k11_webauthn::WebK11Material, String> {
+fn decode_web_k11(
+    att_obj_b64url: &str,
+) -> Result<agentkeys_cli::k11_webauthn::WebK11Material, String> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     let bytes = URL_SAFE_NO_PAD
@@ -905,7 +917,15 @@ async fn register_master_device(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Surface the last few stderr lines (the script logs `fail <reason>`).
-        let tail: String = stderr.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        let tail: String = stderr
+            .lines()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
         return Err(format!("register script exited {}: {tail}", output.status));
     }
 

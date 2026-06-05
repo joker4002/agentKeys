@@ -186,7 +186,7 @@ mod tests {
         let a = addr_word(&[0xab; 20]);
         assert_eq!(&a[..12], &[0u8; 12]);
         assert_eq!(&a[12..], &[0xab; 20]);
-        assert_eq!(u64_word(0x0102_03)[24..], [0, 0, 0, 0, 0, 0x01, 0x02, 0x03]);
+        assert_eq!(u64_word(0x010203)[24..], [0, 0, 0, 0, 0, 0x01, 0x02, 0x03]);
     }
 
     #[test]
@@ -220,8 +220,7 @@ mod tests {
         };
         let op = sample_op();
         let paymaster = [0x55; 20];
-        let get_hash =
-            op.paymaster_get_hash(9_999_999_999, 0, &paymaster, &broker_bytes, 212_013);
+        let get_hash = op.paymaster_get_hash(9_999_999_999, 0, &paymaster, &broker_bytes, 212_013);
         let sig = broker_cosign(&get_hash, &sk).unwrap();
         // The contract recovers from _ethSignedHash(getHash) == EIP-191(getHash).
         let recovered = ecrecover_eip191(&get_hash, &sig).unwrap();
@@ -257,7 +256,13 @@ mod tests {
         );
         println!(
             "RUST_GET_HASH=0x{}",
-            hex::encode(op.paymaster_get_hash(9_999_999_999, 0, &paymaster, &broker_signer, chain_id))
+            hex::encode(op.paymaster_get_hash(
+                9_999_999_999,
+                0,
+                &paymaster,
+                &broker_signer,
+                chain_id
+            ))
         );
     }
 
@@ -265,8 +270,8 @@ mod tests {
     fn paymaster_and_data_layout() {
         let pm = [0x55; 20];
         let sig = format!("0x{}", "ab".repeat(65));
-        let pad = assemble_paymaster_and_data(&pm, 50_000, 40_000, 0xffff_ffff_ffff, 0, &sig)
-            .unwrap();
+        let pad =
+            assemble_paymaster_and_data(&pm, 50_000, 40_000, 0xffff_ffff_ffff, 0, &sig).unwrap();
         assert_eq!(pad.len(), 20 + 16 + 16 + 6 + 6 + 65);
         assert_eq!(&pad[0..20], &pm);
         // validUntil low-6 of 0xffffffffffff = all 0xff.

@@ -475,9 +475,8 @@ mod tests {
         // chain returns true) → the agent's cap passes the scope gate. This is the
         // positive counterpart the suite previously lacked — proves "granted ->
         // success", not just "the gate is consulted".
-        let url = spawn_mock_rpc(
-            "0x0000000000000000000000000000000000000000000000000000000000000001",
-        );
+        let url =
+            spawn_mock_rpc("0x0000000000000000000000000000000000000000000000000000000000000001");
         let token = sample_token(CapOp::Fetch); // operator 0xaa…, actor 0xbb… (distinct)
         let client = reqwest::Client::new();
         let r = check_chain_scope(&client, &url, "0xscope", &token).await;
@@ -487,9 +486,8 @@ mod tests {
     #[tokio::test]
     async fn check_chain_scope_rejects_when_chain_denies() {
         // NEGATIVE: operator != actor, chain returns false (NOT granted) → NotInScope.
-        let url = spawn_mock_rpc(
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-        );
+        let url =
+            spawn_mock_rpc("0x0000000000000000000000000000000000000000000000000000000000000000");
         let token = sample_token(CapOp::Fetch);
         let client = reqwest::Client::new();
         let r = check_chain_scope(&client, &url, "0xscope", &token).await;

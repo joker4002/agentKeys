@@ -491,7 +491,10 @@ enum K11Action {
         about = "Software WebAuthn authenticator (#164 headless/CI register): load-or-generate a software P-256 passkey at --key-file and print PUBX/PUBY/RPIDHASH (eval-able). Rust replacement for erc4337-webauthn-sign.py keygen — no python. NOT a hardware/Touch ID passkey and NOT the deprecated EOA path."
     )]
     SoftwareKeygen {
-        #[arg(long, help = "Path to the software passkey file (PKCS#8 PEM; never overwritten)")]
+        #[arg(
+            long,
+            help = "Path to the software passkey file (PKCS#8 PEM; never overwritten)"
+        )]
         key_file: String,
         #[arg(long, default_value = "localhost", help = "WebAuthn RP ID")]
         rp_id: String,
@@ -501,11 +504,21 @@ enum K11Action {
         about = "Software WebAuthn authenticator (#164 headless/CI): sign a 32-byte userOpHash with the --key-file passkey, printing AUTHDATA/CDJ/CHALLENGE_LOC/R/S (eval-able) — a byte-identical WebAuthn assertion the on-chain K11Verifier accepts. Rust replacement for erc4337-webauthn-sign.py sign."
     )]
     SoftwareSign {
-        #[arg(long, help = "Path to the software passkey file (from software-keygen)")]
+        #[arg(
+            long,
+            help = "Path to the software passkey file (from software-keygen)"
+        )]
         key_file: String,
-        #[arg(long, help = "32-byte userOpHash hex (with or without 0x) to sign over")]
+        #[arg(
+            long,
+            help = "32-byte userOpHash hex (with or without 0x) to sign over"
+        )]
         userop_hash: String,
-        #[arg(long, default_value = "localhost", help = "WebAuthn RP ID (must match keygen)")]
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP ID (must match keygen)"
+        )]
         rp_id: String,
     },
     #[command(
@@ -513,7 +526,10 @@ enum K11Action {
         about = "Hardware WebAuthn authenticator (#164 LOCAL register): load-or-enroll the operator's hardware K11 (Secure Enclave / Touch ID) and print PUBX/PUBY/RPIDHASH (eval-able). Triggers a Touch ID *create* ceremony if not yet enrolled. The SECURE local counterpart to software-keygen — the private key never leaves the platform authenticator (no on-disk key)."
     )]
     WebauthnKeygen {
-        #[arg(long, help = "Operator omni (0x + 64 hex) — locates the enrolled credential")]
+        #[arg(
+            long,
+            help = "Operator omni (0x + 64 hex) — locates the enrolled credential"
+        )]
         operator_omni: String,
         #[arg(long, default_value = "localhost", help = "WebAuthn RP ID")]
         rp_id: String,
@@ -523,13 +539,26 @@ enum K11Action {
         about = "Hardware WebAuthn authenticator (#164 LOCAL register): sign a 32-byte userOpHash with the operator's hardware K11 — a real Touch ID *get* ceremony — printing AUTHDATA/CDJ/CHALLENGE_LOC/R/S (eval-able). challenge == userOpHash (raw), so it drops into the same handleOps path as software-sign. The SECURE local counterpart to software-sign."
     )]
     WebauthnUseropSign {
-        #[arg(long, help = "Operator omni (0x + 64 hex) — locates the enrolled credential")]
+        #[arg(
+            long,
+            help = "Operator omni (0x + 64 hex) — locates the enrolled credential"
+        )]
         operator_omni: String,
-        #[arg(long, help = "32-byte userOpHash hex (with or without 0x) to sign over")]
+        #[arg(
+            long,
+            help = "32-byte userOpHash hex (with or without 0x) to sign over"
+        )]
         userop_hash: String,
-        #[arg(long, default_value = "localhost", help = "WebAuthn RP ID (must match keygen)")]
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP ID (must match keygen)"
+        )]
         rp_id: String,
-        #[arg(long, help = "Operator-readable intent shown on the confirmation page above the raw hash")]
+        #[arg(
+            long,
+            help = "Operator-readable intent shown on the confirmation page above the raw hash"
+        )]
         intent_text: Option<String>,
     },
 }
@@ -878,7 +907,10 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
         // Hardware WebAuthn authenticator (#164 LOCAL register) — real Touch ID, the
         // private key sealed in the Secure Enclave. Same eval-able output as the
         // software path, so the harness submit flow is identical.
-        K11Action::WebauthnKeygen { operator_omni, rp_id } => {
+        K11Action::WebauthnKeygen {
+            operator_omni,
+            rp_id,
+        } => {
             let (x, y, h) =
                 agentkeys_cli::k11_webauthn::hardware_webauthn_keygen(operator_omni, rp_id)
                     .await
@@ -891,15 +923,14 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
             rp_id,
             intent_text,
         } => {
-            let (ad, cdj, loc, r, s) =
-                agentkeys_cli::k11_webauthn::hardware_webauthn_userop_sign(
-                    operator_omni,
-                    userop_hash,
-                    rp_id,
-                    intent_text.clone(),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("webauthn-userop-sign: {e}"))?;
+            let (ad, cdj, loc, r, s) = agentkeys_cli::k11_webauthn::hardware_webauthn_userop_sign(
+                operator_omni,
+                userop_hash,
+                rp_id,
+                intent_text.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("webauthn-userop-sign: {e}"))?;
             return Ok(format!(
                 "AUTHDATA=0x{ad}\nCDJ=0x{cdj}\nCHALLENGE_LOC={loc}\nR=0x{r}\nS=0x{s}"
             ));
