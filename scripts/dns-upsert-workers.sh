@@ -10,8 +10,9 @@
 # Idempotent: UPSERT replaces if exists, creates if not. Safe to re-run.
 #
 # Usage:
-#   bash scripts/dns-upsert-workers.sh                 # auto-derive EIP from broker.${ZONE} A record
-#   bash scripts/dns-upsert-workers.sh --eip 1.2.3.4   # use a known EIP
+#   bash scripts/dns-upsert-workers.sh                 # PROD: EIP from tag Name=agentkeys-broker-eip
+#   bash scripts/dns-upsert-workers.sh --test          # CI/test: tag Name=agentkeys-broker-eip-test
+#   bash scripts/dns-upsert-workers.sh --eip 1.2.3.4   # use a known EIP (skips the tag lookup)
 #   bash scripts/dns-upsert-workers.sh --dry-run       # print the change-batch only
 #   bash scripts/dns-upsert-workers.sh --no-verify     # UPSERT + exit (no INSYNC/DoH
 #                                                      # wait) — setup-cloud.sh uses this
@@ -32,6 +33,7 @@ NO_VERIFY=false   # --no-verify: UPSERT then exit (skip INSYNC/DoH wait + printo
                   # used when setup-cloud.sh delegates here (parity with its other DNS).
 ZONE_ID="${PARENT_ZONE_ID:-Z09723983CFJOHAE3VC65}"   # litentry.org zone
 TTL=300
+TEST_MODE=0       # --test (or a *test* ENV_FILE) → target the CI/test broker's EIP
 
 # ─── CLI parse ────────────────────────────────────────────────────────────────
 while (( $# > 0 )); do
@@ -41,6 +43,7 @@ while (( $# > 0 )); do
     --ttl)       TTL="$2"; shift 2 ;;
     --dry-run)   DRY_RUN=true; shift ;;
     --no-verify) NO_VERIFY=true; shift ;;
+    --test)      TEST_MODE=1; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -60,11 +63,21 @@ have aws  || die "aws CLI not found"
 have jq   || die "jq not found"
 have curl || die "curl not found"
 
-# Source operator-workstation.env to populate $REGION + $WORKER_*_HOST.
+# Source operator-workstation.env (or .test.env under --test) to populate $REGION
+# + $WORKER_*_HOST + $BROKER_HOST. Prod and the CI/test broker are SEPARATE
+# machines with SEPARATE EIPs — the env file + the EIP tag carry the prod/test split.
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
+if [[ "$TEST_MODE" == "1" && "$ENV_FILE" == "$REPO_ROOT/scripts/operator-workstation.env" ]]; then
+  ENV_FILE="$REPO_ROOT/scripts/operator-workstation.test.env"
+fi
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE not found — run from a clone of agentKeys"
 # shellcheck disable=SC1090
 set -a; . "$ENV_FILE"; set +a
+# Auto-detect test mode from the env-file name (so ENV_FILE=…test.env works without
+# --test), mirroring setup-cloud.sh. Then pick the broker's EIP tag for this env.
+case "$ENV_FILE" in *test*) TEST_MODE=1 ;; esac
+EIP_TAG="agentkeys-broker-eip"; ENV_LABEL=prod
+[[ "$TEST_MODE" == "1" ]] && { EIP_TAG="agentkeys-broker-eip-test"; ENV_LABEL=test; }
 
 # Caller must be on the admin profile (Route 53 lives in the account-owner profile).
 # Match case-insensitively per CLAUDE.md (agentKeys-admin vs agentkeys-admin).
@@ -89,35 +102,37 @@ validate_eip() {
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "EIP $ip doesn't look like an IPv4"
 }
 
-# Derive the workers' EIP from the BROKER's OWN A record when --eip isn't passed.
-# The workers co-locate with the broker, so their A records MUST equal the broker's.
-# Reading BROKER_HOST's A record is:
-#   - env-aware: BROKER_HOST is broker.${ZONE} (prod) vs test-broker.${ZONE} (test),
-#     so it picks the RIGHT EIP even when BOTH a prod and a test EIP are allocated.
-#   - authoritative: it mirrors the broker, not "some associated EIP".
-# The old `describe-addresses | first` could NOT tell prod from test and silently
-# grabbed whichever EIP the API returned first — which pointed all 5 worker records
-# at the TEST broker (3.214.219.209) while broker/signer stayed on prod, a
-# multi-round cert-issuance failure. NEVER derive from `dig` (the local resolver
-# lies behind a VPN — signer §6.1).
+# Derive the workers' EIP from the broker's EIP TAG when --eip isn't passed — the
+# SAME mechanism + tag values as setup-cloud.sh step 4 (one source of truth). Prod
+# and the CI/test broker are SEPARATE machines with SEPARATE EIPs:
+#   prod → Name=agentkeys-broker-eip        (ENV_LABEL=prod)
+#   test → Name=agentkeys-broker-eip-test   (ENV_LABEL=test; --test / *test* ENV_FILE)
+# The old `describe-addresses | first` could NOT tell them apart and silently
+# grabbed the TEST EIP, pointing all 5 worker records at the test broker while
+# broker/signer stayed on prod — a multi-round cert-issuance failure. NEVER derive
+# from `dig` (the local resolver lies behind a VPN — signer §6.1).
 : "${BROKER_HOST:?BROKER_HOST not set — source operator-workstation.env (or pass --eip)}"
+if [[ -z "$EIP" ]]; then
+  log "Deriving $ENV_LABEL EIP from tag Name=$EIP_TAG (region $REGION)"
+  EIP="$(aws ec2 describe-addresses --region "$REGION" \
+    --filters "Name=tag:Name,Values=$EIP_TAG" \
+    --query 'Addresses[0].PublicIp' --output text 2>/dev/null)"
+  [[ -n "$EIP" && "$EIP" != "None" ]] \
+    || die "no EIP tagged Name=$EIP_TAG in $REGION — allocate it (setup-cloud.sh step 4, add --test for the CI broker) or pass --eip explicitly"
+  log "  $EIP_TAG → $EIP  (the 5 workers mirror the $ENV_LABEL broker)"
+fi
+validate_eip "$EIP"
+
+# Co-location cross-check — catches a prod/test mixup. The workers MUST sit on the
+# same EIP as the broker today; if the tag-derived (or --eip) value disagrees with
+# BROKER_HOST's current A record, warn loudly (not fatal — a future split-host
+# topology may legitimately differ, but today co-location holds).
 BROKER_A="$(aws route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" \
   --query "ResourceRecordSets[?Name=='${BROKER_HOST}.' && Type=='A'].ResourceRecords[0].Value | [0]" \
   --output text 2>/dev/null || true)"
 [[ "$BROKER_A" == "None" ]] && BROKER_A=""
-if [[ -z "$EIP" ]]; then
-  [[ -n "$BROKER_A" ]] || die "no A record for ${BROKER_HOST} in zone $ZONE_ID — create the broker A record first (setup-cloud.sh step 6) or pass --eip explicitly"
-  EIP="$BROKER_A"
-  log "Derived EIP from ${BROKER_HOST} A record: $EIP  (the 5 workers mirror the broker)"
-fi
-validate_eip "$EIP"
-
-# Co-location guard — catches a prod/test EIP mixup (the exact bug above). The
-# workers MUST sit on the same EIP as the broker today; if the chosen EIP disagrees
-# with the broker's A record it's almost certainly wrong. Warn loudly (not fatal —
-# a future split-host topology may legitimately differ, but today co-location holds).
 if [[ -n "$BROKER_A" && "$BROKER_A" != "$EIP" ]]; then
-  warn "EIP $EIP != ${BROKER_HOST} A record ($BROKER_A) — workers co-locate with the broker, so this points them at a DIFFERENT host. For a prod deploy pass --eip $BROKER_A (the broker's EIP)."
+  warn "EIP $EIP (tag $EIP_TAG, $ENV_LABEL) != ${BROKER_HOST} A record ($BROKER_A) — workers co-locate with the broker; double-check you're targeting the right environment (prod vs test)."
 fi
 
 # Zone sanity-check.
