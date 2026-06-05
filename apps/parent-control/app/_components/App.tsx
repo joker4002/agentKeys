@@ -175,8 +175,15 @@ export function App() {
     const r = await client.plantMemory(PREPARED_MEMORY);
     if (r.ok) {
       const listed = await client.listMasterMemory();
-      if (listed.ok) setMemories(listed.data.map(toPreserved));
-      showToast(`Prepared memory planted · ${r.data.planted} new, ${r.data.skipped} deduped.`);
+      if (listed.ok) {
+        setMemories(listed.data.map(toPreserved));
+        // Show BOTH counts: the plant wrote to S3 + the daemon cache; the list reads
+        // the cache. If "N new" but "0 in view", the cache wasn't repopulated (e.g.
+        // daemon restarted) — the data is still safe in S3.
+        showToast(`Planted · ${r.data.planted} new, ${r.data.skipped} deduped · ${listed.data.length} in the memory view.`);
+      } else {
+        showToast(`Planted ${r.data.planted} new, but the memory list didn't load — ${listed.status.detail ?? 'reload the page'}.`);
+      }
     } else {
       // The plant button only renders when the daemon is connected, so a failure
       // here is almost never "no daemon" — surface the daemon's ACTUAL reason
