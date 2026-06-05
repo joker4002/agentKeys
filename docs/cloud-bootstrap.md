@@ -111,7 +111,7 @@ sudo bash scripts/setup-broker-host.sh --yes
 ```
 
 What `--test` derives automatically:
-- `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`
+- `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`, `config-test.${ZONE}`
 - `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`
 - `noreply-test@bots-test.${ZONE}`
 - `https://test-broker.${ZONE}` for the OIDC issuer URL
@@ -156,10 +156,15 @@ This is **optional**; the broker itself runs from compiled binaries, not from a 
 
 ```bash
 # Still on the broker host (as agentkey or ubuntu — both have sudo):
-for h in ${BROKER_HOST} ${SIGNER_HOST} ${AUDIT_HOST} ${EMAIL_HOST} ${CRED_HOST} ${MEMORY_HOST}; do
+# CONFIG_HOST (config.${ZONE}) is the #201 master-only taxonomy worker — its
+# cert is required too, or stage-3 steps 19-21 fail with SSL_ERROR_SYSCALL.
+for h in ${BROKER_HOST} ${SIGNER_HOST} ${AUDIT_HOST} ${EMAIL_HOST} ${CRED_HOST} ${MEMORY_HOST} ${CONFIG_HOST}; do
   sudo certbot certonly --webroot -w /var/www/certbot -d "$h" \
     --agree-tos -m <your-ops-email> --non-interactive
 done
+# Explicit config form (if you issue certs one at a time):
+#   sudo certbot certonly --webroot -w /var/www/certbot -d config.litentry.org \
+#     --agree-tos -m ops@litentry.org --non-interactive
 
 # Flip nginx from Phase A (HTTP-only) → Phase B (HTTPS) — the renderer in
 # setup-broker-host.sh picks Phase B automatically when /etc/letsencrypt/live/<host>/
@@ -504,7 +509,7 @@ Six subdomains under the operator's parent zone (substitute `${ZONE}` everywhere
 | `${MAIL_DOMAIN}` (e.g. `bots.${ZONE}`) | SES / email backend inbound | §3 |
 | `${BROKER_HOST}` (e.g. `broker.${ZONE}`) | Broker public reverse proxy | §10.1 below |
 | `signer.${ZONE}` | Signer service (issue #74 step 1b) | §10.1 below |
-| `audit.${ZONE}` / `email.${ZONE}` / `cred.${ZONE}` / `memory.${ZONE}` | Service workers (issue #90) | §10.1 below (dev co-location on broker EIP today) |
+| `audit.${ZONE}` / `email.${ZONE}` / `cred.${ZONE}` / `memory.${ZONE}` / `config.${ZONE}` | Service workers (issue #90; config = #201 master-only taxonomy) | §10.1 below (dev co-location on broker EIP today) |
 
 Confirm the parent zone is reachable before any record changes (AWS Route 53 example; the same `get-hosted-zone` shape exists on AliCloud DNS + Cloud DNS):
 
@@ -861,12 +866,12 @@ Run [`harness/v2-stage3-demo.sh`](../harness/v2-stage3-demo.sh) (or `bash harnes
 
 ## §10 Broker host bring-up: `setup-broker-host.sh`
 
-§§3–8 set up identifiers. This step stands up the actual processes — broker + mock-server + signer + 4 service workers — on the EC2 host (or any Linux box with public-internet egress + the broker's hostname).
+§§3–8 set up identifiers. This step stands up the actual processes — broker + mock-server + signer + 5 service workers (audit/email/cred/memory/config) — on the EC2 host (or any Linux box with public-internet egress + the broker's hostname).
 
 ### §10.1 Prereqs
 
 - Fresh Linux host with sudo, systemd, public-internet egress, ports 80 + 443 open inbound (for certbot + nginx).
-- DNS A records for `${BROKER_HOST}` + `signer.${ZONE}` + `audit.${ZONE}` + `email.${ZONE}` + `cred.${ZONE}` + `memory.${ZONE}` all pointing at the host's public IP (provisioned by `setup-cloud.sh` step 6).
+- DNS A records for `${BROKER_HOST}` + `signer.${ZONE}` + `audit.${ZONE}` + `email.${ZONE}` + `cred.${ZONE}` + `memory.${ZONE}` + `config.${ZONE}` all pointing at the host's public IP (provisioned by `setup-cloud.sh` step 6 — broker/signer/mcp inline, the 5 service workers via `dns-upsert-workers.sh`).
 - AWS credentials in `/etc/agentkeys/broker.env` (the script writes the template; operator pastes the `agentkeys-daemon` access key from §4.1).
 
 ### §10.2 Run
@@ -881,6 +886,7 @@ sudo bash scripts/setup-broker-host.sh \
   --email-host  "email.${ZONE}" \
   --cred-host   "cred.${ZONE}" \
   --memory-host "memory.${ZONE}" \
+  --config-host "config.${ZONE}" \
   --yes
 
 # After a `git pull`, the same command re-deploys:
@@ -888,12 +894,12 @@ sudo bash scripts/setup-broker-host.sh --yes
 ```
 
 The script:
-- Builds `agentkeys-broker-server` (+ `auth-email-link` feature), `agentkeys-mock-server`, the 4 service workers, and the signer.
+- Builds `agentkeys-broker-server` (+ `auth-email-link` feature), `agentkeys-mock-server`, the 5 service workers (audit/email/cred/memory/config), and the signer.
 - Creates the `agentkeys` system user + state dir `/var/lib/agentkeys/`.
 - Writes the dev_key_service master secret (one-shot at first boot, never rotated — rotation invalidates every previously-derived wallet).
-- Writes per-worker env files at `/etc/agentkeys/worker-{audit,email,creds,memory}.env`.
+- Writes per-worker env files at `/etc/agentkeys/worker-{audit,email,creds,memory,config}.env`.
 - Writes systemd units for broker + signer + each worker, enables + starts.
-- Configures nginx vhosts for `${BROKER_HOST}` + `signer.${ZONE}` + 4 worker hosts (skip via `--without-nginx`). Vhost is rendered in two phases: Phase A (HTTP-only on `:80`, with the ACME challenge path under `/.well-known/acme-challenge/` and a 503 placeholder on `/`) when no cert is on disk; Phase B (HTTPS on `:443`, broker proxy on `/`) when `/etc/letsencrypt/live/<host>/fullchain.pem` exists. Re-running the script after certbot issuance flips A → B automatically.
+- Configures nginx vhosts for `${BROKER_HOST}` + `signer.${ZONE}` + 5 worker hosts (audit/email/cred/memory/config) (skip via `--without-nginx`). Vhost is rendered in two phases: Phase A (HTTP-only on `:80`, with the ACME challenge path under `/.well-known/acme-challenge/` and a 503 placeholder on `/`) when no cert is on disk; Phase B (HTTPS on `:443`, broker proxy on `/`) when `/etc/letsencrypt/live/<host>/fullchain.pem` exists. Re-running the script after certbot issuance flips A → B automatically.
 - **Installs certbot but does NOT run it.** Cert issuance is DNS-dependent — see quick-start §5b for the per-vhost `certbot certonly --webroot` recipe operators run manually once DNS is in place.
 - Mints broker keypairs (oidc + session) under `/var/lib/agentkeys/keys/`.
 

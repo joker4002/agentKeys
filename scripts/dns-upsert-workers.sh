@@ -13,6 +13,8 @@
 #   bash scripts/dns-upsert-workers.sh                 # auto-derive EIP from AWS
 #   bash scripts/dns-upsert-workers.sh --eip 1.2.3.4   # use a known EIP
 #   bash scripts/dns-upsert-workers.sh --dry-run       # print the change-batch only
+#   bash scripts/dns-upsert-workers.sh --no-verify     # UPSERT + exit (no INSYNC/DoH
+#                                                      # wait) — setup-cloud.sh uses this
 #
 # Prereqs (validated up front):
 #   • awsp agentkeys-admin   # account-owner profile (Route 53 + EC2 read)
@@ -26,6 +28,8 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 EIP=""
 DRY_RUN=false
+NO_VERIFY=false   # --no-verify: UPSERT then exit (skip INSYNC/DoH wait + printout);
+                  # used when setup-cloud.sh delegates here (parity with its other DNS).
 ZONE_ID="${PARENT_ZONE_ID:-Z09723983CFJOHAE3VC65}"   # litentry.org zone
 TTL=300
 
@@ -36,6 +40,7 @@ while (( $# > 0 )); do
     --zone-id)   ZONE_ID="$2"; shift 2 ;;
     --ttl)       TTL="$2"; shift 2 ;;
     --dry-run)   DRY_RUN=true; shift ;;
+    --no-verify) NO_VERIFY=true; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -155,6 +160,15 @@ CHANGE_ID="$(aws route53 change-resource-record-sets \
   --change-batch "$CHANGE_BATCH" \
   --query 'ChangeInfo.Id' --output text)"
 log "  Route 53 ChangeId: $CHANGE_ID  (status will flip INSYNC within ~60s)"
+
+# --no-verify (orchestrator mode): the records are UPSERTed; skip the slow
+# INSYNC + DoH propagation wait and the operator next-steps printout. The caller
+# (setup-cloud.sh) submits the broker/signer/mcp records the same way without a
+# wait; verify-workers.sh proves reachability later.
+if $NO_VERIFY; then
+  log "  --no-verify: worker A records submitted; skipping INSYNC/DoH wait + next-steps"
+  exit 0
+fi
 
 # Wait for INSYNC + DoH verification — gives a hard signal that LE will succeed.
 log "Waiting for Route 53 INSYNC"
