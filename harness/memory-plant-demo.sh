@@ -80,12 +80,15 @@ fi
 # ─── Step 2: wallet SIWE → J1 ──────────────────────────────────────────────
 if should_run 2; then
   step 2 "Wallet SIWE → session J1 (managed-wallet attestation)"
-  start=$(curl -sSf -X POST "$BROKER/v1/auth/wallet/start" -H 'content-type: application/json' \
-    -d "$(jq -n --arg a "0x$DEPLOYER_ADDR" --argjson c 1 '{address:$a, chain_id:$c}')" 2>&1) || die "wallet/start: $start"
+  # $DEPLOYER_ADDR is ALREADY 0x-prefixed (cast wallet address output); do NOT prepend
+  # another 0x (→ "0x0x…" → broker 400 malformed address). --fail-with-body surfaces the
+  # broker's error JSON on 4xx (a bare -sSf hides it behind "curl: (22) … error: NNN").
+  start=$(curl -sS --fail-with-body -X POST "$BROKER/v1/auth/wallet/start" -H 'content-type: application/json' \
+    -d "$(jq -n --arg a "$DEPLOYER_ADDR" --argjson c 1 '{address:$a, chain_id:$c}')" 2>&1) || die "wallet/start: $start"
   req_id=$(echo "$start" | jq -r '.request_id // empty'); msg=$(echo "$start" | jq -r '.siwe_message // empty')
   [ -n "$req_id" ] || die "wallet/start gave no request_id: $start"
   sig=$(cast wallet sign --private-key "$DEPLOYER_KEY" "$msg")
-  verify=$(curl -sSf -X POST "$BROKER/v1/auth/wallet/verify" -H 'content-type: application/json' \
+  verify=$(curl -sS --fail-with-body -X POST "$BROKER/v1/auth/wallet/verify" -H 'content-type: application/json' \
     -d "$(jq -n --arg r "$req_id" --arg s "$sig" '{request_id:$r, signature:$s}')" 2>&1) || die "wallet/verify: $verify"
   J1=$(echo "$verify" | jq -r '.session_jwt // .jwt // empty')
   [ -n "$J1" ] || die "no session JWT: $verify"
