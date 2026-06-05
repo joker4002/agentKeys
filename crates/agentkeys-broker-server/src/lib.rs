@@ -10,6 +10,7 @@ pub mod jwt;
 pub mod metrics;
 pub mod oidc;
 pub mod plugins;
+pub mod sponsor;
 pub mod state;
 pub mod storage;
 pub mod sts;

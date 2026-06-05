@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """WebAuthn (K11) UserOp signer for the ERC-4337 P256Account (#164 E7/E8).
 
+DEPRECATED — reference only. The harness no longer invokes this file. The software
+P-256 passkey signer is now the Rust `agentkeys k11 software-{keygen,sign}`
+(crates/agentkeys-cli/src/k11_webauthn.rs), so the harness needs NO python /
+`cryptography` venv. This .py is kept solely as a compact, readable spec of the
+exact WebAuthn-assertion byte layout the on-chain K11Verifier parses (the Rust port
+is byte-identical — both produce assertions `verifyAssertion` returns true for).
+Do NOT add new callers; use the Rust subcommands.
+
 The production P256Account verifies a UserOp via the on-chain K11Verifier, which
 expects a real WebAuthn assertion whose challenge == base64url(userOpHash). This
 helper produces that assertion (authData + clientDataJSON + P-256 r,s) exactly the

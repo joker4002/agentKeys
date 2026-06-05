@@ -24,6 +24,9 @@
 #                         friendly; on-chain ops in steps 4, 6, 7, 8 are
 #                         skipped because they need a real K11 sig.
 #   --webauthn            use REAL WebAuthn ceremonies (Touch ID prompts)
+#   --ci                  CI run: tolerate skip when the #164 passkey-register
+#                         prereqs are unavailable (never the deprecated EOA path).
+#                         Without it (local), the passkey register must succeed.
 #                         and submit real on-chain mutations.
 #
 # Step gating:
@@ -71,7 +74,7 @@ FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
 SKIP_BUILD=0
-USE_WEBAUTHN=0
+USE_WEBAUTHN=""   # unset → resolved after parse (operator → 1 / Touch ID, CI → 0 / stub)
 REDEPLOY=0
 REVOKE_TARGET=""
 COMPANION_PORT="${AGENTKEYS_COMPANION_PORT:-9091}"
@@ -83,6 +86,7 @@ while [ $# -gt 0 ]; do
     --only-step)     ONLY_STEP="$2"; shift 2 ;;
     --skip-build)    SKIP_BUILD=1; shift ;;
     --webauthn)      USE_WEBAUTHN=1; shift ;;
+    --ci)            export AGENTKEYS_CI=1; shift ;;   # CI run: tolerate skip when #164 passkey prereqs absent (never EOA)
     --stub)          USE_WEBAUTHN=0; shift ;;
     --redeploy)      REDEPLOY=1; shift ;;
     --revoke-master) REVOKE_TARGET="$2"; shift 2 ;;
@@ -94,10 +98,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# OPERATOR (no flag) gets the REAL WebAuthn ceremony (Touch ID); CI uses the stub.
+# Explicit --webauthn / --stub always win (they set USE_WEBAUTHN above).
+if [ -z "$USE_WEBAUTHN" ]; then
+  if [ -n "${AGENTKEYS_CI:-}" ] || [ -n "${CI:-}" ]; then USE_WEBAUTHN=0; else USE_WEBAUTHN=1; fi
+fi
+
 if [ -n "$ONLY_STEP" ]; then FROM_STEP="$ONLY_STEP"; TO_STEP="$ONLY_STEP"; fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+# Shared register_first_master (the #164 passkey-account ERC-4337 register, with
+# EOA fallback). This script keeps its own resolve_master_key below; sourcing
+# _lib.sh here just adds register_first_master. See harness/scripts/_lib.sh.
+. "$REPO_ROOT/harness/scripts/_lib.sh"
 
 AGENTKEYS_CHAIN="${AGENTKEYS_CHAIN:-heima}"
 PROFILE_NAME_UC=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
@@ -323,13 +337,17 @@ if should_run_step 4; then
     ok "primary K11 already enrolled (mode=webauthn)"
   fi
 
-  if [ -f "$K11_FILE" ] && [ "$(jq -r .mode "$K11_FILE" 2>/dev/null)" = "webauthn" ]; then
-    info "running scripts/heima-register-first-master.sh …"
-    if ! bash "$REPO_ROOT/harness/scripts/heima-register-first-master.sh" 2>&1 | tail -5 >&2; then
-      die "register-first-master failed"
-    fi
+  # Register the first master. Prefers the #164 passkey-account ERC-4337 path
+  # (operatorMasterWallet[omni] = the passkey P256Account); falls back to the
+  # old-model EOA path (which reads the enrolled webauthn K11) when the #164
+  # infra/tooling is absent. Both register device_key_hash = keccak(operator_omni).
+  info "registering first master (ERC-4337 passkey-account; EOA fallback uses the enrolled K11) …"
+  if register_first_master "$OPERATOR_OMNI"; then
+    ok "first master registered (or already on-chain)"
+  elif [ -f "$K11_FILE" ] && [ "$(jq -r .mode "$K11_FILE" 2>/dev/null)" = "webauthn" ]; then
+    die "register_first_master failed despite an enrolled webauthn K11"
   else
-    skip "skipping registerFirstMasterDevice (no usable K11)"
+    skip "register_first_master could not run (no #164 infra and no usable webauthn K11 for the EOA fallback)"
   fi
 fi
 

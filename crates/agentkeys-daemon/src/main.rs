@@ -218,8 +218,18 @@ struct Args {
 
     /// W3 real-memory: the on-chain-registered master device key hash (the cap-mint
     /// device binding). Must match the device registered via the W3 bootstrap.
+    /// Issue #196 makes this a FALLBACK — once the K11-finish register shell-out
+    /// runs, the daemon uses the freshly-registered hash automatically.
     #[arg(long, env = "AGENTKEYS_MASTER_DEVICE_KEY_HASH")]
     master_device_key_hash: Option<String>,
+
+    /// Issue #196: path to `harness/scripts/heima-register-first-master.sh`. When
+    /// set, the ui-bridge K11-finish handler shells out to it to register the
+    /// master device on chain (un-stubbing `chain_tx_hash`) under the session
+    /// omni, signed by the local deployer key. Unset ⇒ on-chain registration is
+    /// skipped and `GET /v1/onboarding/state` reports `chain: none` (dev/no-infra).
+    #[arg(long, env = "AGENTKEYS_REGISTER_MASTER_SCRIPT")]
+    register_master_script: Option<String>,
 
     /// How long to wait for the operator to complete email-link click
     /// or OAuth2 callback before failing init.
@@ -1105,6 +1115,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.memory_role_arn.clone(),
         args.region.clone(),
         args.master_device_key_hash.clone(),
+        args.register_master_script.clone(),
     )
     .with_context(|| {
         format!(

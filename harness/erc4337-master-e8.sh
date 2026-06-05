@@ -26,14 +26,19 @@ EP="${ENTRYPOINT_ADDRESS_HEIMA:-0x6672E1b315332167aBA12E0B1d3532a7e9B1ADE9}"
 K11="${K11_VERIFIER_ADDRESS_HEIMA:-0x5a441431f08e0f5f5ed10659620cb4e0e814e627}"
 DEPLOYER_KEY_FILE="${HEIMA_DEPLOYER_KEY_FILE:-$HOME/.agentkeys/heima-deployer.key}"
 RPID="${AGENTKEYS_RP_ID:-litentry.org}"
-VENV="${ERC4337_VENV:-$HOME/.agentkeys/erc4337-venv}"
 # fresh (local default) vs reuse (default in CI). Override with ERC4337_E8_MODE.
 MODE_E8="${ERC4337_E8_MODE:-$([ -n "${CI:-}" ] && echo reuse || echo fresh)}"
 REUSE_KEY_FILE="${ERC4337_E8_KEY_FILE:-$HOME/.agentkeys/erc4337-e8-reuse.key}"
 DEPOSIT_WEI="${ERC4337_E8_DEPOSIT_WEI:-200000000000000000}"   # 0.2 HEI
 MIN_DEPOSIT_WEI="${ERC4337_E8_MIN_DEPOSIT_WEI:-50000000000000000}" # top up reuse below 0.05 HEI
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SIGNER="$HERE/scripts/erc4337-webauthn-sign.py"
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+# Software P-256 passkey signer = the Rust agentkeys CLI (`k11 software-{keygen,sign}`)
+# — no python, no venv. Emits the SAME WebAuthn assertion bytes the live K11Verifier
+# accepts (crates/agentkeys-cli/src/k11_webauthn.rs).
+if   [ -x "$REPO_ROOT/target/release/agentkeys" ]; then BIN="$REPO_ROOT/target/release/agentkeys";
+elif [ -x "$REPO_ROOT/target/debug/agentkeys" ];   then BIN="$REPO_ROOT/target/debug/agentkeys";
+else BIN="$(command -v agentkeys || true)"; fi
 
 ok()   { printf '  ok %s\n' "$1"; }
 skip() { printf '  skip %s\n' "$1"; }
@@ -46,11 +51,7 @@ erc4337_master_e8() {
   echo "== #164 E8: passkey-only master via ERC-4337 UserOp (Heima mainnet, mode=$MODE_E8) =="
   command -v cast >/dev/null || { skip "cast not on PATH"; return 0; }
   [ -f "$DEPLOYER_KEY_FILE" ] || { skip "no deployer key ($DEPLOYER_KEY_FILE)"; return 0; }
-  if [ ! -x "$VENV/bin/python" ]; then
-    python3 -m venv "$VENV" >/dev/null 2>&1 && "$VENV/bin/pip" install -q cryptography \
-      || { skip "could not provision python+cryptography venv"; return 0; }
-  fi
-  local PY="$VENV/bin/python"
+  [ -n "$BIN" ] || { skip "agentkeys binary not built (run: cargo build --release -p agentkeys-cli)"; return 0; }
   local PK; PK="$(tr -d '[:space:]' < "$DEPLOYER_KEY_FILE")"
   local DEPLOYER; DEPLOYER="$(cast wallet address --private-key "$PK")"
 
@@ -69,7 +70,7 @@ erc4337_master_e8() {
     CRED1="$(cast keccak "e8-cred-$$-${RANDOM}-$(date +%s 2>/dev/null || echo 0)")"
     SALT="$(cast keccak "e8-salt-$$-${RANDOM}-$(date +%s 2>/dev/null || echo 0)")"
   fi
-  eval "$($PY "$SIGNER" keygen "$KEY" "$RPID")"   # PUBX PUBY RPIDHASH (idempotent: loads if KEY exists)
+  eval "$("$BIN" k11 software-keygen --key-file "$KEY" --rp-id "$RPID")"   # PUBX PUBY RPIDHASH (idempotent: loads if KEY exists)
 
   # 2. Deploy (or reuse) the account via the factory (CREATE2, idempotent).
   local ACCT; ACCT="$(cast call "$FACTORY" "getAddress(bytes32,uint256,uint256,bytes32,bytes32)(address)" "$CRED1" "$PUBX" "$PUBY" "$RPIDHASH" "$SALT" --rpc-url "$RPC")"
@@ -106,7 +107,7 @@ erc4337_master_e8() {
   ok "userOpHash = $UOH"
 
   # 6. WebAuthn-sign the userOpHash (the passkey signs; full-intent commitment).
-  eval "$($PY "$SIGNER" sign "$KEY" "$UOH" "$RPID")"  # AUTHDATA CDJ CHALLENGE_LOC R S
+  eval "$("$BIN" k11 software-sign --key-file "$KEY" --userop-hash "$UOH" --rp-id "$RPID")"  # AUTHDATA CDJ CHALLENGE_LOC R S
 
   # 7. Pre-check the assertion against the LIVE K11Verifier (free) before spending gas.
   local PRE; PRE="$(cast call "$K11" "verifyAssertion(bytes32,bytes32,bytes,bytes,uint256,uint256,uint256,uint256,uint256)(bool)" "$UOH" "$RPIDHASH" "$AUTHDATA" "$CDJ" "$CHALLENGE_LOC" "$R" "$S" "$PUBX" "$PUBY" --rpc-url "$RPC" 2>&1 | tail -1)"

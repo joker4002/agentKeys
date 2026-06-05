@@ -58,6 +58,9 @@
 #   --confirm             pause for Enter before chain deploy
 #   --debug               enable `set -x` (very chatty)
 #   --webauthn            use REAL WebAuthn ceremony for K11 enroll (step 11)
+#   --ci                  CI run: tolerate skip when the #164 passkey-register
+#                         prereqs are unavailable (never the deprecated EOA path).
+#                         Without it (local), the passkey register must succeed.
 #                         and master-mutation K11 assertions (step 13 scope-set).
 #                         Opens the operator's default browser and prompts
 #                         Touch ID (macOS) / Windows Hello / platform passkey.
@@ -144,6 +147,9 @@ DEBUG=0
 WEBAUTHN_MODE=0
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Shared helpers: resolve_master_key + register_first_master (the #164
+# passkey-account ERC-4337 register, with EOA fallback). See harness/scripts/_lib.sh.
+. "$REPO_ROOT/harness/scripts/_lib.sh"
 # ENV_FILE: caller-supplied env var takes precedence; default = prod.
 # Lets `ENV_FILE=scripts/operator-workstation.test.env bash harness/v2-stage1-demo.sh`
 # (or CI's in-place rewrite of the default path) both point at test resources
@@ -189,12 +195,20 @@ while [ $# -gt 0 ]; do
     --confirm)         CONFIRM=1; shift ;;
     --debug)           DEBUG=1; shift ;;
     --webauthn)        WEBAUTHN_MODE=1; shift ;;
+    --ci)              export AGENTKEYS_CI=1; shift ;;   # CI run: tolerate skip when #164 passkey prereqs absent (never EOA)
     --help|-h)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'
       exit 0 ;;
     *) die "unknown flag: $1 (try --help)" ;;
   esac
 done
+
+# OPERATOR (no flag) gets the REAL WebAuthn K11 ceremony (Touch ID at steps 11 + 13) —
+# onboarding is a genuine biometric ceremony without a flag (the no-flag rule). CI
+# (--ci / $CI) uses the stub (no Touch ID). Explicit --webauthn always wins.
+if [ "$WEBAUTHN_MODE" != 1 ]; then
+  if [ -n "${AGENTKEYS_CI:-}" ] || [ -n "${CI:-}" ]; then WEBAUTHN_MODE=0; else WEBAUTHN_MODE=1; fi
+fi
 
 [ "$DEBUG" = "1" ] && set -x
 
@@ -217,6 +231,11 @@ in_scope() {
 # ─── Step 1: tool sanity-check ──────────────────────────────────────────────
 do_step_1() {
   step "Tool sanity-check"
+  # v2-demo.sh runs this once in its preflight — skip the duplicate when invoked from there.
+  if [ -n "${AGENTKEYS_HARNESS_PREFLIGHT_DONE:-}" ]; then
+    skip "tool sanity-check already done in the v2-demo preflight"
+    return 0
+  fi
   local missing=()
   # python3: parsing cast's tuple-of-struct return in heima-scope-{set,revoke}.sh
   # (codex review finding — missing python3 silently bypasses the idempotency
@@ -693,17 +712,23 @@ do_step_10() {
     info "skipping — no SidecarRegistry address yet (run step 9 chain bring-up first)"
     return 0
   fi
-  # AGENTKEYS_STAGE1_STUB_OK=1 opts THIS specific stage-1 invocation into
-  # accepting a stage1-stub K11 file (CI / WEBAUTHN_MODE=0 path). Without
-  # the env, heima-register-first-master.sh refuses stage1-stub → prevents
-  # a stale stub K11 file in $HOME/.agentkeys/k11/ from being accepted by
-  # a later prod setup-heima.sh run. Codex H2 mitigation.
-  AGENTKEYS_STAGE1_STUB_OK=1 \
-  bash "$REPO_ROOT/scripts/heima-device-register.sh" \
-    --registry-address "$registry_addr" \
-    --roles cap-mint,recovery,scope-mgmt \
-    --session-id "$SESSION_ID" \
-    || die "heima-device-register.sh failed"
+  # Register the first master via register_first_master (_lib.sh). The #164
+  # passkey-account ERC-4337 path is the ONLY supported register — the software
+  # P-256 passkey (Rust `agentkeys k11 software-{keygen,sign}`) signs the UserOp, so
+  # operatorMasterWallet[omni] = the passkey-controlled P256Account.
+  # device_key_hash = keccak(operator_omni); roles default to 7
+  # (cap-mint|recovery|scope-mgmt). operator_omni defaults to the deployer omni.
+  # The old-model EOA register is DEPRECATED — NEVER an automatic fallback. A LOCAL
+  # run fails loud if the #164 prereqs are missing; pass --ci to tolerate a skip in
+  # CI (still never EOA).
+  #
+  # AGENTKEYS_STAGE1_STUB_OK=1 is harmless to the #164 path (the #164 passkey signs
+  # live — hardware Touch ID locally, or the software signer under --ci; no on-disk
+  # K11 stub). It only affects the deprecated EOA escape
+  # (AGENTKEYS_REGISTER_MODE=eoa), letting heima-register-first-master.sh accept a
+  # stage1-stub K11 (CI / WEBAUTHN_MODE=0) instead of refusing it (Codex H2).
+  AGENTKEYS_STAGE1_STUB_OK=1 register_first_master "" \
+    || die "register_first_master failed"
   ok "master device registered (or already on-chain)"
 }
 
@@ -876,7 +901,8 @@ do_step_16() {
     "$SMOKE_TEST_SERVICE" "${VAULT_BUCKET:-$BUCKET}" "$SMOKE_TEST_SERVICE" >&2
   printf "\n  Stage-1 chain actions (bash entries — all shipped):\n" >&2
   if [ -n "$registry_addr" ] && [ "$registry_addr" != "0x0" ]; then
-    printf "    bash scripts/heima-device-register.sh --roles cap-mint,recovery,scope-mgmt\n" >&2
+    printf "    bash harness/scripts/erc4337-register-master.sh           # register master — passkey-account UserOp (#164)\n" >&2
+    printf "    #   (EOA fallback: bash scripts/heima-device-register.sh --roles cap-mint,recovery,scope-mgmt)\n" >&2
     printf "    bash scripts/heima-agent-create.sh    --label demo-agent\n" >&2
     printf "    bash scripts/heima-scope-set.sh       --agent demo-agent --services openrouter\n" >&2
     printf "    bash scripts/heima-credential-audit.sh --actor demo-agent --service openrouter --op store\n" >&2
@@ -912,11 +938,14 @@ main() {
   in_scope 7  && do_step_7
   in_scope 8  && do_step_8
   in_scope 9  && do_step_9
-  # Step 11 (K11 enrollment) must run BEFORE step 10 (register master device):
-  # harness/scripts/heima-register-first-master.sh refuses to run without the
-  # K11 enrollment file at ~/.agentkeys/k11/<operator_omni>.json. The step
-  # numbers reflect the conceptual flow (register-then-enroll for explanation
-  # purposes); the actual execution dependency is enroll-then-register.
+  # Step 11 (K11 enrollment) runs BEFORE step 10 (register master device). The
+  # #164 ERC-4337 register path (register_first_master → erc4337-register-master.sh):
+  # the LOCAL hardware signer (k11 webauthn-keygen) load-OR-enrolls the K11, so
+  # enrolling at step 11 first means the register reuses that credential (no extra
+  # Touch ID *create*); the --ci software signer needs no disk K11. The deprecated EOA
+  # escape refuses without the K11 file at ~/.agentkeys/k11/<operator_omni>.json — so
+  # the enroll-then-register order is kept. Step numbers reflect the conceptual flow;
+  # the execution dependency is enroll-then-register.
   in_scope 11 && do_step_11
   in_scope 10 && do_step_10
   in_scope 12 && do_step_12

@@ -358,6 +358,28 @@ done
 [ "$ready" = "0" ] && { err "mcp-server did not respond on / within 5 s"; exit 1; }
 say "mcp-server ready."
 
+# ─── Ensure frontend deps (fresh clone / git worktree has no node_modules) ─────
+# node_modules is gitignored, so a fresh clone OR a git worktree (e.g.
+# .claude/worktrees/*) starts with none. Without it `npx next dev` can't resolve
+# `next` and Next.js 16/Turbopack fails with a confusing "inferred your workspace
+# root … couldn't find next/package.json" error. Install once here — idempotent:
+# skips when `next` is already present (mirrors how this script ensures the Rust
+# binaries + WASM core, so `dev.sh` is genuinely one-command on a fresh checkout).
+if [ ! -d "$APP_DIR/node_modules/next" ]; then
+  say "installing frontend deps in apps/parent-control (no node_modules — fresh clone / worktree)…"
+  if [ -f "$APP_DIR/package-lock.json" ] && ( cd "$APP_DIR" && npm ci ); then
+    :
+  elif ( cd "$APP_DIR" && npm install ); then
+    :
+  else
+    err "npm install in $APP_DIR failed — run it manually: (cd apps/parent-control && npm install)"
+    exit 1
+  fi
+  say "frontend deps installed."
+else
+  say "frontend deps present — skipping npm install."
+fi
+
 # ─── Start Next.js dev server ──────────────────────────────────────
 #
 # The subshell `exec`s into npx so $! points at the npx process itself

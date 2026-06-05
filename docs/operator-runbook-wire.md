@@ -206,8 +206,9 @@ active-signer count went up by exactly 1 (fresh `1→2`; reuse `N→N+1`). No se
 key signs anything. `ok …` / `fail …` per step.
 
 **Prereqs:** `cast` (Foundry) on PATH; the deployer key (`~/.agentkeys/heima-deployer.key`
-— funds the deposit + gas); Python 3 (the script auto-provisions a `cryptography`
-venv at `~/.agentkeys/erc4337-venv`). The live EntryPoint + factory addresses are in
+— funds the deposit + gas); the `agentkeys` binary built (`cargo build --release -p
+agentkeys-cli`) — the WebAuthn UserOp is signed by the built-in Rust software passkey
+(`agentkeys k11 software-{keygen,sign}`), **no python / no venv**. The live EntryPoint + factory addresses are in
 [`docs/spec/deployed-contracts.md`](spec/deployed-contracts.md). **Append-only:** each run mints a fresh account
 (it is NOT idempotent in the resource sense). The bundler is not required — the demo
 calls `EntryPoint.handleOps` directly. Full design + cutover status:
