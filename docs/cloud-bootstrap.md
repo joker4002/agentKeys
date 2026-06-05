@@ -894,7 +894,7 @@ sudo bash scripts/setup-broker-host.sh --yes
 ```
 
 The script:
-- Builds `agentkeys-broker-server` (+ `auth-email-link` feature), `agentkeys-mock-server`, the 5 service workers (audit/email/cred/memory/config), and the signer.
+- Builds `agentkeys-broker-server` (+ `auth-email-link` feature), `agentkeys-mock-server`, the 5 service workers (audit/email/cred/memory/config), and the signer. Compilations are cached with **sccache** (a content-addressed compiler cache, auto-installed best-effort) so re-deploys + `--ref` branch switches reuse the cache instead of recompiling — even when `git checkout` churns mtimes or `target/` is cold. The build prints `sccache stats` afterward (re-deploys should be mostly cache hits). Opt out with `AGENTKEYS_NO_SCCACHE=1`; pin a version with `SCCACHE_VERSION=vX.Y.Z`.
 - Creates the `agentkeys` system user + state dir `/var/lib/agentkeys/`.
 - Writes the dev_key_service master secret (one-shot at first boot, never rotated — rotation invalidates every previously-derived wallet).
 - Writes per-worker env files at `/etc/agentkeys/worker-{audit,email,creds,memory,config}.env`.

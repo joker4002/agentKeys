@@ -578,6 +578,55 @@ log "Rust: $(rustc --version)"
 # feature-gated-out auth method` at startup. Verified empirically:
 # `cargo build --message-format json` shows features=[…] with auth-email-link
 # missing in the combined form, present in the separate form.
+
+# ─── Build cache (sccache) — fast re-deploys + branch switches ──────────────
+# cargo already caches compiled deps in $REPO_ROOT/target (preserved across
+# runs — we never `cargo clean` on the happy path). But `--ref` does a
+# `git checkout -f`, which rewrites the mtimes of every CHANGED file, so cargo
+# re-fingerprints + recompiles those crates even when a later branch has them
+# unchanged; a cold/wiped target/ recompiles the whole aws-sdk/tokio tree. sccache
+# is a CONTENT-addressed compiler cache (keyed on the crate's actual inputs, not
+# mtime/branch/target state), so identical inputs hit the cache regardless. It
+# persists in $SCCACHE_DIR independent of target/, so even a wiped target/ or a
+# branch switch rebuilds from cache. Best-effort + idempotent + NON-FATAL: if it
+# can't be installed the deploy proceeds with plain cargo. Opt out with
+# AGENTKEYS_NO_SCCACHE=1; pin a different release with SCCACHE_VERSION=vX.Y.Z.
+SCCACHE_VERSION="${SCCACHE_VERSION:-v0.8.2}"
+setup_build_cache() {
+  if [[ "${AGENTKEYS_NO_SCCACHE:-0}" == "1" ]]; then
+    log "sccache disabled (AGENTKEYS_NO_SCCACHE=1) — building with plain cargo"
+    return 0
+  fi
+  if ! have sccache; then
+    local arch tgz url tmp
+    case "$(uname -m)" in
+      x86_64|amd64)  arch="x86_64" ;;
+      aarch64|arm64) arch="aarch64" ;;
+      *) warn "sccache: unsupported arch '$(uname -m)' — plain cargo"; return 0 ;;
+    esac
+    tgz="sccache-${SCCACHE_VERSION}-${arch}-unknown-linux-musl"
+    url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/${tgz}.tar.gz"
+    tmp="$(mktemp -d)"
+    log "Installing sccache ${SCCACHE_VERSION} (${arch}) for cached re-builds"
+    if curl -fsSL "$url" 2>/dev/null | tar xz -C "$tmp" 2>/dev/null && [[ -f "$tmp/$tgz/sccache" ]]; then
+      sudo install -m 0755 "$tmp/$tgz/sccache" /usr/local/bin/sccache
+    elif have cargo && cargo install sccache --locked 2>/dev/null; then
+      : # cargo-installed into ~/.cargo/bin (slow first time; cached thereafter)
+    else
+      warn "sccache install failed (prebuilt + cargo install) — continuing with plain cargo"
+      rm -rf "$tmp"; return 0
+    fi
+    rm -rf "$tmp"
+  fi
+  have sccache || { warn "sccache not on PATH after install — plain cargo"; return 0; }
+  export SCCACHE_DIR="${SCCACHE_DIR:-/var/cache/agentkeys-sccache}"
+  sudo install -d -m 0777 "$SCCACHE_DIR" 2>/dev/null || true
+  export RUSTC_WRAPPER; RUSTC_WRAPPER="$(command -v sccache)"
+  sccache --start-server >/dev/null 2>&1 || true
+  log "sccache enabled (RUSTC_WRAPPER=$RUSTC_WRAPPER, SCCACHE_DIR=$SCCACHE_DIR)"
+}
+setup_build_cache
+
 log "Building agentkeys-mock-server (release)"
 ( cd "$REPO_ROOT" && cargo build --release --locked -p agentkeys-mock-server )
 
@@ -723,6 +772,14 @@ if [[ "$WITH_WORKERS" == "yes" ]]; then
       -p agentkeys-worker-creds \
       -p agentkeys-worker-memory \
       -p agentkeys-worker-config )
+fi
+
+# sccache hit/miss readout — visible proof the compiler cache is working. On a
+# fresh host this is mostly misses (populating the cache); on a re-deploy / branch
+# switch it should be mostly HITS (the win). No-op when sccache isn't enabled.
+if [[ -n "${RUSTC_WRAPPER:-}" ]] && have sccache; then
+  log "sccache stats (re-deploys should be mostly cache hits):"
+  sccache --show-stats 2>/dev/null | grep -iE "compile requests|cache hits|cache misses|cache hit rate" >&2 || true
 fi
 
 log "Installing binaries to /usr/local/bin"
