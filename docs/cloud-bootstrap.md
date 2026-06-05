@@ -154,8 +154,20 @@ This is **optional**; the broker itself runs from compiled binaries, not from a 
 
 `setup-broker-host.sh` installs `certbot` but does NOT issue Let's Encrypt certs itself — issuance is DNS-dependent (the broker hostname must already resolve to this EIP on the public internet before Let's Encrypt's HTTP-01 challenger can validate it). Until you run the issuance below, nginx serves HTTP-only on `:80` with a `503 "TLS cert not yet issued"` placeholder on every non-ACME path — and **the OIDC federation step in [`docs/ci-setup.md`](ci-setup.md) §1 can't succeed because there's no cert to extract a thumbprint from**.
 
+> **⚠️ Run EVERY command in this section ON THE BROKER HOST** — the machine whose public A record the hostnames point to (the EIP). `certbot --webroot` writes the ACME challenge to the **local** `/var/www/certbot`, but Let's Encrypt validates by fetching `http://<host>/.well-known/acme-challenge/…` from the hostname's **public IP = the broker**. Run certbot on your laptop or any non-broker box — *especially* behind a VPN (Cloudflare WARP / Zscaler / Tailscale) that intercepts or rewrites `${ZONE}` — and the challenge lands on the wrong machine, so the broker answers the CA with **404** and issuance fails. SSH in first (`ssh-agentkeys`); sanity-check you're on the right host with `curl -s ifconfig.me` (must print the broker EIP). A laptop `curl` of `<host>` behind a VPN hits the **VPN's** nginx, not the broker's — an easy tell is a different `nginx/<version>` in the 404 page than the broker's `nginx -v`.
+
 ```bash
 # Still on the broker host (as agentkey or ubuntu — both have sudo):
+# PRE-CHECK (cheap; avoids burning Let's Encrypt's rate-limited attempts on a vhost
+# that isn't actually live). Confirm THIS host's nginx serves the ACME path before
+# asking the CA. A freshly-added worker (e.g. config, #201) needs nginx reloaded
+# first — `nginx -T` showing the vhost does NOT mean the running process loaded it.
+sudo nginx -t && sudo systemctl reload nginx
+sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
+echo probe-ok | sudo tee /var/www/certbot/.well-known/acme-challenge/probe >/dev/null
+curl -s http://localhost/.well-known/acme-challenge/probe -H "Host: ${CONFIG_HOST}"   # must print: probe-ok (404 ⇒ vhost not live → reload)
+sudo rm -f /var/www/certbot/.well-known/acme-challenge/probe
+
 # CONFIG_HOST (config.${ZONE}) is the #201 master-only taxonomy worker — its
 # cert is required too, or stage-3 steps 19-21 fail with SSL_ERROR_SYSCALL.
 for h in ${BROKER_HOST} ${SIGNER_HOST} ${AUDIT_HOST} ${EMAIL_HOST} ${CRED_HOST} ${MEMORY_HOST} ${CONFIG_HOST}; do
@@ -197,6 +209,7 @@ Common failures + fixes:
 - **`Connection timeout to … port 80`** — the SG is missing port 80 ingress. Re-check step 1's SG requirements (you need 22, 80, **and** 443).
 - **`DNS problem: NXDOMAIN`** — Route 53 doesn't have the A record yet, or DNS hasn't propagated. Wait 1-2 min, then retry. Quick check: `curl -sS "https://dns.google/resolve?name=<host>&type=A"` (do NOT rely on `dig` — local resolver may be lying).
 - **`No such file or directory: /var/www/certbot`** — Phase A nginx render didn't complete; re-run `sudo bash scripts/setup-broker-host.sh --test --yes` first.
+- **`unauthorized` / `Invalid response … /.well-known/acme-challenge/… : 404`** — the CA reached the host but couldn't fetch the challenge file. Two causes: (1) **certbot ran on the wrong machine** — `--webroot` wrote the challenge to *that* box's `/var/www/certbot`, but the CA validates against the hostname's public IP (the broker). Run certbot ON THE BROKER (see the ⚠️ above). (2) **a newly-added worker's vhost isn't live** — `nginx -T` shows it on disk but the running process wasn't reloaded; `sudo nginx -t && sudo systemctl reload nginx`, then re-run the PRE-CHECK probe. Confirm locally on the broker (not a VPN'd laptop): `echo ok | sudo tee /var/www/certbot/.well-known/acme-challenge/probe >/dev/null && curl -s http://localhost/.well-known/acme-challenge/probe -H "Host: <host>"` must print `ok`.
 
 ---
 
