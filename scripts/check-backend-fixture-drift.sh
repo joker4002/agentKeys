@@ -120,13 +120,83 @@ while IFS=$'\t' read -r shape file aline literal; do
   fi
 done < <(emit_records)
 
+# ── Pass 2: no UNANNOTATED canonical-shaped body (issue #203 — Codex follow-up) ──
+# Pass 1 only visits ANNOTATED bodies, so a hand-rolled canonical body with no
+# annotation is silently ungated — the exact miss Codex found (an unannotated
+# memory-get `{cap, namespace}` readback in memory-plant-demo.sh). This pass
+# scans EVERY single-quoted `jq` object literal and fails any whose key-set
+# EXACTLY matches a canonical fixture but carries no `# @backend-fixture:`
+# annotation on/above it. Exact-match keeps it false-positive-free: cred-worker
+# bodies (`{cap, plaintext_b64}`, `{cap}`) and the ttl-omitted 4-key cap variant
+# (broker `CapRequest.ttl_seconds` is `#[serde(default)]`) match no canonical set,
+# so they're left alone.
+CAP_KEYS="$(fixture_keys cap_mint_request)"
+PUT_KEYS="$(fixture_keys memory_put_body)"
+GET_KEYS="$(fixture_keys memory_get_body)"
+AUDIT_KEYS="$(fixture_keys audit_append_v2)"
+canonical_shape() { case "$1" in
+  "$CAP_KEYS")   echo cap_mint_request ;;
+  "$PUT_KEYS")   echo memory_put_body  ;;
+  "$GET_KEYS")   echo memory_get_body  ;;
+  "$AUDIT_KEYS") echo audit_append_v2  ;;
+  *) echo "" ;;
+esac; }
+
+# Emit `file<TAB>line<TAB>annotated(0|1)<TAB>literal` for every single-quoted
+# `'{...}'` jq object literal (brace-balanced, multi-line aware). `annotated`=1
+# when an unconsumed `@backend-fixture:` comment sits within the 8 lines above —
+# the same one-annotation-covers-the-next-literal semantics as pass 1.
+emit_all_jq_literals() {
+  grep -rl --include='*.sh' 'jq ' "$SCAN_DIR" 2>/dev/null | while IFS= read -r f; do
+    awk -v SQ="'" '
+      BEGIN { pend = 0; annL = -100 }
+      /@backend-fixture:/ { pend = 1; annL = FNR }
+      {
+        s = $0; i = 1; L = length(s)
+        while (i <= L) {
+          ch = substr(s, i, 1)
+          if (!inlit) {
+            if (ch == SQ && substr(s, i + 1, 1) == "{") { inlit = 1; depth = 0; rec = ""; startL = FNR; i++; continue }
+          } else {
+            if (ch == "{") depth++
+            if (depth > 0) rec = rec ch
+            if (ch == "}") {
+              depth--
+              if (depth == 0) {
+                ann = (pend && startL - annL >= 0 && startL - annL <= 8) ? 1 : 0
+                if (ann) pend = 0
+                g = rec; gsub(/[\t ]/, "", g)
+                print FILENAME "\t" startL "\t" ann "\t" g
+                inlit = 0
+              }
+            }
+          }
+          i++
+        }
+      }
+    ' "$f"
+  done
+}
+
+unannotated=0
+while IFS=$'\t' read -r file aline annotated literal; do
+  [ -n "$literal" ] || continue
+  keys="$(extract_keys "$literal")"
+  shape="$(canonical_shape "$keys")"
+  [ -z "$shape" ] && continue        # not a canonical shape — ignore (cred bodies, 4-key cap, …)
+  [ "$annotated" = "1" ] && continue # already annotated → validated by pass 1
+  rel="${file#"$REPO_ROOT"/}"
+  bad "$rel:$aline → UNANNOTATED canonical body (matches $shape) — add '# @backend-fixture: $shape' on the line above it, else the gate can never catch its drift"
+  unannotated=$((unannotated + 1))
+done < <(emit_all_jq_literals)
+
 echo
-if [ "$checked" -eq 0 ] && [ "$missing" -eq 0 ]; then
+if [ "$checked" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$unannotated" -eq 0 ]; then
   info "no @backend-fixture-annotated bodies found under $SCAN_DIR"
   info "(real-path steps drive the shared client; annotate any hand-rolled cap/worker body to gate it)"
 fi
-if [ "$fails" -gt 0 ] || [ "$missing" -gt 0 ]; then
-  bad "$((fails + missing)) annotated bod(y/ies) drifted/broken — fix the bash body, or if the protocol changed regenerate the fixtures (cargo run -p agentkeys-backend-client --bin dump-protocol-fixtures) + update the Rust types"
+if [ "$fails" -gt 0 ] || [ "$missing" -gt 0 ] || [ "$unannotated" -gt 0 ]; then
+  bad "$((fails + missing + unannotated)) issue(s): $fails drifted + $missing unknown-shape + $unannotated unannotated-canonical — fix the bash body / annotate it, or if the protocol changed regenerate the fixtures (cargo run -p agentkeys-backend-client --bin dump-protocol-fixtures) + update the Rust types"
   exit 1
 fi
-ok "no drift — $checked annotated bod(y/ies) match the canonical shapes"
+ok "no drift — $checked annotated bod(y/ies) match the canonical shapes; no unannotated canonical bodies"

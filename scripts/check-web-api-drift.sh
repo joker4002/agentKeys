@@ -74,19 +74,47 @@ annotated_literal() {
   ' "$1"
 }
 
+# True if the canonical route appears AS A CALL ARGUMENT/URL — i.e. immediately
+# followed by a closing quote (it terminates a string literal / URL), within a
+# few lines of an actual call ($2 = the call-keyword regex: curl/-X POST for
+# bash, postJson/fetch for TS). A stale comment or step-label that merely
+# *mentions* the route (route followed by a space, arrow, or end-of-line — not a
+# quote) does NOT satisfy this, so changing the real call URL while leaving an
+# old label behind is caught instead of passing on the stale literal (Codex
+# finding: a whole-file `grep` for the route can't tell the call site from a
+# comment). `index()` is a literal substring search (the route is a fixed
+# string, not a regex); the char-after test rejects a drifted prefix like
+# `…/plantX"` because the char after `plant` is `X`, not a quote.
+route_at_call_site() {  # $1=file  $2=call-keyword regex
+  awk -v ROUTE="$ROUTE" -v KW="$2" -v Q='["'"'"']' '
+    { if ($0 ~ KW) win = 4
+      if (win > 0) {
+        s = $0; p = index(s, ROUTE)
+        while (p > 0) {
+          after = substr(s, p + length(ROUTE), 1)
+          if (after ~ Q) found = 1
+          s = substr(s, p + length(ROUTE)); p = index(s, ROUTE)
+        }
+        win--
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+
 fails=0
 check_consumer() {
-  local label="$1" file="$2"
+  local label="$1" file="$2" kw="$3"
   if [ ! -f "$file" ]; then
     info "$label not present ($file) — skipping (no consumer to gate here)"
     return
   fi
   local rel="${file#"$REPO_ROOT"/}"
-  # 1. route literal present verbatim
-  if grep -qF "$ROUTE" "$file"; then
-    ok "$rel uses route $ROUTE"
+  # 1. route used AT THE CALL SITE (not merely present somewhere in the file)
+  if route_at_call_site "$file" "$kw"; then
+    ok "$rel posts to route $ROUTE at the call site"
   else
-    bad "$rel does NOT reference the canonical plant route $ROUTE (renamed? → false-green)"
+    bad "$rel does NOT post to the canonical route $ROUTE at its call site — a changed call URL with a left-behind comment/label that still names the old route would otherwise read as a false-green"
     fails=$((fails + 1))
   fi
   # 2. annotated entry object key-set matches
@@ -108,8 +136,8 @@ check_consumer() {
 
 echo
 info "gating the two non-Rust consumers (the Rust source is pinned by the ui_bridge unit test)..."
-check_consumer "harness web-parity-demo" "$HARNESS"
-check_consumer "frontend daemon.ts" "$FRONTEND"
+check_consumer "harness web-parity-demo" "$HARNESS" 'curl|-X[[:space:]]+POST'
+check_consumer "frontend daemon.ts" "$FRONTEND" 'postJson|fetch|getJson'
 
 echo
 if [ "$fails" -gt 0 ]; then

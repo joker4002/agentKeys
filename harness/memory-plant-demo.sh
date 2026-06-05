@@ -149,9 +149,11 @@ if should_run 5; then
   step 5 "Read-back proof — worker /v1/memory/get one namespace"
   sts_relay || die "STS relay failed"
   ns=travel; cap=$(mint_cap memory-get "$ns")
+  # @backend-fixture: memory_get_body  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
+  get_body=$(jq -n --argjson cap "$cap" --arg n "$ns" '{cap:$cap, namespace:$n}')
   resp=$(curl -sS -X POST "$MEMORY_URL/v1/memory/get" \
     -H "x-aws-access-key-id: $AK" -H "x-aws-secret-access-key: $SK" -H "x-aws-session-token: $STK" \
-    -H 'content-type: application/json' -d "$(jq -n --argjson cap "$cap" --arg n "$ns" '{cap:$cap, namespace:$n}')" 2>&1)
+    -H 'content-type: application/json' -d "$get_body" 2>&1)
   got=$(echo "$resp" | jq -r '.plaintext_b64 // empty' 2>/dev/null | base64 -d 2>/dev/null || true)
   echo "$got" | grep -q "Chengdu" || die "read-back of memory:$ns did not return the planted content: $resp"
   ok "read-back of memory:$ns returned the planted content ✓ (real S3 round-trip)"
