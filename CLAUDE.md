@@ -146,6 +146,23 @@ Switch with `awsp <profile>`; verify with `aws sts get-caller-identity`.
 ### Caller-ARN matching in scripts must be case-insensitive
 Lowercase the caller_arn before matching, since the remote IAM user is `agentKeys-admin` (capital K) but operator scripts canonicalize on `agentkeys-admin`. Use `tr '[:upper:]' '[:lower:]'` (portable to /bin/bash 3.2) — not `${var,,}` (bash 4+).
 
+### Prod vs CI/test broker = SEPARATE machines + SEPARATE EIPs — ALWAYS verify the IP before a cloud deploy/bootstrap/DNS step
+**Critical trap (real #201 incident, 2026-06-06):** two broker EC2 instances exist, each with its own Elastic IP, distinguished by the **EIP's `Name` tag** (NOT the instance name):
+
+| Env | EIP `Name` tag (stable selector) | EIP today (re-verify, don't hardcode) |
+|---|---|---|
+| **prod** | `agentkeys-broker-eip` | 54.164.117.252 |
+| **CI/test** | `agentkeys-broker-eip-test` | 3.214.219.209 |
+
+**Never pick "the broker EIP" with a `describe-addresses` first-match** (`Addresses[0].PublicIp`, or `Addresses[?AssociationId!=\`null\`] | first`). With both EIPs allocated it returns whichever the API lists first — which once pointed all 5 worker A records (`audit/email/cred/memory/config`) at the **test** broker while `broker`/`signer` stayed on **prod**, causing multi-round Let's Encrypt 404s (the CA validated against the wrong machine).
+
+**Rule — any cloud deploy/bootstrap/DNS step that needs the broker IP must resolve it env-aware FIRST:**
+- **By tag, keyed on prod-vs-test** (canonical — `setup-cloud.sh` step 4 + `dns-upsert-workers.sh`): `aws ec2 describe-addresses --region "$REGION" --filters Name=tag:Name,Values=agentkeys-broker-eip[-test] --query 'Addresses[0].PublicIp'`. Both scripts pick the `-test` suffix from `TEST_MODE` (`--test`, or a `*test*` ENV_FILE).
+- **On the broker host:** `curl -s ifconfig.me` is ground truth for which box you're actually on.
+- **For DNS:** every worker A record MUST equal `broker.${ZONE}`'s — cross-check via DoH, never laptop DNS (a VPN rewrites `${ZONE}`): `for h in broker audit email cred memory config; do echo "$h $(curl -s "https://dns.google/resolve?name=$h.${ZONE}&type=A" | jq -r '.Answer[0].data')"; done`.
+
+Any new script that needs the broker IP MUST accept `--eip`, derive by the env-aware tag, OR read `broker.${ZONE}`'s A record — and SHOULD warn if the chosen IP ≠ the broker's current A record (co-location guard). Never "first associated EIP".
+
 ## Per-actor + per-data-class isolation invariants (issue #90)
 
 The OIDC + cap-token + IAM stack enforces a defense-in-depth chain across **four layers**. Every PR that touches storage, OIDC, the broker cap-mint flow, or the worker handlers MUST verify these invariants explicitly in a demo step. A change that doesn't add a corresponding test for the layer it touches is incomplete.
