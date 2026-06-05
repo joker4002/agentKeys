@@ -215,6 +215,7 @@ if should_run_step 6; then
     jwt=$(echo "$verify" | jq -r '.session_jwt // .jwt // empty')
     [ -n "$jwt" ] || die "wallet/verify returned no session JWT: $verify"
     # master-self memory cap, NO scope grant (operator == actor == deployer omni).
+    # @backend-fixture: cap_mint_request  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
     body=$(jq -n --arg o "0x$DEPLOYER_OMNI" --arg s "memory:bootstrap-proof" --arg d "$MASTER_DKH" \
       '{operator_omni:$o, actor_omni:$o, service:$s, device_key_hash:$d, ttl_seconds:300}')
     rc=$(curl -sS -o /tmp/wmcap.$$.json -w '%{http_code}' -X POST "$OIDC_ISSUER/v1/cap/memory-put" \

@@ -1401,90 +1401,69 @@ async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>,
         region: state.region.clone(),
         j1: session.j1,
         // The broker cap-mint input-validates that operator_omni/actor_omni start with
-        // 0x, but the onboarding session stores the omni bare. Normalize ONCE here so
-        // both memory_put_real + memory_get_real send a 0x-prefixed omni (the broker
-        // normalize_hex32's it for the device-binding match either way).
-        omni: if session.omni.starts_with("0x") {
-            session.omni
-        } else {
-            format!("0x{}", session.omni)
-        },
+        // 0x, but the onboarding session stores the omni bare. Normalize via the ONE
+        // shared normalizer (issue #203) so this can't drift from the cap-mint body the
+        // MCP/harness paths send (the broker normalize_hex32's it either way).
+        omni: agentkeys_backend_client::normalize_omni_0x(&session.omni),
         device_key_hash,
     }))
 }
 
+/// Build the shared broker/worker client for the master's own real-memory
+/// chain (operator == actor == O_master). The agent-session bearer for the STS
+/// relay is the master's J1; the role is the memory data-class role.
+fn real_memory_client(ctx: &RealMemoryCtx) -> agentkeys_backend_client::BackendClient {
+    agentkeys_backend_client::BackendClient::new(
+        Some(ctx.broker.clone()),
+        Some(ctx.memory_url.clone()),
+        None,
+        Some(ctx.j1.clone()),
+        Some(ctx.role_arn.clone()),
+        None,
+        ctx.region.clone(),
+    )
+}
+
 /// One real memory-put: cap-mint(`memory:<ns>`) → STS relay → worker
-/// `/v1/memory/put`. Returns the worker's S3 key. Mirrors
-/// `agentkeys-mcp-server::backend::http_backend::memory_put`.
+/// `/v1/memory/put`. Returns the worker's S3 key. The whole chain (request
+/// shapes + STS relay) is owned by `agentkeys-backend-client` (issue #203) — the
+/// SAME impl the MCP `HttpBackend` uses — so the daemon can't drift its cap-mint
+/// body or omni shape from the agent path again.
 async fn memory_put_real(
-    client: &reqwest::Client,
+    client: &agentkeys_backend_client::BackendClient,
     ctx: &RealMemoryCtx,
     entry: &ApiMemoryEntry,
 ) -> Result<String, String> {
+    use agentkeys_backend_client::{service_memory, CapMintOp, CapMintRequest, MemoryPutInput};
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     // 1. cap-mint for the master's own actor (operator == actor == O_master).
-    let cap_resp = client
-        .post(format!("{}/v1/cap/memory-put", ctx.broker))
-        .bearer_auth(&ctx.j1)
-        .json(&serde_json::json!({
-            "operator_omni": ctx.omni,
-            "actor_omni": ctx.omni,
-            "service": format!("memory:{}", entry.ns),
-            "device_key_hash": ctx.device_key_hash,
-            "ttl_seconds": 300,
-        }))
-        .send()
+    let cap = client
+        .cap_mint(
+            CapMintOp::MemoryPut,
+            CapMintRequest {
+                operator_omni: ctx.omni.clone(),
+                actor_omni: ctx.omni.clone(),
+                service: service_memory(&entry.ns),
+                device_key_hash: ctx.device_key_hash.clone(),
+                ttl_seconds: 300,
+            },
+            &ctx.j1,
+        )
         .await
-        .map_err(|e| format!("cap-mint transport: {e}"))?;
-    if !cap_resp.status().is_success() {
-        let status = cap_resp.status();
-        let body = cap_resp.text().await.unwrap_or_default();
-        return Err(format!("cap-mint {status}: {body}"));
-    }
-    let cap: serde_json::Value = cap_resp
-        .json()
-        .await
-        .map_err(|e| format!("cap-mint parse: {e}"))?;
+        .map_err(|e| format!("cap-mint: {e}"))?;
 
-    // 2. STS relay — per-actor creds tagged agentkeys_actor_omni == O_master.
-    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-        &ctx.broker,
-        &ctx.j1,
-        &ctx.role_arn,
-        &ctx.region,
-    )
-    .await
-    .map_err(|e| format!("STS relay: {e}"))?;
-
-    // 3. worker put → S3 bots/<O_master>/memory/memory:<ns>.enc.
-    let put_resp = client
-        .post(format!("{}/v1/memory/put", ctx.memory_url))
-        .header("x-aws-access-key-id", creds.access_key_id)
-        .header("x-aws-secret-access-key", creds.secret_access_key)
-        .header("x-aws-session-token", creds.session_token)
-        .json(&serde_json::json!({
-            "cap": cap,
-            "plaintext_b64": STANDARD.encode(entry.body.as_bytes()),
-            "namespace": entry.ns,
-        }))
-        .send()
+    // 2. STS relay (per-actor creds tagged agentkeys_actor_omni == O_master) +
+    //    3. worker put → S3 bots/<O_master>/memory/memory:<ns>.enc.
+    let result = client
+        .memory_put(MemoryPutInput {
+            cap,
+            namespace: entry.ns.clone(),
+            plaintext_b64: STANDARD.encode(entry.body.as_bytes()),
+        })
         .await
-        .map_err(|e| format!("worker put transport: {e}"))?;
-    if !put_resp.status().is_success() {
-        let status = put_resp.status();
-        let body = put_resp.text().await.unwrap_or_default();
-        return Err(format!("worker put {status}: {body}"));
-    }
-    let parsed: serde_json::Value = put_resp
-        .json()
-        .await
-        .map_err(|e| format!("worker put parse: {e}"))?;
-    Ok(parsed
-        .get("s3_key")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string())
+        .map_err(|e| format!("worker put: {e}"))?;
+    Ok(result.s3_key)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1532,8 +1511,10 @@ async fn plant_master_memory_inner(
     let mut skipped = 0usize;
 
     if let Some(ctx) = ctx {
-        // REAL chain — the master plants its own memory to the worker/S3.
-        let client = reqwest::Client::new();
+        // REAL chain — the master plants its own memory to the worker/S3 via the
+        // ONE shared broker/worker client (issue #203). Built once + reused across
+        // the loop (it wraps a pooled reqwest client).
+        let client = real_memory_client(&ctx);
         let mut errors: Vec<String> = Vec::new();
         for mut e in req.entries {
             let hash = if e.content_hash.is_empty() {

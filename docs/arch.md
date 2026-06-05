@@ -2147,6 +2147,12 @@ agentkeys/                                  # repo root
 │   │                                       #   LLM hosts over stdio / HTTP / xiaozhi
 │   │                                       #   mcp-endpoint WS relay (issue #107)
 │   ├── agentkeys-provisioner/              # Rust orchestrator that spawns TS scrapers
+│   ├── agentkeys-backend-client/           # ONE owner of the broker/worker client
+│   │                                       #   protocol (issue #203): cap-mint (4
+│   │                                       #   data-class endpoints), STS relay, worker
+│   │                                       #   put/get, memory:<ns> builder, 0x-omni
+│   │                                       #   normalize. MCP HttpBackend delegates to
+│   │                                       #   it; daemon ui_bridge calls it directly
 │   └── agentkeys-chain/                    # Solidity contracts + Rust ABI bindings
 │       ├── contracts/
 │       │   ├── AgentKeysScope.sol

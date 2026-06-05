@@ -163,6 +163,18 @@ jobs:
       # map — same convention as the existing @claude review workflow.
       - run: cargo test --workspace -- --test-threads=1
 
+      # Issue #203 drift gate (broker/worker request shapes have ONE owner).
+      # (a) the committed protocol fixtures must match what the serde types
+      #     emit — fails if a wire struct changed without regenerating; and
+      # (b) every @backend-fixture-annotated bash body under harness/ must
+      #     match the canonical key-set — fails if a hand-rolled cap/worker
+      #     body drifts (the #200 bug class: evm_address vs {address,chain_id},
+      #     dropped/renamed fields). Both are deterministic + no-network.
+      - name: Backend-protocol fixtures are canonical (issue #203)
+        run: cargo run -q -p agentkeys-backend-client --bin dump-protocol-fixtures -- --check
+      - name: No hand-rolled bash body drifted from the canonical shapes (issue #203)
+        run: bash scripts/check-backend-fixture-drift.sh
+
   detect-changes:
     # Issue #101: path-conditional triggers for auto-deploy of the test broker.
     # Computes `broker_changed` so deploy-test-broker can skip when a PR only

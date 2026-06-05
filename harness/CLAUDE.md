@@ -100,6 +100,34 @@ CLAUDE.md runbook-fix-fold-back policy, applied to every harness edit, not just 
   `heima-register-first-master.sh`'s `--operator-omni`/`--k11-cose-hex` web-path
   overrides default to the legacy deployer-derived values).
 
+## Hand-rolled cap/worker bodies — drive the CLI, or annotate + gate (issue #203)
+
+The broker/worker request shapes have ONE owner — the `agentkeys-backend-client`
+crate (see root [`../CLAUDE.md`](../CLAUDE.md) "Broker/worker request shapes have
+ONE owner"). For harness scripts that means:
+
+- **Real-path steps drive the shared client**, not raw curls — `agentkeys memory
+  put …` routes through the MCP server's `HttpBackend` → the shared client, so the
+  agent path can't drift. Prefer that over hand-rolling `jq -n '{…}'` cap/worker
+  bodies.
+- **A hand-rolled body that IS meant to mirror a wire shape** (the few real-path
+  probes + any negative test that sends a *well-formed* body) carries a
+  `# @backend-fixture: <shape>` comment **on the line directly above the jq object
+  literal** (`<shape>` ∈ `cap_mint_request`, `memory_put_body`, `memory_get_body`,
+  `audit_append_v2`). [`../scripts/check-backend-fixture-drift.sh`](../scripts/check-backend-fixture-drift.sh)
+  diffs that body's key-set against the crate-emitted fixture in
+  [`fixtures/backend-protocol/`](fixtures/backend-protocol/) and fails CI on drift
+  (the `harness-ci.yml` `rust-checks` job runs it). Place the annotation so the
+  **next `{`** after it is the object literal (e.g. *inside* a function body, not
+  above the `fn() {` line) — the gate extracts the first brace-balanced literal.
+- **Deliberately-malformed negative-test payloads are NOT annotated** — they're
+  supposed to be wrong (wrong data class, missing field, cross-actor omni). Only
+  annotate bodies that should match canonical.
+- **Changing a wire field** is a crate change, never a bash-only edit: edit
+  `agentkeys-backend-client::protocol`, regenerate fixtures (`cargo run -p
+  agentkeys-backend-client --bin dump-protocol-fixtures`), update the frozen
+  key-set test, then fix every annotated bash body to match.
+
 ## Mainnet + funding posture
 
 - Demos run on **Heima mainnet** (`AGENTKEYS_CHAIN=heima`); the deploy wallet
