@@ -330,6 +330,17 @@ impl OpenVikingClient {
             Ok(h) => h,
             Err(_) => return Vec::new(),
         };
+        // Precompute a normalized index of the authorized lines ONCE (first wins on
+        // duplicates), so each hit is an O(1) lookup instead of an O(lines) re-scan
+        // that re-normalizes every line on every hit. Matching stays O(lines + hits),
+        // so a large gate + many inline hits can't burn CPU past the deadline
+        // (the synchronous match has no await for the timeout to fire on)
+        // (/codex:adversarial-review).
+        let mut line_index: std::collections::HashMap<String, &MemoryLine> =
+            std::collections::HashMap::with_capacity(lines.len());
+        for line in lines {
+            line_index.entry(normalize(&line.text)).or_insert(line);
+        }
         let read_cap = env_usize("OPENVIKING_MAX_URI_READS", DEFAULT_MAX_URI_READS);
         let mut reads = 0usize;
         let mut out: Vec<MemoryLine> = Vec::new();
@@ -370,14 +381,12 @@ impl OpenVikingClient {
             if text.is_empty() {
                 continue;
             }
-            // Gate-bound: only ever return lines that were in the authorized set.
-            // EXACT normalized match (case/whitespace-insensitive) — NOT substring
-            // containment, which could map a partial hit onto the WRONG authorized
-            // line (e.g. "allergic to peanuts" → "Not allergic to peanuts"). The
-            // verbatim line comes from content/read, so exact equality is the right,
-            // safe join (/codex:adversarial-review).
-            let hit_norm = normalize(text);
-            if let Some(line) = lines.iter().find(|l| normalize(&l.text) == hit_norm) {
+            // Gate-bound: O(1) EXACT lookup in the precomputed normalized index —
+            // NOT substring containment (which could map a partial hit onto the WRONG
+            // line, e.g. "allergic to peanuts" → "Not allergic to peanuts") and NOT a
+            // per-hit re-scan. The verbatim line comes from content/read, so exact
+            // normalized equality is the right, safe join (/codex:adversarial-review).
+            if let Some(&line) = line_index.get(&normalize(text)) {
                 if !taken.contains(&line.seq) {
                     // Apply the byte budget INLINE (not deferred to a later pass), so
                     // an oversized matched line is SKIPPED — and does NOT count toward
@@ -1081,6 +1090,47 @@ mod tests {
             out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             vec!["Allergic to peanuts."],
             "must NOT map onto the negated line that merely contains the hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn large_gate_and_many_inline_hits_match_fast() {
+        // A large gate set + many inline hits must match in O(lines + hits) via the
+        // precomputed index, completing well under the deadline (not a per-hit
+        // O(lines) re-scan that the synchronous loop couldn't yield from)
+        // (/codex:adversarial-review).
+        let mut gate: Vec<MemoryLine> = (0..1000_usize)
+            .map(|i| MemoryLine {
+                text: format!("gate line number {i}"),
+                seq: i,
+            })
+            .collect();
+        gate.push(MemoryLine {
+            text: "Allergic to peanuts.".into(),
+            seq: 1000,
+        });
+        let mut hits: Vec<serde_json::Value> = (0..200)
+            .map(|i| serde_json::json!({ "content": format!("unrelated hit {i}") }))
+            .collect();
+        hits.push(serde_json::json!({ "content": "Allergic to peanuts." })); // the lone match
+        let endpoint = spawn_stub(serde_json::json!({ "result": { "results": hits } })).await;
+        let cl = client(endpoint);
+        let budget = SelectionBudget {
+            max_lines: Some(5),
+            max_bytes: None,
+        };
+        let start = std::time::Instant::now();
+        let out = rank_gate_bounded(&cl, "q", &gate, &budget, std::time::Duration::from_secs(5))
+            .await
+            .expect("the single matching line must be recovered from the large gate");
+        let elapsed = start.elapsed();
+        assert_eq!(
+            out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["Allergic to peanuts."]
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "O(lines+hits) matching must be fast; took {elapsed:?}"
         );
     }
 
