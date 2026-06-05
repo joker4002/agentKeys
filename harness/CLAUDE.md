@@ -189,6 +189,40 @@ sandbox) is **GREEN**, never fail/incomplete.
 single-entry orchestrators for chain bring-up + the remote broker host; harness
 scripts assume those have run.)
 
+## Parity/wiring checks evolve down a ladder — `web-parity-demo.sh` (phase 6) is meant to SHRINK
+
+A parity check ("the web flow does the same as the agent flow") is the most
+deceptively fragile kind of test: it asserts behavior at **runtime**, so it rots
+**silently** (stale green) the day either side moves. Don't plan to babysit phase 6
+forever — plan to **dissolve it into the type system** as
+[#203](https://github.com/litentry/agentKeys/issues/203) (the shared backend-client
+crate) lands.
+
+**Phase 6's honest blind spot today:** step 3 `curl`s the daemon endpoint directly
+(`POST /v1/master/memory/plant`) with a hand-built body; the real frontend
+(`apps/parent-control/lib/client/daemon.ts`) builds its OWN body at the same URL.
+They agree by manual coincidence — nothing enforces it, so a `daemon.ts`
+endpoint/shape change leaves phase 6 **green on the old path** (false-green). Phase 6
+proves "daemon → cap-mint → STS → worker → S3 is wired to real infra"; it does NOT
+prove "the React button sends what phase 6 sends."
+
+**The ladder (weakest → strongest) — push a check DOWN it whenever it catches real drift:**
+1. **Runtime behavioral assertion** (run both, compare) — rots silently. ← phase 6 today.
+2. **Shared contract / golden fixture** — both sides derive from one serde schema
+   (`agentkeys-types` + the #203 crate); CI reddens loudly on shape drift, survives
+   cosmetic refactors.
+3. **Shared implementation** — one code path; violating parity is a compile error.
+   The runtime check shrinks to a thin "is the one client wired to real infra?" smoke.
+   ← where #203 lands (its approach steps 2–5 walk phase 6 down rungs 3→2→smoke).
+
+**Operating rule:** every time phase 6 (or any parity/wiring check) catches a real
+drift, ask "could this have been a compile error or a fixture diff instead?" If yes,
+move the assertion down the ladder — the runtime check is *supposed* to get thinner.
+A parity check growing in scope is a smell; one shrinking toward a wiring smoke is
+healthy. **Until #203 lands**, plug the false-green cheaply: a single shared route
+constant referenced by both `daemon.ts` and `web-parity-demo.sh` + a CI grep guard
+that fails on divergence (fold-systemic-fixes-into-enforcement).
+
 ---
 
 <!-- The three sections below were EXTRACTED from the root CLAUDE.md (they are
