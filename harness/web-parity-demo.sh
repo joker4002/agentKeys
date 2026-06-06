@@ -56,6 +56,12 @@ profile_uc="$(printf '%s' "${AGENTKEYS_CHAIN:-heima}" | tr 'a-z-' 'A-Z_')"
 BROKER="${OIDC_ISSUER:-${AGENTKEYS_BROKER_URL:-}}"
 eval "MEMORY_URL=\${AGENTKEYS_WORKER_MEMORY_URL:-\${MEMORY_WORKER_URL:-}}"
 eval "MEMORY_ROLE_ARN=\${MEMORY_ROLE_ARN:-\${MEMORY_ROLE_ARN_${profile_uc}:-}}"
+# #201 Phase 4: when the Config substrate is present, the web plant also writes
+# the master-only memory-types taxonomy (config/memory-taxonomy.enc). Optional —
+# a missing config worker degrades to a logged warning (the memory plant still
+# proves parity), so these stay best-effort.
+CONFIG_URL="${AGENTKEYS_WORKER_CONFIG_URL:-}"
+eval "CONFIG_ROLE_ARN=\${CONFIG_ROLE_ARN:-\${CONFIG_ROLE_ARN_${profile_uc}:-}}"
 REGION="${REGION:-us-east-1}"
 PROBE_NS="${WEB_PARITY_NS:-webparity}"           # a dedicated probe ns — never clobbers real memory
 PROBE_BODY="web-parity probe :: daemon plant chain OK"
@@ -96,6 +102,12 @@ fi
 if should_run 2; then
   step 2 "Boot agentkeys-daemon --ui-bridge (seeded session — no re-onboarding)"
   [ -n "${J1:-}" ] || die "no J1 — run step 1 first"
+  # Optional Config-class args, expanded only when both are set (bash-3.2-safe
+  # empty-array expansion so `set -u` doesn't trip on an absent config worker).
+  CONFIG_FLAGS=()
+  if [ -n "$CONFIG_URL" ] && [ -n "$CONFIG_ROLE_ARN" ]; then
+    CONFIG_FLAGS=(--config-url "$CONFIG_URL" --config-role-arn "$CONFIG_ROLE_ARN")
+  fi
   "$DAEMON_BIN" --ui-bridge \
     --ui-bridge-bind   "$DAEMON_BIND" \
     --ui-bridge-origin "http://localhost:${DAEMON_PORT}" \
@@ -103,6 +115,7 @@ if should_run 2; then
     --broker-url       "$BROKER" \
     --memory-url       "$MEMORY_URL" \
     --memory-role-arn  "$MEMORY_ROLE_ARN" \
+    ${CONFIG_FLAGS[@]+"${CONFIG_FLAGS[@]}"} \
     --region           "$REGION" \
     --master-device-key-hash      "$MASTER_DKH" \
     --ui-bridge-seed-session-jwt  "$J1" \

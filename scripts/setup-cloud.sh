@@ -3,7 +3,7 @@
 #
 # First-time provisioning of the cloud-side resources that precede
 # setup-broker-host.sh: SES domain identity + S3 inbound bucket +
-# DKIM/SPF/DMARC/MX DNS + 6 broker subdomain A records + IAM users +
+# DKIM/SPF/DMARC/MX DNS + 7 broker subdomain A records + IAM users +
 # IAM roles + bucket policies. Mirrors docs/cloud-bootstrap.md
 # end-to-end.
 #
@@ -97,7 +97,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --env-file)         ENV_FILE="$2"; shift 2 ;;
     --broker-env-file)  BROKER_ENV_FILE="$2"; shift 2 ;;
-    --test)             TEST_MODE=1; shift ;;
+    --ci|--test)        TEST_MODE=1; shift ;;   # --ci = canonical CI-env flag; --test retained as alias
     --yes)              YES=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
     --from-step)        FROM_STEP="$2"; shift 2 ;;
@@ -342,7 +342,7 @@ do_step_5() {
 }
 
 do_step_6() {
-  CUR_STEP=6; step "DNS records (DKIM + SPF + DMARC + MX + 7 A records to $EIP)"
+  CUR_STEP=6; step "DNS records (DKIM + SPF + DMARC + MX + 8 A records to $EIP; 5 worker A via dns-upsert-workers.sh)"
   : "${EIP:?EIP missing — re-run step 4 first}"
 
   local tokens t1 t2 t3
@@ -353,26 +353,23 @@ do_step_6() {
   read -r t1 t2 t3 <<<"$tokens"
   [ -z "$t1" ] && die "no DKIM tokens returned — wait 30s after step 5 and re-run"
 
-  # Worker hostnames come from the operator-workstation env file (they
-  # carry the prod/test split: `signer.${ZONE}` vs `signer-test.${ZONE}`
-  # etc.). Hardcoding `signer.${ZONE}` here would silently overwrite
-  # prod DNS records to the test EIP when running --test — disaster.
+  # Worker hostnames come from the operator-workstation env file (prod/test
+  # split: `signer.${ZONE}` vs `signer-test.${ZONE}`). signer + mcp are
+  # provisioned inline here; the 5 SERVICE-worker A records
+  # (audit/email/cred/memory/config) are delegated to dns-upsert-workers.sh —
+  # the single source of truth (compose, don't duplicate; #201 fixed the drift
+  # that left config.litentry.org without an A record). dns-upsert-workers.sh
+  # validates each WORKER_*_HOST against the zone.
   : "${SIGNER_HOST:?SIGNER_HOST missing — must be set in $ENV_FILE}"
-  : "${WORKER_AUDIT_HOST:?WORKER_AUDIT_HOST missing — must be set in $ENV_FILE}"
-  : "${WORKER_EMAIL_HOST:?WORKER_EMAIL_HOST missing — must be set in $ENV_FILE}"
-  : "${WORKER_CRED_HOST:?WORKER_CRED_HOST missing — must be set in $ENV_FILE}"
-  : "${WORKER_MEMORY_HOST:?WORKER_MEMORY_HOST missing — must be set in $ENV_FILE}"
   : "${MCP_HOST:?MCP_HOST missing — must be set in $ENV_FILE}"
 
   local change_batch
   change_batch=$(jq -n \
     --arg domain "$MAIL_DOMAIN" --arg region "$REGION" \
     --arg eip "$EIP" --arg broker "$BROKER_HOST" \
-    --arg signer "$SIGNER_HOST" --arg audit "$WORKER_AUDIT_HOST" \
-    --arg email "$WORKER_EMAIL_HOST" --arg cred "$WORKER_CRED_HOST" \
-    --arg memory "$WORKER_MEMORY_HOST" --arg mcp "$MCP_HOST" \
+    --arg signer "$SIGNER_HOST" --arg mcp "$MCP_HOST" \
     --arg t1 "$t1" --arg t2 "$t2" --arg t3 "$t3" '{
-      Comment: "AgentKeys cloud bootstrap (DKIM/SPF/DMARC/MX + broker subdomains)",
+      Comment: "AgentKeys cloud bootstrap (DKIM/SPF/DMARC/MX + broker/signer/mcp A)",
       Changes: [
         {Action:"UPSERT", ResourceRecordSet:{Name:"\($t1)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t1).dkim.amazonses.com"}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:"\($t2)._domainkey.\($domain)", Type:"CNAME", TTL:300, ResourceRecords:[{Value:"\($t2).dkim.amazonses.com"}]}},
@@ -382,20 +379,27 @@ do_step_6() {
         {Action:"UPSERT", ResourceRecordSet:{Name:"_dmarc.\($domain)", Type:"TXT", TTL:300, ResourceRecords:[{Value:"\"v=DMARC1; p=quarantine; rua=mailto:dmarc@\($domain)\""}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$broker, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$signer, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:$audit,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:$email,  Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:$cred,   Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
-        {Action:"UPSERT", ResourceRecordSet:{Name:$memory, Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}},
         {Action:"UPSERT", ResourceRecordSet:{Name:$mcp,    Type:"A", TTL:300, ResourceRecords:[{Value:$eip}]}}
       ]
     }')
 
-  [ "$DRY_RUN" = "1" ] && { warn "DRY: would change-resource-record-sets (13 UPSERTs)"; return; }
+  if [ "$DRY_RUN" = "1" ]; then
+    warn "DRY: would change-resource-record-sets (9 inline records: DKIM/MX/TXT + broker/signer/mcp)"
+  else
+    aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
+      --change-batch "$change_batch" >/dev/null \
+      || die "route53 change-resource-record-sets failed"
+    ok "DNS records UPSERTed (9 inline records; ~5min for DKIM verification)"
+  fi
 
-  aws route53 change-resource-record-sets --hosted-zone-id "$PARENT_ZONE_ID" \
-    --change-batch "$change_batch" >/dev/null \
-    || die "route53 change-resource-record-sets failed"
-  ok "DNS records UPSERTed (13 records; ~5min for DKIM verification)"
+  # 5 service-worker A records (audit/email/cred/memory/config) — single source
+  # of truth in dns-upsert-workers.sh. --no-verify = parity with the inline submit
+  # above (no INSYNC/DoH wait); honors --dry-run + the resolved EIP + the same
+  # ENV_FILE (so the prod/test split carries through to the delegate).
+  local dns_worker_args=( --eip "$EIP" --no-verify )
+  [ "$DRY_RUN" = "1" ] && dns_worker_args+=( --dry-run )
+  ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/dns-upsert-workers.sh" "${dns_worker_args[@]}" \
+    || die "dns-upsert-workers.sh (service-worker A records) failed"
 }
 
 do_step_7() {
@@ -655,16 +659,22 @@ do_step_12() {
 do_step_13() {
   CUR_STEP=13; step "Per-data-class buckets + roles (delegates to provision-*.sh)"
   if [ "$DRY_RUN" = "1" ]; then
-    warn "DRY: would run provision-{vault,memory}-{bucket,role}.sh + apply-{vault,memory}-bucket-policy.sh"
+    warn "DRY: would run provision-{vault,memory,config}-{bucket,role}.sh + apply-{vault,memory,config}-bucket-policy.sh"
     return
   fi
-  bash "$SCRIPT_DIR/provision-vault-bucket.sh"
-  bash "$SCRIPT_DIR/provision-vault-role.sh"
-  bash "$SCRIPT_DIR/provision-memory-bucket.sh"
-  bash "$SCRIPT_DIR/provision-memory-role.sh"
-  bash "$SCRIPT_DIR/apply-vault-bucket-policy.sh"
-  bash "$SCRIPT_DIR/apply-memory-bucket-policy.sh"
-  ok "per-data-class provisioning complete"
+  # Pass ENV_FILE through so --ci/--test provisions the -test buckets/roles. Each
+  # provision/apply script defaults ENV_FILE to operator-workstation.env (prod) and
+  # `set -a; . "$ENV_FILE"` OVERWRITES any inherited CONFIG_BUCKET — so WITHOUT this
+  # passthrough a --ci run would silently provision the PROD buckets. config = #201
+  # (master-only policy / memory-types taxonomy).
+  local provisioner
+  for provisioner in provision-vault-bucket provision-vault-role \
+                     provision-memory-bucket provision-memory-role \
+                     provision-config-bucket provision-config-role \
+                     apply-vault-bucket-policy apply-memory-bucket-policy apply-config-bucket-policy; do
+    ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/$provisioner.sh"
+  done
+  ok "per-data-class provisioning complete (env: $(basename "$ENV_FILE"))"
 }
 
 do_step_14() {

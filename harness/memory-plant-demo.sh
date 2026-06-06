@@ -47,7 +47,8 @@ ok()   { printf '  %s %s\n' "$(c '1;32' ok)" "$1" >&2; }
 skip() { printf '  %s %s\n' "$(c '1;33' skip)" "$1" >&2; }
 die()  { printf '  %s %s\n' "$(c '1;31' fail)" "$1" >&2; [ "$CI" = 1 ] && { skip "CI — tolerated"; exit 0; }; exit 1; }
 
-# The prepared archive (ONE blob per namespace — the worker's per-namespace model).
+# The prepared archive (ONE blob per namespace — the worker's per-namespace model;
+# each blob is a #201-Phase-4 JSON array of {key,title,body,updated,bytes}).
 # Mirrors apps/parent-control/lib/preparedMemory.ts; kept small + self-contained.
 NAMESPACES="travel personal family"
 plain_for() { case "$1" in
@@ -131,7 +132,13 @@ if should_run 4; then
   sts_relay || die "STS relay failed"
   for ns in $NAMESPACES; do
     cap=$(mint_cap memory-put "$ns")   # re-mint fresh (short-TTL; no cross-step array — bash 3.2)
-    b64=$(printf '%s' "$(plain_for "$ns")" | base64 | tr -d '\n')
+    # #201 Phase 4: each ns blob is a JSON array of {key,title,body,updated,bytes}
+    # — byte-for-byte the daemon's memory_put_ns_real format, so the web plant and
+    # this script write the SAME on-disk shape for the master's own blobs.
+    content="$(plain_for "$ns")"
+    arr=$(jq -n --arg k "$ns" --arg b "$content" \
+      '[{key:$k, title:$k, body:$b, updated:"2026-06-05", bytes:($b|length)}]')
+    b64=$(printf '%s' "$arr" | base64 | tr -d '\n')
     body=$(jq -n --argjson cap "$cap" --arg p "$b64" --arg n "$ns" '{cap:$cap, plaintext_b64:$p, namespace:$n}')
     resp=$(curl -sS -X POST "$MEMORY_URL/v1/memory/put" \
       -H "x-aws-access-key-id: $AK" -H "x-aws-secret-access-key: $SK" -H "x-aws-session-token: $STK" \
@@ -151,8 +158,12 @@ if should_run 5; then
     -H "x-aws-access-key-id: $AK" -H "x-aws-secret-access-key: $SK" -H "x-aws-session-token: $STK" \
     -H 'content-type: application/json' -d "$(jq -n --argjson cap "$cap" --arg n "$ns" '{cap:$cap, namespace:$n}')" 2>&1)
   got=$(echo "$resp" | jq -r '.plaintext_b64 // empty' 2>/dev/null | base64 -d 2>/dev/null || true)
-  echo "$got" | grep -q "Chengdu" || die "read-back of memory:$ns did not return the planted content: $resp"
-  ok "read-back of memory:$ns returned the planted content ✓ (real S3 round-trip)"
+  # #201 Phase 4: the blob is a JSON array — assert the shape AND the content
+  # round-tripped (fall back to a substring match for resilience).
+  echo "$got" | jq -e '.[0].body | contains("Chengdu")' >/dev/null 2>&1 \
+    || echo "$got" | grep -q "Chengdu" \
+    || die "read-back of memory:$ns did not return the planted content: $resp"
+  ok "read-back of memory:$ns returned the planted JSON-array content ✓ (real S3 round-trip)"
 fi
 
 printf '\n%s master memory planted + verified through the REAL chain (same path as the web plant button).\n' "$(c '1;32' 'DONE ·')" >&2
