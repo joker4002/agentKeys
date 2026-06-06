@@ -653,6 +653,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // (issue #214). The master pulls the broker's pending agent bindings
         // (agents it claimed, awaiting on-chain register) for the pairing screen.
         .route("/v1/agent/pairing/pending", get(list_pairing_requests))
+        .route("/v1/agent/pairing/claim", post(claim_pairing))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -1852,6 +1853,71 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
         "requestedAt": "awaiting on-chain approval",
         "attestation": format!("PoP verified · {}", short(&pop_sig)),
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimPairingRequest {
+    pairing_code: String,
+    label: String,
+    #[serde(default)]
+    requested_scope: String,
+}
+
+/// POST /v1/agent/pairing/claim — the master claims an agent's one-time pairing
+/// code (#214, §10.2 P.1). Binds the agent under the HDKD child omni for `label`
+/// and declares its requested scope, via the broker, using the master's J1
+/// session. The agent then surfaces in pending-bindings (GET …/pending) awaiting
+/// the master's on-chain register. Reuses `agentkeys_cli::agent_admin::agent_claim`.
+async fn claim_pairing(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<ClaimPairingRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "no broker configured (--broker-url)" })),
+        )
+            .into_response();
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "no master session — verify email + register the master first"
+                })),
+            )
+                .into_response()
+        }
+    };
+    let code = req.pairing_code.trim();
+    let label = req.label.trim();
+    if code.is_empty() || label.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "pairing_code and label are required" })),
+        )
+            .into_response();
+    }
+    match agentkeys_cli::agent_admin::agent_claim(broker, code, label, &req.requested_scope, &j1)
+        .await
+    {
+        Ok(body) => {
+            let claim: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "ok": true }));
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "claim": claim })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("agent claim: {e:#}") })),
+        )
+            .into_response(),
+    }
 }
 
 async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {

@@ -471,6 +471,17 @@ export class DaemonBackend implements AgentKeysClient {
     return { ok: true, data: r.data.requests };
   }
 
+  // #214: claim an agent's one-time pairing code → broker /v1/agent/pairing/claim.
+  async claimPairing(input: { code: string; label: string; scope?: string }): Promise<Result<void>> {
+    const r = await this.postJson<unknown>('/v1/agent/pairing/claim', {
+      pairing_code: input.code,
+      label: input.label,
+      requested_scope: input.scope ?? '',
+    });
+    if (!r.ok) return r;
+    return { ok: true, data: undefined };
+  }
+
   async listCredentials(): Promise<Result<CredService[]>> {
     const r = await this.getJson<{
       credentials: { service: string; category: string; sensitivity: 'safe' | 'sensitive' }[];

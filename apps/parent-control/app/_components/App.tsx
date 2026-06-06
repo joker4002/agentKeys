@@ -72,6 +72,7 @@ export function App() {
   // #207 credentials data class — the master's vaulted credentials (categorized).
   const [credentials, setCredentials] = useState<CredService[]>([]);
   const [storingCred, setStoringCred] = useState(false);
+  const [claiming, setClaiming] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
   const [justPaired, setJustPaired] = useState<string | null>(null);
@@ -392,6 +393,25 @@ export function App() {
     );
   };
 
+  // #214 §10.2 P.1 — claim the agent's pairing code via the daemon → broker; on
+  // success, re-poll so the claimed agent appears in the rendezvous (awaiting
+  // on-chain register + scope approval).
+  const claimPairing = async (input: { code: string; label: string }) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to claim a pairing code.');
+      return;
+    }
+    setClaiming(true);
+    const r = await client.claimPairing(input);
+    setClaiming(false);
+    if (!r.ok) {
+      showToast('Claim failed — check the code + that your master session is active.');
+      return;
+    }
+    showToast(`Claimed ${input.label} — now awaiting your on-chain approval.`);
+    await refreshPairing();
+  };
+
   const handleRevokeDevice = (actor: Actor) => {
     setPendingAction({
       kind: 'revoke-device',
@@ -576,7 +596,7 @@ export function App() {
           <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
         {page === 'pairing' && (
-          <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />
+          <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} />
         )}
         {page === 'audit' && <AuditFeed events={events} status={status} onPick={(e) => { setEventDetail(e); go('decode'); }} paused={paused} onPause={() => setPaused((p) => !p)} />}
         {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}

@@ -160,6 +160,10 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async claimPairing(_input: { code: string; label: string; scope?: string }): Promise<Result<void>> {
+    return disconnected();
+  }
+
   async listCredentials(): Promise<Result<CredService[]>> {
     return disconnected();
   }

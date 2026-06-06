@@ -348,6 +348,10 @@ export interface AgentKeysClient {
   // on-chain register + scope. REAL data; the device key never touches the
   // master. (claim-by-code + register + scope land in follow-up slices.)
   listPairingRequests(): Promise<Result<PairingRequest[]>>;
+  // Claim an agent's one-time pairing code (#214 §10.2 P.1) — binds it under a
+  // label + declares its requested scope via the broker. The agent then appears
+  // in listPairingRequests() awaiting on-chain register.
+  claimPairing(input: { code: string; label: string; scope?: string }): Promise<Result<void>>;
 
   // §credentials data class (#207). The SAME abstraction as memory: list the
   // master's stored credential services (categorized via the catalog) and vault
