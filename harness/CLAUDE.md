@@ -188,8 +188,13 @@ Every orchestrator + the operator runbook MUST keep this split exact:
   runs the deferred roundtrip with the sandbox-held key via `sbx_exec`). The master never
   signs for the agent. This is the real agent-side coverage.
 - **CI (`--ci`) — headless, no biometric, no sandbox.** Software register (no Touch ID), stub
-  K11 (`WEBAUTHN_MODE=0`), and the **mock agent** for the agent-side steps (the sole
-  sanctioned synthetic agent, contract rule 5). Tolerates prereq skips.
+  K11 (`WEBAUTHN_MODE=0`), the **mock agent** for the agent-side steps (the sole
+  sanctioned synthetic agent, contract rule 5), and **stage-1 auto-skips
+  deploy/email/provision** (CI runs against pre-provisioned infra — contracts pinned,
+  wallet_sig identity, buckets/roles an operator one-shot). Tolerates prereq skips.
+  `harness-ci.yml` runs the WHOLE orchestrator — **`v2-demo.sh --ci` → phases 1–4 + 6**
+  (phase 5/wire auto-skips: no aiosandbox). So phase 6 (the daemon web-chain runtime
+  proof) IS exercised in CI; the only phase CI can't run is the sandbox-bound wire.
 
 **Fresh-ceremony / re-testable rule:** an operator run must EXERCISE the ceremony (Touch ID),
 not silently skip it — never let a re-run look "tested" while the biometric never fired.
