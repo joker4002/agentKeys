@@ -638,6 +638,11 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/master/config/init", post(init_config_default))
         .route("/v1/master/classify/tag", post(classify_tag))
         .route("/v1/master/classify/propose", post(classify_propose))
+        .route("/v1/master/credentials", get(list_master_credentials))
+        .route(
+            "/v1/master/credentials/store",
+            post(store_master_credential),
+        )
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -1925,6 +1930,8 @@ async fn mint_master_cap(
         "memory-get" => CapMintOp::MemoryGet,
         "config-store" => CapMintOp::ConfigStore,
         "config-fetch" => CapMintOp::ConfigFetch,
+        "cred-store" => CapMintOp::CredStore,
+        "cred-fetch" => CapMintOp::CredFetch,
         other => return Err(format!("mint_master_cap: unknown cap route {other}")),
     };
     let client = BackendClient::new(
@@ -2836,6 +2843,265 @@ async fn classify_propose(
         .into_response()
 }
 
+// ─── #207: master CREDENTIALS surface (same abstraction as memory) ───────────
+//
+// Credentials are a first-class data class in the app, mirroring memory: the
+// memory list resolves namespaces → categories (the taxonomy); the credentials
+// list resolves stored services → categories (the catalog). Both are
+// list-then-categorize over the master's own real data. Real data or a loud
+// failure — no in-memory stand-in (the unconfigured dev case is an honest empty).
+
+struct RealCredCtx {
+    broker: String,
+    cred_url: String,
+    role_arn: String,
+    region: String,
+    j1: String,
+    omni: String,
+    device_key_hash: String,
+}
+
+/// Resolve the cred-worker context from env (`AGENTKEYS_WORKER_CRED_URL` +
+/// `VAULT_ROLE_ARN`, which the daemon's launcher sources from
+/// operator-workstation.env) + the master session. `Ok(None)` when the cred
+/// worker isn't configured (dev/no-infra). A partial config (URL set but role
+/// missing) fails loud (issue #90 discipline).
+async fn real_cred_ctx(state: &UiBridgeState) -> Result<Option<RealCredCtx>, String> {
+    let cred_url = match std::env::var("AGENTKEYS_WORKER_CRED_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return Ok(None),
+    };
+    let role_arn = std::env::var("VAULT_ROLE_ARN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or("real cred: AGENTKEYS_WORKER_CRED_URL set but VAULT_ROLE_ARN missing")?;
+    let c = resolve_session_coords(state).await?;
+    Ok(Some(RealCredCtx {
+        broker: c.broker,
+        cred_url,
+        role_arn,
+        region: c.region,
+        j1: c.j1,
+        omni: c.omni,
+        device_key_hash: c.device_key_hash,
+    }))
+}
+
+/// A categorized credential service — the cred parallel to `MemoryCategory`:
+/// the service id + its catalog category + sensitivity (so the UI groups creds
+/// by category exactly like memory namespaces).
+#[derive(Debug, Serialize)]
+pub struct CredService {
+    pub service: String,
+    pub category: String,
+    pub sensitivity: agentkeys_catalog::Sensitivity,
+}
+
+/// `GET /v1/master/credentials` — list the master's stored credential services
+/// (cred worker `/v1/cred/list`), each categorized via the catalog. The
+/// per-data-class parallel to `GET /v1/master/memory`. Unconfigured (no cred
+/// worker) → empty (honest dev); a configured-but-broken worker → 502.
+async fn list_master_credentials(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    match list_master_credentials_inner(&state).await {
+        Ok(creds) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "credentials": creds })),
+        )
+            .into_response(),
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+async fn list_master_credentials_inner(
+    state: &SharedUiBridgeState,
+) -> Result<Vec<CredService>, (StatusCode, String)> {
+    let ctx = match real_cred_ctx(state).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(Vec::new()), // no cred worker configured (dev) → empty
+        Err(e) => return Err((StatusCode::CONFLICT, format!("cred not ready: {e}"))),
+    };
+    let client = reqwest::Client::new();
+    let cap = mint_master_cap(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "cred-fetch",
+        "credentials",
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
+    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay (cred): {e}")))?;
+    let resp = client
+        .post(format!("{}/v1/cred/list", ctx.cred_url))
+        .header("x-aws-access-key-id", creds.access_key_id)
+        .header("x-aws-secret-access-key", creds.secret_access_key)
+        .header("x-aws-session-token", creds.session_token)
+        .json(&serde_json::json!({ "cap": cap }))
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred list transport: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "cred list {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ),
+        ));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred list json: {e}")))?;
+    let services: Vec<String> = body["services"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(services.len());
+    for svc in services {
+        let c = classify_entity(state, "credentials", &svc).await;
+        out.push(CredService {
+            service: svc,
+            category: c.category,
+            sensitivity: c.sensitivity,
+        });
+    }
+    out.sort_by(|a, b| {
+        (a.category.clone(), a.service.clone()).cmp(&(b.category.clone(), b.service.clone()))
+    });
+    Ok(out)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StoreCredRequest {
+    pub service: String,
+    pub secret: String,
+}
+
+/// `POST /v1/master/credentials/store` — vault a master credential (mint a
+/// master-self `cred-store` cap → STS → cred worker `/v1/cred/store`). The
+/// credential parallel to the memory plant. Real durable write or a loud failure.
+async fn store_master_credential(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<StoreCredRequest>,
+) -> axum::response::Response {
+    let service = req.service.trim().to_lowercase();
+    if service.is_empty() || service.len() > 64 || req.secret.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "service (1..=64) and secret are required" })),
+        )
+            .into_response();
+    }
+    let ctx = match real_cred_ctx(&state).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "no cred worker configured (set AGENTKEYS_WORKER_CRED_URL + VAULT_ROLE_ARN)" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": format!("cred not ready: {e}") }))).into_response()
+        }
+    };
+    match store_master_credential_inner(&ctx, &service, &req.secret).await {
+        Ok(category) => {
+            let evt = ApiAuditEvent {
+                id: format!("e-cred-store-{}", now_unix()),
+                ts: now_ts_hms(),
+                actor_id: "master".into(),
+                actor: "master".into(),
+                kind: "credential.store".into(),
+                detail: format!("vaulted credential · {service} · {category}"),
+                chip: "creds".into(),
+                sev: "ok".into(),
+            };
+            push_audit(&state, evt).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "service": service, "category": category })),
+            )
+                .into_response()
+        }
+        Err((status, reason)) => {
+            (status, Json(serde_json::json!({ "error": reason }))).into_response()
+        }
+    }
+}
+
+async fn store_master_credential_inner(
+    ctx: &RealCredCtx,
+    service: &str,
+    secret: &str,
+) -> Result<String, (StatusCode, String)> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let client = reqwest::Client::new();
+    let cap = mint_master_cap(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.omni,
+        &ctx.device_key_hash,
+        "cred-store",
+        service,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
+    let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
+        &ctx.broker,
+        &ctx.j1,
+        &ctx.role_arn,
+        &ctx.region,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay (cred): {e}")))?;
+    let resp = client
+        .post(format!("{}/v1/cred/store", ctx.cred_url))
+        .header("x-aws-access-key-id", creds.access_key_id)
+        .header("x-aws-secret-access-key", creds.secret_access_key)
+        .header("x-aws-session-token", creds.session_token)
+        .json(
+            &serde_json::json!({ "cap": cap, "plaintext_b64": STANDARD.encode(secret.as_bytes()) }),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("cred store transport: {e}"),
+            )
+        })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "cred store {status}: {}",
+                resp.text().await.unwrap_or_default()
+            ),
+        ));
+    }
+    Ok(bundled_catalog().tag(service).category)
+}
+
 async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
     let mut buf = state.audit.write().await;
     if buf.len() == AUDIT_BUFFER_CAP {
@@ -3159,6 +3425,23 @@ mod tests {
         // unknown namespace → conservative Sensitive (explicit pick).
         let kids = classify_entity(&state, "memory", "kids").await;
         assert_eq!(gating_for(kids.sensitivity), "k11");
+    }
+
+    #[tokio::test]
+    async fn list_credentials_empty_when_cred_worker_unconfigured() {
+        // Credentials are the same abstraction as memory, with the same honesty:
+        // no cred worker configured (AGENTKEYS_WORKER_CRED_URL unset in `cargo test`)
+        // → empty (real-data-or-nothing, no in-memory stand-in). A configured-but-
+        // broken worker would 502 instead (real_cred_ctx Ok(Some) → worker error).
+        if std::env::var("AGENTKEYS_WORKER_CRED_URL")
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
+            return; // runner has a cred worker configured — skip the unconfigured assertion
+        }
+        let state = make_state();
+        let creds = list_master_credentials_inner(&state).await.expect("list");
+        assert!(creds.is_empty());
     }
 
     #[test]

@@ -167,6 +167,15 @@ export interface SurfaceItem {
   entity: string;
 }
 
+/** A stored master credential, categorized via the catalog — the cred parallel to
+ *  a memory category (#207). Credentials are a first-class data class in the app,
+ *  same list-then-categorize abstraction as memory. */
+export interface CredService {
+  service: string;
+  category: string;
+  sensitivity: Sensitivity;
+}
+
 export interface EmailVerifyStart {
   requestId: string;
 }
@@ -245,4 +254,10 @@ export interface AgentKeysClient {
   // memory-namespace / cred-service grant in actor state + audits; returns the
   // updated actor. Reached ONLY after the master confirms (sensitive ⇒ K11).
   grantScope(actorId: string, p: ProposedScope): Promise<Result<Actor>>;
+
+  // §credentials data class (#207). The SAME abstraction as memory: list the
+  // master's stored credential services (categorized via the catalog) and vault
+  // a new one. Real durable data — no in-memory stand-in.
+  listCredentials(): Promise<Result<CredService[]>>;
+  storeCredential(service: string, secret: string): Promise<Result<{ service: string; category: string }>>;
 }

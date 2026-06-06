@@ -15,14 +15,15 @@ import { CeremonyRunner, OnboardingScreen } from './ceremony';
 import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
 import { LogoPage } from './logos';
 import { MemoryPage } from './memory';
+import { CredentialsPage } from './credentials';
 import { PairingPage } from './pairing';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
-import type { ConfigPreset, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
+import type { ConfigPreset, CredService, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
-type Page = 'actors' | 'detail' | 'memory' | 'pairing' | 'audit' | 'chain' | 'logo';
+type Page = 'actors' | 'detail' | 'memory' | 'credentials' | 'pairing' | 'audit' | 'chain' | 'logo';
 
 type PendingAction =
   | { kind: 'revoke-device'; actor: Actor; intent: Intent }
@@ -69,6 +70,9 @@ export function App() {
   // scopes for the actor currently open in detail (null = not classified yet).
   const [proposals, setProposals] = useState<ProposedScope[] | null>(null);
   const [proposing, setProposing] = useState(false);
+  // #207 credentials data class — the master's vaulted credentials (categorized).
+  const [credentials, setCredentials] = useState<CredService[]>([]);
+  const [storingCred, setStoringCred] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
   const [justPaired, setJustPaired] = useState<string | null>(null);
@@ -102,9 +106,10 @@ export function App() {
     if (!onboarded) return;
     let cancelled = false;
     (async () => {
-      const [cats, pre] = await Promise.all([
+      const [cats, pre, creds] = await Promise.all([
         client.listMemoryCategories(),
         client.listConfigPresets(),
+        client.listCredentials(),
       ]);
       if (cancelled) return;
       if (cats.ok) {
@@ -118,6 +123,7 @@ export function App() {
         setPresets(pre.data.presets);
         setDefaultPresetId(pre.data.defaultId);
       }
+      if (creds.ok) setCredentials(creds.data);
     })();
     return () => { cancelled = true; };
   }, [onboarded, client]);
@@ -243,6 +249,8 @@ export function App() {
     setPendingPreset('');
     setProposals(null);
     setProposing(false);
+    setCredentials([]);
+    setStoringCred(false);
     setPairingRequests([]);
     setPairingCeremony(null);
     setJustPaired(null);
@@ -296,6 +304,24 @@ export function App() {
   const plantMemory = () => {
     if (planting || initializing) return;
     setPlanting(true);
+  };
+
+  // #207 credentials: vault a master credential through the real chain (cap-mint →
+  // STS → cred worker → S3), then re-list. Real durable write or a loud error.
+  const storeCredential = async (service: string, secret: string) => {
+    if (storingCred) return;
+    setStoringCred(true);
+    const r = await client.storeCredential(service, secret);
+    setStoringCred(false);
+    if (r.ok) {
+      showToast(`Vaulted ${r.data.service} (${r.data.category}).`);
+      const listed = await client.listCredentials();
+      if (listed.ok) setCredentials(listed.data);
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      showToast(`Vault failed — ${m ? m[1] : detail || 'connect a daemon + a cred worker first'}.`);
+    }
   };
   const plantDone = async () => {
     setPlanting(false);
@@ -479,6 +505,9 @@ export function App() {
         <button className={`nav-item ${page === 'memory' ? 'active' : ''}`} onClick={() => go('memory')}>
           <span className="marker">[◇]</span> memory<span className="count">{categories.length || '∅'}</span>
         </button>
+        <button className={`nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
+          <span className="marker">[$]</span> credentials<span className="count">{credentials.length || '∅'}</span>
+        </button>
         <button className={`nav-item ${page === 'pairing' ? 'active' : ''}`} onClick={() => go('pairing')}>
           <span className="marker">[⇄]</span> pairing
           {pairingRequests.length > 0 && <span className="count" style={{ color: 'var(--accent)' }}>{pairingRequests.length}●</span>}
@@ -530,6 +559,9 @@ export function App() {
         )}
         {page === 'memory' && (
           <MemoryPage categories={categories} entriesByNs={entriesByNs} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
+        )}
+        {page === 'credentials' && (
+          <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
         )}
         {page === 'pairing' && (
           <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />

@@ -91,4 +91,18 @@ The **plant prepared demo archive** button below is a **test/demo seed** — it
 imports a small fixed set of example memories (a trip, a profile) so the page has
 data to show. It is idempotent (re-planting is a no-op) and is not the production
 path; planting also only adds namespaces to your taxonomy, never removing the
-ones a preset authored.
+ones a preset authored. (Nothing is planted automatically — onboarding only
+authors the category index; memory entries appear only when **you** plant them.)
+
+## Credentials (parent-control)
+
+The **credentials** page is the same data-class abstraction as memory: it lists
+the credentials you've vaulted, **categorized by the shared catalog** (`stripe →
+payments`, `openrouter → ai-services`), with sensitive categories (payments,
+access-control, health, …) flagged — exactly like memory namespaces are grouped
+by category. Each is stored encrypted (AES-256-GCM, K3 KEK) at
+`bots/<you>/credentials/<service>.enc` through the real chain (cap-mint → STS →
+cred worker → S3); the secret is **decrypt-on-read and never shown** in the UI. An
+agent can fetch a credential only with a granted `cred:<service>` scope. **Vault a
+credential** with the form on that page (service id + secret). Listing is
+**master-only** — an agent's single-service cap can't enumerate your vault.

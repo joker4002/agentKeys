@@ -6,6 +6,7 @@ import type {
   ConfigPresetList,
   ConnectionStatus,
   CredCategorization,
+  CredService,
   DisconnectedStatus,
   EmailVerifyStart,
   EmailVerifyStatus,
@@ -448,6 +449,30 @@ export class DaemonBackend implements AgentKeysClient {
     );
     if (!r.ok) return r;
     return { ok: true, data: apiToActor(r.data) };
+  }
+
+  async listCredentials(): Promise<Result<CredService[]>> {
+    const r = await this.getJson<{
+      credentials: { service: string; category: string; sensitivity: 'safe' | 'sensitive' }[];
+    }>('/v1/master/credentials');
+    if (!r.ok) return r;
+    return {
+      ok: true,
+      data: r.data.credentials.map((c) => ({
+        service: c.service,
+        category: c.category,
+        sensitivity: c.sensitivity,
+      })),
+    };
+  }
+
+  async storeCredential(service: string, secret: string): Promise<Result<{ service: string; category: string }>> {
+    const r = await this.postJson<{ ok: boolean; service: string; category: string }>(
+      '/v1/master/credentials/store',
+      { service, secret },
+    );
+    if (!r.ok) return r;
+    return { ok: true, data: { service: r.data.service, category: r.data.category } };
   }
 }
 

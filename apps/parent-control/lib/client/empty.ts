@@ -5,6 +5,7 @@ import type {
   ConfigPresetList,
   ConnectionStatus,
   CredCategorization,
+  CredService,
   DisconnectedStatus,
   EmailVerifyStart,
   EmailVerifyStatus,
@@ -144,6 +145,14 @@ export class EmptyBackend implements AgentKeysClient {
   }
 
   async grantScope(_actorId: string, _p: ProposedScope): Promise<Result<Actor>> {
+    return disconnected();
+  }
+
+  async listCredentials(): Promise<Result<CredService[]>> {
+    return disconnected();
+  }
+
+  async storeCredential(_service: string, _secret: string): Promise<Result<{ service: string; category: string }>> {
     return disconnected();
   }
 }
