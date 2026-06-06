@@ -67,8 +67,12 @@ bash harness/v2-demo.sh --ci   # software register, mock agent, tolerate prereq 
 ```
 
 `--ci` (or the runner's `$CI`) ⇒ `--signer software` + `--mock-agent` + `--allow-skip`
-semantics. The mock agent tests the worker **plumbing only** — not the real §10.2 agent
-(that's the sandbox run above).
+semantics + **stage-1 auto-skips deploy/email/provision** (CI runs against
+pre-provisioned infra — contracts pinned in secrets, identity via wallet_sig, the
+vault/memory buckets+roles an operator one-shot). The mock agent tests the worker
+**plumbing only** — not the real §10.2 agent (that's the sandbox run above). This is
+exactly what `harness-ci.yml` runs: `v2-demo.sh --ci` → phases 1–4 + 6 (phase 5/wire
+is the only one CI can't do — no aiosandbox).
 
 ---
 

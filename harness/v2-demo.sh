@@ -113,6 +113,14 @@ preflight() {
   ( cd "$PROJECT_ROOT" && cargo build --release -p agentkeys-cli -p agentkeys-daemon -p agentkeys-mcp-server ) \
     || { printf '%s\n' "$(c '1;31' '✗ preflight — cargo build failed')" >&2; exit 1; }
   say "build ok → $PROJECT_ROOT/target/release"
+  # Put the freshly-built binaries on PATH so every phase's bare `agentkeys` /
+  # `agentkeys-daemon` calls resolve to THIS build. The phases skip their own
+  # install (--skip-build / AGENTKEYS_SKIP_CLI_BUILD below), so the preflight build
+  # is the authoritative one — without this, a bare `agentkeys` only works if a
+  # (possibly stale) copy is already installed globally, and CI has none → stage 1
+  # died with `agentkeys: command not found`. export → inherited by every phase
+  # subprocess; prepended so the just-built binary wins over any global install.
+  export PATH="$PROJECT_ROOT/target/release:$PATH"
   # Signal every phase that the shared work is done → they skip their build + sanity-check.
   export AGENTKEYS_HARNESS_PREFLIGHT_DONE=1 AGENTKEYS_SKIP_CLI_BUILD=1
 }

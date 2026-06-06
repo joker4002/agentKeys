@@ -98,6 +98,7 @@ fi
 
 # Mint a cap (op=memory-put|memory-get) for the master's own actor (no scope grant).
 mint_cap() { local op="$1" ns="$2"
+  # @backend-fixture: cap_mint_request  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
   curl -sS -X POST "$BROKER/v1/cap/$op" -H "authorization: Bearer $J1" -H 'content-type: application/json' \
     -d "$(jq -n --arg o "0x$DEPLOYER_OMNI" --arg s "memory:$ns" --arg d "$MASTER_DKH" \
       '{operator_omni:$o, actor_omni:$o, service:$s, device_key_hash:$d, ttl_seconds:300}')"; }
@@ -139,6 +140,7 @@ if should_run 4; then
     arr=$(jq -n --arg k "$ns" --arg b "$content" \
       '[{key:$k, title:$k, body:$b, updated:"2026-06-05", bytes:($b|length)}]')
     b64=$(printf '%s' "$arr" | base64 | tr -d '\n')
+    # @backend-fixture: memory_put_body  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
     body=$(jq -n --argjson cap "$cap" --arg p "$b64" --arg n "$ns" '{cap:$cap, plaintext_b64:$p, namespace:$n}')
     resp=$(curl -sS -X POST "$MEMORY_URL/v1/memory/put" \
       -H "x-aws-access-key-id: $AK" -H "x-aws-secret-access-key: $SK" -H "x-aws-session-token: $STK" \
@@ -154,9 +156,11 @@ if should_run 5; then
   step 5 "Read-back proof — worker /v1/memory/get one namespace"
   sts_relay || die "STS relay failed"
   ns=travel; cap=$(mint_cap memory-get "$ns")
+  # @backend-fixture: memory_get_body  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
+  get_body=$(jq -n --argjson cap "$cap" --arg n "$ns" '{cap:$cap, namespace:$n}')
   resp=$(curl -sS -X POST "$MEMORY_URL/v1/memory/get" \
     -H "x-aws-access-key-id: $AK" -H "x-aws-secret-access-key: $SK" -H "x-aws-session-token: $STK" \
-    -H 'content-type: application/json' -d "$(jq -n --argjson cap "$cap" --arg n "$ns" '{cap:$cap, namespace:$n}')" 2>&1)
+    -H 'content-type: application/json' -d "$get_body" 2>&1)
   got=$(echo "$resp" | jq -r '.plaintext_b64 // empty' 2>/dev/null | base64 -d 2>/dev/null || true)
   # #201 Phase 4: the blob is a JSON array — assert the shape AND the content
   # round-tripped (fall back to a substring match for resilience).
