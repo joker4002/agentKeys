@@ -1331,11 +1331,18 @@ async fn grant_service_scope(
     let snapshot = actor.clone();
     drop(guard);
 
-    let how = if req.gating == "k11" { "K11-confirmed" } else { "auto-confirmed" };
+    let how = if req.gating == "k11" {
+        "K11-confirmed"
+    } else {
+        "auto-confirmed"
+    };
     let detail = if req.category.is_empty() {
         format!("granted {label} · {how} · chain commit via master K11")
     } else {
-        format!("granted {label} · {} · {how} · chain commit via master K11", req.category)
+        format!(
+            "granted {label} · {} · {how} · chain commit via master K11",
+            req.category
+        )
     };
     let evt = ApiAuditEvent {
         id: format!("e-grant-{}", now_unix()),
@@ -2713,7 +2720,10 @@ async fn classify_tag(
     let data_class = match normalize_data_class(&req.data_class) {
         Ok(d) => d,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
                 .into_response()
         }
     };
@@ -2782,7 +2792,10 @@ async fn classify_propose(
         let data_class = match normalize_data_class(&item.data_class) {
             Ok(d) => d,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
                     .into_response()
             }
         };
@@ -2934,8 +2947,10 @@ mod tests {
             cat("kids", "Kids"),                    // new ns → added
         ];
         let merged = merge_categories(existing, &incoming);
-        let by_ns: std::collections::BTreeMap<_, _> =
-            merged.iter().map(|c| (c.ns.as_str(), c.label.as_str())).collect();
+        let by_ns: std::collections::BTreeMap<_, _> = merged
+            .iter()
+            .map(|c| (c.ns.as_str(), c.label.as_str()))
+            .collect();
         assert_eq!(by_ns.get("finance"), Some(&"Finance")); // existing wins
         assert_eq!(by_ns.get("kids"), Some(&"Kids"));
         assert_eq!(merged.len(), 3);
@@ -2957,7 +2972,10 @@ mod tests {
         assert_eq!(resp.taxonomy_status, "cached"); // Config unconfigured in tests
         let ns: Vec<&str> = resp.categories.iter().map(|c| c.ns.as_str()).collect();
         for required in ["kids", "business", "smart-home", "finance", "family"] {
-            assert!(ns.contains(&required), "authored taxonomy missing {required}");
+            assert!(
+                ns.contains(&required),
+                "authored taxonomy missing {required}"
+            );
         }
         // And the master-memory list now resolves those authored categories with
         // NOTHING planted (proves "authored, not plant-derived").
@@ -3042,7 +3060,10 @@ mod tests {
         let state = make_state();
         let stripe = classify_entity(&state, "credentials", "Stripe").await;
         assert_eq!(stripe.category, "payments");
-        assert_eq!(stripe.sensitivity, agentkeys_catalog::Sensitivity::Sensitive);
+        assert_eq!(
+            stripe.sensitivity,
+            agentkeys_catalog::Sensitivity::Sensitive
+        );
         let notion = classify_entity(&state, "credentials", "notion").await;
         assert_eq!(notion.category, "productivity");
         assert_eq!(notion.sensitivity, agentkeys_catalog::Sensitivity::Safe);
@@ -3605,7 +3626,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(resp.0.services.as_ref().unwrap().contains(&"openrouter".to_string()));
+        assert!(resp
+            .0
+            .services
+            .as_ref()
+            .unwrap()
+            .contains(&"openrouter".to_string()));
 
         let resp2 = grant_service_scope(
             State(state.clone()),

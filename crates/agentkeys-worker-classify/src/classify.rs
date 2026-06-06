@@ -136,7 +136,10 @@ mod tests {
     #[test]
     fn compile_extracts_known_services_and_keywords() {
         let cat = Catalog::bundled();
-        let r = compile(&cat, "I use stripe to get paid, invest on the side, and have kids.");
+        let r = compile(
+            &cat,
+            "I use stripe to get paid, invest on the side, and have kids.",
+        );
         let cats: Vec<&str> = r.categories.iter().map(|c| c.category.as_str()).collect();
         assert!(cats.contains(&"payments")); // from "stripe"
         assert!(cats.contains(&"financial")); // from "invest"
@@ -147,7 +150,11 @@ mod tests {
     fn compile_flags_sensitive_categories() {
         let cat = Catalog::bundled();
         let r = compile(&cat, "binance trading");
-        let exch = r.categories.iter().find(|c| c.category == "exchange").unwrap();
+        let exch = r
+            .categories
+            .iter()
+            .find(|c| c.category == "exchange")
+            .unwrap();
         assert_eq!(exch.sensitivity, Sensitivity::Sensitive);
     }
 

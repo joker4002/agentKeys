@@ -345,10 +345,12 @@ fn verify_overlay_sig(
     let sig_bytes = URL_SAFE_NO_PAD
         .decode(sig_b64url)
         .map_err(|e| OverlayError::SigDecode(e.to_string()))?;
-    let sig = Signature::from_slice(&sig_bytes).map_err(|e| OverlayError::SigDecode(e.to_string()))?;
+    let sig =
+        Signature::from_slice(&sig_bytes).map_err(|e| OverlayError::SigDecode(e.to_string()))?;
     let vk = VerifyingKey::from_public_key_pem(vendor_pubkey_pem)
         .map_err(|e| OverlayError::Key(e.to_string()))?;
-    vk.verify(&digest, &sig).map_err(|_| OverlayError::SigInvalid)
+    vk.verify(&digest, &sig)
+        .map_err(|_| OverlayError::SigInvalid)
 }
 
 #[cfg(test)]
@@ -464,9 +466,7 @@ mod tests {
         // Deterministic test key (not for production) — fixed 32-byte scalar.
         let sk = p256::ecdsa::SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
         let vk = sk.verifying_key();
-        let pem = vk
-            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
-            .unwrap();
+        let pem = vk.to_public_key_pem(p256::pkcs8::LineEnding::LF).unwrap();
         (sk, pem)
     }
 }
