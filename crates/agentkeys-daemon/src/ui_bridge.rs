@@ -3629,6 +3629,42 @@ mod tests {
         assert_eq!(requested[1]["ns"][0], "family");
     }
 
+    /// #214: the pairing routes (poll / claim / register) require a configured
+    /// broker — `make_state` has none, so every one fails closed with 503 rather
+    /// than reaching the network. (Live broker behavior is the harness e2e.)
+    #[tokio::test]
+    async fn pairing_routes_fail_closed_without_a_broker() {
+        let state = make_state();
+        assert_eq!(
+            list_pairing_requests(State(state.clone())).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            claim_pairing(
+                State(state.clone()),
+                Json(ClaimPairingRequest {
+                    pairing_code: "PAIR-1234".into(),
+                    label: "demo-agent".into(),
+                    requested_scope: String::new(),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            register_pairing(
+                State(state),
+                Json(RegisterPairingRequest {
+                    request_id: "req-1".into(),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
     /// Pin the master-memory plant CONTRACT (the daemon's web API) to the
     /// committed fixture that `daemon.ts` + `web-parity-demo.sh` are gated
     /// against (issue #203 / the #206 parity ladder, rung 2). The Rust struct +
