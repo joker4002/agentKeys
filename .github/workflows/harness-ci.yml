@@ -845,7 +845,10 @@ jobs:
         #     are ONE operator one-shot (setup-cloud.sh --ci + the broker deploy's
         #     certbot). Until then step 19 (config write) + step 21 (config-worker
         #     reachability) skip cleanly; step 20 (config cap rejected by memory +
-        #     cred workers) still runs. Drop both once the test config infra exists.
+        #     cred workers) still runs. The "Guard" step below keeps this honest —
+        #     warns every run while config-test is unprovisioned (#209) + FAILS once
+        #     it becomes reachable, so the allowance can't silently persist. Drop
+        #     both (allowance + guard) once the test config infra exists.
         #
         # The workflow_dispatch `stage` input still selects a single phase
         # (`--stage N`); push/PR (stage='' / 'all') runs the full 1-4 + 6 sequence.
@@ -859,6 +862,43 @@ jobs:
             *)     ;;   # all / empty → full phases 1-4 + 6 (phase 5/wire auto-skipped)
           esac
           AGENTKEYS_CHAIN=heima bash harness/v2-demo.sh "${ARGS[@]}"
+
+      - name: Guard — stage-3 step-21 config-worker quarantine must not become permanent (#209)
+        if: ${{ inputs.stage == 'all' || inputs.stage == '3' || inputs.stage == '' }}
+        # stage-3 step 21 (run by v2-demo → phase 3) is the ONLY live proof that the
+        # deployed config worker rejects a cross-data-class cap (POST a memory/cred
+        # cap to config-test.<zone>/v1/config/put → expect 403 cap_data_class_mismatch).
+        # It is allow-skipped via config-worker-unreachable while config-test is
+        # unprovisioned (#209). Per the codex adversarial review (2026-06), that
+        # tolerance must NOT silently persist — unit tests + step 20 cannot catch
+        # deployed route/nginx/TLS/BROKER_CAP_PUBKEY/middleware drift. This guard:
+        #   - config-test UNREACHABLE → ::warning:: every run (visible, links #209),
+        #     CI stays green (the skip is legitimate — the host genuinely isn't up).
+        #   - config-test REACHABLE → ::error:: + exit 1: the infra now exists, so the
+        #     allowance must be dropped (remove config-worker-unreachable from the
+        #     v2-demo --allow-skip) and step 21 must run as a live gate. Fail-loud so
+        #     the quarantine self-dissolves the moment #209 lands.
+        run: |
+          set -uo pipefail
+          # config-test.<zone> is the TEST config worker (distinct from prod
+          # config.<zone>). TEST_BROKER_ZONE is set by the "Compute zone" step via
+          # $GITHUB_ENV; use it directly — do NOT source operator-workstation.env
+          # (whose AGENTKEYS_WORKER_CONFIG_URL could point elsewhere).
+          url="https://config-test.${TEST_BROKER_ZONE:-litentry.org}/healthz"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null) || true
+          code="${code:-000}"
+          echo "config worker healthz probe: $url → HTTP $code"
+          # Self-dissolving: once the allowance is removed, the guard is inert
+          # (so removing just the allow-skip token, without this step, is safe).
+          if ! grep -q 'allow-skip=.*config-worker-unreachable' .github/workflows/harness-ci.yml; then
+            echo "::notice::config-worker-unreachable allowance already removed — stage-3 step 21 runs as a live gate. This Guard step is now a no-op (safe to delete)."
+            exit 0
+          fi
+          if [ "$code" = "200" ]; then
+            echo "::error::config-test is now REACHABLE ($url → 200), but stage-3 step 21 is still allow-skipped via 'config-worker-unreachable'. Remove it from the v2-demo --allow-skip so step 21 runs as a LIVE config-worker isolation gate, then close #209."
+            exit 1
+          fi
+          echo "::warning::stage-3 step 21 (config-worker cap-data-class isolation, #201) is QUARANTINED — config-test unreachable ($url → HTTP $code). The LIVE config-worker rejection proof is NOT running on CI. Provision config-test via 'setup-cloud.sh --ci' to restore it (#209)."
 
       - name: Clean up harness test data (bots/<actor_omni>/ prefix)
         if: always()
