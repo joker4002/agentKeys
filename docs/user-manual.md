@@ -47,3 +47,33 @@ Remove it any time with `agentkeys wire <runtime> --unwire`.
 > `hermes config set model.default …` strips the sentinel comment lines while
 > keeping the hooks data. `agentkeys wire` detects a de-sentineled block and
 > re-wraps it on the next run, so re-running wire is always safe.
+
+## Setting up your memory categories (parent-control)
+
+Onboarding ends with a **"Set up your memory categories"** step (right after you
+bind your passkey): pick a starting profile and your taxonomy is authored before
+you connect any agent. You can **skip** it there and do it later — the **memory**
+page offers the same setup whenever your taxonomy is empty. Either way you author
+your **memory taxonomy** — the category tree every paired agent reads from
+(`memory:<namespace>`) — in one of two ways:
+
+- **A · Start from a profile** — pick one of ~10 role presets (the default is a
+  rich *adult-household* profile: kids, business, smart-home, finance, family,
+  health, travel, personal), preview its categories, and click **initialize
+  categories**. This authors your taxonomy in one step. You can re-run it or
+  switch presets later — it **merges**, so it never drops categories you already
+  have.
+- **B · Describe in your own words** — a natural-language box that compiles a
+  sentence into a taxonomy. This is shown as **coming soon**; it lands in a later
+  release.
+
+> Initializing categories writes only the **category index** (which namespaces
+> exist), not any memory contents and not agent permissions — so it needs no
+> passkey (K11) confirmation. It is **master-only**: the agents a policy governs
+> can't read or change it.
+
+The **plant prepared demo archive** button below is a **test/demo seed** — it
+imports a small fixed set of example memories (a trip, a profile) so the page has
+data to show. It is idempotent (re-planting is a no-op) and is not the production
+path; planting also only adds namespaces to your taxonomy, never removing the
+ones a preset authored.

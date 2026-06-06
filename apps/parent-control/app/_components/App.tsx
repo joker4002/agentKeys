@@ -19,7 +19,7 @@ import { PairingPage } from './pairing';
 import { EmptyState, Modal, WebAuthnModal } from './shared';
 import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
 import { PREPARED_MEMORY } from '@/lib/preparedMemory';
-import type { MasterMemoryEntry, MemoryCategory } from '@/lib/client/types';
+import type { ConfigPreset, MasterMemoryEntry, MemoryCategory, ProposedScope } from '@/lib/client/types';
 import type { Actor, AuditEvent, Namespace, PairingRequest, PreservedMemory } from './types';
 
 type Page = 'actors' | 'detail' | 'memory' | 'pairing' | 'audit' | 'chain' | 'logo';
@@ -59,6 +59,16 @@ export function App() {
   const [categories, setCategories] = useState<MemoryCategory[]>([]);
   const [entriesByNs, setEntriesByNs] = useState<Record<string, PreservedMemory[] | 'loading'>>({});
   const [planting, setPlanting] = useState(false);
+  // #207 item 1A — config-init entry point A (default-preset bootstrap): the
+  // bundled presets, the shipped default id, and the in-flight authoring state.
+  const [presets, setPresets] = useState<ConfigPreset[]>([]);
+  const [defaultPresetId, setDefaultPresetId] = useState('');
+  const [initializing, setInitializing] = useState(false);
+  const [pendingPreset, setPendingPreset] = useState('');
+  // #207 items 5/7 — connect-time auto-distribution: the classifier's proposed
+  // scopes for the actor currently open in detail (null = not classified yet).
+  const [proposals, setProposals] = useState<ProposedScope[] | null>(null);
+  const [proposing, setProposing] = useState(false);
   const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
   const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
   const [justPaired, setJustPaired] = useState<string | null>(null);
@@ -85,20 +95,28 @@ export function App() {
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
 
   // §2: list the master's memory CATEGORIES once onboarded (from the durable
-  // taxonomy, no decrypt). EmptyBackend returns disconnected → stays empty → the
-  // memory page renders its empty state.
+  // taxonomy, no decrypt) + load the bundled config-init presets (#207 item 1A)
+  // for the empty-state setup screen. EmptyBackend returns disconnected → stays
+  // empty → the memory page renders its setup/empty state.
   useEffect(() => {
     if (!onboarded) return;
     let cancelled = false;
     (async () => {
-      const r = await client.listMemoryCategories();
+      const [cats, pre] = await Promise.all([
+        client.listMemoryCategories(),
+        client.listConfigPresets(),
+      ]);
       if (cancelled) return;
-      if (r.ok) {
-        setCategories(r.data);
-      } else if (r.status.reason !== 'no-backend-configured') {
+      if (cats.ok) {
+        setCategories(cats.data);
+      } else if (cats.status.reason !== 'no-backend-configured') {
         // #201 codex finding 2: a configured-but-broken Config 502s here instead
         // of reporting an empty store — surface it rather than show a bare list.
-        showToast(`Memory categories unavailable — ${r.status.detail ?? 'config worker error'}.`);
+        showToast(`Memory categories unavailable — ${cats.status.detail ?? 'config worker error'}.`);
+      }
+      if (pre.ok) {
+        setPresets(pre.data.presets);
+        setDefaultPresetId(pre.data.defaultId);
       }
     })();
     return () => { cancelled = true; };
@@ -156,7 +174,54 @@ export function App() {
     setPage(p);
     setActorId(id);
     setSideOpen(false);
+    setProposals(null); // #207: a fresh actor detail starts un-classified
+    setProposing(false);
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'instant' });
+  };
+
+  // #207 items 5/7 — connect-time auto-distribution. Classify the agent's surface
+  // (its cred services) → sensitivity-tiered proposals. The grant itself rides the
+  // existing K11-gated scope mutation; confirming here surfaces the gesture
+  // (sensitive ⇒ explicit) and clears the proposal. No scope is written on propose.
+  const proposeForActor = async (actor: Actor) => {
+    const credSurface = (actor.services ?? [])
+      .filter((s) => s !== 'email')
+      .map((s) => ({ dataClass: 'credentials', entity: s }));
+    // #207 item 8 — agent memory inheritance: the agent can inherit the master's
+    // namespaces (the taxonomy categories); the master curates per-namespace, and
+    // sensitive namespaces (health, finance, …) land in the explicit-pick tier.
+    const memSurface = categories.map((c) => ({ dataClass: 'memory', entity: c.ns }));
+    const surface = [...memSurface, ...credSurface];
+    if (surface.length === 0) { setProposals([]); return; }
+    setProposing(true);
+    const r = await client.proposeScopes(actor.id, surface);
+    setProposing(false);
+    if (r.ok) {
+      setProposals(r.data);
+    } else {
+      const m = (r.status.detail ?? '').match(/\{"error":"([^"]+)"\}/);
+      showToast(`Classify failed — ${m ? m[1] : r.status.detail ?? 'connect a daemon, then onboard first'}.`);
+    }
+  };
+  const confirmProposal = async (actor: Actor, p: ProposedScope) => {
+    const r = await client.grantScope(actor.id, p);
+    if (r.ok) {
+      setActors((prev) => prev.map((a) => (a.id === r.data.id ? r.data : a)));
+      setProposals((prev) => (prev ? prev.filter((x) => x.service !== p.service) : prev));
+      showToast(`${p.gating === 'k11' ? 'Touch ID confirmed · ' : ''}granted ${p.service} (${p.category})`);
+    } else {
+      const m = (r.status.detail ?? '').match(/\{"error":"([^"]+)"\}/);
+      showToast(`Grant failed — ${m ? m[1] : r.status.detail ?? 'reload the page'}.`);
+    }
+  };
+  const confirmSafeSet = async (actor: Actor, ps: ProposedScope[]) => {
+    let granted = 0;
+    for (const p of ps) {
+      const r = await client.grantScope(actor.id, p);
+      if (r.ok) { granted += 1; setActors((prev) => prev.map((a) => (a.id === r.data.id ? r.data : a))); }
+    }
+    setProposals((prev) => (prev ? prev.filter((x) => x.gating !== 'auto') : prev));
+    showToast(`Confirmed ${granted} safe ${granted === 1 ? 'scope' : 'scopes'} into your daily review`);
   };
 
   // Log out: clear the local session flag and reset all in-memory view state so
@@ -171,6 +236,12 @@ export function App() {
     setCategories([]);
     setEntriesByNs({});
     setPlanting(false);
+    setPresets([]);
+    setDefaultPresetId('');
+    setInitializing(false);
+    setPendingPreset('');
+    setProposals(null);
+    setProposing(false);
     setPairingRequests([]);
     setPairingCeremony(null);
     setJustPaired(null);
@@ -187,10 +258,40 @@ export function App() {
     showToast('scope updated · K11 assertion queued for next save');
   };
 
-  // §2 plant: import the PREPARED archive through the real client seam
-  // (daemon content-hash dedup). Gated in the UI to connected + empty.
+  // #207 item 1A — config-init entry point A: author the taxonomy from a bundled
+  // preset. Two-phase like plant (ceremony → real call) so the authoring shows
+  // the same ritual. Master-self Config write; no K11 (it writes the category
+  // index, not scope grants).
+  const initDefault = (presetId: string) => {
+    if (initializing || planting) return;
+    setPendingPreset(presetId);
+    setInitializing(true);
+  };
+  const initDone = async () => {
+    setInitializing(false);
+    const r = await client.initConfigDefault(pendingPreset);
+    if (r.ok) {
+      // "cached" ⇒ Config unconfigured (dev/no-infra) — authored into the
+      // daemon's in-memory mirror only; say so rather than imply durability.
+      const cached = r.data.taxonomyStatus === 'cached';
+      setCategories(r.data.categories);
+      setEntriesByNs({});
+      showToast(
+        `Initialized · ${r.data.categories.length} categories${cached ? ' (dev cache — Config not configured)' : ''}.`,
+      );
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      const reason = m ? m[1] : detail || 'connect a daemon, then complete onboarding (login + K11 enroll) first';
+      showToast(`Initialize failed — ${reason}`);
+    }
+  };
+
+  // §2 plant: import the PREPARED archive through the real client seam (daemon
+  // content-hash dedup — idempotent server-side, so no client dedup guard needed;
+  // just block re-entry while a ceremony is running).
   const plantMemory = () => {
-    if (categories.length > 0) return; // dedup guard — already planted
+    if (planting || initializing) return;
     setPlanting(true);
   };
   const plantDone = async () => {
@@ -412,10 +513,10 @@ export function App() {
       <main className="app-main" data-section={sectionAttr}>
         {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
         {page === 'detail' && currentActor && (
-          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} />
+          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} />
         )}
         {page === 'memory' && (
-          <MemoryPage categories={categories} entriesByNs={entriesByNs} status={status} planting={planting} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
+          <MemoryPage categories={categories} entriesByNs={entriesByNs} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onView={setMemoryView} />
         )}
         {page === 'pairing' && (
           <PairingPage requests={pairingRequests} actors={actors} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} justPaired={justPaired} onManage={(id) => go('detail', id)} />

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Upsert Route 53 A records for the 5 co-located service workers
-# (audit / email / cred / memory / config) — issue #90 + #201.
+# Upsert Route 53 A records for the 6 co-located service workers
+# (audit / email / cred / memory / config / classify) — issue #90 + #201 + #207.
 #
 # All these workers live on the same EC2 box as the broker today (dev-only
 # co-location per CLAUDE.md "for production, we will isolate all the
@@ -142,8 +142,8 @@ ZONE_NAME="$(aws route53 get-hosted-zone --id "$ZONE_ID" --query 'HostedZone.Nam
 log "  zone: $ZONE_NAME"
 
 # Hostname sanity — each must end in the zone (defensive against env file drift).
-for h in "$WORKER_AUDIT_HOST" "$WORKER_EMAIL_HOST" "$WORKER_CRED_HOST" "$WORKER_MEMORY_HOST" "$WORKER_CONFIG_HOST"; do
-  [[ -n "$h" ]] || die "operator-workstation.env did not export all five WORKER_*_HOST variables (incl. WORKER_CONFIG_HOST, #201)"
+for h in "$WORKER_AUDIT_HOST" "$WORKER_EMAIL_HOST" "$WORKER_CRED_HOST" "$WORKER_MEMORY_HOST" "$WORKER_CONFIG_HOST" "$WORKER_CLASSIFY_HOST"; do
+  [[ -n "$h" ]] || die "operator-workstation.env did not export all six WORKER_*_HOST variables (incl. WORKER_CONFIG_HOST #201, WORKER_CLASSIFY_HOST #207)"
   case "$h." in
     *".$ZONE_NAME") ;;
     *) die "host $h is not under zone $ZONE_NAME — refusing to UPSERT a record outside the target zone" ;;
@@ -157,15 +157,17 @@ CHANGE_BATCH="$(jq -n \
   --arg cred   "${WORKER_CRED_HOST}."   \
   --arg memory "${WORKER_MEMORY_HOST}." \
   --arg config "${WORKER_CONFIG_HOST}." \
+  --arg classify "${WORKER_CLASSIFY_HOST}." \
   --arg ip "$EIP" \
   --argjson ttl "$TTL" '{
-    Comment: "audit/email/cred/memory/config workers co-located with broker (issue #90 + #201)",
+    Comment: "audit/email/cred/memory/config/classify workers co-located with broker (issue #90 + #201 + #207)",
     Changes: [
       {Action:"UPSERT", ResourceRecordSet:{Name:$audit,  Type:"A", TTL:$ttl, ResourceRecords:[{Value:$ip}]}},
       {Action:"UPSERT", ResourceRecordSet:{Name:$email,  Type:"A", TTL:$ttl, ResourceRecords:[{Value:$ip}]}},
       {Action:"UPSERT", ResourceRecordSet:{Name:$cred,   Type:"A", TTL:$ttl, ResourceRecords:[{Value:$ip}]}},
       {Action:"UPSERT", ResourceRecordSet:{Name:$memory, Type:"A", TTL:$ttl, ResourceRecords:[{Value:$ip}]}},
-      {Action:"UPSERT", ResourceRecordSet:{Name:$config, Type:"A", TTL:$ttl, ResourceRecords:[{Value:$ip}]}}
+      {Action:"UPSERT", ResourceRecordSet:{Name:$config, Type:"A", TTL:$ttl, ResourceRecords:[{Value:$ip}]}},
+      {Action:"UPSERT", ResourceRecordSet:{Name:$classify, Type:"A", TTL:$ttl, ResourceRecords:[{Value:$ip}]}}
     ]
   }')"
 
@@ -175,12 +177,13 @@ cat <<EOF
   Zone        : $ZONE_NAME ($ZONE_ID)
   EIP         : $EIP
   TTL         : $TTL
-  Records (5) :
+  Records (6) :
     $WORKER_AUDIT_HOST  A  $EIP
     $WORKER_EMAIL_HOST  A  $EIP
     $WORKER_CRED_HOST   A  $EIP
     $WORKER_MEMORY_HOST A  $EIP
     $WORKER_CONFIG_HOST A  $EIP
+    $WORKER_CLASSIFY_HOST A  $EIP
 
 EOF
 
@@ -190,7 +193,7 @@ if $DRY_RUN; then
   exit 0
 fi
 
-log "Submitting Route 53 change-batch (UPSERT × 5)"
+log "Submitting Route 53 change-batch (UPSERT × 6)"
 CHANGE_ID="$(aws route53 change-resource-record-sets \
   --hosted-zone-id "$ZONE_ID" \
   --change-batch "$CHANGE_BATCH" \
@@ -212,7 +215,7 @@ aws route53 wait resource-record-sets-changed --id "$CHANGE_ID"
 log "  INSYNC"
 
 log "Verifying propagation via Cloudflare DoH (local resolver may still be lying behind VPN)"
-for h in "$WORKER_AUDIT_HOST" "$WORKER_EMAIL_HOST" "$WORKER_CRED_HOST" "$WORKER_MEMORY_HOST" "$WORKER_CONFIG_HOST"; do
+for h in "$WORKER_AUDIT_HOST" "$WORKER_EMAIL_HOST" "$WORKER_CRED_HOST" "$WORKER_MEMORY_HOST" "$WORKER_CONFIG_HOST" "$WORKER_CLASSIFY_HOST"; do
   attempts=0
   until [ "$(curl -s --max-time 5 "https://cloudflare-dns.com/dns-query?name=${h}&type=A" \
               -H 'accept: application/dns-json' | jq -r '.Answer[0].data // empty')" = "$EIP" ]; do
@@ -234,7 +237,7 @@ cat <<EOF
   Next steps on the broker host:
 
     sudo bash scripts/setup-broker-host.sh --yes                              # writes HTTP-only nginx vhosts
-    for h in $WORKER_AUDIT_HOST $WORKER_EMAIL_HOST $WORKER_CRED_HOST $WORKER_MEMORY_HOST $WORKER_CONFIG_HOST; do
+    for h in $WORKER_AUDIT_HOST $WORKER_EMAIL_HOST $WORKER_CRED_HOST $WORKER_MEMORY_HOST $WORKER_CONFIG_HOST $WORKER_CLASSIFY_HOST; do
       sudo certbot certonly --webroot -w /var/www/certbot -d "\$h" \\
         --agree-tos -m ops@litentry.org --non-interactive
     done

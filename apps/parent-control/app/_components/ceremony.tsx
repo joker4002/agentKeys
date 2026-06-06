@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
-import type { AgentKeysClient } from '@/lib/client/types';
+import type { AgentKeysClient, ConfigPreset } from '@/lib/client/types';
 import { credentialToFinishPayload, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { CeremonyStep } from './types';
 import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
@@ -128,7 +128,9 @@ export function CeremonyRunner({
 // Full-screen WebAuthn login → onboarding ceremony (workflow 1).
 export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   const client = useClient();
-  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony'>('email');
+  // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
+  // → onComplete. `setup` is the last onboarding step before connecting agents.
+  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup'>('email');
   const [enrollMode, setEnrollMode] = useState<'real' | 'demo' | 'pending'>('pending');
   const [email, setEmail] = useState('');
   const [requestId, setRequestId] = useState('');
@@ -138,6 +140,47 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   const [maskEm, setMaskEm] = useState(true);
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+
+  // #207 item 1A — the onboarding setup step: author the default taxonomy.
+  const [presets, setPresets] = useState<ConfigPreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState('');
+  const [initializing, setInitializing] = useState(false);
+  const [setupCount, setSetupCount] = useState<number | null>(null); // null = not done
+  const [setupNote, setSetupNote] = useState('');
+
+  // On entering 'setup', fetch the bundled presets. If the daemon is unreachable
+  // (offline/demo), there's nothing to author — note it and let the user finish.
+  useEffect(() => {
+    if (phase !== 'setup') return;
+    let cancelled = false;
+    (async () => {
+      const r = await client.listConfigPresets();
+      if (cancelled) return;
+      if (r.ok) {
+        setPresets(r.data.presets);
+        setSelectedPreset(r.data.defaultId);
+      } else {
+        setSetupNote('Categories are set up from the app once a daemon is connected — you can do this later from the memory page.');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [phase, client]);
+
+  const initTaxonomy = async () => {
+    if (initializing || !selectedPreset) return;
+    setInitializing(true);
+    setSetupNote('');
+    const r = await client.initConfigDefault(selectedPreset);
+    setInitializing(false);
+    if (r.ok) {
+      setSetupCount(r.data.categories.length);
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      setSetupNote(`Couldn't author your categories — ${m ? m[1] : detail || 'try again from the memory page after onboarding'}.`);
+    }
+  };
+  const chosenPreset = presets.find((p) => p.id === selectedPreset) ?? presets[0];
 
   // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
   // email) comes FIRST; the WebAuthn Touch ID is Stage 2 (master binding),
@@ -309,7 +352,69 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
                 logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}
               </div>
             )}
-            <CeremonyRunner steps={stages} onDone={onComplete} stepMs={760} />
+            <CeremonyRunner steps={stages} onDone={() => setPhase('setup')} stepMs={760} />
+          </div>
+        )}
+
+        {phase === 'setup' && (
+          <div className="onboard-login">
+            {setupCount === null ? (
+              <>
+                <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your memory categories.</h1>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 16, maxWidth: 420 }}>
+                  Pick a starting profile. This authors your <strong>memory taxonomy</strong> — the category tree every agent
+                  you connect reads from and can inherit. You can refine it any time; nothing is shared with an agent until you
+                  connect one.
+                </p>
+                {presets.length > 0 ? (
+                  <>
+                    <label htmlFor="ak-preset" style={{ display: 'block', fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}>
+                      starting profile
+                    </label>
+                    <select
+                      id="ak-preset"
+                      value={selectedPreset}
+                      onChange={(e) => setSelectedPreset(e.target.value)}
+                      style={{ width: '100%', padding: '10px 11px', fontSize: 13, border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', marginBottom: 10 }}
+                    >
+                      {presets.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    </select>
+                    {chosenPreset && (
+                      <>
+                        <p className="muted" style={{ fontSize: 11.5, margin: '0 0 10px' }}>{chosenPreset.description}</p>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 16 }}>
+                          {chosenPreset.categories.map((c) => <span key={c.ns} className="chip">{c.label}</span>)}
+                        </div>
+                      </>
+                    )}
+                    <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} disabled={initializing} onClick={initTaxonomy}>
+                      {initializing ? 'authoring…' : '⊕ initialize my categories'}
+                    </button>
+                    <button className="btn" style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: 8 }} onClick={onComplete}>
+                      skip — set up later
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={onComplete}>
+                    Continue →
+                  </button>
+                )}
+                {setupNote && <div style={{ fontSize: 11.5, color: 'var(--ink-dim)', marginTop: 12 }}>{setupNote}</div>}
+              </>
+            ) : (
+              <>
+                <div className="serif" style={{ fontSize: 40, fontStyle: 'italic', color: 'var(--ok, #2a7)', marginBottom: 4 }}>✓</div>
+                <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>You&apos;re set up.</h1>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 16, maxWidth: 420 }}>
+                  Your taxonomy is ready with <strong>{setupCount} categories</strong>. The next step is to{' '}
+                  <strong>connect an agent</strong> — when you pair one, the classifier proposes which categories + credentials
+                  it may use, and you confirm (sensitive ones need Touch ID).
+                </p>
+                <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={onComplete}>
+                  Enter agentKeys →
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

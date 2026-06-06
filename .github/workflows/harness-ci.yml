@@ -762,6 +762,9 @@ jobs:
           AGENTKEYS_WORKER_CRED_URL=https://cred-test.$TEST_BROKER_ZONE
           AGENTKEYS_WORKER_MEMORY_URL=https://memory-test.$TEST_BROKER_ZONE
           AGENTKEYS_WORKER_CONFIG_URL=https://config-test.$TEST_BROKER_ZONE
+          # #207 classifier-service worker (compute gate) — derived, no new secret.
+          WORKER_CLASSIFY_HOST=classify-test.$TEST_BROKER_ZONE
+          AGENTKEYS_WORKER_CLASSIFY_URL=https://classify-test.$TEST_BROKER_ZONE
           BACKEND_URL=https://signer-test.$TEST_BROKER_ZONE
           AGENTKEYS_CHAIN=heima
           SCOPE_CONTRACT_ADDRESS_HEIMA=$SCOPE_ADDR
@@ -851,7 +854,7 @@ jobs:
         # broken auth chain or missing agent setup.
         run: |
           AGENTKEYS_CHAIN=heima \
-            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set,config-role-missing,config-worker-unreachable
+            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set,config-role-missing,config-worker-unreachable,classify-not-configured,classify-worker-unavailable
 
       - name: Clean up harness test data (bots/<actor_omni>/ prefix)
         if: always()
