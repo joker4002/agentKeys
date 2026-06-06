@@ -372,11 +372,24 @@ export function App() {
     setPairingRequests((prev) => prev.filter((r) => r.id !== id));
     showToast('Pairing request declined.');
   };
-  const refreshPairing = () => {
+  // #214: poll the REAL broker rendezvous (daemon GET /v1/agent/pairing/pending)
+  // for agents the master has claimed that await on-chain approval. Replaces the
+  // former local-state mock.
+  const refreshPairing = async () => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to poll for agent pairing codes.');
+      return;
+    }
+    const r = await client.listPairingRequests();
+    if (!r.ok) {
+      showToast('Could not reach the daemon to poll agent pairings.');
+      return;
+    }
+    setPairingRequests(r.data);
     showToast(
-      status.kind === 'connected'
-        ? 'Polled rendezvous · no pending pairing codes.'
-        : 'Connect a daemon to poll for agent pairing codes.',
+      r.data.length > 0
+        ? `${r.data.length} agent${r.data.length > 1 ? 's' : ''} awaiting on-chain approval.`
+        : 'Polled rendezvous · no pending agent pairings.',
     );
   };
 

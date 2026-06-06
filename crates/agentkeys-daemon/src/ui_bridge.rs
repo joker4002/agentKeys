@@ -643,6 +643,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             "/v1/master/credentials/store",
             post(store_master_credential),
         )
+        // Agent pairing — the web-app half of the §10.2 agent-initiated ceremony
+        // (issue #214). The master pulls the broker's pending agent bindings
+        // (agents it claimed, awaiting on-chain register) for the pairing screen.
+        .route("/v1/agent/pairing/pending", get(list_pairing_requests))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -1639,6 +1643,116 @@ async fn dev_emit_event(
 /// unconfigured or the taxonomy is confirmed missing; a configured-but-failing
 /// Config surfaces as 502 (codex finding 2 — never hide a broken Config behind a
 /// stale "looks empty" view). Per-entry detail is lazy via `.../memory/entry`.
+/// GET /v1/agent/pairing/pending — the web-app half of §10.2 agent pairing
+/// (issue #214). The master pulls the broker's pending agent bindings (agents it
+/// claimed that await on-chain register) via its J1 session, mapped to the web
+/// UI's `PairingRequest` shape. REAL data — broker `/v1/agent/pending-bindings`
+/// (reuses `agentkeys_cli::agent_admin`, the CLI master-side pairing client).
+async fn list_pairing_requests(
+    State(state): State<SharedUiBridgeState>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "no broker configured (--broker-url) — cannot pull pending agent pairings"
+            })),
+        )
+            .into_response();
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "no master session — verify email + register the master first"
+                })),
+            )
+                .into_response()
+        }
+    };
+    match agentkeys_cli::agent_admin::agent_pending_value(broker, &j1).await {
+        Ok(v) => {
+            let requests: Vec<serde_json::Value> = v
+                .get("pending")
+                .and_then(|p| p.as_array())
+                .map(|rows| rows.iter().map(pending_binding_to_request).collect())
+                .unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "requests": requests })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("broker pending-bindings: {e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// Map one broker `PendingBinding` row → the web UI's `PairingRequest` JSON
+/// (`apps/parent-control/app/_components/types.ts`). These rows are POST-claim
+/// (the one-time code was consumed at claim), so `pairCode` carries the real
+/// request handle and the UI presents them as "awaiting your on-chain approval".
+fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
+    let field = |k: &str| {
+        b.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let request_id = field("request_id");
+    let label = field("label");
+    let device_pubkey = field("device_pubkey");
+    let pop_sig = field("pop_sig");
+    let requested_scope = field("requested_scope");
+    // char-safe head…tail elision for long hex handles.
+    let short = |v: &str| -> String {
+        let n = v.chars().count();
+        if n > 18 {
+            let head: String = v.chars().take(10).collect();
+            let tail: String = v.chars().skip(n - 6).collect();
+            format!("{head}…{tail}")
+        } else {
+            v.to_string()
+        }
+    };
+    // requested_scope: comma-separated "<service>:<ns>" tokens → RequestedPerm[].
+    let requested: Vec<serde_json::Value> = requested_scope
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|tok| {
+            let (cap, ns) = match tok.split_once(':') {
+                Some((c, n)) => (
+                    c.to_string(),
+                    vec![serde_json::Value::String(n.to_string())],
+                ),
+                None => (tok.to_string(), Vec::new()),
+            };
+            serde_json::json!({ "cap": cap, "ns": ns, "reason": "requested at pairing" })
+        })
+        .collect();
+    serde_json::json!({
+        "id": request_id,
+        "agent": label,
+        "vendor": "agent",
+        "device": "sandbox device (K10)",
+        "machine": "aiosandbox",
+        "runtime": "hermes",
+        "dpub": short(&device_pubkey),
+        "dpubFull": device_pubkey,
+        "pairCode": short(&request_id),
+        "derivation": format!("//{label}"),
+        "requested": requested,
+        "requestedAt": "awaiting on-chain approval",
+        "attestation": format!("PoP verified · {}", short(&pop_sig)),
+    })
+}
+
 async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
     match resolve_categories(&state).await {
         Ok(categories) => (
@@ -3134,6 +3248,33 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #214: a broker PendingBinding row (post-claim, §10.2) maps to the web UI's
+    /// PairingRequest shape — label→agent, requested_scope→RequestedPerm[],
+    /// device_pubkey→dpub. The device key is surfaced for display only, never as
+    /// a secret, and the HDKD derivation path is reconstructed from the label.
+    #[test]
+    fn pending_binding_maps_to_pairing_request() {
+        let row = serde_json::json!({
+            "request_id": "req-abc123def456",
+            "child_omni": "0xchildomni",
+            "operator_omni": "0xmasteromni",
+            "label": "demo-agent",
+            "requested_scope": "memory:travel,memory:family",
+            "device_pubkey": "0x04aabbccddeeff00112233445566778899aabbcc",
+            "pop_sig": "0xsignaturedeadbeef0011223344556677",
+        });
+        let pr = pending_binding_to_request(&row);
+        assert_eq!(pr["id"], "req-abc123def456");
+        assert_eq!(pr["agent"], "demo-agent");
+        assert_eq!(pr["derivation"], "//demo-agent");
+        assert_eq!(pr["dpubFull"], "0x04aabbccddeeff00112233445566778899aabbcc");
+        let requested = pr["requested"].as_array().expect("requested is an array");
+        assert_eq!(requested.len(), 2, "two scope tokens");
+        assert_eq!(requested[0]["cap"], "memory");
+        assert_eq!(requested[0]["ns"][0], "travel");
+        assert_eq!(requested[1]["ns"][0], "family");
+    }
 
     /// Pin the master-memory plant CONTRACT (the daemon's web API) to the
     /// committed fixture that `daemon.ts` + `web-parity-demo.sh` are gated

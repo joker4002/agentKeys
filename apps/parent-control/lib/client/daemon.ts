@@ -28,6 +28,7 @@ import type {
   AuditEvent,
   ChipKind,
   Namespace,
+  PairingRequest,
   ScopeBits,
   StatusKind,
   Worker,
@@ -449,6 +450,15 @@ export class DaemonBackend implements AgentKeysClient {
     );
     if (!r.ok) return r;
     return { ok: true, data: apiToActor(r.data) };
+  }
+
+  // #214: poll the broker rendezvous for agents the master has claimed that
+  // await on-chain approval. The daemon maps broker PendingBinding rows → the
+  // PairingRequest shape, so this is a straight pass-through.
+  async listPairingRequests(): Promise<Result<PairingRequest[]>> {
+    const r = await this.getJson<{ requests: PairingRequest[] }>('/v1/agent/pairing/pending');
+    if (!r.ok) return r;
+    return { ok: true, data: r.data.requests };
   }
 
   async listCredentials(): Promise<Result<CredService[]>> {

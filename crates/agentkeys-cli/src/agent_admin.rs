@@ -71,6 +71,15 @@ pub async fn agent_claim(
 /// `pop_sig`, `device_key_hash`) the master needs to submit `registerAgentDevice`,
 /// keyed by `request_id`.
 pub async fn agent_pending(broker_url: &str, session_bearer: &str) -> Result<String> {
+    let v = agent_pending_value(broker_url, session_bearer).await?;
+    Ok(serde_json::to_string_pretty(&v)?)
+}
+
+/// Same as [`agent_pending`] but returns the parsed broker response
+/// (`{ "pending": [PendingBinding, …] }`) for programmatic callers — the daemon
+/// ui-bridge maps it to the web UI's pairing-request shape (issue #214). The CLI
+/// wrapper above pretty-prints this for the operator.
+pub async fn agent_pending_value(broker_url: &str, session_bearer: &str) -> Result<Value> {
     let bearer = resolve_bearer(session_bearer)?;
     let base = broker_url.trim_end_matches('/');
     let resp = client()?
@@ -84,6 +93,5 @@ pub async fn agent_pending(broker_url: &str, session_bearer: &str) -> Result<Str
     if !status.is_success() {
         return Err(anyhow!("agent pending failed: HTTP {status}: {text}"));
     }
-    let v: Value = serde_json::from_str(&text).with_context(|| format!("parse: {text}"))?;
-    Ok(serde_json::to_string_pretty(&v)?)
+    serde_json::from_str(&text).with_context(|| format!("parse: {text}"))
 }
