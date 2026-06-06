@@ -311,7 +311,7 @@ The fixture [`tests/fixtures/demo-profile.md`](../../tests/fixtures/demo-profile
 4. **MCP server 7 tools** — already shipped under [#107](https://github.com/litentry/agentKeys/issues/107); verified the hook helpers call them correctly.
 5. **Drift detection** — `agentkeys wire hermes --check-only` (single-invocation; the nightly cron wrapper is deferred — see below).
 6. **Operator runbook** — [`docs/operator-runbook-wire.md`](../operator-runbook-wire.md) — the 7-step flow + the three-act demo verification, with commands verified end-to-end.
-7. **End-to-end smoke test verified** (against the in-memory MCP backend on the host):
+7. **End-to-end smoke test verified** (at the time, against the in-memory MCP backend on the host — that backend was later removed in #207, so today this proof is the Rust `transport_conformance.rs` + the real-worker wire demo):
    - Act 1 Permissioned Memory: `memory-inject travel` → `{"context":"## Memory: travel\nChengdu trip — Apr 12 to 16, hotpot at Yulin."}`
    - Act 2 Deterministic Denial: `check --scope payment.spend` over-cap → `{"decision":"block","reason":"daily_spend_cap_exceeded: cap=500, requested=600, period=daily"}`; under-cap → `{}`
    - Auto-audit: `hook audit` → `{}`
@@ -326,6 +326,6 @@ The fixture [`tests/fixtures/demo-profile.md`](../../tests/fixtures/demo-profile
 
 - **Phase 1.b adapters** (Claude Code, Codex, OpenClaw) — out of this PR's scope by the agreed Full-Phase-1.a cut. The `RuntimeAdapter` trait is the seam they slot into. Tracked: [#133](https://github.com/litentry/agentKeys/issues/133).
 - **Nightly drift-check cron** (`agentkeys cron install --wire-drift-check`) — the `--check-only` primitive landed; scheduling it via cron + parent-UI alerting is Phase 1.b.
-- **Real master-pairing identity flow** (steps 2-3 of the journey) — the wire command defaults to the in-memory demo actor/operator; production identity comes from the existing `agentkeys init` pairing, wired via `--actor-omni` / `--operator-omni` (supported, not yet defaulted from a live session).
+- **Real master-pairing identity flow** (steps 2-3 of the journey) — at the time the wire command defaulted to the in-memory demo actor/operator (that demo-actor default was removed in #207 — there is no fake default now); production identity comes from the existing `agentkeys init` pairing, wired via `--actor-omni` / `--operator-omni` (supported, not yet defaulted from a live session).
 - **Cap-mint pre-warming for sub-50ms hook latency** (plan §6 deliverable 5 of the broader list / strategy §5 Phase 3) — the hooks call the MCP server per-invocation; the daemon cap-cache optimization is a Phase 3 latency concern, not a correctness gap.
-- **Live demo against real Hermes inside aiosandbox** — verified on the host with a stub Hermes (`hermes --version` + `hooks doctor`) + the real in-memory MCP backend. The real-Hermes-in-sandbox run is an operator step in the runbook §5–7.
+- **Live demo against real Hermes inside aiosandbox** — verified on the host with a stub Hermes (`hermes --version` + `hooks doctor`) + the in-memory MCP backend (since removed, #207 — the real-worker path is the only one now). The real-Hermes-in-sandbox run is an operator step in the runbook §5–7.

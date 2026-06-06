@@ -22,16 +22,18 @@
 
 - **Master = MacBook** holds the operator identity + authority actions (provision, grant, revoke).
 - **Agent = sandbox** holds the actor identity; Hermes runs here, wired so its hooks call AgentKeys as the actor.
-- **Backend = real** (`--backend http`). The in-memory backend (Mode L below) is the fast pre-check; the account-reuse test is Mode R.
+- **Backend = real** (`--backend http`) — the only backend (the in-memory `--light`/Mode L pre-check was removed, #207).
 
-## 2. Two run modes
+## 2. Run mode — real only
+
+> The in-memory **Mode L** (`--backend in-memory`, the `--light` pre-flight) was
+> **removed in #207** (real-data-only). The harness runs **Mode R** only — there
+> is no fast in-memory plumbing check anymore; the MCP protocol/transport proof
+> is now the Rust `crates/agentkeys-mcp-server/tests/transport_conformance.rs`.
 
 | Mode | Backend | Account | Use |
 |---|---|---|---|
-| **L — light** (inner loop) | `--backend in-memory` (seeds demo actor + `travel`/`family`/`profile`) | none; demo constants | Fast plumbing check of wire + hooks. Already passing (PR #141 smoke test). Fully automated, no manual gates except none. |
 | **R — real** (this plan) | `--backend http` → live broker + workers + Heima | **reuse** `setup-heima.sh` master (`alice`) + agent (`demo-agent`) | The account-reuse end-to-end. The table below is Mode R. |
-
-The harness defaults to **Mode R**; pass `--light` to run Mode L as a pre-flight.
 
 ## 3. Automation-decision principles
 

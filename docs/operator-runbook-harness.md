@@ -54,8 +54,8 @@ bash "$HOME/sandbox-agent-isolation.sh"   # the REAL agent: the deferred roundtr
 ```
 
 (If `v2-demo.sh` reported the wire phase **skipped — no aiosandbox**, the agent wasn't paired:
-set the sandbox up and re-pair with `bash harness/v2-demo.sh --from 5`. `--light` is the offline
-dev loop only — never for assertions.)
+set the sandbox up and re-pair with `bash harness/v2-demo.sh --from 5`. The wire demo is
+`--real`-only now — the in-memory `--light` path was removed, #207.)
 
 ### On CI
 
@@ -125,7 +125,7 @@ is the only one CI can't do — no aiosandbox).
   → S3 `bots/<actor>/memory/`, passively injected each turn by the `pre_llm_call` hook. **Pairs the
   §10.2 agent AND the master grants its `memory:<ns>` scope via Touch ID** (`--webauthn`; the agent's
   cap service is `memory:<ns>`, so without the grant `memory.get` → `service_not_in_scope`). The
-  **only** real-memory proof (never `--light`).
+  **only** real-memory proof (real-only — the in-memory `--light` path was removed, #207).
 - **phase 6 — web↔agent parity** (`web-parity-demo.sh`): boots `agentkeys-daemon --ui-bridge` (seeded
   with the master's J1 + device via the `--ui-bridge-seed-*` seam, so it skips re-onboarding) and
   plants a dedicated `webparity` probe namespace through the **web** endpoint
@@ -237,9 +237,9 @@ and run `bash harness/v2-demo.sh`; **phase 5 does the wiring**. Only reach for
 `openviking-sandbox-setup.sh` **after** a green run, to swap the memory engine to OpenViking —
 see [`operator-runbook-openviking.md`](operator-runbook-openviking.md).
 
-**Q. The wire test says "must pass `--real` or `--light`".**
-It refuses to guess — `--real` hits the live broker + real S3 (spend), `--light` is offline
-dev. Operators want `--real`. Never assert against `--light` (it auto-seeds a fake fixture).
+**Q. What mode does the wire test run in?**
+`--real` only (the default) — it hits the live broker + real S3 (spend). The in-memory
+`--light` path was removed (#207, real-data-only); passing `--light` now errors.
 
 **Q. `ServiceNotInScope` on a master-self cap (stage 3 step 16)?**
 Not a missed step — the **deployed** broker is pre-#195 (the repo/`origin/main` have the skip;

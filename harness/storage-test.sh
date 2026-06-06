@@ -10,29 +10,21 @@
 #   4. test suites    — runs the REAL storage code paths: envelope crypto
 #                       (encrypt-at-rest), per-actor S3 key derivation,
 #                       namespace isolation (#147), and the pluggable engine.
-#   5. live roundtrip — starts an in-process MCP server (in-memory backend) and
-#                       drives put → get → inject end-to-end, plus an engine
-#                       selection check (lexical + budget).
 #
-# Idempotent: every run is a cargo no-op when nothing changed; the MCP server
-# is killed + restarted fresh (ephemeral state) each run. Re-run safely.
+# Idempotent: every run is a cargo no-op when nothing changed. Re-run safely.
 #
-# NOT a real-S3 proof. The in-memory backend exercises the put/get/engine
-# PLUMBING without AWS. For the authoritative real-worker proof (broker cap-mint
-# → per-actor STS → memory.litentry.org → S3), run:
+# Unit-level only — these are the REAL storage code paths exercised in-process,
+# NOT an end-to-end S3 proof. (The in-memory MCP live-roundtrip step was removed
+# with the in-memory backend — real-data-only.) For the authoritative real-worker
+# proof (broker cap-mint → per-actor STS → memory.litentry.org → S3), run:
 #     bash harness/phase1-wire-demo.sh --real
 #
-# Usage: bash harness/storage-test.sh [--release] [--no-build] [--keep-server]
+# Usage: bash harness/storage-test.sh [--release] [--no-build]
 #   --release       build + test in release profile (default: debug, faster)
 #   --no-build      skip the build step (use existing binaries)
-#   --keep-server   leave the MCP server running after exit (for manual poking)
 #
 # Env overrides (no hardcoded values — all have sane defaults):
 #   CARGO_TARGET_DIR / CARGO_HOME          build cache locations
-#   STORAGE_TEST_PORT (18099)              MCP listen port
-#   STORAGE_TEST_ACTOR / _OPERATOR / _DEVICE   demo identities (mirror
-#                                          crates/agentkeys-mcp-server/src/backend/in_memory.rs)
-#   STORAGE_TEST_VENDOR (magiclick) / _TOKEN (demo-tok)
 
 set -uo pipefail
 
@@ -51,12 +43,10 @@ FAILED=0
 PROFILE="debug"
 CARGO_PROFILE_FLAG=""
 DO_BUILD=1
-KEEP_SERVER=0
 for arg in "$@"; do
   case "$arg" in
     --release)     PROFILE="release"; CARGO_PROFILE_FLAG="--release" ;;
     --no-build)    DO_BUILD=0 ;;
-    --keep-server) KEEP_SERVER=1 ;;
     -h|--help)     grep '^#' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
     *)             echo "unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -70,15 +60,8 @@ export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 # AGENTKEYS_BROKER_URL leak that otherwise makes provision tests hit prod.
 unset AGENTKEYS_BROKER_URL AGENTKEYS_DATA_ROLE_ARN 2>/dev/null || true
 
-ACTOR="${STORAGE_TEST_ACTOR:-0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7}"
-OPERATOR="${STORAGE_TEST_OPERATOR:-0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8}"
-DEVICE="${STORAGE_TEST_DEVICE:-0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef}"
-PORT="${STORAGE_TEST_PORT:-18099}"
-VENDOR="${STORAGE_TEST_VENDOR:-magiclick}"
-TOKEN="${STORAGE_TEST_TOKEN:-demo-tok}"
-MCP_URL="http://127.0.0.1:$PORT/mcp"
 ok "cache" "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
-ok "env" "profile=$PROFILE port=$PORT actor=${ACTOR:0:12}…"
+ok "env" "profile=$PROFILE"
 
 # ─── step 1 — prereqs ────────────────────────────────────────────────────────
 log "step 1 — prereqs"
@@ -123,62 +106,9 @@ run_suite agentkeys-worker-memory     # s3_key derivation, memory/credentials pr
 run_suite agentkeys-mcp-server        # memory.put / memory.get tools
 run_suite agentkeys-cli --lib         # engine wiring: wire-bake + hook (--lib skips env-dependent provision integration tests)
 
-# ─── step 4 — live storage roundtrip (in-memory backend) ─────────────────────
-log "step 4 — live roundtrip: put → get → inject → engine-select (in-memory MCP; no AWS/chain/broker)"
-# idempotent: clear any prior storage-test server on this port, then start fresh
-pkill -f "agentkeys-mcp-server.*--listen 127.0.0.1:$PORT" 2>/dev/null || true
-sleep 0.3
-SERVER_LOG="$(mktemp -t storage-test-mcp.XXXXXX 2>/dev/null || echo /tmp/storage-test-mcp.$$.log)"
-"$MCP_BIN" --backend in-memory --transport http --listen "127.0.0.1:$PORT" \
-  --vendor-tokens "$VENDOR:$TOKEN" \
-  --default-actor "$ACTOR" --default-operator-omni "$OPERATOR" --default-device-key-hash "$DEVICE" \
-  >"$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
-cleanup() { if [[ "$KEEP_SERVER" != 1 && -n "${SERVER_PID:-}" ]]; then kill "$SERVER_PID" 2>/dev/null || true; fi; }
-trap cleanup EXIT
-
-healthy=0
-for _ in $(seq 1 50); do
-  if curl -fsS -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then healthy=1; break; fi
-  sleep 0.2
-done
-if [[ "$healthy" != 1 ]]; then
-  echo "--- mcp server log ---" >&2; tail -20 "$SERVER_LOG" >&2
-  fail "4.0 mcp up" "server not healthy on :$PORT"
-  log "summary: $FAILED failure(s)"; exit 1
-fi
-ok "4.0 mcp up" "in-memory MCP on :$PORT (pid $SERVER_PID)"
-
-export AGENTKEYS_MCP_URL="$MCP_URL"
-export AGENTKEYS_MCP_VENDOR_TOKEN="$TOKEN"
-export AGENTKEYS_ACTOR_OMNI="$ACTOR"
-export AGENTKEYS_OPERATOR_OMNI="$OPERATOR"
-
-# 4.1 READ a pre-seeded namespace (proves read from storage)
-seeded="$("$AGENTKEYS_BIN" hook memory-inject --namespaces travel </dev/null 2>/dev/null | jq -r '.context // ""')"
-if echo "$seeded" | grep -q "Chengdu"; then ok "4.1 read seeded" "travel → $(echo "$seeded" | tr '\n' ' ' | cut -c1-40)…"; else fail "4.1 read seeded" "expected 'Chengdu', got: $(echo "$seeded" | cut -c1-80)"; fi
-
-# 4.2 WRITE a fresh multi-line namespace (proves write to storage)
-NS="storagetest"
-MARKER="roundtrip-$$"
-CONTENT=$'Booked Chengdu flight CA4515 on Apr 12.\nPeanut allergy noted for inflight meals.\nHotel in Yulin district near hotpot street.\nMarker '"$MARKER"
-put_out="$("$AGENTKEYS_BIN" memory put --namespace "$NS" --content "$CONTENT" 2>&1)"
-if echo "$put_out" | grep -q "s3_key"; then ok "4.2 put" "wrote 4-line '$NS'"; else fail "4.2 put" "$(echo "$put_out" | tr '\n' ' ' | cut -c1-140)"; fi
-
-# 4.3 READ-BACK via inject, default passthrough engine (proves the round trip)
-got="$("$AGENTKEYS_BIN" hook memory-inject --namespaces "$NS" </dev/null 2>/dev/null | jq -r '.context // ""')"
-got_body_lines="$(echo "$got" | grep -vc '^## Memory:')"
-if echo "$got" | grep -q "$MARKER"; then ok "4.3 get roundtrip" "read back marker; $got_body_lines body lines (passthrough = all)"; else fail "4.3 get roundtrip" "marker '$MARKER' missing: $(echo "$got" | tr '\n' ' ' | cut -c1-100)"; fi
-
-# 4.4 ENGINE selection over storage: lexical + max_lines=1 → exactly 1 body line
-sel="$(AGENTKEYS_MEMORY_ENGINE=lexical AGENTKEYS_MEMORY_MAX_LINES=1 "$AGENTKEYS_BIN" hook memory-inject --namespaces "$NS" </dev/null 2>/dev/null | jq -r '.context // ""')"
-sel_body="$(echo "$sel" | grep -v '^## Memory:')"
-sel_lines="$(echo "$sel_body" | grep -c .)"
-if [[ "$sel_lines" == 1 ]]; then ok "4.4 engine select" "lexical/max_lines=1 → 1 of $got_body_lines lines: $(echo "$sel_body" | cut -c1-44)"; else fail "4.4 engine select" "expected 1 body line, got $sel_lines: $(echo "$sel_body" | tr '\n' ' ' | cut -c1-80)"; fi
-
 # ─── summary ─────────────────────────────────────────────────────────────────
 if [[ $FAILED -eq 0 ]]; then
-  log "ALL GREEN — storage solution verified (build · suites · roundtrip · engine)"
+  log "ALL GREEN — storage code paths verified (build · suites)"
   exit 0
 else
   log "$FAILED FAILURE(S) — see above"

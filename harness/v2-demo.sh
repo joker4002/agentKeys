@@ -28,7 +28,7 @@
 # Other flags are for CI / scoping only — an operator should not need them:
 #   bash harness/v2-demo.sh --ci                 # CI: software register + mock agent + tolerate skips; wire OFF (no sandbox)
 #   bash harness/v2-demo.sh --stage 3            # one phase
-#   bash harness/v2-demo.sh --wire real|light|none     # force the wire phase on/off (light = the dev loop, never for assertions)
+#   bash harness/v2-demo.sh --wire real|none           # force the wire phase on/off (real-data-only; in-memory 'light' removed)
 #   bash harness/v2-demo.sh --allow-skip=agent-file-invalid   # passthrough to stage 3
 #
 # Fail-fast: stops at the first failing phase (a red phase cascades); the wire phase
@@ -39,7 +39,8 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"      # the harness/ dir
 PROJECT_ROOT="$(cd "$REPO_ROOT/.." && pwd)"     # the repo root (Cargo.toml, scripts/)
 STAGES="1,2,3,4,5,6"    # 1-3 stages, 4 memory-plant, 5 wire, 6 web↔agent parity
-WIRE_MODE=""            # '' (auto: real if the sandbox is up, else skip), 'real', 'light', or 'none'
+WIRE_MODE=""            # '' (auto: real if the sandbox is up, else skip), 'real', or 'none'
+                        # ('light' / in-memory was removed — real-data-only)
 FROM_PHASE=""; FROM_STEP=""   # --from P.S : resume from phase P step S, continue to the end
 ONLY_PHASE=""; ONLY_STEP=""   # --only P.S : run only phase P (step S)
 CI=0
@@ -149,8 +150,8 @@ run_wire_phase() {
         return 0
       fi ;;
     real)  phase "5 — phase1-wire-demo.sh --real --webauthn";  WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --real --webauthn ;;
-    light) phase "5 — phase1-wire-demo.sh --light"; WIRE_RESULT=wired; bash "$REPO_ROOT/phase1-wire-demo.sh" --light ;;
-    *) echo "v2-demo: --wire wants real|light|none (got '$WIRE_MODE')" >&2; return 1 ;;
+    light) echo "v2-demo: --wire light (in-memory) was removed — real-data-only. Use --wire real|none." >&2; return 1 ;;
+    *) echo "v2-demo: --wire wants real|none (got '$WIRE_MODE')" >&2; return 1 ;;
   esac
 }
 

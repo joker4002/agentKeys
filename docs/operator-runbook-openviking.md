@@ -33,7 +33,7 @@ OpenViking is a pluggable *engine*, swappable for Holographic / mem0 / a determi
 
 1. **A working wired AgentKeys agent.** Run the wire demo first so memory already flows end-to-end:
    ```bash
-   bash harness/phase1-wire-demo.sh --light     # self-contained, or --real for the live worker
+   bash harness/phase1-wire-demo.sh --real --webauthn   # the live worker (real memory only; in-memory --light was removed #207)
    ```
    See [`operator-runbook-wire.md`](operator-runbook-wire.md).
 2. **Python 3.10+ and `pip`** (already present in the aiosandbox).
@@ -237,7 +237,7 @@ Re-run it any time — every step pre-checks and short-circuits (`ok` / `skip` /
 | `/health` fails | embedding/VLM misconfigured | re-run `openviking-server init`; read `~/openviking.log` |
 | `search/find` returns nothing | index empty | run Step 4/5 (load/mirror) — it ranks only what's indexed |
 | Step 7 injects the *whole* namespace, unranked | hook fell back (no query, or `OPENVIKING_ENDPOINT` not baked) | confirm Step 6 baked the env; ensure the payload has a `query` field |
-| Step 6 bakes an empty `AGENTKEYS_ACTOR_OMNI=''` (or the wrong actor) into the hook | you ran the wire command (6b) before exporting the omni env (6a) — `--actor-omni "$UNSET"` passes an empty string, overriding `wire`'s demo fallback | run **Step 6a** first: it recovers actor/operator omni + MCP URL + vendor token from the hook the [Step-0](#prerequisites) wire demo baked. `--light` falls back to the `in_memory.rs` demo omnis only when you **omit** the flags entirely |
+| Step 6 bakes an empty `AGENTKEYS_ACTOR_OMNI=''` (or the wrong actor) into the hook | you ran the wire command (6b) before exporting the omni env (6a) — `--actor-omni "$UNSET"` passes an empty string, overriding `wire`'s demo fallback | run **Step 6a** first: it recovers actor/operator omni + MCP URL + vendor token from the hook the [Step-0](#prerequisites) wire demo baked. (There is no demo-omni fallback anymore — the in-memory backend was removed in #207; supply the real actor/operator omni.) |
 | `memory.get(<ns>) failed … cap_mint failed … service_not_in_scope` → empty injection | the agent's on-chain scope grants bare `memory`, but the cap requests `memory:<ns>` (issue #147; `keccak("memory") ≠ keccak("memory:<ns>")`, arch.md §896) | grant the **namespace-qualified** service: re-run `bash harness/phase1-wire-demo.sh --real --webauthn` (now grants `memory:<ns>`), or directly `bash scripts/heima-scope-set.sh --webauthn --agent <label> --services memory:<ns>` (e.g. `memory:travel`) |
 | `content/write` HTTP 400 on every write | malformed URI — it **must** be `viking://user/<user>/memories/<subdir>/<name>.md` (the `<user>` segment + `.md` are required) | use the full path (Step 4); drop `-f` so you can see the error body |
 | `search/find` → `jq: Cannot iterate over null` | results are under **`.result.memories`** (+ `.resources`/`.skills`), not `.result.results` | `jq '.result.memories[]? \| {score,uri,abstract}'` |

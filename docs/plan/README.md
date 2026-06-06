@@ -25,7 +25,7 @@ These two are the live source-of-truth pointers referenced from [`../arch.md`](.
 - [`agentkeys-memory-design.md`](agentkeys-memory-design.md) — memory worker design (single file).
 - [`ceo-plan.md`](ceo-plan.md) — v0 product approach (Minimal Viable Tool). Foundational vision; largely superseded by `milestones-roadmap.md` for sequencing — keep for the DX/mock-backend contract framing.
 - [`issue-103-aiosandbox-hermes-esp32-demo.md`](issue-103-aiosandbox-hermes-esp32-demo.md) — M1 ESP32 demo tracking doc. **Partially superseded:** sections C4/C5/C6 are stale (architecture moved to Hermes + MCP + hooks); the forward path is `phase-1-fresh-user-wire-onboarding.md`.
-- [`issue-107-mcp-demo-runbook.md`](issue-107-mcp-demo-runbook.md) — two-mode MCP demo runbook (light in-memory / real broker).
+- `issue-107-mcp-demo-runbook.md` — **archived** ([`docs/archived/`](../archived/issue-107-mcp-demo-runbook.md)). Documented the bash+python `mcp-demo-mode-*` demos; both the in-memory backend and the demos were removed in #207 (the MCP protocol-conformance proof is now the Rust `crates/agentkeys-mcp-server/tests/transport_conformance.rs`).
 - [`issue-74-step-1c-device-key-auth.md`](issue-74-step-1c-device-key-auth.md) — v1c device-key auth (HDKD per-agent omni + WebAuthn-uniform binding).
 - [`issue-82-erc7730-v2-aligned.md`](issue-82-erc7730-v2-aligned.md) — ERC-7730 signing-display + intent-aware audit (M3/M4).
 - [`issue-credential-storage-s3-oidc.md`](issue-credential-storage-s3-oidc.md) — S3-backed AES-256-GCM credential store replacing the mock-server `/credential/*` endpoints.
