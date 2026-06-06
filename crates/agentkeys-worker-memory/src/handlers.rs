@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::SharedMemoryWorkerState;
 use agentkeys_worker_creds::aws_creds::{s3_for_request, OptionalStsCreds};
 use agentkeys_worker_creds::envelope;
-use agentkeys_worker_creds::errors::{err_400, err_403, err_500, err_502, ApiError};
+use agentkeys_worker_creds::errors::{err_400, err_403, err_404, err_500, err_502, ApiError};
 use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedMemoryWorkerState) -> Router {
@@ -127,7 +127,18 @@ async fn memory_get(
         .key(&key)
         .send()
         .await
-        .map_err(|e| err_502(e.to_string(), "s3_get"))?;
+        .map_err(|e| {
+            // #201 Phase 4: a missing object is 404 (not 502), so a caller can
+            // distinguish "namespace never written" from an S3/transport error.
+            if e.as_service_error()
+                .map(|se| se.is_no_such_key())
+                .unwrap_or(false)
+            {
+                err_404("memory object not found", "s3_no_such_key")
+            } else {
+                err_502(e.to_string(), "s3_get")
+            }
+        })?;
     let body = resp
         .body
         .collect()
