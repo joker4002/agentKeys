@@ -191,6 +191,23 @@ pub struct CredFetchResp {
     pub plaintext_b64: String,
 }
 
+/// Cred-worker `/v1/cred/store` request body. Mirrors
+/// `agentkeys_worker_creds::handlers::StoreRequest` — the signed cap (the
+/// credential `service` rides INSIDE the cap payload) plus the base64 plaintext.
+/// The worker encrypts (K3 KEK) + S3-PUTs `bots/<actor>/credentials/<service>.enc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreBody {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CredStoreResp {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+}
+
 // ── audit worker (`/v1/audit/append/v2`) ────────────────────────────────────
 
 /// Audit envelope version, pinned to `agentkeys_core::audit::ENVELOPE_VERSION`.
@@ -258,6 +275,19 @@ pub struct CredFetchInput {
 pub struct CredFetchResult {
     pub ok: bool,
     pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreInput {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreResult {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

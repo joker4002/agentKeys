@@ -3579,9 +3579,11 @@ async fn store_master_credential_inner(
         .header("x-aws-access-key-id", creds.access_key_id)
         .header("x-aws-secret-access-key", creds.secret_access_key)
         .header("x-aws-session-token", creds.session_token)
-        .json(
-            &serde_json::json!({ "cap": cap, "plaintext_b64": STANDARD.encode(secret.as_bytes()) }),
-        )
+        // Crate-owned body shape (#204) — a drifted field is a compile error.
+        .json(&agentkeys_backend_client::CredStoreBody {
+            cap,
+            plaintext_b64: STANDARD.encode(secret.as_bytes()),
+        })
         .send()
         .await
         .map_err(|e| {

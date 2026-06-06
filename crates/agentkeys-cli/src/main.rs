@@ -425,6 +425,36 @@ enum CredAction {
         #[arg(long, env = "REGION", default_value = "us-east-1")]
         region: String,
     },
+    /// Vault a credential (#216, the store half of `fetch`). Master-self by
+    /// default (operator == actor); seeds the agent's authorized key (e.g. the
+    /// LLM key the agent later cred-fetches). Prints the worker S3 key.
+    Store {
+        /// The credential service id (e.g. `openrouter`).
+        service: String,
+        /// The secret to vault. Prefer `--secret-env NAME` to keep it off argv.
+        #[arg(long, conflicts_with = "secret_env")]
+        secret: Option<String>,
+        /// Read the secret from this env var instead of `--secret` (keeps the
+        /// plaintext out of the process list / shell history).
+        #[arg(long)]
+        secret_env: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator_omni: String,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor_omni: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_HASH")]
+        device_key_hash: String,
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
+        session_bearer: String,
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: String,
+        #[arg(long, env = "AGENTKEYS_WORKER_CRED_URL")]
+        cred_url: String,
+        #[arg(long, env = "VAULT_ROLE_ARN")]
+        vault_role_arn: String,
+        #[arg(long, env = "REGION", default_value = "us-east-1")]
+        region: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1446,6 +1476,46 @@ async fn main() {
                     region,
                 )
                 .await
+            }
+            CredAction::Store {
+                service,
+                secret,
+                secret_env,
+                operator_omni,
+                actor_omni,
+                device_key_hash,
+                session_bearer,
+                broker_url,
+                cred_url,
+                vault_role_arn,
+                region,
+            } => {
+                let resolved: anyhow::Result<String> = match (secret, secret_env) {
+                    (Some(s), _) => Ok(s.clone()),
+                    (None, Some(env_name)) => std::env::var(env_name).map_err(|_| {
+                        anyhow::anyhow!("--secret-env {env_name} is not set in the environment")
+                    }),
+                    (None, None) => Err(anyhow::anyhow!(
+                        "provide the secret via --secret <value> or --secret-env <ENV_NAME>"
+                    )),
+                };
+                match resolved {
+                    Ok(secret_value) => agentkeys_cli::cred_admin::cred_store(
+                        service,
+                        &secret_value,
+                        operator_omni,
+                        actor_omni,
+                        device_key_hash,
+                        session_bearer,
+                        broker_url,
+                        cred_url,
+                        vault_role_arn,
+                        region,
+                    )
+                    .await
+                    .map(|s3_key| format!("stored `{service}` → {s3_key}")),
+                    Err(e) => Err(e),
+                }
             }
         },
     };
