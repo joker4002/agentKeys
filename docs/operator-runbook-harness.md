@@ -130,9 +130,11 @@ is the only one CI can't do — no aiosandbox).
   with the master's J1 + device via the `--ui-bridge-seed-*` seam, so it skips re-onboarding) and
   plants a dedicated `webparity` probe namespace through the **web** endpoint
   `POST /v1/master/memory/plant`. A 200 proves the daemon's chain (cap-mint → STS → worker → S3)
-  matches the agent/harness path, so the web flow can't silently drift from the harness. A **thin
-  3-step wiring smoke** — the body shape is gated at compile/fixture time
-  (`scripts/check-web-api-drift.sh`), so the runtime check stays minimal. The probe ns is **deleted on
+  matches the agent/harness path, so the web flow can't silently drift from the harness. **Step 4
+  (#214)** then polls `GET /v1/agent/pairing/pending` and asserts a well-formed `{requests:[…]}` — the
+  master-side web-pairing route reaches the real broker rendezvous. A **thin 4-step wiring smoke** — the
+  body shape is gated at compile/fixture time (`scripts/check-web-api-drift.sh`), so the runtime check
+  stays minimal. The probe ns is **deleted on
   exit** (success or failure), so it never leaks into real memory. **Reuses** the build/chain/broker/
   master from phases 1–2 — one daemon boot, no re-bootstrap. Real-only; skips cleanly without a broker.
 

@@ -22,8 +22,9 @@
 #   3. plant a probe namespace via the WEB endpoint POST /v1/master/memory/plant
 #      → assert HTTP 200 (with --memory-url, a 200 means cap-mint → STS → worker →
 #      S3 all succeeded: the daemon's web chain == the real chain)
-#   4. parity artifact: the canonical S3 key bots/<O_master>/memory/memory:<ns>.enc
-#      exists (best-effort, admin profile) + clean up the probe
+#   4. web agent-pairing poll: GET /v1/agent/pairing/pending → assert a well-formed
+#      {requests:[...]} (#214) — the daemon's pairing route reaches the real broker
+#      rendezvous with the master J1 (the master-side web-pairing wiring smoke)
 #
 #   bash harness/web-parity-demo.sh                # full
 #   bash harness/web-parity-demo.sh --only-step 3  # one step
@@ -36,7 +37,7 @@ ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/harness/scripts/_lib.sh"
 
-CI=0; FROM=1; TO=99; STEP_TOTAL=3
+CI=0; FROM=1; TO=99; STEP_TOTAL=4
 for a in "$@"; do case "$a" in
   --ci) CI=1 ;;
   --from-step) shift; FROM="${1:-1}" ;; --from-step=*) FROM="${a#*=}" ;;
@@ -160,6 +161,22 @@ if should_run 3; then
   planted=$(echo "$resp" | jq -r '.planted // empty' 2>/dev/null)
   [ -n "$planted" ] || die "web plant returned no planted count (daemon log: $(tail -3 "$DAEMON_LOG" | tr '\n' ' ')): $resp"
   ok "web plant OK via the daemon — planted=$planted skipped=$(echo "$resp" | jq -r '.skipped // 0') (web chain == agent chain)"
+fi
+
+# ─── Step 4: web agent-pairing poll reaches the real broker rendezvous (#214) ──
+if should_run 4; then
+  step 4 "Web pairing poll GET /v1/agent/pairing/pending → real broker rendezvous"
+  { [ -n "${DAEMON_PID:-}" ] && kill -0 "$DAEMON_PID" 2>/dev/null; } || die "daemon not running — run step 2"
+  pr=$(curl -sS --fail-with-body "http://${DAEMON_BIND}/v1/agent/pairing/pending" 2>&1) \
+    || die "pairing poll failed (daemon → broker /v1/agent/pending-bindings): $pr"
+  # A well-formed {requests:[...]} (usually empty for a fresh master) proves the
+  # daemon's #214 pairing route reaches the real broker rendezvous with the seeded
+  # master J1 — the master-side web-pairing wiring smoke. The full claim → register
+  # e2e needs a live agent pairing request (the sandbox §10.2 path) and is exercised
+  # by the agent-side wire demo; here we gate that the route is wired + reachable.
+  echo "$pr" | jq -e 'has("requests") and (.requests | type == "array")' >/dev/null 2>&1 \
+    || die "pairing poll returned a malformed body (expected {requests:[...]}): $pr"
+  ok "web pairing poll OK — $(echo "$pr" | jq -r '.requests | length') pending agent binding(s) (route → broker reachable)"
 fi
 
 # Phase 6 is deliberately a THIN runtime-wiring smoke (harness/CLAUDE.md "parity
