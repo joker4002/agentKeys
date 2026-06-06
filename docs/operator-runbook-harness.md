@@ -196,6 +196,7 @@ Steps 11-12 sign STS creds AS the agent → they need the agent's key. Three rol
 ### Other entry points
 
 - **`erc4337-master-e8.sh`** — standalone #164 mechanism smoke (passkey-only master mutation, green on mainnet).
+- **`cred-fetch-demo.sh`** — **#216 agent-side vaulted-key fetch, real e2e.** A master vaults a probe credential via the daemon, then the agent fetches it back with `agentkeys cred fetch`, asserting the exact secret round-trips through the live cap-mint → STS → cred worker → decrypt chain. Idempotent (fixed `cred-e2e-probe`), `--ci`-tolerant, real-only. Run: `bash harness/cred-fetch-demo.sh`.
 - **`web-memory-bootstrap.sh`** — issue #196 web-memory pre-flight; runbook [`operator-runbook-web-memory.md`](operator-runbook-web-memory.md).
 - **`openviking-sandbox-setup.sh`** — *optional, advanced.* Stands up **OpenViking as the memory
   engine** (Model B) and runs **INSIDE the aiosandbox**, not on the Mac. It **requires the agent to
