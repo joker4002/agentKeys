@@ -37,7 +37,7 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         actor_omni: "0x<actor_omni>".into(),
         service: "memory:<namespace>".into(),
         device_key_hash: "0x<device_key_hash>".into(),
-        ttl_seconds: 300,
+        ttl_seconds: Some(300),
     };
     let memory_put = MemoryPutBody {
         cap: json!("<cap-token>"),

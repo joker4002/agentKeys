@@ -32,6 +32,15 @@ import type {
   StatusKind,
   Worker,
 } from '@/app/_components/types';
+// Wire types GENERATED from the Rust ui_bridge Api* structs via ts-rs (#203 B2).
+// Do not hand-edit @/lib/generated or re-declare these here — a daemon-side field
+// rename regenerates the .ts and the mappers below stop compiling (rung-3 drift
+// gate; CI also git-diffs the generated dir).
+import type { ApiActor } from '@/lib/generated/ApiActor';
+import type { ApiAuditEvent } from '@/lib/generated/ApiAuditEvent';
+import type { ApiWorker } from '@/lib/generated/ApiWorker';
+import type { ApiMemoryEntry } from '@/lib/generated/ApiMemoryEntry';
+import type { MemoryCategory as ApiMemoryCategory } from '@/lib/generated/MemoryCategory';
 
 /**
  * DaemonBackend — talks to a running agentkeys-daemon over HTTP.
@@ -486,51 +495,10 @@ interface ApiProposedScope {
   confidence: number;
 }
 
-// ─── API wire types (snake_case, mirror ui_bridge.rs ApiActor etc.) ────
-
-interface ApiActor {
-  id: string;
-  omni: string;
-  omni_hex: string;
-  label: string;
-  role: string;
-  parent: string | null;
-  derivation: string;
-  device: string;
-  device_pubkey: string;
-  last_active: string;
-  status: string;
-  vendor: string;
-  k11: boolean;
-  scope?: Record<string, { read: boolean; write: boolean }>;
-  payment_cap?: { per_tx: number; daily: number; currency: string };
-  time_window?: { start: string; end: string; tz: string };
-  services?: string[];
-}
-
-interface ApiAuditEvent {
-  id: string;
-  ts: string;
-  actor_id: string;
-  actor: string;
-  kind: string;
-  detail: string;
-  chip: string;
-  sev: string;
-}
-
-interface ApiWorker {
-  id: string;
-  title: string;
-  host: string;
-  desc: string;
-  calls_today: number;
-  calls_hour: number;
-  p50: number;
-  p95: number;
-  cap: string;
-  by_actor: { actor: string; count: number; share: number }[];
-}
+// ─── Wire types are imported from @/lib/generated (ts-rs, generated from the
+//     ui_bridge.rs Api* structs — #203 B2). The mappers below convert the
+//     snake_case wire types to the camelCase UI domain types; a daemon-side
+//     field rename regenerates the .ts and breaks these mappers (drift gate). ──
 
 function apiToActor(a: ApiActor): Actor {
   return {
@@ -604,23 +572,6 @@ function normalizeChip(c: string): ChipKind {
     'revoke',
   ];
   return (allowed as string[]).includes(c) ? (c as ChipKind) : 'default';
-}
-
-interface ApiMemoryEntry {
-  ns: string;
-  key: string;
-  title: string;
-  bytes: number;
-  version: string;
-  updated: string;
-  preview: string;
-  body: string;
-  content_hash?: string;
-}
-
-interface ApiMemoryCategory {
-  ns: string;
-  label: string;
 }
 
 function apiToMemoryEntry(m: ApiMemoryEntry): MasterMemoryEntry {

@@ -39,6 +39,7 @@ use axum::{
 };
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
@@ -172,11 +173,13 @@ pub struct RegisteredMaster {
 /// A master-actor memory entry. `content_hash` is the dedup key —
 /// keccak-free sha256 over (ns || key || body) so a re-plant of the same
 /// content is detected and skipped (the "prevent duplicate plant" gate).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiMemoryEntry {
     pub ns: String,
     pub key: String,
     pub title: String,
+    #[ts(type = "number")]
     pub bytes: u64,
     pub version: String,
     pub updated: String,
@@ -260,7 +263,8 @@ pub struct MemoryTaxonomy {
     categories: Vec<MemoryCategory>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct MemoryCategory {
     pub ns: String,
     pub label: String,
@@ -366,27 +370,31 @@ pub type SharedUiBridgeState = Arc<UiBridgeState>;
 
 const AUDIT_BUFFER_CAP: usize = 200;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiScopeBits {
     pub read: bool,
     pub write: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiPaymentCap {
     pub per_tx: f64,
     pub daily: f64,
     pub currency: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiTimeWindow {
     pub start: String,
     pub end: String,
     pub tz: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiActor {
     pub id: String,
     pub omni: String,
@@ -402,16 +410,21 @@ pub struct ApiActor {
     pub vendor: String,
     pub k11: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub scope: Option<HashMap<String, ApiScopeBits>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub payment_cap: Option<ApiPaymentCap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub time_window: Option<ApiTimeWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub services: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiCapToken {
     pub id: String,
     pub cap: String,
@@ -419,10 +432,12 @@ pub struct ApiCapToken {
     pub ttl: String,
     pub minted: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub danger: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiAuditEvent {
     pub id: String,
     pub ts: String,
@@ -434,39 +449,52 @@ pub struct ApiAuditEvent {
     pub sev: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiWorkerActorShare {
     pub actor: String,
+    #[ts(type = "number")]
     pub count: u64,
     pub share: f64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiWorker {
     pub id: String,
     pub title: String,
     pub host: String,
     pub desc: String,
+    #[ts(type = "number")]
     pub calls_today: u64,
+    #[ts(type = "number")]
     pub calls_hour: u64,
+    #[ts(type = "number")]
     pub p50: u64,
+    #[ts(type = "number")]
     pub p95: u64,
     pub cap: String,
     pub by_actor: Vec<ApiWorkerActorShare>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiAnchorBatch {
     pub ts: String,
     pub root: String,
+    #[ts(type = "number")]
     pub count: u64,
     pub txn: String,
+    #[ts(type = "number")]
     pub conf: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiAnchorStatus {
+    #[ts(type = "number")]
     pub last_anchor_at: u64,
+    #[ts(type = "number")]
     pub next_anchor_in: u64,
     pub recent: Vec<ApiAnchorBatch>,
 }

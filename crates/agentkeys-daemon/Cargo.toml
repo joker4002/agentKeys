@@ -27,6 +27,12 @@ sha2 = "0.10" # ui-bridge master-memory content-hash dedup (§2 plant)
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# B2 (#203 parity ladder, rung 3): generate the Api* wire types as TypeScript so
+# the parent-control frontend imports them instead of hand-mirroring (a drift then
+# becomes a compile error, not a silent runtime break). The `#[ts(export)]` tests
+# write apps/parent-control/lib/generated/ under `cargo test`; a CI git-diff gate
+# fails on drift.
+ts-rs = "10"
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

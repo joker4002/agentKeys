@@ -152,6 +152,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -186,6 +187,28 @@ jobs:
       # (run by cargo test); this gates the two non-Rust consumers.
       - name: Frontend↔harness plant contract has not drifted (issue #203 / #206)
         run: bash scripts/check-web-api-drift.sh
+
+      # B1 (#203 follow-up): the browser host (agentkeys-web-core — a cdylib+rlib
+      # that compiles to wasm32) shares the cap-mint wire shape with the native
+      # client through the pure-serde `agentkeys-protocol` crate. This gate fails
+      # if that shared crate (or web-core) ever pulls a native-only dep (tokio /
+      # native reqwest / aws-sdk-sts, the last via the provisioner) that breaks
+      # the browser build — exactly the regression that would occur if web-core
+      # depended on the native backend-client directly. Default + `wasm` bindings.
+      - name: web-core compiles to wasm32 (no native transport leaked into the browser)
+        run: |
+          cargo check --target wasm32-unknown-unknown -p agentkeys-web-core
+          cargo check --target wasm32-unknown-unknown -p agentkeys-web-core --features wasm
+
+      # B2 (#203 parity ladder, rung 3): the frontend imports the Api* wire types
+      # GENERATED from ui_bridge.rs via ts-rs (apps/parent-control/lib/generated/).
+      # `cargo test --workspace` above re-ran the #[ts(export)] tests, rewriting
+      # those .ts in place; if a daemon-side struct changed without committing the
+      # regenerated bindings, the working tree now differs from HEAD → fail (same
+      # discipline as the backend-protocol fixtures). Keeps the generated types and
+      # the daemon structs from drifting silently.
+      - name: ts-rs frontend bindings are up to date (issue #203 B2)
+        run: git diff --exit-code -- apps/parent-control/lib/generated/
 
   detect-changes:
     # Issue #101: path-conditional triggers for auto-deploy of the test broker.

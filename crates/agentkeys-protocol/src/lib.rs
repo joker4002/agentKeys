@@ -85,15 +85,27 @@ pub struct CapMintRequest {
 }
 
 /// Broker cap-mint request body — the exact JSON
-/// `agentkeys_broker_server::handlers::cap` deserializes for all four
-/// `/v1/cap/*` endpoints.
+/// `agentkeys_broker_server::handlers::cap` deserializes for all six
+/// `/v1/cap/*` endpoints, AND the on-the-wire shape the browser host
+/// (`agentkeys-web-core`) serializes directly (it has no separate caller-side
+/// type — it aliases this as `CapRequest`).
+///
+/// `ttl_seconds` is `Option` + `skip_serializing_if` to mirror the broker's
+/// `#[serde(default = "default_ttl_seconds")]`: `None` omits the field so the
+/// broker applies its default (300s, clamped 60..1800); native callers coming
+/// from [`CapMintRequest`] always send `Some(..)` (wire-identical to before).
+/// This is the SINGLE on-wire definition, so the browser and the native client
+/// can no longer drift on it — previously each crate had its own copy and they
+/// diverged on this very field (the bug class #203 closed for the chain, now
+/// extended to the browser).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrokerCapRequest {
     pub operator_omni: String,
     pub actor_omni: String,
     pub service: String,
     pub device_key_hash: String,
-    pub ttl_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
 }
 
 impl From<CapMintRequest> for BrokerCapRequest {
@@ -103,7 +115,11 @@ impl From<CapMintRequest> for BrokerCapRequest {
             actor_omni: r.actor_omni,
             service: r.service,
             device_key_hash: r.device_key_hash,
-            ttl_seconds: r.ttl_seconds,
+            // Caller-side `CapMintRequest` always carries an explicit ttl, so the
+            // wire body always sends it (`Some`) — byte-identical to before the
+            // on-wire field became `Option`. Only a direct on-wire caller (the
+            // browser) can choose `None` to take the broker default.
+            ttl_seconds: Some(r.ttl_seconds),
         }
     }
 }
@@ -316,5 +332,31 @@ mod tests {
         assert_eq!(normalize_omni_0x("abcd"), "0xabcd");
         assert_eq!(normalize_omni_0x("0xabcd"), "0xabcd");
         assert_eq!(normalize_omni_0x("0Xabcd"), "0Xabcd");
+    }
+
+    #[test]
+    fn broker_cap_request_ttl_is_optional_on_the_wire() {
+        // Mirrors the broker's `#[serde(default)]`: `None` omits ttl_seconds (the
+        // broker then applies its default), `Some` emits a bare number. This is
+        // why the single on-wire type uses `Option` + skip rather than a required
+        // `u64` — the divergence web-core and backend-client used to carry.
+        let base = BrokerCapRequest {
+            operator_omni: "0xop".into(),
+            actor_omni: "0xactor".into(),
+            service: "memory:travel".into(),
+            device_key_hash: "0xdkh".into(),
+            ttl_seconds: None,
+        };
+        let omitted = serde_json::to_value(&base).unwrap();
+        assert!(
+            omitted.get("ttl_seconds").is_none(),
+            "None must omit ttl_seconds so the broker applies its default"
+        );
+        let present = serde_json::to_value(BrokerCapRequest {
+            ttl_seconds: Some(900),
+            ..base
+        })
+        .unwrap();
+        assert_eq!(present["ttl_seconds"], 900);
     }
 }
