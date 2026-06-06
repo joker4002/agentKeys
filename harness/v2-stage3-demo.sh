@@ -218,6 +218,13 @@ set -a; . "$ENV_FILE"; set +a
 : "${REGION:?REGION unset}"
 : "${VAULT_ROLE_ARN:?VAULT_ROLE_ARN unset}"
 : "${MEMORY_ROLE_ARN:?MEMORY_ROLE_ARN unset (operator-workstation.env — added in #90 Q3 followup)}"
+# #201 config data class — OPTIONAL (newer than the env files some operators /
+# the CI materializer still carry). Default to empty so `set -u` never aborts on
+# an unbound var; the step-19/20/21 config checks then degrade via
+# `prereq_missing config-role-missing` instead of crashing the whole run.
+: "${CONFIG_ROLE_ARN:=}"
+: "${CONFIG_BUCKET:=}"
+: "${AGENTKEYS_WORKER_CONFIG_URL:=}"
 
 # Deployer-wallet resolution: prefer a raw private-key file (the CI path,
 # and the operator's test-deployer path) over a mnemonic. Set

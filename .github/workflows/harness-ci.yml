@@ -748,6 +748,12 @@ jobs:
           DATA_ROLE_ARN=$DATA_ROLE_ARN_RAW
           VAULT_ROLE_ARN=$VAULT_ROLE_ARN_RAW
           MEMORY_ROLE_ARN=$MEMORY_ROLE_ARN_RAW
+          # #201 config data class — derived (no new secret), mirroring
+          # operator-workstation.test.env. Required by stage-3 steps 19-21 under
+          # `set -u`; step 19 skips cleanly (config-role-missing) if the test
+          # config bucket/role aren't provisioned yet (setup-cloud.sh --ci).
+          CONFIG_BUCKET=agentkeys-config-test-$ACCOUNT_ID
+          CONFIG_ROLE_ARN=arn:aws:iam::$ACCOUNT_ID:role/agentkeys-config-role-test
           AGENTKEYS_SIGNER_URL=https://signer-test.$TEST_BROKER_ZONE
           # Worker URLs derived from TEST_BROKER_ZONE → byte-for-byte match
           # setup-broker-host.sh --test's derive_companion() output.
@@ -755,6 +761,7 @@ jobs:
           AGENTKEYS_WORKER_EMAIL_URL=https://email-test.$TEST_BROKER_ZONE
           AGENTKEYS_WORKER_CRED_URL=https://cred-test.$TEST_BROKER_ZONE
           AGENTKEYS_WORKER_MEMORY_URL=https://memory-test.$TEST_BROKER_ZONE
+          AGENTKEYS_WORKER_CONFIG_URL=https://config-test.$TEST_BROKER_ZONE
           BACKEND_URL=https://signer-test.$TEST_BROKER_ZONE
           AGENTKEYS_CHAIN=heima
           SCOPE_CONTRACT_ADDRESS_HEIMA=$SCOPE_ADDR
@@ -820,16 +827,23 @@ jobs:
         # Codex H1 (2026-05-23): blanket --allow-skip allowed ANY prereq
         # to skip → CI could report success while bypassing every isolation
         # check. Replaced with --allow-skip=<reason> allowlist that only
-        # permits the ONE structurally-unfixable skip in CI: setScopeWithWebauthn
-        # requires a real WebAuthn assertion (scripts/heima-scope-set.sh L172),
-        # which a no-Touch-ID runner cannot produce. Every OTHER prereq
-        # (agent-file-missing, broker-misconfig, device-role-missing,
-        # agent-sts-mint-failed, agent-file-invalid) now fails closed → CI
-        # cannot pass with a broken auth chain or missing agent setup, only
-        # with the documented Touch-ID-impossible scope grant.
+        # permits structurally-unfixable / operator-one-shot skips in CI:
+        #   - scope-not-set: setScopeWithWebauthn requires a real WebAuthn
+        #     assertion (scripts/heima-scope-set.sh L172), which a no-Touch-ID
+        #     runner cannot produce.
+        #   - config-role-missing (#201): the test config bucket + IAM role are
+        #     an operator one-shot (setup-cloud.sh --ci, same model as the
+        #     vault/memory --skip-provision); until they're provisioned, step 19
+        #     skips cleanly instead of failing. Steps 20-21 (config cap-mismatch)
+        #     still run — they need only the deployed config worker, not the
+        #     bucket/role. Drop this allowance once the test config infra exists.
+        # Every OTHER prereq (agent-file-missing, broker-misconfig,
+        # device-role-missing, agent-sts-mint-failed, agent-file-invalid,
+        # broker-no-config-route) still fails closed → CI cannot pass with a
+        # broken auth chain, a missing config worker, or missing agent setup.
         run: |
           AGENTKEYS_CHAIN=heima \
-            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set
+            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set,config-role-missing
 
       - name: Clean up harness test data (bots/<actor_omni>/ prefix)
         if: always()
