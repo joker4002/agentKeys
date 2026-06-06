@@ -48,7 +48,7 @@ export function App() {
   const [paused, setPaused] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [eventDetail, setEventDetail] = useState<AuditEvent | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; sticky?: boolean } | null>(null);
 
   const [onboarded, setOnboarded] = useState(false);
   const [identity, setIdentity] = useState<{ email?: string; omni?: string } | null>(null);
@@ -165,9 +165,10 @@ export function App() {
     return stop;
   }, [onboarded, paused, client]);
 
-  const showToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 2600);
+  const showToast = (msg: string, sticky = false) => {
+    setToast({ msg, sticky });
+    // Sticky toasts (e.g. post-onboarding next-steps) stay until dismissed.
+    if (!sticky) setTimeout(() => setToast(null), 2600);
   };
 
   const go = (p: Page, id: string | null = null) => {
@@ -408,10 +409,20 @@ export function App() {
   if (!onboarded) {
     return (
       <OnboardingScreen
-        onComplete={() => {
+        onComplete={(summary) => {
           try { localStorage.setItem('ak_onboarded', '1'); } catch {}
           setOnboarded(true);
           go('actors');
+          // Jump straight into the app; a STICKY toast (no auto-dismiss) carries
+          // the next step so it isn't a wall the user has to click through.
+          if (summary?.categories != null) {
+            const n = summary.categories;
+            const noun = n === 1 ? 'category' : 'categories';
+            const head = summary.already
+              ? `✓ You're set up — ${n} ${noun} already configured.`
+              : `✓ ${n} ${noun} authored${summary.dev ? ' (dev only — no config worker)' : ''}.`;
+            showToast(`${head}  Next: connect an agent — open the Pairing tab to pair one.`, true);
+          }
         }}
       />
     );
@@ -566,8 +577,17 @@ export function App() {
       )}
 
       {toast && (
-        <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', background: 'var(--ink)', color: 'var(--bg)', padding: '10px 18px', fontSize: 12, border: '1px solid var(--ink)', zIndex: 200, animation: 'pop 0.22s cubic-bezier(.2,.8,.2,1)' }}>
-          {toast}
+        <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center', gap: 14, maxWidth: 'min(92vw, 560px)', background: 'var(--ink)', color: 'var(--bg)', padding: '10px 14px 10px 18px', fontSize: 12, border: '1px solid var(--ink)', zIndex: 200, animation: 'pop 0.22s cubic-bezier(.2,.8,.2,1)' }}>
+          <span>{toast.msg}</span>
+          {toast.sticky && (
+            <button
+              onClick={() => setToast(null)}
+              aria-label="dismiss"
+              style={{ background: 'none', border: 'none', color: 'var(--bg)', opacity: 0.7, cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: 0, flexShrink: 0 }}
+            >
+              ×
+            </button>
+          )}
         </div>
       )}
     </div>

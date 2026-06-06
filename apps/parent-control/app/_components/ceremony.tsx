@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
 import type { AgentKeysClient, ConfigPreset } from '@/lib/client/types';
@@ -126,7 +126,14 @@ export function CeremonyRunner({
 }
 
 // Full-screen WebAuthn login → onboarding ceremony (workflow 1).
-export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
+export function OnboardingScreen({
+  onComplete,
+}: {
+  // `summary` lets the host (App) show the right post-onboarding toast: how many
+  // categories were authored, whether the taxonomy already existed (idempotent
+  // re-onboard), and whether it was a dev-only (no config worker) write.
+  onComplete: (summary?: { categories?: number; already?: boolean; dev?: boolean }) => void;
+}) {
   const client = useClient();
   // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
   // → onComplete. `setup` is the last onboarding step before connecting agents.
@@ -141,52 +148,110 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
   useEffect(() => { setMaskEm(getMaskEmail()); }, []);
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
-  // #207 item 1A — the onboarding setup step: author the default taxonomy.
+  // #207 item 1A — the onboarding setup step: author the default taxonomy behind a
+  // visible progress ceremony (init does cap-mint → STS → config worker → S3, so
+  // it takes several seconds). `checking` runs the idempotency probe, `pick` shows
+  // the preset picker, `authoring` runs the progress bar.
+  const [setupStage, setSetupStage] = useState<'checking' | 'pick' | 'authoring'>('checking');
   const [presets, setPresets] = useState<ConfigPreset[]>([]);
   const [selectedPreset, setSelectedPreset] = useState('');
-  const [initializing, setInitializing] = useState(false);
-  const [setupCount, setSetupCount] = useState<number | null>(null); // null = not done
   const [setupNote, setSetupNote] = useState('');
+  const initResult = useRef<{ ok: boolean; count: number; dev: boolean; note: string }>({
+    ok: false,
+    count: 0,
+    dev: false,
+    note: '',
+  });
 
-  // On entering 'setup', fetch the bundled presets. If the daemon is unreachable
-  // (offline/demo), there's nothing to author — note it and let the user finish.
+  // On entering 'setup': (1) IDEMPOTENCY — if a taxonomy ALREADY exists (a
+  // re-onboard), jump straight in without re-authoring (never clobber, never
+  // re-prompt). (2) else load the presets for the picker.
   useEffect(() => {
     if (phase !== 'setup') return;
     let cancelled = false;
     (async () => {
+      const existing = await client.listMemoryCategories();
+      if (cancelled) return;
+      if (existing.ok && existing.data.length > 0) {
+        onComplete({ categories: existing.data.length, already: true });
+        return;
+      }
       const r = await client.listConfigPresets();
       if (cancelled) return;
       if (r.ok) {
         setPresets(r.data.presets);
         setSelectedPreset(r.data.defaultId);
       } else {
-        setSetupNote('Categories are set up from the app once a daemon is connected — you can do this later from the memory page.');
+        setSetupNote('Categories are set up once a daemon is connected — you can do this later from the memory page.');
       }
+      setSetupStage('pick');
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [phase, client]);
 
-  const initTaxonomy = async () => {
-    if (initializing || !selectedPreset) return;
-    setInitializing(true);
+  const chosenPreset = presets.find((p) => p.id === selectedPreset) ?? presets[0];
+
+  // The init progress ceremony. The real author call fires as the slow step's
+  // `action` (the runner AWAITS it), so the bar reflects the true duration and
+  // we read the captured result in `authoringDone`.
+  const initStages: CeremonyStep[] = [
+    {
+      label: 'Read your profile',
+      sub: chosenPreset ? `${chosenPreset.label} · ${chosenPreset.categories.length} categories` : '',
+    },
+    {
+      label: 'Compile category taxonomy',
+      sub: 'merge into config/memory-taxonomy (idempotent — never clobbers existing)',
+    },
+    {
+      label: 'Encrypt + store to Config',
+      sub: 'cap-mint → STS → config worker → S3 · AES-256-GCM · master-only',
+      action: async () => {
+        const r = await client.initConfigDefault(selectedPreset);
+        if (r.ok) {
+          initResult.current = {
+            ok: true,
+            count: r.data.categories.length,
+            dev: r.data.taxonomyStatus === 'cached',
+            note: '',
+          };
+        } else {
+          const detail = r.status.detail ?? '';
+          const m = detail.match(/\{"error":"([^"]+)"\}/);
+          initResult.current = { ok: false, count: 0, dev: false, note: m ? m[1] : detail || 'init failed' };
+          throw new Error('init failed'); // narrated by the runner; handled in authoringDone
+        }
+      },
+    },
+    {
+      label: 'Index + audit',
+      sub: 'CredentialAudit.append(op=config.taxonomy) · tier-1 + anchor',
+      onchain: true,
+      fn: 'append(bytes32,bytes32,bytes32)',
+    },
+  ];
+
+  const startAuthoring = () => {
+    if (!selectedPreset) return;
     setSetupNote('');
-    const r = await client.initConfigDefault(selectedPreset);
-    setInitializing(false);
-    if (r.ok) {
-      setSetupCount(r.data.categories.length);
-      // "cached" = NO config worker configured (dev/no-infra) — authored in-memory
-      // only. A configured-but-broken store hard-fails into the else branch below
-      // (real durable data or a loud error — never a silent in-memory stand-in).
-      if (r.data.taxonomyStatus === 'cached') {
-        setSetupNote('Authored locally — no config worker configured in this environment (dev only; not durable).');
-      }
+    initResult.current = { ok: false, count: 0, dev: false, note: '' };
+    setSetupStage('authoring');
+  };
+
+  // The runner finished the animation — act on the REAL captured result: success
+  // jumps straight into the app (no extra button); failure returns to the picker
+  // with the actionable error.
+  const authoringDone = () => {
+    const res = initResult.current;
+    if (res.ok) {
+      onComplete({ categories: res.count, dev: res.dev });
     } else {
-      const detail = r.status.detail ?? '';
-      const m = detail.match(/\{"error":"([^"]+)"\}/);
-      setSetupNote(`Couldn't author your categories — ${m ? m[1] : detail || 'try again from the memory page after onboarding'}.`);
+      setSetupStage('pick');
+      setSetupNote(`Couldn't author your categories — ${res.note}. Fix the config worker, then try again.`);
     }
   };
-  const chosenPreset = presets.find((p) => p.id === selectedPreset) ?? presets[0];
 
   // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
   // email) comes FIRST; the WebAuthn Touch ID is Stage 2 (master binding),
@@ -364,7 +429,13 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
 
         {phase === 'setup' && (
           <div className="onboard-login">
-            {setupCount === null ? (
+            {setupStage === 'checking' && (
+              <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
+                ▸ checking your setup…
+              </div>
+            )}
+
+            {setupStage === 'pick' && (
               <>
                 <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your categories.</h1>
                 <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 16, maxWidth: 420 }}>
@@ -395,35 +466,28 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
                         </div>
                       </>
                     )}
-                    <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} disabled={initializing} onClick={initTaxonomy}>
-                      {initializing ? 'authoring…' : '⊕ initialize my categories'}
+                    <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={startAuthoring}>
+                      ⊕ initialize my categories
                     </button>
-                    <button className="btn" style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: 8 }} onClick={onComplete}>
+                    <button className="btn" style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: 8 }} onClick={() => onComplete()}>
                       skip — set up later
                     </button>
                   </>
                 ) : (
-                  <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={onComplete}>
+                  <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={() => onComplete()}>
                     Continue →
                   </button>
                 )}
-                {setupNote && <div style={{ fontSize: 11.5, color: 'var(--ink-dim)', marginTop: 12 }}>{setupNote}</div>}
+                {setupNote && <div style={{ fontSize: 11.5, color: 'var(--accent, #b8860b)', marginTop: 12 }}>{setupNote}</div>}
               </>
-            ) : (
+            )}
+
+            {setupStage === 'authoring' && (
               <>
-                <div className="serif" style={{ fontSize: 40, fontStyle: 'italic', color: 'var(--ok, #2a7)', marginBottom: 4 }}>✓</div>
-                <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>You&apos;re set up.</h1>
-                <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 16, maxWidth: 420 }}>
-                  Your taxonomy is ready with <strong>{setupCount} categories</strong>. The next step is to{' '}
-                  <strong>connect an agent</strong> — when you pair one, the classifier proposes which categories + credentials
-                  it may use, and you confirm (sensitive ones need Touch ID).
-                </p>
-                {setupNote && (
-                  <p style={{ fontSize: 11.5, color: 'var(--accent, #b8860b)', marginBottom: 16, maxWidth: 420 }}>{setupNote}</p>
-                )}
-                <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={onComplete}>
-                  Enter agentKeys →
-                </button>
+                <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
+                  Authoring your taxonomy{chosenPreset ? ` · ${chosenPreset.label}` : ''}
+                </div>
+                <CeremonyRunner steps={initStages} onDone={authoringDone} stepMs={700} />
               </>
             )}
           </div>

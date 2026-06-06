@@ -3053,6 +3053,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_preserves_a_pre_existing_planted_namespace() {
+        // Idempotency invariant (#207): init MERGES into the existing taxonomy —
+        // it must NEVER clobber/delete a namespace a prior plant added. Seed a
+        // "planted" namespace not in any preset, then init the default; the
+        // planted namespace must survive alongside the newly-authored ones.
+        let state = make_state();
+        *state.authored_taxonomy.write().await = Some(MemoryTaxonomy {
+            version: 1,
+            categories: vec![cat("chengdu-trip", "Chengdu Trip")],
+        });
+        let resp = init_config_default_inner(&state, &InitConfigRequest::default())
+            .await
+            .expect("init");
+        let ns: Vec<&str> = resp.categories.iter().map(|c| c.ns.as_str()).collect();
+        assert!(
+            ns.contains(&"chengdu-trip"),
+            "init DELETED the planted namespace — not idempotent/non-destructive"
+        );
+        assert!(
+            ns.contains(&"kids"),
+            "init did not add the preset categories"
+        );
+    }
+
+    #[tokio::test]
     async fn init_unknown_preset_is_bad_request() {
         let state = make_state();
         let err = init_config_default_inner(
