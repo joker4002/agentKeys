@@ -379,7 +379,7 @@ say "starting mcp-server on http://${MCP_BIND} (backend=http → ${DAEMON_BROKER
 prefix "$C_MCP" "mcp" < "$FIFO_MCP" &
 PREFIX_MCP_PID=$!
 disown "$PREFIX_MCP_PID" 2>/dev/null || true
-MCP_ARGS=( --backend http --listen "$MCP_BIND" --broker-url "$DAEMON_BROKER_URL" --region "$DAEMON_REGION" )
+MCP_ARGS=( --backend http --listen "$MCP_BIND" --broker-url "$DAEMON_BROKER_URL" --aws-region "$DAEMON_REGION" )
 [ -n "$DAEMON_MEMORY_URL" ] && MCP_ARGS+=( --memory-url "$DAEMON_MEMORY_URL" )
 [ -n "$MCP_AUDIT_URL" ]     && MCP_ARGS+=( --audit-url "$MCP_AUDIT_URL" )
 "$MCP_BIN" "${MCP_ARGS[@]}" \
