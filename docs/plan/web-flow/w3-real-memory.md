@@ -1,7 +1,7 @@
 # W3 — memory through the real worker (daemon ui-bridge)
 
 **Status:** plan (pre-code). Phase **W3** of [`wire-real-paths.md`](wire-real-paths.md) §6, picked after W1 (onboarding identity + session) merged in #187.
-**Goal:** replace the daemon ui-bridge's **in-memory** master-memory store (`/v1/master/memory{,/plant}` → `RwLock<HashMap>`) with the **real** `cap-mint → STS relay → memory worker → S3` chain — the same chain the agent-side wire demo (`phase1-wire-demo.sh`) and the MCP `http_backend` already exercise.
+**Goal:** replace the daemon ui-bridge's **in-memory** master-memory store (`/v1/master/memory{,/plant}` → `RwLock<HashMap>`) with the **real** `cap-mint → STS relay → memory worker → S3` chain — the same chain the agent-side wire demo (`phase1-wire-demo.sh`) and the MCP server (via `agentkeys-backend-client`) already exercise.
 **Reference implementation (do not re-invent):** [`crates/agentkeys-mcp-server/src/backend/http_backend.rs`](../../../crates/agentkeys-mcp-server/src/backend/http_backend.rs) `memory_put`/`memory_get` + `sts_headers`, and the shared STS primitive `agentkeys_provisioner::fetch_via_broker_default_ttl`.
 
 ---
@@ -42,7 +42,7 @@ Add `agentkeys-provisioner = { workspace = true }` to `crates/agentkeys-daemon/C
 New `crates/agentkeys-daemon/src/master_memory.rs` (or a section of `ui_bridge.rs`): `async fn put_real(...)` / `get_real(...)` mirroring `http_backend.rs` (cap-mint POST → `fetch_via_broker_default_ttl` → worker POST). Worker body shapes mirror [`mcp-server/src/backend/memory.rs`](../../../crates/agentkeys-mcp-server/src/backend/memory.rs).
 
 ### 3.4 Handler rework — real when configured, in-memory fallback otherwise
-`plant_master_memory` / `list_master_memory`: if the real path is configured **and** an onboarding session is present (`memory_url` + `memory_role_arn` set + `onboarding_session.j1` + `omni` available) → real chain; **else** the current in-memory `HashMap` (so `--light`/no-infra dev still works, non-breaking). Surface which path ran in the response + a `tracing::warn!` on fallback (same loud-downgrade discipline as `http_backend::sts_headers`).
+`plant_master_memory` / `list_master_memory`: if the real path is configured **and** an onboarding session is present (`memory_url` + `memory_role_arn` set + `onboarding_session.j1` + `omni` available) → real chain; **else** the current in-memory `HashMap` (so no-infra dev still works, non-breaking — this is the daemon's own dev fallback, unrelated to the MCP backend that #207 removed). Surface which path ran in the response + a `tracing::warn!` on fallback (same loud-downgrade discipline as `BackendClient::sts_headers`).
 
 ### 3.5 `device_key_hash` — the integration constraint to handle
 cap-mint sends `device_key_hash`; the broker resolves the on-chain device by it and checks `actor_omni == O_master` + `roles & CAP_MINT`. **So the daemon's K10 (whose hash it sends) MUST be the on-chain-registered master device.** Sourcing: derive from the daemon's K10 (currently `device_pubkey` in `ui_bridge.rs:166`; add the hash). **Constraint for the bootstrap (§4):** the K10 the daemon uses for cap-mint must be the same key registered on-chain. (W2 will make the daemon register its own K10 from the browser; until then the bootstrap registers the daemon's K10 explicitly.)

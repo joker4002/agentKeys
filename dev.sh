@@ -27,7 +27,9 @@
 #   DAEMON_ORIGIN     default http://localhost:${UI_PORT}
 #   DAEMON_RP_ID      default localhost
 #   DAEMON_RP_NAME    default AgentKeys
-#   MCP_BACKEND       default in-memory   (zero external deps; auto-seeds demo fixtures)
+#   (the MCP server always uses the real HTTP backend — broker + workers; the
+#    in-memory fixture backend was removed. dev.sh points it at the same real
+#    broker / memory / audit URLs it resolves for the daemon.)
 #
 # Requirements: cargo, npx (node), lsof, curl. Bash 3.2+ (works with
 # macOS default /bin/bash).
@@ -66,7 +68,6 @@ MCP_BIND="127.0.0.1:${MCP_PORT}"
 DAEMON_ORIGIN="${DAEMON_ORIGIN:-http://localhost:${UI_PORT}}"
 DAEMON_RP_ID="${DAEMON_RP_ID:-localhost}"
 DAEMON_RP_NAME="${DAEMON_RP_NAME:-AgentKeys}"
-MCP_BACKEND="${MCP_BACKEND:-in-memory}"
 
 DAEMON_BIN="$REPO_ROOT/target/debug/agentkeys-daemon"
 MCP_BIN="$REPO_ROOT/target/debug/agentkeys-mcp-server"
@@ -368,11 +369,20 @@ done
 say "daemon ready."
 
 # ─── Start MCP server ──────────────────────────────────────────────
-say "starting mcp-server on http://${MCP_BIND} (backend=${MCP_BACKEND})"
+# The MCP server always uses the real HTTP backend (broker cap-mint → per-actor
+# STS → worker → S3); the in-memory fixture backend was removed (real-data-only).
+# Point it at the same real broker / memory / audit URLs the daemon uses. Agent
+# tool calls need a paired agent session (--agent-session-bearer), absent in this
+# web dev loop — so manual pokes get honest auth errors, never fake fixture data.
+MCP_AUDIT_URL="${AGENTKEYS_WORKER_AUDIT_URL:-${AGENTKEYS_AUDIT_URL:-}}"
+say "starting mcp-server on http://${MCP_BIND} (backend=http → ${DAEMON_BROKER_URL})"
 prefix "$C_MCP" "mcp" < "$FIFO_MCP" &
 PREFIX_MCP_PID=$!
 disown "$PREFIX_MCP_PID" 2>/dev/null || true
-"$MCP_BIN" --backend "$MCP_BACKEND" --listen "$MCP_BIND" \
+MCP_ARGS=( --backend http --listen "$MCP_BIND" --broker-url "$DAEMON_BROKER_URL" --aws-region "$DAEMON_REGION" )
+[ -n "$DAEMON_MEMORY_URL" ] && MCP_ARGS+=( --memory-url "$DAEMON_MEMORY_URL" )
+[ -n "$MCP_AUDIT_URL" ]     && MCP_ARGS+=( --audit-url "$MCP_AUDIT_URL" )
+"$MCP_BIN" "${MCP_ARGS[@]}" \
   > "$FIFO_MCP" 2>&1 &
 MCP_PID=$!
 disown "$MCP_PID" 2>/dev/null || true

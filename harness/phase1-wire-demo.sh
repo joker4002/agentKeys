@@ -6,37 +6,35 @@
 #
 # Spec: docs/plan/phase1-wire-harness-test-plan.md
 #
-# Two modes — you MUST pick ONE explicitly (there is NO default; running real
-# mode by accident flips the sandbox MCP to the live broker and loses the demo):
-#   --light   In-memory MCP IN THE SANDBOX + real Hermes + the wire flow.
-#             Self-contained: NO real account / broker / chain. Seeds the demo
-#             memory fixture — the "Chengdu" surprise lives HERE. Start here.
-#   --real    Live broker + workers + Heima mainnet, REUSING the account
-#             `setup-heima.sh` created (master `alice`, agent `demo-agent`).
-#             NO in-memory fixture. Live-env steps fail-loud if a prereq missing.
+# REAL memory only (real-data-only): live broker + workers + Heima mainnet,
+# REUSING the account `setup-heima.sh` created (master `alice`, agent
+# `demo-agent`). The sandbox MCP runs `--backend http`; every memory.get/put goes
+# broker cap-mint → per-actor STS → worker → S3. Live-env steps fail-loud if a
+# prereq is missing. (The in-memory `--light` mode + its fake "Chengdu" fixture
+# were removed — there is no self-contained fake path anymore.)
 #
 # The agent binary must be aarch64-linux (the sandbox is aarch64 Linux); the
 # harness cross-builds it in an arm64 Linux rust container and uploads it via
 # the sandbox's own file API (no scp).
 #
 # Manual gates (the "test through" essence): the LLM key (auto from
-# $OPENROUTER_API_KEY, else paste), real Touch ID at scope grant (Mode R, only
-# if not already scoped), the Hermes surprise + its confirmation. Everything
-# else is automated.
+# $OPENROUTER_API_KEY, else paste), real Touch ID at scope grant (only if not
+# already scoped), the Hermes surprise + its confirmation. Everything else is
+# automated.
 #
 # Usage:
-#   bash harness/phase1-wire-demo.sh {--light | --real} [--webauthn] [--unwire]
+#   bash harness/phase1-wire-demo.sh [--real] [--webauthn] [--unwire]
 #                                    [--openviking] [--yes] [--skip-N ...] [--help]
 #   --openviking : after the acts, test the OpenViking engine behind the gate
 #                  (needs openviking-server up — see docs/operator-runbook-openviking.md).
-#   (--light or --real is REQUIRED — the harness refuses to guess.)
+#   (--real is the only mode + the default; the in-memory --light was removed.)
 
 set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ─── config (env overridable) ──────────────────────────────────────────────
-MODE=""   # no default — must be set explicitly via --light or --real (see flags)
+MODE="real"   # the only mode (in-memory --light was removed — real-data-only)
 SANDBOX_URL="${SANDBOX_URL:-http://localhost:8080}"
 MCP_PORT="${MCP_PORT:-18088}"   # 8088 collides with the aiosandbox built-in gem-server; 18088 is outside its range
 MCP_URL_IN_SANDBOX="http://localhost:${MCP_PORT}/mcp"
@@ -85,10 +83,6 @@ SBX_HOME=""
 AGENT_BIN_DST=""
 MCP_BIN_DST=""
 
-# Mode-L demo identity (must match crates/agentkeys-mcp-server/src/backend/in_memory.rs)
-DEMO_ACTOR="0xa0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c701a0c7"
-DEMO_OPERATOR="0x07e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8a107e8"
-
 WEBAUTHN=false; UNWIRE=false; ASSUME_YES=false; OPENVIKING=false
 SKIP_PHASES=""   # space-separated phase numbers (bash 3.2 — no assoc arrays)
 
@@ -118,7 +112,7 @@ BROKER_URL="${AGENTKEYS_BROKER_URL:-}"             # Mode R: the BROKER (serves 
 # ─── flags ──────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --light)     MODE="light"; shift ;;
+    --light)     echo "ERROR: the in-memory --light mode was removed (real-data-only). Use --real (the default)." >&2; exit 2 ;;
     --real)      MODE="real"; shift ;;
     --webauthn)  WEBAUTHN=true; shift ;;
     --reuse-agent) REUSE_AGENT=true; shift ;;
@@ -131,32 +125,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Require an explicit mode — never silently default to the live broker.
-if [[ -z "$MODE" ]]; then
-  echo "ERROR: pick a mode explicitly — this harness will NOT guess." >&2
-  echo "  --light   in-memory demo, self-contained (the Chengdu surprise lives here) — START HERE" >&2
-  echo "  --real    live broker + workers + Heima mainnet (reuses the real account)" >&2
-  echo "Running --real by accident flips the sandbox MCP to the live broker and" >&2
-  echo "loses the in-memory demo fixture. See --help." >&2
-  exit 2
+# Loud mode banner — REAL is the only mode (real-data-only).
+echo "════════════════════════════════════════════════════════════════════"
+echo "  MODE: REAL — live broker + workers + Heima MAINNET"
+echo "               (real memory only — no in-memory fixture; real account)"
+if [[ "$WEBAUTHN" != true ]]; then
+  echo "               webauthn=false → step 1.5 will NOT grant the memory scope;"
+  echo "               re-run with --webauthn to seed the real memory (Touch ID)."
 fi
-
-# Loud mode banner so the active mode is never ambiguous.
-if [[ "$MODE" == "light" ]]; then
-  echo "════════════════════════════════════════════════════════════════════"
-  echo "  MODE: LIGHT — in-memory MCP, self-contained, seeded demo fixture"
-  echo "                (the Chengdu memory surprise lives here)"
-  echo "════════════════════════════════════════════════════════════════════"
-else
-  echo "════════════════════════════════════════════════════════════════════"
-  echo "  MODE: REAL — live broker + workers + Heima MAINNET"
-  echo "               (NO in-memory Chengdu fixture; uses the real account)"
-  if [[ "$WEBAUTHN" != true ]]; then
-    echo "               webauthn=false → step 1.5 will NOT grant the memory scope;"
-    echo "               re-run with --webauthn to seed the Chengdu memory (Touch ID)."
-  fi
-  echo "════════════════════════════════════════════════════════════════════"
-fi
+echo "════════════════════════════════════════════════════════════════════"
 
 # ─── output (CLAUDE.md ok/skip/fail convention) ──────────────────────────────
 FAILED=0
@@ -268,14 +245,7 @@ phase0_prereqs() {
   skip_phase 0 && { log "Phase 0 — prerequisites: skip (--skip-0)"; return; }
   log "Phase 0 — prerequisites ($MODE mode)"
 
-  if [[ "$MODE" == "light" ]]; then
-    ACTOR_OMNI="$DEMO_ACTOR"; OPERATOR_OMNI="$DEMO_OPERATOR"
-    VENDOR_TOKEN="${VENDOR_TOKEN:-demo-tok}"; SESSION_BEARER=""
-    ok "0.L identity" "in-memory demo actor ${ACTOR_OMNI:0:14}…"
-    return
-  fi
-
-  # Mode R — reuse the real account; verify, don't rebuild.
+  # Reuse the real account; verify, don't rebuild.
   VENDOR_TOKEN="${VENDOR_TOKEN:-harness-tok}"
   if [[ -f "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -551,7 +521,7 @@ phase1_sandbox() {
   #                 broker by request_id (clears the binding from pending).
   #   P.3 grant   — the MASTER grants the requested scope (one Touch ID).
   # P.2+P.3 are ONE product approval conceptually; kept as two steps so the test
-  # drives + verifies each deterministically. Skipped under --reuse-agent + --light.
+  # drives + verifies each deterministically. Skipped under --reuse-agent.
   # (Agent-side unbind / factory-reset re-pair is deferred → #156.)
   #
   # GENUINE FRESH PAIRING: AGENT_LABEL (default `demo-agent`) is stable and the
@@ -731,11 +701,8 @@ phase1_sandbox() {
   # memory.get/permission.check 401s ("bearer token not recognized"). Also
   # restart when a fresh binary was just uploaded.
   local mcp_backend mcp_vendor mcp_brokerarg mcp_relayarg cmd
-  if [[ "$MODE" == "light" ]]; then
-    mcp_backend="in-memory"; mcp_vendor="magiclick:$VENDOR_TOKEN"; mcp_brokerarg=""; mcp_relayarg=""
-    cmd="$MCP_BIN_DST --backend in-memory --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor"
-  else
-    mcp_backend="http"; mcp_vendor="harness:$VENDOR_TOKEN"; mcp_brokerarg="--broker-url ${BROKER_URL:-}"
+  # REAL backend only (real-data-only — the in-memory --backend was removed).
+  mcp_backend="http"; mcp_vendor="harness:$VENDOR_TOKEN"; mcp_brokerarg="--broker-url ${BROKER_URL:-}"
     # Per-actor STS relay (issue #90): the MCP server uses the AGENT session
     # (0.8 — omni == actor_omni) to mint AssumeRoleWithWebIdentity creds tagged
     # with the actor, then forwards them to the worker as X-Aws-* headers so the
@@ -758,17 +725,12 @@ phase1_sandbox() {
       mcp_session_arg="--agent-session-bearer-file $reuse_sf"
     fi
     [[ -n "$mcp_session_arg" ]] && mcp_relayarg="$mcp_session_arg --memory-role-arn ${MEMORY_ROLE_ARN:-} --vault-role-arn ${VAULT_ROLE_ARN:-} --aws-region ${REGION:-us-east-1}"
-    cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BROKER_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH $mcp_relayarg"
-  fi
+  cmd="$MCP_BIN_DST --backend http --transport http --listen 127.0.0.1:$MCP_PORT --vendor-tokens $mcp_vendor --broker-url ${BROKER_URL:-} --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-} --audit-url ${AGENTKEYS_WORKER_AUDIT_URL:-} --default-actor $ACTOR_OMNI --default-operator-omni $OPERATOR_OMNI --default-device-key-hash $DEVICE_KEY_HASH $mcp_relayarg"
   # Reuse only if a live server's argv carries the intended backend + token AND
-  # (real mode) the intended --broker-url — else a stale server pointed at the
-  # wrong broker (e.g. the signer) is silently reused. Empty mcp_brokerarg in
-  # light mode makes that last grep a no-op (empty pattern matches every line).
-  # In real mode with the STS relay, never reuse: the agent session bearer is
-  # freshly minted each run (0.8), and a reused server would hold a stale bearer
-  # → mint-oidc-jwt 401 on every memory op. -z both AGENT_SESSION_BEARER and
-  # AGENT_SESSION_FILE is true in light mode (and real-without-relay), preserving
-  # fast reuse there.
+  # the intended --broker-url — else a stale server pointed at the wrong broker
+  # (e.g. the signer) is silently reused. With the STS relay, never reuse: the
+  # agent session bearer is freshly minted each run (0.8), and a reused server
+  # would hold a stale bearer → mint-oidc-jwt 401 on every memory op.
   local reuse=false
   if [[ "$mcp_bin_changed" != true \
         && -z "$AGENT_SESSION_BEARER" && -z "$AGENT_SESSION_FILE" \
@@ -786,15 +748,15 @@ phase1_sandbox() {
     sbx_exec "pkill -f agentkeys-mcp-server 2>/dev/null; sleep 1; pkill -f agentkeys-mcp-server 2>/dev/null; sleep 1" >/dev/null
     # Start under a RESPAWN LOOP so a crash self-heals without a harness re-run,
     # and append (>>) to the log so a restart never truncates the audit trail
-    # (a plain > wiped it on every restart). The server re-seeds its in-memory
-    # fixture on each (re)start, so a respawn is a clean reset — no data drift.
+    # (a plain > wiped it on every restart). A respawn is a clean restart of the
+    # real http-backend server — it re-reads real worker state, no data drift.
     sbx_exec "nohup bash -c 'while true; do $cmd >>/tmp/agentkeys-mcp.log 2>&1; echo \"[respawn]\" >>/tmp/agentkeys-mcp.log; sleep 1; done' >/dev/null 2>&1 & sleep 2; echo started" >/dev/null
     [[ "$(sbx_rc "curl -fsS http://localhost:$MCP_PORT/healthz")" == "0" ]] \
       && ok "1.4 mcp server" "(re)started under respawn loop ($mcp_backend backend, token $mcp_vendor)" \
       || fail "1.4 mcp server" "did not come up — see /tmp/agentkeys-mcp.log in the sandbox"
   fi
 
-  # 1.5 seed the real memory worker (Mode R ONLY — in-memory auto-seeds). The
+  # 1.5 seed the real memory worker. The
   # agent reads this back in Act 1. Idempotent + scope-aware + --webauthn-gated:
   #   a. namespace already has content → skip everything (no Touch ID);
   #   b. else try memory.put directly — succeeds if the scope is already granted
@@ -1056,7 +1018,7 @@ phase3_acts() {
   # 3.1 Act 1 — memory inject (pre_llm_call)
   local a1; a1="$(sbx_hook 'agentkeys-prellm-memory-inject.sh' '{"hook_event_name":"pre_llm_call"}')"
   if echo "$a1" | jq -e '.context' >/dev/null 2>&1; then
-    local mem_src; mem_src="$([[ "$MODE" == real ]] && echo 'REAL worker' || echo 'in-mem fixture')"
+    local mem_src; mem_src="REAL worker"
     ok "3.1 Act1 memory" "engine=$MEMORY_ENGINE via $mem_src → $(echo "$a1" | jq -r '.context' | tr '\n' ' ' | cut -c1-44)…"
   else
     fail "3.1 Act1 memory" "no context returned: $a1"
@@ -1239,7 +1201,7 @@ main() {
   log "phase1-wire harness — mode=$MODE webauthn=$WEBAUTHN"
   phase0_prereqs
   if [[ "$FAILED" -gt 0 && "$MODE" == "real" ]]; then
-    log "Phase 0 has $FAILED failure(s) — fix the prerequisites above, then re-run. (Try --light for the in-memory path.)"
+    log "Phase 0 has $FAILED failure(s) — fix the prerequisites above, then re-run."
     exit 1
   fi
   phase1_sandbox

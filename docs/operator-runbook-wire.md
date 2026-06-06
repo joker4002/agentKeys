@@ -13,19 +13,20 @@ reads only its permitted memory, is deterministically denied an over-cap action
 > §3.6–3.7, [`docs/arch.md`](arch.md) §22d, [`docs/wiki/agent-iam-guarantee-glossary.md`](wiki/agent-iam-guarantee-glossary.md).
 > Full action table + automation decisions: [`docs/plan/phase1-wire-harness-test-plan.md`](plan/phase1-wire-harness-test-plan.md).
 
-## TL;DR — pick a mode and run one command
+## TL;DR — one command
+
+> **Real memory only (#207):** the in-memory `--light` mode was **removed** —
+> there is no fake/self-contained path anymore. The sandbox MCP always runs
+> `--backend http` against the real broker + workers + Heima mainnet. `--real`
+> is the only mode (and the default).
 
 ```bash
-# Lighter path — real Hermes + the full wire flow in the sandbox, in-memory
-# backend. No real account/broker/chain. The Chengdu surprise lives here. START HERE.
-bash harness/phase1-wire-demo.sh --light
-
-# Real — the live product on your heima account + real broker/workers + Heima
-# mainnet. Runs a FRESH §10.2 pairing EACH run: the agent generates its own key
-# IN THE SANDBOX (never on the master), the master binds it on-chain, and
-# --webauthn "approves" the memory scope via Touch ID. Then it seeds + recalls
-# the Chengdu memory. Each run DEPAIRS the prior device (revoke) + re-pairs a fresh
-# K10 (register), so expect ONE Touch ID + ~2 on-chain txs per run.
+# The live product on your heima account + real broker/workers + Heima mainnet.
+# Runs a FRESH §10.2 pairing EACH run: the agent generates its own key IN THE
+# SANDBOX (never on the master), the master binds it on-chain, and --webauthn
+# "approves" the memory scope via Touch ID. Then it seeds + recalls the Chengdu
+# memory. Each run DEPAIRS the prior device (revoke) + re-pairs a fresh K10
+# (register), so expect ONE Touch ID + ~2 on-chain txs per run.
 bash harness/phase1-wire-demo.sh --real --webauthn
 
 # VERIFY — deterministic, no LLM. Run IN THE SANDBOX after setup (the harness
@@ -36,11 +37,9 @@ docker exec -it <sandbox-container> bash -lc "hermes hooks test pre_llm_call"
 #   → stdout: {}   ❌  (MCP down / scope not granted / session bad)
 ```
 
-**A mode is REQUIRED** — `--light` or `--real`. The harness refuses to guess
-(running `--real` by accident flips the sandbox MCP to the live broker and loses
-the in-memory demo fixture). It prints a loud `MODE:` banner so the active mode
-is never ambiguous. Every step prints `ok proceeding` / `skip <reason>` /
-`fail <reason>`; the harness is idempotent — re-running is safe.
+The harness prints a loud `MODE:` banner, then `ok proceeding` / `skip <reason>` /
+`fail <reason>` per step; it is idempotent — re-running is safe. (Passing the old
+`--light` flag now errors with a pointer to `--real`.)
 
 ## How to run — the `--real --webauthn` walkthrough
 
@@ -82,31 +81,27 @@ story. Each run does a **genuine fresh pairing** — it **depairs** the prior de
 fresh pairing and reuses a single master-side agent — no per-run Touch ID / tx.
 Note it puts the agent key back on the master; use only for quick loops.
 
-## The two modes — `--light` vs `--real`
+## One mode — `--real` (the in-memory `--light` was removed, #207)
 
-> **`--light` = self-contained demo** (fake-but-pre-seeded data, nothing
-> external). **`--real` = the live product** (real broker + chain + your
-> account, no demo data). "Light" = *lightweight / no external dependencies*,
-> not "fewer features" — it runs the identical wire + hook + memory flow.
+There used to be two modes; the self-contained in-memory `--light` path was
+removed (real-data-only). The demo now always runs the **live product**:
 
-| | **`--light`** (start here) | **`--real`** |
-|---|---|---|
-| **In one line** | Self-contained sandbox demo — nothing external | The live product wired to real infra |
-| **MCP backend** | `in-memory` (data lives in the server's RAM) | `http` → real broker + workers |
-| **Memory data** | a **pre-seeded fixture** — the "Chengdu trip" is baked into the binary | the real S3-backed memory worker (empty unless you seeded it) |
-| **The Chengdu surprise** | ✅ works out of the box | ✅ **Phase P pairs + approves the scope (Touch ID), then 1.5 seeds** the agent's memory — run **`--real --webauthn`**. Step 1.5 (re)seeds the fixture each run — memory is keyed by the agent's **stable** omni (only the device key is fresh), so 1.5 overwrites and it's always present. Needs a live master session + K11 enrolled in webauthn mode |
-| **Broker / chain** | none | real broker (`signer.litentry.org`) + Heima **mainnet** |
-| **Account** | a fixed demo actor/operator | your master (operator) + the **same agent omni** (stable HDKD of the label) re-paired with a **fresh device key minted in the sandbox each run** (`--reuse-agent` reuses one master-side agent) |
-| **Cap-mint** | stubbed — always succeeds | real cap-mint (needs a valid master session) |
-| **Vendor token** | `demo-tok` | `harness-tok` |
-| **Touch ID** | never | at **Phase P (P.3)** EACH run when you pass `--webauthn` — the master *approves* the fresh agent's `[memory]` scope; never otherwise |
-| **Needs network to** | sandbox + Docker + (first build) a rust image | + reachable broker / workers / Heima RPC |
-| **Proves** | the wire + hook + memory-injection **plumbing** works | the same, against **real IAM infra** (real signing + isolation) |
-| **Cost / risk** | free, can't break anything | real gas/cost, mutates real account state |
+| | **`--real`** (the only mode) |
+|---|---|
+| **MCP backend** | `http` → real broker + workers |
+| **Memory data** | the real S3-backed memory worker (`bots/<actor>/memory/`); step 1.5 seeds the "Chengdu" trip through the real chain |
+| **The Chengdu surprise** | **Phase P pairs + approves the scope (Touch ID), then 1.5 seeds** the agent's memory — run **`--real --webauthn`**. Memory is keyed by the agent's **stable** omni (only the device key is fresh each run), so 1.5 overwrites and it's always present. Needs a live master session + K11 enrolled in webauthn mode |
+| **Broker / chain** | real broker (`signer.litentry.org`) + Heima **mainnet** |
+| **Account** | your master (operator) + the **same agent omni** (stable HDKD of the label) re-paired with a **fresh device key minted in the sandbox each run** (`--reuse-agent` reuses one master-side agent) |
+| **Cap-mint** | real cap-mint (needs a valid master session) |
+| **Vendor token** | `harness-tok` |
+| **Touch ID** | at **Phase P (P.3)** EACH run when you pass `--webauthn` — the master *approves* the fresh agent's `[memory]` scope; never otherwise |
+| **Proves** | the wire + hook + memory-injection flow against **real IAM infra** (real signing + isolation) |
+| **Cost / risk** | real gas/cost, mutates real account state |
 
 ## Setup entry points — first-time bring-up + re-runs
 
-`--light` needs **none** of this (self-contained — skip to *How to run*). For **`--real`**, the live infra is owned by three idempotent scripts. **Run each ON the machine shown** — this is the part that bites: `setup-broker-host.sh` runs *on the broker host* (SSH in first), the other two from your laptop.
+The live infra is owned by three idempotent scripts. **Run each ON the machine shown** — this is the part that bites: `setup-broker-host.sh` runs *on the broker host* (SSH in first), the other two from your laptop.
 
 ### Starting from scratch (nothing set up yet) — run ONCE, in order
 
@@ -139,7 +134,7 @@ All three are **idempotent + unattended by default** — re-running converges an
 
 **Always:** Rust toolchain (`rustup default stable`) + `jq` (`brew install jq`).
 
-**`--light` / real (sandbox path):**
+**Sandbox path (the wire flow):**
 - **Docker** + the sandbox running:
   ```bash
   docker run --security-opt seccomp=unconfined -d -p 8080:8080 ghcr.io/agent-infra/sandbox:latest
@@ -257,9 +252,8 @@ optional live demo; run it **while the gate is open** (Phase 5 stops the MCP).
 ## Useful flags
 
 ```
---light           sandbox path, in-memory backend
---real            live broker + workers + Heima mainnet + fresh §10.2 pairing
---webauthn        real Touch ID at the Phase P scope grant (real mode)
+--real            (default) live broker + workers + Heima mainnet + fresh §10.2 pairing
+--webauthn        real Touch ID at the Phase P scope grant
 --reuse-agent     skip fresh pairing; reuse one master-side agent (fast iterate)
 --unwire          remove the managed hooks block at teardown
 --yes             auto-confirm non-secret prompts
@@ -302,8 +296,8 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | `wire` step 0 → `fail hermes not installed` | Hermes not on the sandbox PATH | the harness installs it; or run the guarded install (Appendix) — needs GitHub reachable |
 | `wire` step 3 → `fail … already has a top-level hooks:` | hand-authored `hooks:` in `~/.hermes/config.yaml` | merge manually or remove it, then re-run |
 | `hook check` blocks with `agentkeys_unreachable` | MCP server down | start it (the harness does in Phase 1); check `AGENTKEYS_MCP_URL` |
-| `hook memory-inject` returns `{}` | namespace not granted/seeded | use a granted namespace (in-memory seeds `travel`/`family`/`profile`); check stderr for the skipped-namespace warning |
-| MCP call → 401 | wrong vendor token | match `AGENTKEYS_MCP_VENDOR_TOKEN` to the server's `--vendor-tokens` (in-memory seeds `demo-tok`) |
+| `hook memory-inject` returns `{}` | namespace not granted/seeded | use a granted namespace (step 1.5 seeds `travel` through the real worker); check stderr for the skipped-namespace warning |
+| MCP call → 401 | wrong vendor token | match `AGENTKEYS_MCP_VENDOR_TOKEN` to the server's `--vendor-tokens` (the harness uses `harness-tok`) |
 | MCP call → 403 | actor header mismatch | `AGENTKEYS_ACTOR_OMNI` must match the server's actor |
 | Memory swap not reflected | hooks fetch per-call but Hermes caches the LLM context | start a fresh Hermes session |
 | Phase 1 `1.3 … upload failed` | sandbox upload API runs non-root → can't write `/usr/local/bin` (`Errno 13`) | fixed: binaries now upload to the writable `~/.local/bin` (on PATH); just re-run |
@@ -315,7 +309,7 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 | Phase 4 `4.1 model smoke` / surprise → HTTP 429 | OpenRouter throttling a `:free` model | retry, or use the paid default `LLM_MODEL=deepseek/deepseek-v4-flash` |
 | Surprise reply says "nothing in memory" | wire hooks/MCP missing → `pre_llm_call` never injected | 4.0 now prechecks + fails loud; ensure Phases 1+2 ran (no `--skip-1/--skip-2`): `~/.hermes/agent-hooks/` exists + `:18088/healthz` up; use a fresh Hermes session |
 | Phase 1 `1.4 mcp server … did not come up` → `Address already in use` | `MCP_PORT` collides with a sandbox service (8088 = built-in `gem-server`) | default is now `18088` (outside the sandbox's range); override `MCP_PORT` if it still clashes — check `ss -ltnp` in the sandbox |
-| Hermes was memory-aware, now replies "nothing in memory" | the MCP server died, **or** a `--real` run flipped the sandbox to the live broker (no Chengdu fixture) | the MCP server now runs under a **respawn loop** (1.4), so a crash self-heals; if it's still down (e.g. a sandbox *container* restart killed the loop), bring it back with `bash harness/phase1-wire-demo.sh --light --skip-2 --skip-3 --skip-4 --skip-5` (Phases 0+1 only). If you ran `--real`, re-run `--light` to restore the in-memory fixture. Then ask again in a fresh Hermes turn. |
+| Hermes was memory-aware, now replies "nothing in memory" | the MCP server died, or the agent's memory scope/session lapsed | the MCP server runs under a **respawn loop** (1.4), so a crash self-heals; if it's still down (e.g. a sandbox *container* restart killed the loop), bring it back with `bash harness/phase1-wire-demo.sh --real --skip-2 --skip-3 --skip-4 --skip-5` (Phases 0+1 only) to restart it + re-seed the real memory. Then ask again in a fresh Hermes turn. |
 
 ## Appendix A — what `agentkeys wire` writes (reference)
 
@@ -347,9 +341,9 @@ The harness does these for you; run them manually only to understand the flow.
 
 ```bash
 # 1. Sandbox (see Prerequisites).
-# 2. MCP server (in-memory demo):
-./target/release/agentkeys-mcp-server --backend in-memory --transport http --listen 127.0.0.1:18088
-# (real: --backend http --broker-url … --memory-url … --audit-url … --vendor-tokens you:tok)
+# 2. MCP server (real http backend — the only backend; in-memory was removed #207):
+./target/release/agentkeys-mcp-server --backend http --transport http --listen 127.0.0.1:18088 \
+  --broker-url … --memory-url … --audit-url … --vendor-tokens you:tok
 
 # 3. Install Hermes in the sandbox (idempotent):
 curl -sS -X POST http://localhost:8080/v1/shell/exec -H 'content-type: application/json' \
