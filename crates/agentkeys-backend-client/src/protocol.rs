@@ -31,6 +31,11 @@ pub enum CapMintOp {
     CredFetch,
     MemoryPut,
     MemoryGet,
+    /// #201 config data class — master-only taxonomy/config object. A third
+    /// `DataClass::Config` with its own bucket + IAM role (arch.md §17.2); the
+    /// cred + memory workers reject a Config cap via `verify::check_data_class`.
+    ConfigStore,
+    ConfigFetch,
 }
 
 impl CapMintOp {
@@ -40,6 +45,8 @@ impl CapMintOp {
             "cred_fetch" => Some(Self::CredFetch),
             "memory_put" => Some(Self::MemoryPut),
             "memory_get" => Some(Self::MemoryGet),
+            "config_store" => Some(Self::ConfigStore),
+            "config_fetch" => Some(Self::ConfigFetch),
             _ => None,
         }
     }
@@ -50,6 +57,8 @@ impl CapMintOp {
             Self::CredFetch => "/v1/cap/cred-fetch",
             Self::MemoryPut => "/v1/cap/memory-put",
             Self::MemoryGet => "/v1/cap/memory-get",
+            Self::ConfigStore => "/v1/cap/config-store",
+            Self::ConfigFetch => "/v1/cap/config-fetch",
         }
     }
 
@@ -57,6 +66,7 @@ impl CapMintOp {
         match self {
             Self::CredStore | Self::CredFetch => "credentials",
             Self::MemoryPut | Self::MemoryGet => "memory",
+            Self::ConfigStore | Self::ConfigFetch => "config",
         }
     }
 }
@@ -133,6 +143,32 @@ pub struct MemoryPutResp {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MemoryGetResp {
+    pub ok: bool,
+    pub plaintext_b64: String,
+}
+
+// ── config worker (`/v1/config/{put,get}`) — #201 config data class ──────────
+
+/// Config-worker `/v1/config/put` request body. Mirrors
+/// `agentkeys_worker_config::handlers::PutRequest`. Config is a single
+/// master-only object (the memory-types taxonomy), so — unlike `MemoryPutBody`
+/// — there is NO `namespace` field; the object's identity is the signed cap
+/// `service` (`memory-taxonomy`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigPutBody {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+/// Config-worker `/v1/config/get` request body. Mirrors
+/// `agentkeys_worker_config::handlers::GetRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigGetBody {
+    pub cap: CapToken,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigGetResp {
     pub ok: bool,
     pub plaintext_b64: String,
 }
@@ -259,6 +295,8 @@ mod tests {
             ("cred_fetch", "/v1/cap/cred-fetch", "credentials"),
             ("memory_put", "/v1/cap/memory-put", "memory"),
             ("memory_get", "/v1/cap/memory-get", "memory"),
+            ("config_store", "/v1/cap/config-store", "config"),
+            ("config_fetch", "/v1/cap/config-fetch", "config"),
         ] {
             let op = CapMintOp::parse(s).unwrap();
             assert_eq!(op.broker_path(), path);

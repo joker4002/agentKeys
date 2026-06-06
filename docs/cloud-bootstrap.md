@@ -14,7 +14,7 @@ The day-to-day broker re-deploys live in §10 below (`setup-broker-host.sh`); th
 
 ## Quick start — five steps to a running stack
 
-Tight five-step flow. Explanation + per-step reasoning are in §1–§11 below; the same flow works for prod (no `--test`) or test (`--test` swaps in `-test` identifiers everywhere). The orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) is idempotent — re-running is safe.
+Tight five-step flow. Explanation + per-step reasoning are in §1–§11 below; the same flow works for prod (**no flag**) or the CI/test stack (**`--ci`**, alias `--test`, swaps in `-test` identifiers everywhere + targets the test broker EIP `agentkeys-broker-eip-test`). The orchestrator [`scripts/setup-cloud.sh`](../scripts/setup-cloud.sh) is idempotent — re-running is safe. **Prod and the CI/test broker are SEPARATE EC2 machines with SEPARATE EIPs** — `--ci` is what keeps them apart; never mix the flag.
 
 ### 1. Get the EC2 + EIP (manual, ~5 min per stack)
 
@@ -50,12 +50,13 @@ In practice: paste `INSTANCE_ID` into the two broker env files. Done.
 ```bash
 awsp agentkeys-admin
 
-# Prod stack:
+# Prod stack (no env flag):
 bash scripts/setup-cloud.sh --yes
 
-# Test stack — --test auto-selects scripts/operator-workstation.test.env
-# + scripts/broker.test.env and suffixes IAM identifiers with -test:
-bash scripts/setup-cloud.sh --test --yes
+# CI/test stack — --ci (alias --test) auto-selects scripts/operator-workstation.test.env
+# + scripts/broker.test.env, suffixes IAM identifiers with -test, and targets the
+# test broker EIP (tag agentkeys-broker-eip-test):
+bash scripts/setup-cloud.sh --ci --yes
 ```
 
 The orchestrator walks 15 idempotent steps (cloud-side AWS resources + IAM users + per-data-class roles + bucket policies + DNS UPSERTs). Steps 10 (`agentkeys-daemon[-test]`) and 12 (`agentkeys-broker[-test]`) print **access keys** to copy off — they're shown ONCE.
@@ -101,18 +102,18 @@ ssh-agentkeys-test-fallback   # ssh -i ~/.ssh/your.pem ubuntu@<test EIP>
 git clone https://github.com/litentry/agentKeys.git
 cd agentKeys
 
-sudo bash scripts/setup-broker-host.sh --test --yes
+sudo bash scripts/setup-broker-host.sh --ci --yes
 ```
 
-Two flags. `--test` triggers the `-test` suffix on every derived hostname / bucket / email; `--issuer-url` + `--account-id` auto-derive from `ZONE` + `ACCOUNT_ID` in `scripts/operator-workstation.env` (which the repo clone ships with). Override any flag explicitly if you need a non-conventional name. For **prod**, drop `--test`:
+Two flags. `--ci` (alias `--test`) triggers the `-test` suffix on every derived hostname / bucket / email; `--issuer-url` + `--account-id` auto-derive from `ZONE` + `ACCOUNT_ID` in `scripts/operator-workstation.env` (which the repo clone ships with). Override any flag explicitly if you need a non-conventional name. For **prod**, drop `--ci`:
 
 ```bash
 sudo bash scripts/setup-broker-host.sh --yes
 ```
 
-What `--test` derives automatically:
-- `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`
-- `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`
+What `--ci` derives automatically:
+- `signer-test.${ZONE}`, `audit-test.${ZONE}`, `email-test.${ZONE}`, `cred-test.${ZONE}`, `memory-test.${ZONE}`, `config-test.${ZONE}`
+- `agentkeys-vault-test-${ACCOUNT_ID}`, `agentkeys-memory-test-${ACCOUNT_ID}`, `agentkeys-config-test-${ACCOUNT_ID}`
 - `noreply-test@bots-test.${ZONE}`
 - `https://test-broker.${ZONE}` for the OIDC issuer URL
 
@@ -130,7 +131,7 @@ ssh-agentkeys-test         # Instance Connect, no .pem needed
 cd ~/agentKeys             # → /home/agentkey/agentKeys, files visible
 ```
 
-Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --test --yes`) happen from `/home/agentkey/agentKeys` — step 10's relocation is idempotent (existence check skips when already in place). The cargo build cache survives the move (it's inside `target/`). The Rust toolchain itself is **deleted from `/root/` at the end of the first run** to save ~1.5 GB — future re-runs reinstall it as part of the toolchain step automatically. This keeps the box clean and ensures only one canonical Rust install on disk at a time.
+Subsequent re-runs (`git pull` + `sudo bash scripts/setup-broker-host.sh --ci --yes`) happen from `/home/agentkey/agentKeys` — step 10's relocation is idempotent (existence check skips when already in place). The cargo build cache survives the move (it's inside `target/`). The Rust toolchain is **KEPT across runs by default** so re-deploys skip the slow rustup + crate-registry re-download (and sccache caches the compilations) — a no-source-change re-run drops to ~30-60s. Pass **`--reclaim-toolchain`** on a final deploy to delete `/root/.cargo` + `/root/.rustup` and free ~1.5 GB.
 
 For **prod**, the same flow applies — drop `--test` everywhere and the relocation moves the repo from whichever home dir you bootstrapped in to `/home/agentkey/`.
 
@@ -154,12 +155,29 @@ This is **optional**; the broker itself runs from compiled binaries, not from a 
 
 `setup-broker-host.sh` installs `certbot` but does NOT issue Let's Encrypt certs itself — issuance is DNS-dependent (the broker hostname must already resolve to this EIP on the public internet before Let's Encrypt's HTTP-01 challenger can validate it). Until you run the issuance below, nginx serves HTTP-only on `:80` with a `503 "TLS cert not yet issued"` placeholder on every non-ACME path — and **the OIDC federation step in [`docs/ci-setup.md`](ci-setup.md) §1 can't succeed because there's no cert to extract a thumbprint from**.
 
+> **⚠️ Run EVERY command in this section ON THE BROKER HOST** — the machine whose public A record the hostnames point to (the EIP). `certbot --webroot` writes the ACME challenge to the **local** `/var/www/certbot`, but Let's Encrypt validates by fetching `http://<host>/.well-known/acme-challenge/…` from the hostname's **public IP = the broker**. Run certbot on your laptop or any non-broker box — *especially* behind a VPN (Cloudflare WARP / Zscaler / Tailscale) that intercepts or rewrites `${ZONE}` — and the challenge lands on the wrong machine, so the broker answers the CA with **404** and issuance fails. SSH in first (`ssh-agentkeys`); sanity-check you're on the right host with `curl -s ifconfig.me` (must print the broker EIP). A laptop `curl` of `<host>` behind a VPN hits the **VPN's** nginx, not the broker's — an easy tell is a different `nginx/<version>` in the 404 page than the broker's `nginx -v`.
+
 ```bash
 # Still on the broker host (as agentkey or ubuntu — both have sudo):
-for h in ${BROKER_HOST} ${SIGNER_HOST} ${AUDIT_HOST} ${EMAIL_HOST} ${CRED_HOST} ${MEMORY_HOST}; do
+# PRE-CHECK (cheap; avoids burning Let's Encrypt's rate-limited attempts on a vhost
+# that isn't actually live). Confirm THIS host's nginx serves the ACME path before
+# asking the CA. A freshly-added worker (e.g. config, #201) needs nginx reloaded
+# first — `nginx -T` showing the vhost does NOT mean the running process loaded it.
+sudo nginx -t && sudo systemctl reload nginx
+sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
+echo probe-ok | sudo tee /var/www/certbot/.well-known/acme-challenge/probe >/dev/null
+curl -s http://localhost/.well-known/acme-challenge/probe -H "Host: ${CONFIG_HOST}"   # must print: probe-ok (404 ⇒ vhost not live → reload)
+sudo rm -f /var/www/certbot/.well-known/acme-challenge/probe
+
+# CONFIG_HOST (config.${ZONE}) is the #201 master-only taxonomy worker — its
+# cert is required too, or stage-3 steps 19-21 fail with SSL_ERROR_SYSCALL.
+for h in ${BROKER_HOST} ${SIGNER_HOST} ${AUDIT_HOST} ${EMAIL_HOST} ${CRED_HOST} ${MEMORY_HOST} ${CONFIG_HOST}; do
   sudo certbot certonly --webroot -w /var/www/certbot -d "$h" \
     --agree-tos -m <your-ops-email> --non-interactive
 done
+# Explicit config form (if you issue certs one at a time):
+#   sudo certbot certonly --webroot -w /var/www/certbot -d config.litentry.org \
+#     --agree-tos -m ops@litentry.org --non-interactive
 
 # Flip nginx from Phase A (HTTP-only) → Phase B (HTTPS) — the renderer in
 # setup-broker-host.sh picks Phase B automatically when /etc/letsencrypt/live/<host>/
@@ -192,6 +210,8 @@ Common failures + fixes:
 - **`Connection timeout to … port 80`** — the SG is missing port 80 ingress. Re-check step 1's SG requirements (you need 22, 80, **and** 443).
 - **`DNS problem: NXDOMAIN`** — Route 53 doesn't have the A record yet, or DNS hasn't propagated. Wait 1-2 min, then retry. Quick check: `curl -sS "https://dns.google/resolve?name=<host>&type=A"` (do NOT rely on `dig` — local resolver may be lying).
 - **`No such file or directory: /var/www/certbot`** — Phase A nginx render didn't complete; re-run `sudo bash scripts/setup-broker-host.sh --test --yes` first.
+- **A worker's cert fails but the broker's works (or the CA hits an IP that isn't your broker)** — the worker A records point at a *different* EIP than the broker. Workers co-locate with the broker, so every worker A record MUST equal `broker.${ZONE}`'s. This bit us when the account had **both** a prod and a test broker EIP and the worker records were pointed at the **test** EIP while `broker`/`signer` stayed on prod. Check via DoH (never laptop DNS — a VPN rewrites it): `for h in broker audit email cred memory config; do echo "$h → $(curl -s "https://dns.google/resolve?name=$h.${ZONE}&type=A" | jq -r '.Answer[0].data')"; done`. If any worker differs from `broker`, re-run `bash scripts/dns-upsert-workers.sh` from your laptop (`agentkeys-admin`) — it derives the EIP from `broker.${ZONE}`'s own A record, so all five workers mirror the broker (pass `--eip <broker-EIP>` to be explicit).
+- **`unauthorized` / `Invalid response … /.well-known/acme-challenge/… : 404`** — the CA reached the host but couldn't fetch the challenge file. Two causes: (1) **certbot ran on the wrong machine** — `--webroot` wrote the challenge to *that* box's `/var/www/certbot`, but the CA validates against the hostname's public IP (the broker). Run certbot ON THE BROKER (see the ⚠️ above). (2) **a newly-added worker's vhost isn't live** — `nginx -T` shows it on disk but the running process wasn't reloaded; `sudo nginx -t && sudo systemctl reload nginx`, then re-run the PRE-CHECK probe. Confirm locally on the broker (not a VPN'd laptop): `echo ok | sudo tee /var/www/certbot/.well-known/acme-challenge/probe >/dev/null && curl -s http://localhost/.well-known/acme-challenge/probe -H "Host: <host>"` must print `ok`.
 
 ---
 
@@ -504,7 +524,7 @@ Six subdomains under the operator's parent zone (substitute `${ZONE}` everywhere
 | `${MAIL_DOMAIN}` (e.g. `bots.${ZONE}`) | SES / email backend inbound | §3 |
 | `${BROKER_HOST}` (e.g. `broker.${ZONE}`) | Broker public reverse proxy | §10.1 below |
 | `signer.${ZONE}` | Signer service (issue #74 step 1b) | §10.1 below |
-| `audit.${ZONE}` / `email.${ZONE}` / `cred.${ZONE}` / `memory.${ZONE}` | Service workers (issue #90) | §10.1 below (dev co-location on broker EIP today) |
+| `audit.${ZONE}` / `email.${ZONE}` / `cred.${ZONE}` / `memory.${ZONE}` / `config.${ZONE}` | Service workers (issue #90; config = #201 master-only taxonomy) | §10.1 below (dev co-location on broker EIP today) |
 
 Confirm the parent zone is reachable before any record changes (AWS Route 53 example; the same `get-hosted-zone` shape exists on AliCloud DNS + Cloud DNS):
 
@@ -861,12 +881,12 @@ Run [`harness/v2-stage3-demo.sh`](../harness/v2-stage3-demo.sh) (or `bash harnes
 
 ## §10 Broker host bring-up: `setup-broker-host.sh`
 
-§§3–8 set up identifiers. This step stands up the actual processes — broker + mock-server + signer + 4 service workers — on the EC2 host (or any Linux box with public-internet egress + the broker's hostname).
+§§3–8 set up identifiers. This step stands up the actual processes — broker + mock-server + signer + 5 service workers (audit/email/cred/memory/config) — on the EC2 host (or any Linux box with public-internet egress + the broker's hostname).
 
 ### §10.1 Prereqs
 
 - Fresh Linux host with sudo, systemd, public-internet egress, ports 80 + 443 open inbound (for certbot + nginx).
-- DNS A records for `${BROKER_HOST}` + `signer.${ZONE}` + `audit.${ZONE}` + `email.${ZONE}` + `cred.${ZONE}` + `memory.${ZONE}` all pointing at the host's public IP (provisioned by `setup-cloud.sh` step 6).
+- DNS A records for `${BROKER_HOST}` + `signer.${ZONE}` + `audit.${ZONE}` + `email.${ZONE}` + `cred.${ZONE}` + `memory.${ZONE}` + `config.${ZONE}` all pointing at the host's public IP (provisioned by `setup-cloud.sh` step 6 — broker/signer/mcp inline, the 5 service workers via `dns-upsert-workers.sh`).
 - AWS credentials in `/etc/agentkeys/broker.env` (the script writes the template; operator pastes the `agentkeys-daemon` access key from §4.1).
 
 ### §10.2 Run
@@ -881,6 +901,7 @@ sudo bash scripts/setup-broker-host.sh \
   --email-host  "email.${ZONE}" \
   --cred-host   "cred.${ZONE}" \
   --memory-host "memory.${ZONE}" \
+  --config-host "config.${ZONE}" \
   --yes
 
 # After a `git pull`, the same command re-deploys:
@@ -888,12 +909,12 @@ sudo bash scripts/setup-broker-host.sh --yes
 ```
 
 The script:
-- Builds `agentkeys-broker-server` (+ `auth-email-link` feature), `agentkeys-mock-server`, the 4 service workers, and the signer.
+- Builds `agentkeys-broker-server` (+ `auth-email-link` feature), `agentkeys-mock-server`, the 5 service workers (audit/email/cred/memory/config), and the signer. Compilations are cached with **sccache** (a content-addressed compiler cache, auto-installed best-effort) so re-deploys + `--ref` branch switches reuse the cache instead of recompiling — even when `git checkout` churns mtimes or `target/` is cold. The build prints `sccache stats` afterward (re-deploys should be mostly cache hits). Opt out with `AGENTKEYS_NO_SCCACHE=1`; pin a version with `SCCACHE_VERSION=vX.Y.Z`.
 - Creates the `agentkeys` system user + state dir `/var/lib/agentkeys/`.
 - Writes the dev_key_service master secret (one-shot at first boot, never rotated — rotation invalidates every previously-derived wallet).
-- Writes per-worker env files at `/etc/agentkeys/worker-{audit,email,creds,memory}.env`.
+- Writes per-worker env files at `/etc/agentkeys/worker-{audit,email,creds,memory,config}.env`.
 - Writes systemd units for broker + signer + each worker, enables + starts.
-- Configures nginx vhosts for `${BROKER_HOST}` + `signer.${ZONE}` + 4 worker hosts (skip via `--without-nginx`). Vhost is rendered in two phases: Phase A (HTTP-only on `:80`, with the ACME challenge path under `/.well-known/acme-challenge/` and a 503 placeholder on `/`) when no cert is on disk; Phase B (HTTPS on `:443`, broker proxy on `/`) when `/etc/letsencrypt/live/<host>/fullchain.pem` exists. Re-running the script after certbot issuance flips A → B automatically.
+- Configures nginx vhosts for `${BROKER_HOST}` + `signer.${ZONE}` + 5 worker hosts (audit/email/cred/memory/config) (skip via `--without-nginx`). Vhost is rendered in two phases: Phase A (HTTP-only on `:80`, with the ACME challenge path under `/.well-known/acme-challenge/` and a 503 placeholder on `/`) when no cert is on disk; Phase B (HTTPS on `:443`, broker proxy on `/`) when `/etc/letsencrypt/live/<host>/fullchain.pem` exists. Re-running the script after certbot issuance flips A → B automatically.
 - **Installs certbot but does NOT run it.** Cert issuance is DNS-dependent — see quick-start §5b for the per-vhost `certbot certonly --webroot` recipe operators run manually once DNS is in place.
 - Mints broker keypairs (oidc + session) under `/var/lib/agentkeys/keys/`.
 

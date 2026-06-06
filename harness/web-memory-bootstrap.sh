@@ -246,9 +246,14 @@ if should_run_step 7; then
         --signer-url <SIGNER_URL> \\
         --memory-url ${AGENTKEYS_WORKER_MEMORY_URL:-<MEMORY_WORKER_URL>} \\
         --memory-role-arn ${MEMORY_ROLE_ARN:-<MEMORY_ROLE_ARN>} \\
+        --config-url ${AGENTKEYS_WORKER_CONFIG_URL:-<CONFIG_WORKER_URL>} \\
+        --config-role-arn ${CONFIG_ROLE_ARN:-<CONFIG_ROLE_ARN>} \\
         --region ${REGION:-us-east-1}
       # the daemon's env must resolve the deployer key (it signs the register tx)
       # + have cast + agentkeys on PATH + $ENV_FILE present.
+      # --config-url/--config-role-arn (#201 Phase 4) let the memory list resolve
+      # categories from the durable, master-only taxonomy; omit for the in-memory
+      # fallback (the list then derives categories from the cache).
 
     Then in the web UI, IN THIS ORDER (the one sequencing rule):
       1. Verify email (mints J1 + freezes the session omni).
@@ -258,7 +263,9 @@ if should_run_step 7; then
           with a clear chain_error; just re-finish after verifying.)
       3. Confirm:  curl -s \$UI_BRIDGE/v1/onboarding/state | jq .chain
                    # → "master-registered"
-      4. Click the memory plant button → writes bots/0x<omni>/memory/memory:<ns>.enc.
+      4. Click the memory plant button → writes per-ns JSON arrays at
+         bots/0x<omni>/memory/memory:<ns>.enc + (if --config-url set) the
+         master-only taxonomy at bots/0x<omni>/config/memory-taxonomy.enc.
 EOF
   ok "web-demo instructions printed"
 fi

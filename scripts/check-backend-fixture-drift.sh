@@ -67,7 +67,7 @@ extract_keys() {
 }
 
 info "canonical shapes (from harness/fixtures/backend-protocol):"
-for fx in cap_mint_request memory_put_body memory_get_body audit_append_v2; do
+for fx in cap_mint_request memory_put_body memory_get_body config_put_body config_get_body audit_append_v2; do
   [ -f "$FIX_DIR/$fx.json" ] || { bad "missing fixture $fx.json"; exit 2; }
   printf '    %-18s = %s\n' "$fx" "$(fixture_keys "$fx")"
 done
@@ -125,11 +125,19 @@ done < <(emit_records)
 # annotation is silently ungated — the exact miss Codex found (an unannotated
 # memory-get `{cap, namespace}` readback in memory-plant-demo.sh). This pass
 # scans EVERY single-quoted `jq` object literal and fails any whose key-set
-# EXACTLY matches a canonical fixture but carries no `# @backend-fixture:`
-# annotation on/above it. Exact-match keeps it false-positive-free: cred-worker
-# bodies (`{cap, plaintext_b64}`, `{cap}`) and the ttl-omitted 4-key cap variant
-# (broker `CapRequest.ttl_seconds` is `#[serde(default)]`) match no canonical set,
-# so they're left alone.
+# EXACTLY matches an UNAMBIGUOUS canonical fixture but carries no
+# `# @backend-fixture:` annotation on/above it.
+#
+# Only the four UNAMBIGUOUS shapes auto-detect here. Deliberately EXCLUDED:
+#   - `config_put_body` (`{cap, plaintext_b64}`) and `config_get_body` (`{cap}`)
+#     — these are key-set-identical to the cred-worker store/fetch bodies, so a
+#     `{cap}` literal can't be classified config-vs-cred by shape alone. Config
+#     bodies are gated via PASS-1 annotation (explicit `@backend-fixture:
+#     config_*`), never auto-detected here (auto-detect would false-positive on
+#     every cred `{cap}` / `{cap, plaintext_b64}`).
+#   - the ttl-omitted 4-key cap variant (broker `CapRequest.ttl_seconds` is
+#     `#[serde(default)]`) — 4 keys, never equals the 5-key `cap_mint_request`.
+# So exact-match against ONLY these four stays false-positive-free.
 CAP_KEYS="$(fixture_keys cap_mint_request)"
 PUT_KEYS="$(fixture_keys memory_put_body)"
 GET_KEYS="$(fixture_keys memory_get_body)"
@@ -139,7 +147,7 @@ canonical_shape() { case "$1" in
   "$PUT_KEYS")   echo memory_put_body  ;;
   "$GET_KEYS")   echo memory_get_body  ;;
   "$AUDIT_KEYS") echo audit_append_v2  ;;
-  *) echo "" ;;
+  *) echo "" ;;   # config_put/config_get intentionally absent — see comment above
 esac; }
 
 # Emit `file<TAB>line<TAB>annotated(0|1)<TAB>literal` for every single-quoted
