@@ -2052,6 +2052,39 @@ async fn register_pairing(
         tx = tx.as_deref().unwrap_or("(already-registered)"),
         "#214: agent device registered on chain (web pairing)"
     );
+    // Surface the freshly-registered agent in the web UI (state.actors) so it
+    // appears in the devices view + becomes targetable by the existing scope-grant
+    // flow (P.3, /v1/actors/:id/scope/grant). Keyed by `agent-<label>`, mirroring
+    // the master actor's in-memory model (chain-backed reload is a separate concern).
+    let omni_hex = if actor_omni.starts_with("0x") {
+        actor_omni.clone()
+    } else {
+        format!("0x{actor_omni}")
+    };
+    let agent_actor = ApiActor {
+        id: format!("agent-{label}"),
+        omni: omni_hex.clone(),
+        omni_hex,
+        label: label.clone(),
+        role: "agent".into(),
+        parent: Some("master".into()),
+        derivation: format!("//{label}"),
+        device: "sandbox device (§10.2)".into(),
+        device_pubkey: agent_address.clone(),
+        last_active: "just paired".into(),
+        status: "ok".into(),
+        vendor: String::new(),
+        k11: false,
+        scope: None,
+        payment_cap: None,
+        time_window: None,
+        services: None,
+    };
+    state
+        .actors
+        .write()
+        .await
+        .insert(agent_actor.id.clone(), agent_actor);
     (
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "label": label, "actor_omni": actor_omni, "tx_hash": tx })),
