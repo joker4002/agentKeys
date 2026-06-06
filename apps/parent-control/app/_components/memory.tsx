@@ -169,9 +169,10 @@ function TaxonomySetup({
   return (
     <div className="empty-memory" style={{ maxWidth: 560 }}>
       <div className="serif" style={{ fontSize: 40, fontStyle: 'italic', color: 'var(--ink-faint)', marginBottom: 4 }}>∅</div>
-      <h2 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 8px' }}>Set up your memory categories</h2>
+      <h2 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 8px' }}>Set up your categories</h2>
       <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', margin: '0 auto 20px' }}>
-        Author your memory taxonomy — the category tree every paired agent reads from. Two ways to start:
+        Author your <strong>category taxonomy</strong> — the vocabulary agentKeys uses to scope what an agent can access:
+        the memory it reads, the credentials it uses, and more data classes as you add them. Two ways to start:
       </p>
 
       <div style={{ display: 'grid', gap: 12 }}>

@@ -174,6 +174,14 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
     setInitializing(false);
     if (r.ok) {
       setSetupCount(r.data.categories.length);
+      // Surface a degraded write (durable Config unavailable → saved in-memory)
+      // so the user knows it's not durable yet — onboarding still completes.
+      const status = r.data.taxonomyStatus;
+      if (status.startsWith('cached-degraded')) {
+        setSetupNote('Saved locally — your durable Config store is unavailable right now. Re-initialize from the memory page once the config worker is healthy.');
+      } else if (status === 'cached') {
+        setSetupNote('Saved locally (durable Config not configured in this environment).');
+      }
     } else {
       const detail = r.status.detail ?? '';
       const m = detail.match(/\{"error":"([^"]+)"\}/);
@@ -360,11 +368,13 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
           <div className="onboard-login">
             {setupCount === null ? (
               <>
-                <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your memory categories.</h1>
+                <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your categories.</h1>
                 <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 16, maxWidth: 420 }}>
-                  Pick a starting profile. This authors your <strong>memory taxonomy</strong> — the category tree every agent
-                  you connect reads from and can inherit. You can refine it any time; nothing is shared with an agent until you
-                  connect one.
+                  Pick a starting profile. This authors your <strong>category taxonomy</strong> — the vocabulary agentKeys uses
+                  to scope everything an agent can touch: the <strong>memory</strong> it reads, the <strong>credentials</strong> it
+                  uses, and more data classes (payments, …) as you add them. It seeds your categories now; credentials are
+                  auto-categorized into the same taxonomy when you connect an agent. Refine it any time — nothing is shared until
+                  you connect one.
                 </p>
                 {presets.length > 0 ? (
                   <>
@@ -410,6 +420,9 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
                   <strong>connect an agent</strong> — when you pair one, the classifier proposes which categories + credentials
                   it may use, and you confirm (sensitive ones need Touch ID).
                 </p>
+                {setupNote && (
+                  <p style={{ fontSize: 11.5, color: 'var(--accent, #b8860b)', marginBottom: 16, maxWidth: 420 }}>{setupNote}</p>
+                )}
                 <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={onComplete}>
                   Enter agentKeys →
                 </button>

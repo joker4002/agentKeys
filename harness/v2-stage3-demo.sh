@@ -1415,13 +1415,20 @@ master_classify_rejection() {
     die "$cap_url master-self cap-mint returned HTTP $rc — body: $capjson"
   fi
   # POST to the classify worker — NO STS (compute gate, no S3 extractor).
-  local art_path body
+  local art_path body err_file
   art_path="$STATE_DIR/classify.${art}.json"
+  err_file="${art_path}.curlerr"
   body=$(jq -n --argjson cap "$capjson" --arg dc "$req_dc" '{cap:$cap, data_class:$dc, entity:"stripe"}')
+  # Send curl's transport/TLS error to a SIDE FILE (not 2>&1) and use `|| true`
+  # (NOT `|| echo 000`): on an undeployed worker curl already prints
+  # %{http_code}=000, so `|| echo 000` would DOUBLE it to "000000" and miss the
+  # `case 000|502|503|504)` skip below → a spurious die. Mirror the config helper.
   rc=$(curl -sS -o "$art_path" -w '%{http_code}' \
        -X POST "${AGENTKEYS_WORKER_CLASSIFY_URL}/v1/classify/tag" \
-       -H 'content-type: application/json' -d "$body" 2>/dev/null || echo "000")
+       -H 'content-type: application/json' -d "$body" 2>"$err_file" || true)
   [ -z "$rc" ] && rc="000"
+  if [ ! -s "$art_path" ] && [ -s "$err_file" ]; then cat "$err_file" >"$art_path"; fi
+  rm -f "$err_file"
   body=$(cat "$art_path" 2>/dev/null || true)
   if [ "$rc" = "200" ]; then
     cat "$art_path" >&2

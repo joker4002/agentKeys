@@ -48,14 +48,24 @@ Remove it any time with `agentkeys wire <runtime> --unwire`.
 > keeping the hooks data. `agentkeys wire` detects a de-sentineled block and
 > re-wraps it on the next run, so re-running wire is always safe.
 
-## Setting up your memory categories (parent-control)
+## Setting up your categories (parent-control)
 
-Onboarding ends with a **"Set up your memory categories"** step (right after you
-bind your passkey): pick a starting profile and your taxonomy is authored before
-you connect any agent. You can **skip** it there and do it later — the **memory**
-page offers the same setup whenever your taxonomy is empty. Either way you author
-your **memory taxonomy** — the category tree every paired agent reads from
-(`memory:<namespace>`) — in one of two ways:
+Onboarding ends with a **"Set up your categories"** step (right after you bind
+your passkey): pick a starting profile and your taxonomy is authored before you
+connect any agent. You can **skip** it there and do it later — the **memory** page
+offers the same setup whenever your taxonomy is empty. Either way you author your
+**category taxonomy** — the vocabulary agentKeys uses to scope everything an agent
+can touch: the **memory** it reads (`memory:<namespace>`), the **credentials** it
+uses, and more data classes (payments, …) as you add them. It seeds your memory
+categories now; credentials are auto-categorized into the same taxonomy when you
+connect an agent. You author it in one of two ways:
+
+> **If init reports "saved locally" / "durable Config unavailable":** your config
+> worker (the encrypted, master-only `Config` store) isn't reachable, so the
+> taxonomy was kept in the daemon's memory only (lost on restart, not yet readable
+> by agents). The onboarding still completes — provision/repair the config data
+> class (`setup-cloud.sh` + a broker redeploy), then re-initialize. In a pure dev
+> run with no config worker, this is expected.
 
 - **A · Start from a profile** — pick one of ~10 role presets (the default is a
   rich *adult-household* profile: kids, business, smart-home, finance, family,

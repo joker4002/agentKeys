@@ -271,14 +271,21 @@ export function App() {
     setInitializing(false);
     const r = await client.initConfigDefault(pendingPreset);
     if (r.ok) {
-      // "cached" ⇒ Config unconfigured (dev/no-infra) — authored into the
-      // daemon's in-memory mirror only; say so rather than imply durability.
-      const cached = r.data.taxonomyStatus === 'cached';
+      // taxonomyStatus: "ok" (durable) · "cached" (Config unconfigured, in-memory
+      // only) · "cached-degraded: <reason>" (durable write FAILED — config worker
+      // unhealthy — saved in-memory; needs an infra fix). Say which, never imply
+      // durability we don't have.
+      const status = r.data.taxonomyStatus;
+      const degraded = status.startsWith('cached-degraded');
+      const cached = status === 'cached';
       setCategories(r.data.categories);
       setEntriesByNs({});
-      showToast(
-        `Initialized · ${r.data.categories.length} categories${cached ? ' (dev cache — Config not configured)' : ''}.`,
-      );
+      const suffix = degraded
+        ? ' — saved locally; durable Config unavailable (provision/repair the config worker, then re-initialize)'
+        : cached
+          ? ' (saved locally — Config not configured)'
+          : '';
+      showToast(`Initialized · ${r.data.categories.length} categories${suffix}.`);
     } else {
       const detail = r.status.detail ?? '';
       const m = detail.match(/\{"error":"([^"]+)"\}/);
