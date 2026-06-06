@@ -831,19 +831,27 @@ jobs:
         #   - scope-not-set: setScopeWithWebauthn requires a real WebAuthn
         #     assertion (scripts/heima-scope-set.sh L172), which a no-Touch-ID
         #     runner cannot produce.
-        #   - config-role-missing (#201): the test config bucket + IAM role are
-        #     an operator one-shot (setup-cloud.sh --ci, same model as the
-        #     vault/memory --skip-provision); until they're provisioned, step 19
-        #     skips cleanly instead of failing. Steps 20-21 (config cap-mismatch)
-        #     still run — they need only the deployed config worker, not the
-        #     bucket/role. Drop this allowance once the test config infra exists.
+        #   - config-role-missing / config-worker-unreachable (#201): the test
+        #     config bucket + IAM role AND the config worker's DNS+cert
+        #     (config-test.<zone>) are ONE operator one-shot — setup-cloud.sh --ci
+        #     provisions the DNS/role/bucket, then the broker deploy's certbot
+        #     issues the cert (same model as vault/memory --skip-provision; and
+        #     certbot CANNOT issue a cert until the config-test A record exists,
+        #     so worker-reachability is gated on the same one-shot as the role).
+        #     Until config-test is fully provisioned the config bucket write
+        #     (step 19) + the config-worker reachability check (step 21) skip
+        #     cleanly. Step 20 (config-class cap rejected by the memory + cred
+        #     workers) still runs — it never touches the config worker. The
+        #     config worker's own cap-data-class-mismatch rejection is also
+        #     covered by unit tests (agentkeys-worker-config). Drop BOTH
+        #     allowances once the test config infra (DNS+cert+role+bucket) exists.
         # Every OTHER prereq (agent-file-missing, broker-misconfig,
         # device-role-missing, agent-sts-mint-failed, agent-file-invalid,
         # broker-no-config-route) still fails closed → CI cannot pass with a
-        # broken auth chain, a missing config worker, or missing agent setup.
+        # broken auth chain or missing agent setup.
         run: |
           AGENTKEYS_CHAIN=heima \
-            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set,config-role-missing
+            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set,config-role-missing,config-worker-unreachable
 
       - name: Clean up harness test data (bots/<actor_omni>/ prefix)
         if: always()
