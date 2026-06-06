@@ -271,21 +271,16 @@ export function App() {
     setInitializing(false);
     const r = await client.initConfigDefault(pendingPreset);
     if (r.ok) {
-      // taxonomyStatus: "ok" (durable) · "cached" (Config unconfigured, in-memory
-      // only) · "cached-degraded: <reason>" (durable write FAILED — config worker
-      // unhealthy — saved in-memory; needs an infra fix). Say which, never imply
-      // durability we don't have.
-      const status = r.data.taxonomyStatus;
-      const degraded = status.startsWith('cached-degraded');
-      const cached = status === 'cached';
+      // taxonomyStatus: "ok" (durable, real Config store) · "cached" (NO config
+      // worker configured at all — dev/no-infra, in-memory only). A configured-
+      // but-broken store does NOT reach here — it hard-fails into the else branch
+      // (no silent in-memory fallback; real data or a loud error).
+      const cached = r.data.taxonomyStatus === 'cached';
       setCategories(r.data.categories);
       setEntriesByNs({});
-      const suffix = degraded
-        ? ' — saved locally; durable Config unavailable (provision/repair the config worker, then re-initialize)'
-        : cached
-          ? ' (saved locally — Config not configured)'
-          : '';
-      showToast(`Initialized · ${r.data.categories.length} categories${suffix}.`);
+      showToast(
+        `Initialized · ${r.data.categories.length} categories${cached ? ' (dev only — no config worker configured)' : ''}.`,
+      );
     } else {
       const detail = r.status.detail ?? '';
       const m = detail.match(/\{"error":"([^"]+)"\}/);

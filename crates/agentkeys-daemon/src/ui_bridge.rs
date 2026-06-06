@@ -1663,27 +1663,10 @@ async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCat
                 // Present-but-empty (unusual) or confirmed-missing taxonomy →
                 // fallback is legitimate (nothing durable to list).
                 Ok(_) => Ok(fallback_categories(state).await),
-                Err(e) => {
-                    // Durable Config errored. If we have an in-memory authored
-                    // taxonomy (e.g. a DEGRADED `init` that fell back to the
-                    // mirror because the config worker is unhealthy), show THAT
-                    // rather than 502 — it's real authored data, just not durable.
-                    // Only 502 when there's nothing local, so a configured-but-
-                    // broken Config holding durable data isn't masked as empty
-                    // (#201 codex finding 2).
-                    match state.authored_taxonomy.read().await.clone() {
-                        Some(tax) if !tax.categories.is_empty() => {
-                            tracing::warn!(
-                                "resolve_categories: durable Config errored ({e}); showing in-memory authored taxonomy (degraded)"
-                            );
-                            Ok(merge_categories(
-                                tax.categories,
-                                &categories_from_cache(state).await,
-                            ))
-                        }
-                        _ => Err(format!("config taxonomy unavailable: {e}")),
-                    }
-                }
+                // A configured-but-broken Config store is a HARD error (502), never
+                // masked behind in-memory data or an empty list (#201 finding-2):
+                // the operator must see + fix it. Real data or a loud failure.
+                Err(e) => Err(format!("config taxonomy unavailable: {e}")),
             }
         }
         Ok(None) => Ok(fallback_categories(state).await), // Config not configured
@@ -2510,41 +2493,44 @@ async fn init_config_default_inner(
     ))?;
     let authored = preset_categories(preset);
 
-    // The in-memory mirror merged with the new preset — the fallback for both the
-    // unconfigured (dev) path and a DEGRADED durable write (config worker unhealthy).
-    let cached_merge = || async {
-        let existing = state
-            .authored_taxonomy
-            .read()
-            .await
-            .clone()
-            .map(|t| t.categories)
-            .unwrap_or_default();
-        merge_categories(existing, &authored)
-    };
-
     let (taxonomy_status, categories) = match real_config_ctx(state).await {
         Ok(Some(cfg)) => {
-            // REAL chain: read-modify-write MERGE into durable Config. If the
-            // config worker is unhealthy (unreachable / S3 error), DEGRADE to the
-            // in-memory mirror so onboarding still completes — surfaced LOUDLY as
-            // `cached-degraded` (NOT silently "ok"), so the operator knows the
-            // durable Config needs fixing (provision the bucket / fix the worker).
+            // REAL chain: read-modify-write MERGE into the durable, encrypted Config
+            // store. A config worker failure (unreachable / S3 error) is a HARD error
+            // — we author REAL durable data or fail loud. NO in-memory fallback that
+            // masks a broken store (#201 finding-2): the operator must fix the Config
+            // data class (provision the bucket + role, deploy/repair the worker).
             let client = reqwest::Client::new();
-            match reconcile_taxonomy(&client, &cfg, &authored).await {
-                Ok(merged) => ("ok".to_string(), merged),
-                Err(e) => {
-                    tracing::warn!(
-                        "init: durable Config write failed ({e}) — authoring in-memory only (degraded)"
-                    );
-                    (format!("cached-degraded: {e}"), cached_merge().await)
-                }
-            }
+            let merged = reconcile_taxonomy(&client, &cfg, &authored)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "taxonomy authoring failed — the Config data class must be healthy \
+                             (config worker reachable + its bucket/role provisioned with S3 \
+                             Get/Put/List on bots/<actor>/config/*): {e}"
+                        ),
+                    )
+                })?;
+            ("ok".to_string(), merged)
         }
-        // Config unconfigured (dev / no-infra): author into the in-memory mirror.
-        Ok(None) => ("cached".to_string(), cached_merge().await),
+        // No `--config-url` configured AT ALL: the explicit dev/no-infra mode —
+        // author into the in-memory mirror so the local UI works WITHOUT a config
+        // worker. This is NOT a degrade of a configured store (that fails loud
+        // above); it is the honest absence of one.
+        Ok(None) => {
+            let existing = state
+                .authored_taxonomy
+                .read()
+                .await
+                .clone()
+                .map(|t| t.categories)
+                .unwrap_or_default();
+            ("cached".to_string(), merge_categories(existing, &authored))
+        }
         // Partial config (config-url set but role missing) / no session — a real
-        // misconfiguration the operator must fix; fail loud (not degraded).
+        // misconfiguration the operator must fix; fail loud.
         Err(e) => return Err((StatusCode::CONFLICT, format!("config not ready: {e}"))),
     };
 

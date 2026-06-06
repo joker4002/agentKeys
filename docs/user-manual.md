@@ -60,12 +60,17 @@ uses, and more data classes (payments, …) as you add them. It seeds your memor
 categories now; credentials are auto-categorized into the same taxonomy when you
 connect an agent. You author it in one of two ways:
 
-> **If init reports "saved locally" / "durable Config unavailable":** your config
-> worker (the encrypted, master-only `Config` store) isn't reachable, so the
-> taxonomy was kept in the daemon's memory only (lost on restart, not yet readable
-> by agents). The onboarding still completes — provision/repair the config data
-> class (`setup-cloud.sh` + a broker redeploy), then re-initialize. In a pure dev
-> run with no config worker, this is expected.
+> **If init fails with a config-worker error** (e.g. `taxonomy authoring failed —
+> the Config data class must be healthy … s3 GetObject: AccessDenied`): the
+> encrypted, master-only `Config` store isn't healthy, so **nothing was written** —
+> AgentKeys authors real durable data or fails loudly; it never keeps a silent
+> in-memory stand-in. Fix the real cause the error names: provision `$CONFIG_BUCKET`
+> + the config role (`setup-cloud.sh`), deploy/repair the config worker
+> (`setup-broker-host.sh --ref main`), and check the role's S3 Get/Put/List on
+> `bots/<actor>/config/*` and the region — then re-initialize. (A dev daemon
+> started WITHOUT `--config-url` authors in-memory only, clearly labelled "dev
+> only" — that is the one non-durable path, and it exists only when you opt out of
+> a config worker entirely.)
 
 - **A · Start from a profile** — pick one of ~10 role presets (the default is a
   rich *adult-household* profile: kids, business, smart-home, finance, family,

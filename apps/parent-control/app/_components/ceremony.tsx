@@ -174,13 +174,11 @@ export function OnboardingScreen({ onComplete }: { onComplete: () => void }) {
     setInitializing(false);
     if (r.ok) {
       setSetupCount(r.data.categories.length);
-      // Surface a degraded write (durable Config unavailable → saved in-memory)
-      // so the user knows it's not durable yet — onboarding still completes.
-      const status = r.data.taxonomyStatus;
-      if (status.startsWith('cached-degraded')) {
-        setSetupNote('Saved locally — your durable Config store is unavailable right now. Re-initialize from the memory page once the config worker is healthy.');
-      } else if (status === 'cached') {
-        setSetupNote('Saved locally (durable Config not configured in this environment).');
+      // "cached" = NO config worker configured (dev/no-infra) — authored in-memory
+      // only. A configured-but-broken store hard-fails into the else branch below
+      // (real durable data or a loud error — never a silent in-memory stand-in).
+      if (r.data.taxonomyStatus === 'cached') {
+        setSetupNote('Authored locally — no config worker configured in this environment (dev only; not durable).');
       }
     } else {
       const detail = r.status.detail ?? '';
