@@ -873,6 +873,11 @@ jobs:
         env:
           VAULT_BUCKET: ${{ secrets.TEST_VAULT_BUCKET }}
           MEMORY_BUCKET: ${{ secrets.TEST_MEMORY_BUCKET }}
+          # #201 config data class: phase 6 (web-parity) writes the master-only
+          # memory-taxonomy to bots/<omni>/config/ in the CONFIG bucket. Wipe it
+          # too. Empty until TEST_CONFIG_BUCKET is set (config infra is an operator
+          # one-shot) → the [ -n ] guard below makes it a no-op until then.
+          CONFIG_BUCKET: ${{ secrets.TEST_CONFIG_BUCKET }}
         run: |
           set -euo pipefail
           if [ -z "${HEIMA_DEPLOYER_ADDR_HEIMA:-}" ]; then
@@ -886,7 +891,7 @@ jobs:
           actor_omni=$(printf 'agentkeysevm%s' "$addr_lc" | shasum -a 256 | awk '{print $1}')
           PREFIX="bots/$actor_omni/"
           echo "::notice::cleaning S3 under prefix $PREFIX"
-          for bucket in "$VAULT_BUCKET" "$MEMORY_BUCKET"; do
+          for bucket in "$VAULT_BUCKET" "$MEMORY_BUCKET" "${CONFIG_BUCKET:-}"; do
             [ -n "$bucket" ] || continue
             aws s3 rm "s3://$bucket/$PREFIX" --recursive 2>/dev/null || true
           done
