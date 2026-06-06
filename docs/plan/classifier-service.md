@@ -173,5 +173,8 @@ Net: a new device/service is *usually* a free catalog lookup; the LLM runs only 
 
 ## References
 - [`../research/universal-gate-pattern.md`](../research/universal-gate-pattern.md) — the four primitives + the determinism principle (this doc's foundation; "the upstream classifier" it names *is* this worker).
+- [`web-flow/onboarding-classifier-distribution.md`](web-flow/onboarding-classifier-distribution.md) — the **onboarding/product view** of this design: how `Config` is bootstrapped (default vs NL→COMPILE) and auto-distributed to agents as scopes (the R1–R4 refinements fold back here when the first stage ships).
+- [`web-flow/config-data-class-memory-list.md`](web-flow/config-data-class-memory-list.md) — the `DataClass::Config` substrate (#201, landed) §7 writes to.
+- [`../wiki/policy-scope-namespace.md`](../wiki/policy-scope-namespace.md) — the policy/scope/namespace/category/service vocabulary used throughout.
 - [`agentkeys-memory-design.md`](agentkeys-memory-design.md) §6a — the read-side engine seam this is the write-side dual of.
 - [`../arch.md`](../arch.md) §15 (workers), §17.5 (per-data-class + four-layer isolation), §22 (pluggable surfaces).
