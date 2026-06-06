@@ -17,10 +17,10 @@
 # harness cross-builds it in an arm64 Linux rust container and uploads it via
 # the sandbox's own file API (no scp).
 #
-# Manual gates (the "test through" essence): the LLM key (auto from
-# $OPENROUTER_API_KEY, else paste), real Touch ID at scope grant (only if not
-# already scoped), the Hermes surprise + its confirmation. Everything else is
-# automated.
+# Manual gates (the "test through" essence): the LLM key (#216: Phase 4.0b fetches
+# it from the master's VAULT — cred:<service>; $OPENROUTER_API_KEY/paste is only a
+# dev fallback), real Touch ID at scope grant (only if not already scoped), the
+# Hermes surprise + its confirmation. Everything else is automated.
 #
 # Usage:
 #   bash harness/phase1-wire-demo.sh [--real] [--webauthn] [--unwire]
@@ -41,9 +41,10 @@ MCP_URL_IN_SANDBOX="http://localhost:${MCP_PORT}/mcp"
 SESSION_ID="${SESSION_ID:-alice}"            # master session label on the Mac
 AGENT_LABEL="${AGENT_LABEL:-demo-agent}"
 SERVICE="${SERVICE:-openrouter}"             # LLM cred service name
-# LLM key for the Phase 4 Hermes "surprise". Falls back to OPENROUTER_API_KEY
-# (export it in ~/.zshenv) so 0.6 needs no manual paste. Used to configure the
-# sandbox Hermes model before the surprise chat.
+# #216 DEV-FALLBACK LLM key. Phase 4.0b configures the sandbox Hermes model from
+# the key the agent FETCHES FROM THE MASTER'S VAULT (cred:$SERVICE); this env var
+# (export OPENROUTER_API_KEY in ~/.zshenv) is used ONLY when the vault fetch is
+# unavailable. The full vault path is proven by harness/cred-wire-demo.sh.
 LLM_API_KEY="${LLM_API_KEY:-${OPENROUTER_API_KEY:-}}"
 LLM_BASE_URL="${LLM_BASE_URL:-https://openrouter.ai/api/v1}"
 LLM_MODEL="${LLM_MODEL:-deepseek/deepseek-v4-flash}"   # OpenRouter slug; ':free' tier is 429-throttled
@@ -66,6 +67,13 @@ if [[ -z "${SEED_SCOPE_SERVICES:-}" ]]; then
   SEED_SCOPE_SERVICES=""
   IFS=',' read -ra _seed_ns <<<"$MEMORY_NS"
   for _n in "${_seed_ns[@]}"; do SEED_SCOPE_SERVICES+="${SEED_SCOPE_SERVICES:+,}memory:$_n"; done
+  # #216: also authorize the agent for its LLM cred so Phase 4.0b can fetch the
+  # key from the master's vault (the agent-identity cred-fetch cap-mint checks
+  # isServiceInScope(operator, actor, keccak("$SERVICE")) — the grant service is
+  # the BARE cred name, NOT prefixed, since cred-fetch requests the bare service
+  # (unlike memory's "memory:<ns>"). Without this grant the Phase 4.0b vault fetch
+  # → service_not_in_scope and falls back to the operator env (dev only).
+  SEED_SCOPE_SERVICES+="${SEED_SCOPE_SERVICES:+,}$SERVICE"
 fi
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 AGENT_FILE="${AGENT_FILE:-$HOME/.agentkeys/agents/${AGENT_LABEL}.json}"
@@ -334,14 +342,17 @@ phase0_prereqs() {
     ok "0.5 scope" "verify via heima-scope-set.sh; grant needs real Touch ID if absent"
   fi
 
-  # 0.6 LLM key — env fallback (OPENROUTER_API_KEY / LLM_API_KEY) → manual paste.
+  # 0.6 LLM key — the #216 DEV FALLBACK only. Phase 4.0b fetches the agent's key
+  # from the MASTER'S VAULT (cred:$SERVICE) first; this env/paste value is used
+  # solely when the vault fetch is unavailable. (The real vault path is proven by
+  # harness/cred-wire-demo.sh.)
   if [[ -n "$LLM_API_KEY" ]]; then
-    ok "0.6 LLM key" "from OPENROUTER_API_KEY/LLM_API_KEY env (${#LLM_API_KEY} chars)"
+    ok "0.6 LLM key" "dev-fallback from OPENROUTER_API_KEY/LLM_API_KEY env (${#LLM_API_KEY} chars) — Phase 4.0b prefers the vault"
   else
-    gate "0.6 LLM key" "no OPENROUTER_API_KEY in env (export it in ~/.zshenv) — paste an LLM key now, or just press enter to skip the Phase 4 surprise" secret || true
+    gate "0.6 LLM key" "no OPENROUTER_API_KEY in env (export it in ~/.zshenv) — paste a DEV-fallback LLM key now (Phase 4.0b prefers the vault), or press enter to rely on the vault / skip the surprise" secret || true
     [[ -n "${REPLY:-}" ]] && LLM_API_KEY="$REPLY"
-    if [[ -n "$LLM_API_KEY" ]]; then ok "0.6 LLM key" "operator-provided (${#LLM_API_KEY} chars)"
-    else skip "0.6 LLM key" "none provided — Phase 4 surprise will be skipped"; fi
+    if [[ -n "$LLM_API_KEY" ]]; then ok "0.6 LLM key" "dev-fallback operator-provided (${#LLM_API_KEY} chars)"
+    else skip "0.6 LLM key" "no dev fallback — Phase 4.0b will rely on the vault cred:$SERVICE (else skip the surprise)"; fi
   fi
 
   # 0.7 session bearer — must be a FRESH JWT whose agentkeys.omni_account ==
@@ -1046,8 +1057,34 @@ phase4_surprise() {
   skip_phase 4 && { log "Phase 4 — surprise: skip (--skip-4)"; return; }
   log "Phase 4 — the surprise (real Hermes session in the sandbox)"
 
-  if [[ -z "$LLM_API_KEY" ]]; then
-    skip "4.0 hermes llm" "no LLM key (export OPENROUTER_API_KEY) — skipping the surprise"
+  # 4.0 #216: the agent's LLM key comes from the MASTER'S VAULT (cred-fetch via its
+  # authorized cred scope), NOT an ambient operator env. Resolve VAULT-FIRST; the
+  # $OPENROUTER_API_KEY/$LLM_API_KEY env is a DEV-ONLY fallback (clearly labelled).
+  # The full vault chain is proven headless (master-self) by harness/cred-wire-demo.sh;
+  # the agent-identity fetch here additionally needs (a) the cred scope granted at
+  # pairing (P.3 SEED_SCOPE_SERVICES, --webauthn) and (b) the key already vaulted.
+  local WIRE_KEY="" WIRE_KEY_SRC="" _host_cli=""
+  if [[ -x "$REPO_ROOT/target/release/agentkeys" ]]; then _host_cli="$REPO_ROOT/target/release/agentkeys"
+  elif [[ -x "$REPO_ROOT/target/debug/agentkeys" ]]; then _host_cli="$REPO_ROOT/target/debug/agentkeys"
+  else _host_cli="$(command -v agentkeys 2>/dev/null || true)"; fi
+  if [[ -n "$_host_cli" && -n "${AGENTKEYS_WORKER_CRED_URL:-}" && -n "${VAULT_ROLE_ARN:-}" \
+        && -n "$SESSION_BEARER" && -n "$ACTOR_OMNI" && -n "$OPERATOR_OMNI" && -n "$DEVICE_KEY_HASH" ]]; then
+    local _fetched
+    if _fetched="$("$_host_cli" cred fetch "$SERVICE" \
+          --operator-omni "$OPERATOR_OMNI" --actor-omni "$ACTOR_OMNI" \
+          --device-key-hash "$DEVICE_KEY_HASH" --session-bearer "$SESSION_BEARER" \
+          --broker-url "${BROKER_URL%/}" --cred-url "${AGENTKEYS_WORKER_CRED_URL}" \
+          --vault-role-arn "${VAULT_ROLE_ARN}" --region "${REGION:-us-east-1}" 2>/dev/null)" \
+        && [[ -n "$_fetched" ]]; then
+      WIRE_KEY="$_fetched"; WIRE_KEY_SRC="the master's VAULT (cred:$SERVICE — #216, the agent's authorized key)"
+    fi
+  fi
+  if [[ -z "$WIRE_KEY" && -n "$LLM_API_KEY" ]]; then
+    WIRE_KEY="$LLM_API_KEY"
+    WIRE_KEY_SRC="operator env \$OPENROUTER_API_KEY (DEV fallback — vault cred:$SERVICE unavailable; #216 wants the vault: grant the cred scope + vault the key, see harness/cred-wire-demo.sh)"
+  fi
+  if [[ -z "$WIRE_KEY" ]]; then
+    skip "4.0 hermes llm" "no LLM key — neither a vaulted cred:$SERVICE (the #216 path; proven by harness/cred-wire-demo.sh) nor \$OPENROUTER_API_KEY (dev fallback). Skipping the surprise."
     return
   fi
   # 4.0a wiring precheck — the surprise is only memory-aware if the wire hooks
@@ -1069,12 +1106,12 @@ phase4_surprise() {
   # be single-line: the sandbox /v1/shell/exec rejects multi-line payloads with
   # a silent ErrorObservation. Verified (not masked with || true).
   local env_path='$HOME/.hermes/.env'
-  sbx_exec "ENV=$env_path; grep -v '^OPENROUTER_API_KEY=' \"\$ENV\" > \"\$ENV.tmp\" 2>/dev/null; printf 'OPENROUTER_API_KEY=%s\n' $(printf '%q' "$LLM_API_KEY") >> \"\$ENV.tmp\"; mv \"\$ENV.tmp\" \"\$ENV\"" >/dev/null
+  sbx_exec "ENV=$env_path; grep -v '^OPENROUTER_API_KEY=' \"\$ENV\" > \"\$ENV.tmp\" 2>/dev/null; printf 'OPENROUTER_API_KEY=%s\n' $(printf '%q' "$WIRE_KEY") >> \"\$ENV.tmp\"; mv \"\$ENV.tmp\" \"\$ENV\"" >/dev/null
   if [[ "$(sbx_rc "grep -q '^OPENROUTER_API_KEY=' $env_path")" != "0" ]]; then
     fail "4.0 hermes llm" "could not write OPENROUTER_API_KEY to ~/.hermes/.env"; return
   fi
   sbx_exec "export PATH=\$HOME/.local/bin:\$PATH; hermes config set model.provider openrouter >/dev/null 2>&1; hermes config set model.base_url $(printf '%q' "$LLM_BASE_URL") >/dev/null 2>&1; hermes config set model.default $(printf '%q' "$LLM_MODEL") >/dev/null 2>&1" >/dev/null
-  ok "4.0 hermes llm" "provider=openrouter, model=$LLM_MODEL, key in ~/.hermes/.env"
+  ok "4.0 hermes llm" "provider=openrouter, model=$LLM_MODEL, key from $WIRE_KEY_SRC"
 
   # 4.1 model smoke (non-fatal) — surface throttling/credential errors BEFORE
   # the manual surprise, so the operator isn't debugging during the chat.
