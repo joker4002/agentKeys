@@ -47,14 +47,18 @@ ok()   { printf '  %s %s\n' "$(c '1;32' ok)" "$1" >&2; }
 skip() { printf '  %s %s\n' "$(c '1;33' skip)" "$1" >&2; }
 die()  { printf '  %s %s\n' "$(c '1;31' fail)" "$1" >&2; [ "$CI" = 1 ] && { skip "CI — tolerated"; exit 0; }; exit 1; }
 
-# The prepared archive (ONE blob per namespace — the worker's per-namespace model;
-# each blob is a #201-Phase-4 JSON array of {key,title,body,updated,bytes}).
-# Mirrors apps/parent-control/lib/preparedMemory.ts; kept small + self-contained.
-NAMESPACES="travel personal family"
+# DEDICATED DEMO namespaces — deliberately NOT the real travel/personal/family.
+# The harness plants its proof memory under a clearly-ephemeral `demo-*` prefix so
+# it (a) never pollutes the master's real memory and (b) can be deleted EXACTLY by
+# the EXIT-trap cleanup below (success OR failure). The real prepared archive
+# (apps/parent-control/lib/preparedMemory.ts) is planted ONLY by the user — the web
+# "⊕ plant prepared memory" button — never auto-planted by onboarding or a demo.
+# Each blob is a #201-Phase-4 JSON array of {key,title,body,updated,bytes}.
+NAMESPACES="demo-travel demo-personal demo-family"
 plain_for() { case "$1" in
-  travel)   printf '{"trip":"Chengdu 2025","dates":"Oct 3-12","hotel":"Niccolo","notes":"pandas at Dujiangyan; hotpot on Jinli"}' ;;
-  personal) printf '{"diet":"pescatarian","allergies":["peanuts"],"timezone":"Asia/Shanghai"}' ;;
-  family)   printf '{"partner":"Wen","kids":2,"emergency_contact":"+86-138-0000-0000"}' ;;
+  demo-travel)   printf '{"trip":"Chengdu 2025","dates":"Oct 3-12","hotel":"Niccolo","notes":"pandas at Dujiangyan; hotpot on Jinli"}' ;;
+  demo-personal) printf '{"diet":"pescatarian","allergies":["peanuts"],"timezone":"Asia/Shanghai"}' ;;
+  demo-family)   printf '{"partner":"Wen","kids":2,"emergency_contact":"+86-138-0000-0000"}' ;;
 esac; }
 
 profile_uc="$(printf '%s' "${AGENTKEYS_CHAIN:-heima}" | tr 'a-z-' 'A-Z_')"
@@ -62,6 +66,25 @@ BROKER="${OIDC_ISSUER:-${AGENTKEYS_BROKER_URL:-}}"
 eval "MEMORY_URL=\${AGENTKEYS_WORKER_MEMORY_URL:-\${MEMORY_WORKER_URL:-}}"
 eval "MEMORY_ROLE_ARN=\${MEMORY_ROLE_ARN:-\${MEMORY_ROLE_ARN_${profile_uc}:-}}"
 REGION="${REGION:-us-east-1}"
+MEMORY_BUCKET="${MEMORY_BUCKET:-}"
+
+# Always-runs cleanup (success OR failure, via EXIT trap): delete the `demo-*`
+# memory blobs this demo planted so test memory never leaks into the master's real
+# store. Scoped to the exact S3 keys (bots/<omni>/memory/memory:<ns>.enc) — it can
+# only ever touch the demo namespaces, never real user memory. `KEEP_DEMO_MEMORY=1`
+# opts out (for debugging a failed run). Best-effort + idempotent.
+cleanup_planted_memory() {
+  [ "${KEEP_DEMO_MEMORY:-0}" = 1 ] && return 0
+  [ -n "${DEPLOYER_OMNI:-}" ] && [ -n "$MEMORY_BUCKET" ] || return 0
+  local n=0
+  for ns in $NAMESPACES; do
+    aws s3 rm "s3://$MEMORY_BUCKET/bots/$DEPLOYER_OMNI/memory/memory:$ns.enc" \
+      --region "$REGION" >/dev/null 2>&1 && n=$((n + 1)) || true
+  done
+  [ "$n" -gt 0 ] && printf '  %s deleted %s demo memory blob(s) — bots/%s…/memory/memory:demo-*\n' \
+    "$(c '1;33' cleanup)" "$n" "${DEPLOYER_OMNI:0:10}" >&2 || true
+}
+trap cleanup_planted_memory EXIT
 
 # ─── Step 1: prereqs + identity ────────────────────────────────────────────
 if should_run 1; then
@@ -155,7 +178,7 @@ fi
 if should_run 5; then
   step 5 "Read-back proof — worker /v1/memory/get one namespace"
   sts_relay || die "STS relay failed"
-  ns=travel; cap=$(mint_cap memory-get "$ns")
+  ns=demo-travel; cap=$(mint_cap memory-get "$ns")
   # @backend-fixture: memory_get_body  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
   get_body=$(jq -n --argjson cap "$cap" --arg n "$ns" '{cap:$cap, namespace:$n}')
   resp=$(curl -sS -X POST "$MEMORY_URL/v1/memory/get" \

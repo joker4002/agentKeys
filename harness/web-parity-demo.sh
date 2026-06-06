@@ -36,7 +36,7 @@ ENV_FILE="${ENV_FILE:-$REPO_ROOT/scripts/operator-workstation.env}"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/harness/scripts/_lib.sh"
 
-CI=0; FROM=1; TO=99; STEP_TOTAL=4
+CI=0; FROM=1; TO=99; STEP_TOTAL=3
 for a in "$@"; do case "$a" in
   --ci) CI=1 ;;
   --from-step) shift; FROM="${1:-1}" ;; --from-step=*) FROM="${a#*=}" ;;
@@ -65,12 +65,24 @@ eval "CONFIG_ROLE_ARN=\${CONFIG_ROLE_ARN:-\${CONFIG_ROLE_ARN_${profile_uc}:-}}"
 REGION="${REGION:-us-east-1}"
 PROBE_NS="${WEB_PARITY_NS:-webparity}"           # a dedicated probe ns — never clobbers real memory
 PROBE_BODY="web-parity probe :: daemon plant chain OK"
+MEMORY_BUCKET="${MEMORY_BUCKET:-}"
 DAEMON_BIN="$REPO_ROOT/target/release/agentkeys-daemon"
 DAEMON_PORT="${WEB_PARITY_DAEMON_PORT:-3119}"
 DAEMON_BIND="127.0.0.1:${DAEMON_PORT}"
 DAEMON_PID=""
 DAEMON_LOG="$(mktemp -t web-parity-daemon.XXXX)"
-cleanup() { [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null; rm -f "$DAEMON_LOG"; }
+# Always-runs (EXIT) cleanup: stop the daemon AND delete the probe ns this run
+# planted, so the parity test never leaks test memory into the master's real
+# store. Scoped to exactly bots/<omni>/memory/memory:<probe>.enc — can only touch
+# the dedicated probe ns. KEEP_DEMO_MEMORY=1 opts out (debugging).
+cleanup() {
+  [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
+  rm -f "$DAEMON_LOG"
+  if [ "${KEEP_DEMO_MEMORY:-0}" != 1 ] && [ -n "${DEPLOYER_OMNI:-}" ] && [ -n "$MEMORY_BUCKET" ]; then
+    aws s3 rm "s3://$MEMORY_BUCKET/bots/$DEPLOYER_OMNI/memory/memory:$PROBE_NS.enc" \
+      --region "$REGION" >/dev/null 2>&1 || true
+  fi
+}
 trap cleanup EXIT
 
 # ─── Step 1: prereqs + identity + master J1 ────────────────────────────────
@@ -150,19 +162,12 @@ if should_run 3; then
   ok "web plant OK via the daemon — planted=$planted skipped=$(echo "$resp" | jq -r '.skipped // 0') (web chain == agent chain)"
 fi
 
-# ─── Step 4: parity artifact + cleanup ─────────────────────────────────────
-if should_run 4; then
-  step 4 "Parity artifact: canonical S3 key written by the WEB path + cleanup probe"
-  : "${DEPLOYER_OMNI:?run step 1}"
-  KEY="bots/${DEPLOYER_OMNI}/memory/memory:${PROBE_NS}.enc"   # worker s3_key strips 0x + lowercases
-  BUCKET="${MEMORY_BUCKET:-}"
-  if [ -n "$BUCKET" ] && aws --region "$REGION" s3api head-object --bucket "$BUCKET" --key "$KEY" >/dev/null 2>&1; then
-    ok "S3 object exists at the canonical key s3://$BUCKET/$KEY — the web plant landed where the agent path reads"
-    aws --region "$REGION" s3api delete-object --bucket "$BUCKET" --key "$KEY" >/dev/null 2>&1 \
-      && ok "cleaned up the probe object" || skip "probe object left (delete needs admin profile)"
-  else
-    skip "couldn't HEAD s3://${BUCKET:-?}/$KEY directly (need MEMORY_BUCKET + admin profile) — step 3's HTTP 200 already proved the real chain; probe left in the dedicated '$PROBE_NS' ns (no clobber)"
-  fi
-fi
+# Phase 6 is deliberately a THIN runtime-wiring smoke (harness/CLAUDE.md "parity
+# checks evolve down a ladder"): step 3's HTTP 200 is the whole proof — the daemon's
+# web chain (cap-mint → STS → worker → S3) reaches real infra, identical to the agent
+# path. The body SHAPE is gated at compile/fixture time by scripts/check-web-api-drift.sh
+# (the @web-fixture annotation above), and the canonical S3 key is deterministic +
+# covered by the worker's s3_key unit test — so no extra runtime artifact/HEAD step is
+# needed here. The probe ns is deleted by the EXIT trap (success OR failure).
 
 printf '\n%s web flow plants through the SAME real chain as the agent/harness path (no drift).\n' "$(c '1;32' 'DONE ·')" >&2

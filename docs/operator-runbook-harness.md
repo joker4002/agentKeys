@@ -99,7 +99,7 @@ is the only one CI can't do — no aiosandbox).
   device** → K11 enroll → create demo agent → scope grant → credential audit.
 - **phase 2 — hardening** (`v2-stage2-demo.sh`): real WebAuthn K11 enrollment + register
   first master + the companion (second-master M-of-N) daemon.
-- **phase 3 — OIDC + isolation proof** (`v2-stage3-demo.sh`, 22 steps): SIWE → OIDC JWT → per-actor
+- **phase 3 — OIDC + isolation proof** (`v2-stage3-demo.sh`, 23 steps): SIWE → OIDC JWT → per-actor
   STS → S3 positive/negative, cross-actor + cross-data-class denials, the four issue-#90
   isolation layers, and the **scope triad** — step 16 master-self cap (operator==actor, no
   scope → 200), step 17 cross-actor un-granted → ServiceNotInScope, step 18 granted agent
@@ -109,7 +109,11 @@ is the only one CI can't do — no aiosandbox).
   memory/vault buckets (+ memory creds → config bucket AccessDenied); steps 20–21 the
   cap data-class-mismatch (config cap ↔ memory/cred workers). These are **master-self → run on
   the operator** (no sandbox defer); they `skip` cleanly until you've run `provision-config-{bucket,role}.sh`
-  + `apply-config-bucket-policy.sh` and redeployed the broker host. Per-step `ok`/`skip`/`fail`; strict by default.
+  + `apply-config-bucket-policy.sh` and redeployed the broker host. **Step 22 (#207)** proves the
+  **classifier-worker** isolation (master-self, compute gate): a storage cap → classify worker →
+  `cap_op_mismatch`, and a `memory`-bound Classify cap declared as `credentials` → `cap_data_class_mismatch`
+  (no STS — the classify worker has no S3); it `skip`s cleanly until you deploy the worker (`setup-cloud.sh`
+  DNS + `setup-broker-host.sh --ref main`). Step 23 = cleanup + summary. Per-step `ok`/`skip`/`fail`; strict by default.
   **Steps 11-12 / 14-15** sign STS creds AS the agent → `defer` to the sandbox on the operator.
 - **phase 4 — memory plant** (`memory-plant-demo.sh`): the master plants its prepared archive
   through the real master-self chain (cap-mint → STS → worker `/v1/memory/put` → S3) — the CLI
@@ -124,10 +128,13 @@ is the only one CI can't do — no aiosandbox).
   **only** real-memory proof (never `--light`).
 - **phase 6 — web↔agent parity** (`web-parity-demo.sh`): boots `agentkeys-daemon --ui-bridge` (seeded
   with the master's J1 + device via the `--ui-bridge-seed-*` seam, so it skips re-onboarding) and
-  plants a probe namespace through the **web** endpoint `POST /v1/master/memory/plant`. A 200 proves
-  the daemon's chain (cap-mint → STS → worker → S3) matches the agent/harness path, so the web flow
-  can't silently drift from the harness. **Reuses** the build/chain/broker/master from phases 1–2 —
-  one daemon boot, no re-bootstrap. Real-only; skips cleanly without a broker.
+  plants a dedicated `webparity` probe namespace through the **web** endpoint
+  `POST /v1/master/memory/plant`. A 200 proves the daemon's chain (cap-mint → STS → worker → S3)
+  matches the agent/harness path, so the web flow can't silently drift from the harness. A **thin
+  3-step wiring smoke** — the body shape is gated at compile/fixture time
+  (`scripts/check-web-api-drift.sh`), so the runtime check stays minimal. The probe ns is **deleted on
+  exit** (success or failure), so it never leaks into real memory. **Reuses** the build/chain/broker/
+  master from phases 1–2 — one daemon boot, no re-bootstrap. Real-only; skips cleanly without a broker.
 
 ### The master register — #164 ERC-4337 (EOA deprecated)
 

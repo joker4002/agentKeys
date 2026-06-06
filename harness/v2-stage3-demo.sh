@@ -67,7 +67,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # step 16. Defines functions only (safe to source before env). See harness/scripts/_lib.sh.
 . "$REPO_ROOT/harness/scripts/_lib.sh"
 STEP_NUM=0
-STEP_TOTAL=22
+STEP_TOTAL=23
 FROM_STEP=1
 TO_STEP=$STEP_TOTAL
 ONLY_STEP=""
@@ -225,6 +225,7 @@ set -a; . "$ENV_FILE"; set +a
 : "${CONFIG_ROLE_ARN:=}"
 : "${CONFIG_BUCKET:=}"
 : "${AGENTKEYS_WORKER_CONFIG_URL:=}"
+: "${AGENTKEYS_WORKER_CLASSIFY_URL:=}"   # #207 classify worker (compute gate, step 22)
 
 # Deployer-wallet resolution: prefer a raw private-key file (the CI path,
 # and the operator's test-deployer path) over a mnemonic. Set
@@ -1374,6 +1375,83 @@ master_cross_class_rejection() {
   esac
 }
 
+# Master-self classifier-worker isolation (#207 items 2-3). The classify worker is
+# a COMPUTE gate (COMPILE/TAG over the catalog) — NO S3, NO OptionalStsCreds — so
+# unlike the storage cross-class tests this needs NO STS creds. It mints a
+# master-self cap, POSTs it to the classify worker's /v1/classify/tag, and asserts
+# the expected cap-layer rejection. All paths gracefully prereq_missing until the
+# worker is deployed (setup-broker-host.sh --ref main + DNS via setup-cloud.sh).
+# Args: $1 cap_url (memory-put|classify)  $2 cap service  $3 request data_class
+#       $4 expected reason (cap_op_mismatch|cap_data_class_mismatch)
+#       $5 cap data_class ("" ⇒ a storage cap; else mint a Classify cap with it)
+#       $6 artifact basename
+master_classify_rejection() {
+  local cap_url="$1" cap_svc="$2" req_dc="$3" want="$4" cap_dc="$5" art="$6"
+  [ -n "${AGENTKEYS_WORKER_CLASSIFY_URL:-}" ] || { prereq_missing classify-not-configured "AGENTKEYS_WORKER_CLASSIFY_URL unset — source operator-workstation.env (#207 classify worker)" || return 1; return 0; }
+  [ -f "$STATE_DIR/session.jwt" ] || { prereq_missing no-session "no session.jwt — re-run step 1" || return 1; return 0; }
+  local master_dkh self_body rc capjson
+  master_dkh="$(resolve_active_master_dkh "$OWN_ACTOR_OMNI" "$WALLET_LC" 2>/dev/null || cast keccak "0x$OWN_ACTOR_OMNI")"
+  if [ -n "$cap_dc" ]; then
+    self_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "0x$OWN_ACTOR_OMNI" \
+                      --arg svc "$cap_svc" --arg dkh "$master_dkh" --arg dc "$cap_dc" \
+       '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh, data_class:$dc}')
+  else
+    self_body=$(jq -n --arg op "0x$OWN_ACTOR_OMNI" --arg actor "0x$OWN_ACTOR_OMNI" \
+                      --arg svc "$cap_svc" --arg dkh "$master_dkh" \
+       '{operator_omni:$op, actor_omni:$actor, service:$svc, device_key_hash:$dkh}')
+  fi
+  rc=$(mint_cap "$cap_url" "$self_body")
+  capjson=$(cat /tmp/cap.$$.json 2>/dev/null || true); rm -f /tmp/cap.$$.json
+  if [ "$rc" != "200" ]; then
+    if echo "$capjson" | grep -qiE "no route|Cannot POST|not found|404"; then
+      prereq_missing broker-no-classify-route "broker has no /v1/cap/$cap_url route — redeploy broker host (origin/main has the #207 classify route). body: $capjson" || return 1; return 0
+    fi
+    if echo "$capjson" | grep -qiE "RPC URL not set|AGENTKEYS_CHAIN_RPC_HTTP|SIDECAR_REGISTRY_ADDRESS_HEIMA|SCOPE_CONTRACT_ADDRESS_HEIMA"; then
+      prereq_missing broker-misconfig "broker missing chain config (HTTP $rc) — redeploy broker host. body: $capjson" || return 1; return 0
+    fi
+    if echo "$capjson" | grep -qiE "DeviceNotActive|DeviceBindingMismatch|DeviceRoleMissing|role_missing"; then
+      prereq_missing master-not-registered "master device not registered with CAP_MINT (HTTP $rc) — run register_first_master. body: $capjson" || return 1; return 0
+    fi
+    die "$cap_url master-self cap-mint returned HTTP $rc — body: $capjson"
+  fi
+  # POST to the classify worker — NO STS (compute gate, no S3 extractor).
+  local art_path body err_file
+  art_path="$STATE_DIR/classify.${art}.json"
+  err_file="${art_path}.curlerr"
+  body=$(jq -n --argjson cap "$capjson" --arg dc "$req_dc" '{cap:$cap, data_class:$dc, entity:"stripe"}')
+  # Send curl's transport/TLS error to a SIDE FILE (not 2>&1) and use `|| true`
+  # (NOT `|| echo 000`): on an undeployed worker curl already prints
+  # %{http_code}=000, so `|| echo 000` would DOUBLE it to "000000" and miss the
+  # `case 000|502|503|504)` skip below → a spurious die. Mirror the config helper.
+  rc=$(curl -sS -o "$art_path" -w '%{http_code}' \
+       -X POST "${AGENTKEYS_WORKER_CLASSIFY_URL}/v1/classify/tag" \
+       -H 'content-type: application/json' -d "$body" 2>"$err_file" || true)
+  [ -z "$rc" ] && rc="000"
+  if [ ! -s "$art_path" ] && [ -s "$err_file" ]; then cat "$err_file" >"$art_path"; fi
+  rm -f "$err_file"
+  body=$(cat "$art_path" 2>/dev/null || true)
+  if [ "$rc" = "200" ]; then
+    cat "$art_path" >&2
+    die "CRITICAL: classify worker accepted a cap it MUST reject ($art) — classify isolation broken!"
+  fi
+  case "$rc" in
+    000|502|503|504)
+      prereq_missing classify-worker-unavailable "classify worker unreachable at ${AGENTKEYS_WORKER_CLASSIFY_URL} (HTTP $rc) — deploy it: setup-cloud.sh (DNS) + setup-broker-host.sh --ref main. body: $body" || return 1
+      ;;
+    400|401|403)
+      if echo "$body" | grep -qiE "$want"; then
+        ok "classify worker correctly rejected ($want, $rc) [$art]"
+        record_ok "classify worker rejected $art ($rc $want)"
+        return 0
+      fi
+      die "classify worker rejected with HTTP $rc but NOT the expected '$want' (body: $body) — cannot confirm the classify isolation gate fired"
+      ;;
+    *)
+      die "classify worker returned unexpected HTTP $rc (expected 400/401/403 with $want) — body: $body"
+      ;;
+  esac
+}
+
 # ─── Step 19: Config layers 3+4 — own-prefix write OK + cross-bucket AccessDenied ──
 # Master-self (operator==actor): config creds reach ONLY bots/<O_master>/config/.
 if should_run_step 19; then
@@ -1438,8 +1516,20 @@ if should_run_step 21; then
   master_cross_class_rejection cred-store "$SMOKE_SERVICE"   "${AGENTKEYS_WORKER_CONFIG_URL}/v1/config/put" config cred   cred-to-config
 fi
 
-# ─── Step 22: Cleanup with admin profile ───────────────────────────────────
+# ─── Step 22: NEGATIVE — classifier worker isolation (#207 items 2-3, master-self) ──
+# The classify worker is a COMPUTE gate: it accepts ONLY op=Classify and binds on
+# the signed data_class. Two cap-layer negatives (no STS — no S3): (a) a storage
+# (op=Store) cap → cap_op_mismatch; (b) a Classify cap bound to `memory` but the
+# request declares `credentials` → cap_data_class_mismatch. Skips gracefully until
+# the classify worker is deployed (operator one-shot — like steps 19-21 for config).
 if should_run_step 22; then
+  step "NEGATIVE: storage cap + cross-data-class cap → classify worker reject (#207 items 2-3, master-self)"
+  master_classify_rejection memory-put memory:stage3self memory      cap_op_mismatch          ""     store-to-classify
+  master_classify_rejection classify   classify:memory   credentials cap_data_class_mismatch  memory xclass-classify
+fi
+
+# ─── Step 23: Cleanup with admin profile ───────────────────────────────────
+if should_run_step 23; then
   step "Cleanup test objects + summary"
   # Use the laptop's admin profile (NOT the STS creds) to delete the
   # objects we wrote. Only the POSITIVE-step objects exist — every
@@ -1527,6 +1617,6 @@ if should_run_step 22; then
   elif [ "$nok" -gt 0 ]; then
     printf "\n${C_OK}DEMO COMPLETE${C_RESET}: %d steps exercised — operator-side isolation proven.%s\n" "$nok" "$defer_note" >&2
   else
-    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 22); run full demo to prove coverage.\n" >&2
+    printf "\n${C_WARN}NO STEPS EXERCISED${C_RESET}: cleanup-only invocation (--from-step 23); run full demo to prove coverage.\n" >&2
   fi
 fi

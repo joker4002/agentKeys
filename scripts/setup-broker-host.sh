@@ -53,6 +53,7 @@ EMAIL_HOST=""                # --email-host: hostname for email-service worker (
 CRED_HOST=""                 # --cred-host:  hostname for credentials-service worker (default cred.<zone>)
 MEMORY_HOST=""               # --memory-host: hostname for memory-service worker (default memory.<zone>)
 CONFIG_HOST=""               # --config-host: hostname for config-service worker (default config.<zone>) — #201 master-only taxonomy
+CLASSIFY_HOST=""             # --classify-host: hostname for classifier-service worker (default classify.<zone>) — #207 items 2-3 compute gate
 # Chain + bucket overrides for the credentials + memory + config workers.
 # Defaults target Heima Mainnet (production chain) with addresses pulled from
 # scripts/operator-workstation.env. Pass --chain-rpc / --vault-bucket /
@@ -107,6 +108,7 @@ while (( $# > 0 )); do
     --cred-host)          CRED_HOST="$2"; shift 2 ;;
     --memory-host)        MEMORY_HOST="$2"; shift 2 ;;
     --config-host)        CONFIG_HOST="$2"; shift 2 ;;
+    --classify-host)      CLASSIFY_HOST="$2"; shift 2 ;;
     --chain-rpc)          CHAIN_RPC="$2"; shift 2 ;;
     --vault-bucket)       VAULT_BUCKET="$2"; shift 2 ;;
     --memory-bucket)      MEMORY_BUCKET="$2"; shift 2 ;;
@@ -451,6 +453,7 @@ if [[ -z "$EMAIL_HOST"  ]]; then EMAIL_HOST="$(derive_companion email)";  fi
 if [[ -z "$CRED_HOST"   ]]; then CRED_HOST="$(derive_companion cred)";    fi
 if [[ -z "$MEMORY_HOST" ]]; then MEMORY_HOST="$(derive_companion memory)";fi
 if [[ -z "$CONFIG_HOST" ]]; then CONFIG_HOST="$(derive_companion config)";fi
+if [[ -z "$CLASSIFY_HOST" ]]; then CLASSIFY_HOST="$(derive_companion classify)";fi
 
 # Service-worker defaults (dev-only co-location on the broker host).
 # Production will split each service to its own machine + IAM principal;
@@ -501,6 +504,7 @@ cat <<EOF
   Cred host   : $CRED_HOST    (credentials worker — fronts :9094)
   Memory host : $MEMORY_HOST  (memory worker — fronts :9095)
   Config host : $CONFIG_HOST  (config worker — fronts :9096 · master-only taxonomy #201)
+  Classify host: $CLASSIFY_HOST  (classifier worker — fronts :9097 · compute gate #207)
   Account ID  : $ACCOUNT_ID
   Region      : $REGION
   Cred mode   : $CRED_MODE
@@ -752,7 +756,7 @@ fi
 # hosts where nothing's running yet).
 log "Stopping agentkeys services (idempotent)"
 # Workers first (they depend on broker), then signer, then broker, then backend.
-for svc in agentkeys-worker-config agentkeys-worker-memory agentkeys-worker-creds agentkeys-worker-email agentkeys-worker-audit \
+for svc in agentkeys-worker-classify agentkeys-worker-config agentkeys-worker-memory agentkeys-worker-creds agentkeys-worker-email agentkeys-worker-audit \
            agentkeys-signer agentkeys-broker agentkeys-backend; do
   sudo systemctl stop "$svc" 2>/dev/null || true
 done
@@ -763,7 +767,7 @@ BACKUP_BINS=(agentkeys-mock-server agentkeys-broker-server)
 if [[ "$WITH_WORKERS" == "yes" ]]; then
   BACKUP_BINS+=(agentkeys-worker-audit agentkeys-worker-email \
                 agentkeys-worker-creds agentkeys-worker-memory \
-                agentkeys-worker-config)
+                agentkeys-worker-config agentkeys-worker-classify)
 fi
 for bin in "${BACKUP_BINS[@]}"; do
   if [[ -x "/usr/local/bin/$bin" ]]; then
@@ -776,13 +780,14 @@ done
 # Co-located on the broker host for dev (CLAUDE.md "for production, we will
 # isolate all the services"). One cargo invocation builds all 5 in parallel.
 if [[ "$WITH_WORKERS" == "yes" ]]; then
-  log "Building service workers (audit + email + creds + memory + config, release)"
+  log "Building service workers (audit + email + creds + memory + config + classify, release)"
   ( cd "$REPO_ROOT" && cargo build --release --locked \
       -p agentkeys-worker-audit \
       -p agentkeys-worker-email \
       -p agentkeys-worker-creds \
       -p agentkeys-worker-memory \
-      -p agentkeys-worker-config )
+      -p agentkeys-worker-config \
+      -p agentkeys-worker-classify )
 fi
 
 # sccache hit/miss readout — visible proof the compiler cache is working. On a
@@ -805,6 +810,7 @@ if [[ "$WITH_WORKERS" == "yes" ]]; then
     "$REPO_ROOT/target/release/agentkeys-worker-creds" \
     "$REPO_ROOT/target/release/agentkeys-worker-memory" \
     "$REPO_ROOT/target/release/agentkeys-worker-config" \
+    "$REPO_ROOT/target/release/agentkeys-worker-classify" \
     /usr/local/bin/
 fi
 
@@ -1027,6 +1033,7 @@ WORKER_EMAIL_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-email.env
 WORKER_CREDS_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-creds.env
 WORKER_MEMORY_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-memory.env
 WORKER_CONFIG_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-config.env
+WORKER_CLASSIFY_ENV_FILE=$DEV_KEY_SERVICE_ENV_DIR/worker-classify.env
 
 if [[ "$WITH_WORKERS" == "yes" ]]; then
   # audit + email: no secrets. Mode 0644 is fine; the values are public
@@ -1135,6 +1142,24 @@ AGENTKEYS_CONFIG_KEK_HEX=$EXISTING_CONFIG_KEK
 EOF
   sudo chown agentkeys:agentkeys "$WORKER_CONFIG_ENV_FILE"
   sudo chmod 0600 "$WORKER_CONFIG_ENV_FILE"
+
+  # classifier worker (#207 items 2-3): a COMPUTE gate — COMPILE + TAG over the
+  # in-process catalog. NO bucket, NO KEK (no S3 touch); just the bind + chain
+  # config for the shared cap-verify chain. BROKER_CAP_PUBKEY_PEM is injected by
+  # the systemd unit (cat of the PEM), same as the storage workers. Not 0600 —
+  # it carries no secret, but we keep the dir's default perms for consistency.
+  sudo tee "$WORKER_CLASSIFY_ENV_FILE" >/dev/null <<EOF
+# Auto-generated by setup-broker-host.sh. Classifier-service worker (#207 2-3) —
+# a compute gate, no secrets here (no bucket / KEK; the effect is inference).
+WORKER_BIND=127.0.0.1:9097
+AGENTKEYS_CHAIN=heima
+AGENTKEYS_CHAIN_RPC_HTTP=$CHAIN_RPC
+SIDECAR_REGISTRY_ADDRESS_HEIMA=$REGISTRY_ADDR
+SCOPE_CONTRACT_ADDRESS_HEIMA=$SCOPE_ADDR
+K3_EPOCH_COUNTER_ADDRESS_HEIMA=$K3_COUNTER_ADDR
+EOF
+  sudo chown agentkeys:agentkeys "$WORKER_CLASSIFY_ENV_FILE"
+  sudo chmod 0644 "$WORKER_CLASSIFY_ENV_FILE"
 fi
 
 # ─── 5. systemd units ─────────────────────────────────────────────────────────
@@ -1279,6 +1304,7 @@ EOF
 #   cred.<zone>   → :9094  → /v1/cred/*   (credential blob CRUD)
 #   memory.<zone> → :9095  → /v1/memory/* (long-term memory CRUD)
 #   config.<zone> → :9096  → /v1/config/* (master-only policy/taxonomy, #201)
+#   classify.<zone> → :9097 → /v1/classify/* (compute gate: COMPILE + TAG, #207)
 #
 # Production will split each to its own EC2/IAM principal (CLAUDE.md
 # "for production, we will isolate all the services for the security issue").
@@ -1407,6 +1433,31 @@ Requires=agentkeys-broker.service
 Type=simple
 EnvironmentFile=$WORKER_CONFIG_ENV_FILE
 ExecStart=/bin/sh -c 'export BROKER_CAP_PUBKEY_PEM="\$(cat $BROKER_CAP_PEM_PATH)" && [ -n "\$BROKER_CAP_PUBKEY_PEM" ] && exec /usr/local/bin/agentkeys-worker-config'
+Restart=on-failure
+RestartSec=5s
+User=agentkeys
+Group=agentkeys
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  log "Writing agentkeys-worker-classify.service"
+  sudo tee /etc/systemd/system/agentkeys-worker-classify.service >/dev/null <<EOF
+[Unit]
+Description=AgentKeys classifier-service worker (#178 §15.6 / #207 2-3 — compute gate, COMPILE + TAG)
+After=network-online.target agentkeys-broker.service
+Wants=network-online.target
+Requires=agentkeys-broker.service
+
+[Service]
+Type=simple
+EnvironmentFile=$WORKER_CLASSIFY_ENV_FILE
+ExecStart=/bin/sh -c 'export BROKER_CAP_PUBKEY_PEM="\$(cat $BROKER_CAP_PEM_PATH)" && [ -n "\$BROKER_CAP_PUBKEY_PEM" ] && exec /usr/local/bin/agentkeys-worker-classify'
 Restart=on-failure
 RestartSec=5s
 User=agentkeys
@@ -1614,6 +1665,7 @@ if [[ "$WITH_NGINX" == "yes" ]]; then
     write_worker_nginx_site cred   "$CRED_HOST"   9094
     write_worker_nginx_site memory "$MEMORY_HOST" 9095
     write_worker_nginx_site config "$CONFIG_HOST" 9096
+    write_worker_nginx_site classify "$CLASSIFY_HOST" 9097
   fi
   # Single point of enabling — one ln -sf per vhost (idempotent), default
   # vhost out of the way. Done here (not inside write_nginx_site) so the
@@ -1622,7 +1674,7 @@ if [[ "$WITH_NGINX" == "yes" ]]; then
     sudo ln -sf /etc/nginx/sites-available/agentkeys-broker /etc/nginx/sites-enabled/
     sudo ln -sf /etc/nginx/sites-available/agentkeys-signer /etc/nginx/sites-enabled/
     if [[ "$WITH_WORKERS" == "yes" ]]; then
-      for slug in audit email cred memory config; do
+      for slug in audit email cred memory config classify; do
         sudo ln -sf "/etc/nginx/sites-available/agentkeys-worker-$slug" /etc/nginx/sites-enabled/
       done
     fi
@@ -1657,7 +1709,7 @@ WORKER_UNITS=()
 if [[ "$WITH_WORKERS" == "yes" ]]; then
   WORKER_UNITS=(agentkeys-worker-audit agentkeys-worker-email \
                 agentkeys-worker-creds agentkeys-worker-memory \
-                agentkeys-worker-config)
+                agentkeys-worker-config agentkeys-worker-classify)
 fi
 
 log "daemon-reload + enable + restart core + worker services"
@@ -1786,6 +1838,7 @@ Status:
   • worker-creds  systemd:     agentkeys-worker-creds.service   (:9094, loopback → $CRED_HOST)
   • worker-memory systemd:     agentkeys-worker-memory.service  (:9095, loopback → $MEMORY_HOST)
   • worker-config systemd:     agentkeys-worker-config.service  (:9096, loopback → $CONFIG_HOST)
+  • worker-classify systemd:   agentkeys-worker-classify.service  (:9097, loopback → $CLASSIFY_HOST · compute gate #207)
   • binaries:                  /usr/local/bin/agentkeys-{mock-server,broker-server,worker-{audit,email,creds,memory,config}}
   • state dir:                 /var/lib/agentkeys      (mode 0700, agentkeys:agentkeys)
   • audit DB will land at:     /var/lib/agentkeys/.agentkeys/broker/audit.sqlite
@@ -1849,10 +1902,11 @@ cat <<EOF
          $CRED_HOST    → <public IP>  (credentials-service worker vhost)
          $MEMORY_HOST  → <public IP>  (memory-service worker vhost)
          $CONFIG_HOST  → <public IP>  (config-service worker vhost · master-only taxonomy #201)
+         $CLASSIFY_HOST → <public IP>  (classifier-service worker vhost · compute gate #207)
     2. Open port 443 on the host firewall (and 80 only for ACME challenges).
-       Drop all ingress to :8090, :8091, :8092, :9092, :9093, :9094, :9095, :9096 except 127.0.0.1.
+       Drop all ingress to :8090, :8091, :8092, :9092, :9093, :9094, :9095, :9096, :9097 except 127.0.0.1.
     3. Issue Let's Encrypt certs for every co-located vhost:
-         for h in $SIGNER_HOST $AUDIT_HOST $EMAIL_HOST $CRED_HOST $MEMORY_HOST $CONFIG_HOST; do
+         for h in $SIGNER_HOST $AUDIT_HOST $EMAIL_HOST $CRED_HOST $MEMORY_HOST $CONFIG_HOST $CLASSIFY_HOST; do
            sudo certbot certonly --webroot -w /var/www/certbot -d "\$h" \\
              --agree-tos -m <ops@your.org> --non-interactive
          done
@@ -1864,6 +1918,7 @@ cat <<EOF
          curl -sS https://$CRED_HOST/healthz     # → JSON {"ok":true,...}
          curl -sS https://$MEMORY_HOST/healthz   # → JSON {"ok":true,...}
          curl -sS https://$CONFIG_HOST/healthz   # → JSON {"ok":true,...}
+         curl -sS https://$CLASSIFY_HOST/healthz # → JSON {"ok":true,"catalog_version":...}
 
 EOF
 
