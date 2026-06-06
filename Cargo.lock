@@ -38,6 +38,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-backend-client"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-provisioner",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "agentkeys-broker-server"
 version = "0.1.0"
 dependencies = [
@@ -167,6 +181,7 @@ dependencies = [
 name = "agentkeys-daemon"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-backend-client",
  "agentkeys-catalog",
  "agentkeys-cli",
  "agentkeys-core",
@@ -224,7 +239,7 @@ dependencies = [
 name = "agentkeys-mcp-server"
 version = "0.1.0"
 dependencies = [
- "agentkeys-provisioner",
+ "agentkeys-backend-client",
  "agentkeys-types",
  "anyhow",
  "async-trait",

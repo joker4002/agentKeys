@@ -100,6 +100,34 @@ CLAUDE.md runbook-fix-fold-back policy, applied to every harness edit, not just 
   `heima-register-first-master.sh`'s `--operator-omni`/`--k11-cose-hex` web-path
   overrides default to the legacy deployer-derived values).
 
+## Hand-rolled cap/worker bodies — drive the CLI, or annotate + gate (issue #203)
+
+The broker/worker request shapes have ONE owner — the `agentkeys-backend-client`
+crate (see root [`../CLAUDE.md`](../CLAUDE.md) "Broker/worker request shapes have
+ONE owner"). For harness scripts that means:
+
+- **Real-path steps drive the shared client**, not raw curls — `agentkeys memory
+  put …` routes through the MCP server's `HttpBackend` → the shared client, so the
+  agent path can't drift. Prefer that over hand-rolling `jq -n '{…}'` cap/worker
+  bodies.
+- **A hand-rolled body that IS meant to mirror a wire shape** (the few real-path
+  probes + any negative test that sends a *well-formed* body) carries a
+  `# @backend-fixture: <shape>` comment **on the line directly above the jq object
+  literal** (`<shape>` ∈ `cap_mint_request`, `memory_put_body`, `memory_get_body`,
+  `audit_append_v2`). [`../scripts/check-backend-fixture-drift.sh`](../scripts/check-backend-fixture-drift.sh)
+  diffs that body's key-set against the crate-emitted fixture in
+  [`fixtures/backend-protocol/`](fixtures/backend-protocol/) and fails CI on drift
+  (the `harness-ci.yml` `rust-checks` job runs it). Place the annotation so the
+  **next `{`** after it is the object literal (e.g. *inside* a function body, not
+  above the `fn() {` line) — the gate extracts the first brace-balanced literal.
+- **Deliberately-malformed negative-test payloads are NOT annotated** — they're
+  supposed to be wrong (wrong data class, missing field, cross-actor omni). Only
+  annotate bodies that should match canonical.
+- **Changing a wire field** is a crate change, never a bash-only edit: edit
+  `agentkeys-backend-client::protocol`, regenerate fixtures (`cargo run -p
+  agentkeys-backend-client --bin dump-protocol-fixtures`), update the frozen
+  key-set test, then fix every annotated bash body to match.
+
 ## Mainnet + funding posture
 
 - Demos run on **Heima mainnet** (`AGENTKEYS_CHAIN=heima`); the deploy wallet
@@ -160,8 +188,13 @@ Every orchestrator + the operator runbook MUST keep this split exact:
   runs the deferred roundtrip with the sandbox-held key via `sbx_exec`). The master never
   signs for the agent. This is the real agent-side coverage.
 - **CI (`--ci`) — headless, no biometric, no sandbox.** Software register (no Touch ID), stub
-  K11 (`WEBAUTHN_MODE=0`), and the **mock agent** for the agent-side steps (the sole
-  sanctioned synthetic agent, contract rule 5). Tolerates prereq skips.
+  K11 (`WEBAUTHN_MODE=0`), the **mock agent** for the agent-side steps (the sole
+  sanctioned synthetic agent, contract rule 5), and **stage-1 auto-skips
+  deploy/email/provision** (CI runs against pre-provisioned infra — contracts pinned,
+  wallet_sig identity, buckets/roles an operator one-shot). Tolerates prereq skips.
+  `harness-ci.yml` runs the WHOLE orchestrator — **`v2-demo.sh --ci` → phases 1–4 + 6**
+  (phase 5/wire auto-skips: no aiosandbox). So phase 6 (the daemon web-chain runtime
+  proof) IS exercised in CI; the only phase CI can't run is the sandbox-bound wire.
 
 **Fresh-ceremony / re-testable rule:** an operator run must EXERCISE the ceremony (Touch ID),
 not silently skip it — never let a re-run look "tested" while the biometric never fired.
@@ -198,30 +231,41 @@ forever — plan to **dissolve it into the type system** as
 [#203](https://github.com/litentry/agentKeys/issues/203) (the shared backend-client
 crate) lands.
 
-**Phase 6's honest blind spot today:** step 3 `curl`s the daemon endpoint directly
-(`POST /v1/master/memory/plant`) with a hand-built body; the real frontend
-(`apps/parent-control/lib/client/daemon.ts`) builds its OWN body at the same URL.
-They agree by manual coincidence — nothing enforces it, so a `daemon.ts`
-endpoint/shape change leaves phase 6 **green on the old path** (false-green). Phase 6
-proves "daemon → cap-mint → STS → worker → S3 is wired to real infra"; it does NOT
-prove "the React button sends what phase 6 sends."
+**Phase 6's old blind spot (now CLOSED by #203/#204):** step 3 `curl`s the daemon
+endpoint directly (`POST /v1/master/memory/plant`) with a hand-built body; the real
+frontend (`apps/parent-control/lib/client/daemon.ts`) builds its OWN body at the same
+URL. They used to agree by manual coincidence — a `daemon.ts` endpoint/shape change
+left phase 6 **green on the old path** (false-green). That gap is now gated: the route
++ the `ApiMemoryEntry` body shape have ONE source of truth (the daemon's
+`MASTER_MEMORY_{,PLANT_}ROUTE` const + the struct), pinned to
+[`fixtures/web-api/master_memory_plant.json`](fixtures/web-api/master_memory_plant.json)
+by a `ui_bridge` unit test, and BOTH consumers (`daemon.ts` + `web-parity-demo.sh`)
+are diffed against it by [`../scripts/check-web-api-drift.sh`](../scripts/check-web-api-drift.sh)
+in CI. A rename/added/dropped field or a route change on either side is now CI-red.
+What phase 6 still uniquely proves (and can't be compile-checked) is the **runtime
+wiring**: "daemon → cap-mint → STS → worker → S3 is reachable on real infra."
 
 **The ladder (weakest → strongest) — push a check DOWN it whenever it catches real drift:**
-1. **Runtime behavioral assertion** (run both, compare) — rots silently. ← phase 6 today.
-2. **Shared contract / golden fixture** — both sides derive from one serde schema
-   (`agentkeys-types` + the #203 crate); CI reddens loudly on shape drift, survives
-   cosmetic refactors.
+1. **Runtime behavioral assertion** (run both, compare) — rots silently.
+2. **Shared contract / golden fixture** — both sides derive from one serde schema;
+   CI reddens loudly on shape drift, survives cosmetic refactors. ← the daemon
+   web-API plant contract sits here now (the `master_memory_plant` fixture + the
+   `daemon.ts`/`web-parity-demo.sh` gate).
 3. **Shared implementation** — one code path; violating parity is a compile error.
    The runtime check shrinks to a thin "is the one client wired to real infra?" smoke.
-   ← where #203 lands (its approach steps 2–5 walk phase 6 down rungs 3→2→smoke).
+   ← the broker/worker chain is here (#203/#204: daemon + MCP share
+   `agentkeys-backend-client`). Phase 6's body shape is rung 2; its remaining job is
+   the rung-3-residual runtime-wiring smoke.
 
 **Operating rule:** every time phase 6 (or any parity/wiring check) catches a real
 drift, ask "could this have been a compile error or a fixture diff instead?" If yes,
 move the assertion down the ladder — the runtime check is *supposed* to get thinner.
 A parity check growing in scope is a smell; one shrinking toward a wiring smoke is
-healthy. **Until #203 lands**, plug the false-green cheaply: a single shared route
-constant referenced by both `daemon.ts` and `web-parity-demo.sh` + a CI grep guard
-that fails on divergence (fold-systemic-fixes-into-enforcement).
+healthy. **Done (#203/#204):** the false-green is plugged — the plant route + body
+shape are a single serde source of truth gated by `scripts/check-web-api-drift.sh`
+(fold-systemic-fixes-into-enforcement). The next rung-down for phase 6 is tier-3 for
+the frontend: compile the daemon ui-bridge plant types into the browser host via
+`agentkeys-web-core` (wasm) so `daemon.ts` stops hand-building the body at all.
 
 ---
 

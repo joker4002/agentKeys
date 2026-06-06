@@ -1,8 +1,13 @@
 name: harness CI (no LLM)
 
 # Issue #66: deterministic, no-LLM, no-WebAuthn CI that runs the SAME
-# production harness scripts (harness/v2-stage{1,2,3}-demo.sh) against
-# a parallel TEST instance of the production environment.
+# production harness orchestrator (harness/v2-demo.sh --ci → phases 1-4 + 6;
+# phase 5/wire is the only phase CI can't run — no aiosandbox — so --ci sets
+# --wire none) against a parallel TEST instance of the production environment.
+# (Was three separate v2-stage{1,2,3}-demo.sh steps; switched to the whole
+# orchestrator so CI also covers phase 4 (memory-plant) + phase 6 (web-parity —
+# the daemon web-chain runtime proof the #200 restructure added but never wired
+# into CI).)
 #
 # "Mirror production" means: same Heima mainnet chain, same Solidity
 # source files, same harness scripts, same broker code, same AWS
@@ -162,6 +167,25 @@ jobs:
       # AWS_*) and the keyring tests serialize on a per-process accounts
       # map — same convention as the existing @claude review workflow.
       - run: cargo test --workspace -- --test-threads=1
+
+      # Issue #203 drift gate (broker/worker request shapes have ONE owner).
+      # (a) the committed protocol fixtures must match what the serde types
+      #     emit — fails if a wire struct changed without regenerating; and
+      # (b) every @backend-fixture-annotated bash body under harness/ must
+      #     match the canonical key-set — fails if a hand-rolled cap/worker
+      #     body drifts (the #200 bug class: evm_address vs {address,chain_id},
+      #     dropped/renamed fields). Both are deterministic + no-network.
+      - name: Backend-protocol fixtures are canonical (issue #203)
+        run: cargo run -q -p agentkeys-backend-client --bin dump-protocol-fixtures -- --check
+      - name: No hand-rolled bash body drifted from the canonical shapes (issue #203)
+        run: bash scripts/check-backend-fixture-drift.sh
+      # The daemon web-API plant contract: daemon.ts (React frontend) +
+      # web-parity-demo.sh must agree with the daemon's ApiMemoryEntry + route
+      # const (the #206 parity ladder, rung 2 — closes phase 6's frontend
+      # false-green). The Rust half is pinned by the ui_bridge unit test above
+      # (run by cargo test); this gates the two non-Rust consumers.
+      - name: Frontend↔harness plant contract has not drifted (issue #203 / #206)
+        run: bash scripts/check-web-api-drift.sh
 
   detect-changes:
     # Issue #101: path-conditional triggers for auto-deploy of the test broker.
@@ -590,19 +614,20 @@ jobs:
           # Session name shows up in CloudTrail — keep traceable per run.
           role-session-name: gh-ci-${{ github.run_id }}
 
-      - name: Build agentkeys CLI + workers (release)
-        # Build ONLY the three binaries the harness actually invokes at
-        # runtime — agentkeys (CLI), agentkeys-daemon, agentkeys-mock-server
-        # (same set as scripts/install-agentkeys-cli.sh L138). `--workspace`
-        # would also build agentkeys-broker-server + all 4 worker bins +
-        # agentkeys-chain — those run REMOTELY on the test-broker EC2, not
-        # on this runner, so building them here is pure cargo-time waste
-        # (~3-4min per run with cold cache). Drop to the minimum set.
+      - name: Build agentkeys CLI + daemon + mcp-server (release)
+        # Build EXACTLY what harness/v2-demo.sh's preflight builds
+        # (agentkeys-cli + agentkeys-daemon + agentkeys-mcp-server), so the
+        # v2-demo run below finds a warm target/release and its preflight cargo
+        # build is a ~0.5s fingerprint no-op. (Real-mode CI — AGENTKEYS_CHAIN=heima
+        # — never uses agentkeys-mock-server, which is mock-mode infra, so it's
+        # dropped.) `--workspace` would also build the broker + 4 worker bins +
+        # agentkeys-chain — those run REMOTELY on the test-broker EC2, not on this
+        # runner, so building them here is pure cargo-time waste.
         run: |
           cargo build --release \
             -p agentkeys-cli \
             -p agentkeys-daemon \
-            -p agentkeys-mock-server
+            -p agentkeys-mcp-server
 
       - name: Materialize test deployer key + derive address (no argv leak)
         # Codex M2 mitigation: previously, the env-file materialization step
@@ -791,70 +816,92 @@ jobs:
           fi
           echo "::notice::env file materialized + safety-validated (no \$( ), no backticks; all secrets routed via env: block)"
 
-      - name: Stage 1 — chain reachability + identity bootstrap
-        if: ${{ inputs.stage == 'all' || inputs.stage == '1' || inputs.stage == '' }}
-        # --skip-deploy:    contracts are pre-deployed once per test-env
-        #                   refresh (operator one-shot) and pinned in
-        #                   TEST_*_HEIMA secrets, so CI doesn't burn HEI
-        #                   on every push.
-        # --skip-email:     SES email-link round-trip is exercised separately;
-        #                   identity bootstrap here uses wallet_sig.
-        # --skip-provision: vault/memory bucket+role+policy were provisioned
-        #                   by the operator's `setup-cloud.sh --test` one-shot;
-        #                   the CI assumed-role (github-actions-agentkeys-e2e)
-        #                   deliberately lacks IAM-admin perms to (re)create
-        #                   them. Same model as --skip-deploy: one-shot infra
-        #                   provisioning lives on the operator's laptop, not
-        #                   on the ephemeral runner.
-        # No --webauthn:    stub-mode K11 (WEBAUTHN_MODE=0 default).
-        run: |
-          AGENTKEYS_CHAIN=heima \
-            bash harness/v2-stage1-demo.sh --skip-deploy --skip-email --skip-provision
-
-      - name: Stage 2 — multi-master + recovery (stub mode)
-        if: ${{ inputs.stage == 'all' || inputs.stage == '2' || inputs.stage == '' }}
-        run: |
-          AGENTKEYS_CHAIN=heima \
-            bash harness/v2-stage2-demo.sh --stub --skip-build
-
-      - name: Stage 3 — per-actor + per-data-class PrincipalTag isolation
-        if: ${{ inputs.stage == 'all' || inputs.stage == '3' || inputs.stage == '' }}
-        # The capstone: stage-3 is the layer with the highest security
-        # invariant payload (per CLAUDE.md "Per-actor + per-data-class
-        # isolation invariants" table). Requires AWS STS
-        # AssumeRoleWithWebIdentity → which requires AWS to fetch the
-        # OIDC issuer's JWKS over public TLS. The long-lived test broker
-        # (TEST_BROKER_HOST) satisfies that; the same code path proves
-        # the prod IAM trust policy + bucket policy are correctly scoped.
+      - name: v2-demo on Heima mainnet — phases 1-4 + 6 (wire/phase-5 skipped, no sandbox)
+        # Run the WHOLE orchestrator (harness/v2-demo.sh) rather than the three
+        # v2-stage{1,2,3}-demo.sh in isolation, so CI also covers the phases the
+        # #200 v2-demo restructure added but never wired into CI:
+        #   - phase 4 (memory-plant-demo.sh): the master plants its own memory
+        #     through the real chain + read-back.
+        #   - phase 6 (web-parity-demo.sh): the daemon's WEB endpoint
+        #     POST /v1/master/memory/plant → real chain (cap-mint → STS → worker
+        #     → S3). This is the ONLY runtime proof of the parent-control app's
+        #     path — stage 3 exercises the CLI/curl path, not the daemon ui-bridge.
+        #     (The #203 check-web-api-drift.sh gate in rust-checks covers its
+        #     SHAPE at compile/fixture time; THIS step covers runtime reachability.)
+        # Phase 5 (wire) is the §10.2 agent inside the aiosandbox — CI is headless
+        # with no sandbox, so `--ci` auto-sets `--wire none` (the one phase that
+        # genuinely can't run here).
         #
-        # Codex H1 (2026-05-23): blanket --allow-skip allowed ANY prereq
-        # to skip → CI could report success while bypassing every isolation
-        # check. Replaced with --allow-skip=<reason> allowlist that only
-        # permits structurally-unfixable / operator-one-shot skips in CI:
-        #   - scope-not-set: setScopeWithWebauthn requires a real WebAuthn
-        #     assertion (scripts/heima-scope-set.sh L172), which a no-Touch-ID
-        #     runner cannot produce.
+        # `--ci` threads to every phase (v2-demo run_phase): stage 1 auto-skips
+        # deploy/email/provision (PRE-PROVISIONED infra — contracts pinned in
+        # TEST_*_HEIMA secrets, identity via wallet_sig, vault/memory buckets+roles
+        # an operator one-shot the CI assumed-role can't recreate; see
+        # v2-stage1-demo.sh's CI block), stage 2 auto-stubs K11 (no Touch ID),
+        # stages 1/2 skip their build (the preflight built once above).
+        #
+        # --allow-skip allowlist (stage 3 only; Codex H1 2026-05-23 — NOT blanket;
+        # every OTHER prereq still fails closed):
+        #   - scope-not-set: setScopeWithWebauthn needs a real WebAuthn assertion
+        #     (heima-scope-set.sh L172) a no-Touch-ID runner cannot produce.
         #   - config-role-missing / config-worker-unreachable (#201): the test
-        #     config bucket + IAM role AND the config worker's DNS+cert
-        #     (config-test.<zone>) are ONE operator one-shot — setup-cloud.sh --ci
-        #     provisions the DNS/role/bucket, then the broker deploy's certbot
-        #     issues the cert (same model as vault/memory --skip-provision; and
-        #     certbot CANNOT issue a cert until the config-test A record exists,
-        #     so worker-reachability is gated on the same one-shot as the role).
-        #     Until config-test is fully provisioned the config bucket write
-        #     (step 19) + the config-worker reachability check (step 21) skip
-        #     cleanly. Step 20 (config-class cap rejected by the memory + cred
-        #     workers) still runs — it never touches the config worker. The
-        #     config worker's own cap-data-class-mismatch rejection is also
-        #     covered by unit tests (agentkeys-worker-config). Drop BOTH
-        #     allowances once the test config infra (DNS+cert+role+bucket) exists.
-        # Every OTHER prereq (agent-file-missing, broker-misconfig,
-        # device-role-missing, agent-sts-mint-failed, agent-file-invalid,
-        # broker-no-config-route) still fails closed → CI cannot pass with a
-        # broken auth chain or missing agent setup.
+        #     config bucket+role AND the config worker DNS+cert (config-test.<zone>)
+        #     are ONE operator one-shot (setup-cloud.sh --ci + the broker deploy's
+        #     certbot). Until then step 19 (config write) + step 21 (config-worker
+        #     reachability) skip cleanly; step 20 (config cap rejected by memory +
+        #     cred workers) still runs. The "Guard" step below keeps this honest —
+        #     warns every run while config-test is unprovisioned (#209) + FAILS once
+        #     it becomes reachable, so the allowance can't silently persist. Drop
+        #     both (allowance + guard) once the test config infra exists.
+        #
+        # The workflow_dispatch `stage` input still selects a single phase
+        # (`--stage N`); push/PR (stage='' / 'all') runs the full 1-4 + 6 sequence.
+        env:
+          STAGE: ${{ inputs.stage }}
         run: |
-          AGENTKEYS_CHAIN=heima \
-            bash harness/v2-stage3-demo.sh --allow-skip=scope-not-set,config-role-missing,config-worker-unreachable,classify-not-configured,classify-worker-unavailable
+          set -euo pipefail
+          ARGS=(--ci --allow-skip=scope-not-set,config-role-missing,config-worker-unreachable,classify-not-configured,classify-worker-unavailable)
+          case "${STAGE:-}" in
+            1|2|3) ARGS+=(--stage "$STAGE") ;;
+            *)     ;;   # all / empty → full phases 1-4 + 6 (phase 5/wire auto-skipped)
+          esac
+          AGENTKEYS_CHAIN=heima bash harness/v2-demo.sh "${ARGS[@]}"
+
+      - name: Guard — stage-3 step-21 config-worker quarantine must not become permanent (#209)
+        if: ${{ inputs.stage == 'all' || inputs.stage == '3' || inputs.stage == '' }}
+        # stage-3 step 21 (run by v2-demo → phase 3) is the ONLY live proof that the
+        # deployed config worker rejects a cross-data-class cap (POST a memory/cred
+        # cap to config-test.<zone>/v1/config/put → expect 403 cap_data_class_mismatch).
+        # It is allow-skipped via config-worker-unreachable while config-test is
+        # unprovisioned (#209). Per the codex adversarial review (2026-06), that
+        # tolerance must NOT silently persist — unit tests + step 20 cannot catch
+        # deployed route/nginx/TLS/BROKER_CAP_PUBKEY/middleware drift. This guard:
+        #   - config-test UNREACHABLE → ::warning:: every run (visible, links #209),
+        #     CI stays green (the skip is legitimate — the host genuinely isn't up).
+        #   - config-test REACHABLE → ::error:: + exit 1: the infra now exists, so the
+        #     allowance must be dropped (remove config-worker-unreachable from the
+        #     v2-demo --allow-skip) and step 21 must run as a live gate. Fail-loud so
+        #     the quarantine self-dissolves the moment #209 lands.
+        run: |
+          set -uo pipefail
+          # config-test.<zone> is the TEST config worker (distinct from prod
+          # config.<zone>). TEST_BROKER_ZONE is set by the "Compute zone" step via
+          # $GITHUB_ENV; use it directly — do NOT source operator-workstation.env
+          # (whose AGENTKEYS_WORKER_CONFIG_URL could point elsewhere).
+          url="https://config-test.${TEST_BROKER_ZONE:-litentry.org}/healthz"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null) || true
+          code="${code:-000}"
+          echo "config worker healthz probe: $url → HTTP $code"
+          # Self-dissolving: once the allowance is removed, the guard is inert
+          # (so removing just the allow-skip token, without this step, is safe).
+          if ! grep -q 'allow-skip=.*config-worker-unreachable' .github/workflows/harness-ci.yml; then
+            echo "::notice::config-worker-unreachable allowance already removed — stage-3 step 21 runs as a live gate. This Guard step is now a no-op (safe to delete)."
+            exit 0
+          fi
+          if [ "$code" = "200" ]; then
+            echo "::error::config-test is now REACHABLE ($url → 200), but stage-3 step 21 is still allow-skipped via 'config-worker-unreachable'. Remove it from the v2-demo --allow-skip so step 21 runs as a LIVE config-worker isolation gate, then close #209."
+            exit 1
+          fi
+          echo "::warning::stage-3 step 21 (config-worker cap-data-class isolation, #201) is QUARANTINED — config-test unreachable ($url → HTTP $code). The LIVE config-worker rejection proof is NOT running on CI. Provision config-test via 'setup-cloud.sh --ci' to restore it (#209)."
 
       - name: Clean up harness test data (bots/<actor_omni>/ prefix)
         if: always()
@@ -869,6 +916,11 @@ jobs:
         env:
           VAULT_BUCKET: ${{ secrets.TEST_VAULT_BUCKET }}
           MEMORY_BUCKET: ${{ secrets.TEST_MEMORY_BUCKET }}
+          # #201 config data class: phase 6 (web-parity) writes the master-only
+          # memory-taxonomy to bots/<omni>/config/ in the CONFIG bucket. Wipe it
+          # too. Empty until TEST_CONFIG_BUCKET is set (config infra is an operator
+          # one-shot) → the [ -n ] guard below makes it a no-op until then.
+          CONFIG_BUCKET: ${{ secrets.TEST_CONFIG_BUCKET }}
         run: |
           set -euo pipefail
           if [ -z "${HEIMA_DEPLOYER_ADDR_HEIMA:-}" ]; then
@@ -882,7 +934,7 @@ jobs:
           actor_omni=$(printf 'agentkeysevm%s' "$addr_lc" | shasum -a 256 | awk '{print $1}')
           PREFIX="bots/$actor_omni/"
           echo "::notice::cleaning S3 under prefix $PREFIX"
-          for bucket in "$VAULT_BUCKET" "$MEMORY_BUCKET"; do
+          for bucket in "$VAULT_BUCKET" "$MEMORY_BUCKET" "${CONFIG_BUCKET:-}"; do
             [ -n "$bucket" ] || continue
             aws s3 rm "s3://$bucket/$PREFIX" --recursive 2>/dev/null || true
           done

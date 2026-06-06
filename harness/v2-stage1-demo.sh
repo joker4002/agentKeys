@@ -210,6 +210,22 @@ if [ "$WEBAUTHN_MODE" != 1 ]; then
   if [ -n "${AGENTKEYS_CI:-}" ] || [ -n "${CI:-}" ]; then WEBAUTHN_MODE=0; else WEBAUTHN_MODE=1; fi
 fi
 
+# CI (--ci / $CI) is a headless run against PRE-PROVISIONED infra: contracts are
+# pinned + pre-deployed, identity bootstraps via wallet_sig (not the email round-
+# trip), and the vault/memory buckets+roles are an operator one-shot the CI
+# assumed-role deliberately can't (re)create. So CI IMPLIES these three skips —
+# the same "auto-detect the environment, don't make the caller re-pass flags"
+# posture as WEBAUTHN_MODE above + stage 2's auto-stub. This is what lets
+# `v2-demo.sh --ci` drive stage 1 without re-passing
+# --skip-deploy/--skip-email/--skip-provision (the explicit flags still work and
+# are now redundant under CI). Operators (no --ci) still get the full
+# deploy/email/provision path.
+if [ -n "${AGENTKEYS_CI:-}" ] || [ -n "${CI:-}" ]; then
+  SKIP_DEPLOY=1
+  SKIP_EMAIL=1
+  SKIP_PROVISION=1
+fi
+
 [ "$DEBUG" = "1" ] && set -x
 
 if [ -n "$ONLY_STEP" ]; then
