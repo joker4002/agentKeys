@@ -482,6 +482,13 @@ export class DaemonBackend implements AgentKeysClient {
     return { ok: true, data: undefined };
   }
 
+  // #214: approve a claimed agent → daemon registers it on chain + acks the broker.
+  async registerPairing(requestId: string): Promise<Result<void>> {
+    const r = await this.postJson<unknown>('/v1/agent/pairing/register', { request_id: requestId });
+    if (!r.ok) return r;
+    return { ok: true, data: undefined };
+  }
+
   async listCredentials(): Promise<Result<CredService[]>> {
     const r = await this.getJson<{
       credentials: { service: string; category: string; sensitivity: 'safe' | 'sensitive' }[];

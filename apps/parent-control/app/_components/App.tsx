@@ -351,22 +351,22 @@ export function App() {
     }
   };
 
-  // ─── Pairing: accept → K11 → ceremony → bind ───────────────────
-  const acceptPairing = (req: PairingRequest) => {
-    setPendingAction({
-      kind: 'pair-accept',
-      req,
-      intent: {
-        text: `Pair agent · ${req.agent}`,
-        fields: [
-          ['new actor', `O_master${req.derivation}`],
-          ['device pubkey', req.dpub],
-          ['pair-code', req.pairCode],
-          ['grant', req.requested.map((p) => p.cap).join(' · ')],
-          ['mutation', 'SidecarRegistry.registerDevice + setScope'],
-        ],
-      },
-    });
+  // ─── Pairing: accept → register on chain (§10.2 P.2) ───────────────
+  // #214: the daemon submits registerAgentDevice for the binding + acks the broker.
+  // The agent's scope grant (Touch ID, P.3) is the next step via its actor detail.
+  const acceptPairing = async (req: PairingRequest) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to approve a pairing.');
+      return;
+    }
+    showToast(`Registering ${req.agent} on chain…`);
+    const r = await client.registerPairing(req.id);
+    if (!r.ok) {
+      showToast('Register failed — check your master session + chain config.');
+      return;
+    }
+    showToast(`Registered ${req.agent} on chain. Grant its scope next (Touch ID).`);
+    await refreshPairing();
   };
   const declinePairing = (id: string) => {
     setPairingRequests((prev) => prev.filter((r) => r.id !== id));

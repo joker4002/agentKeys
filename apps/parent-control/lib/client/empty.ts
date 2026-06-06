@@ -164,6 +164,10 @@ export class EmptyBackend implements AgentKeysClient {
     return disconnected();
   }
 
+  async registerPairing(_requestId: string): Promise<Result<void>> {
+    return disconnected();
+  }
+
   async listCredentials(): Promise<Result<CredService[]>> {
     return disconnected();
   }

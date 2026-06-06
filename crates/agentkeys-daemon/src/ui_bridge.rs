@@ -654,6 +654,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         // (agents it claimed, awaiting on-chain register) for the pairing screen.
         .route("/v1/agent/pairing/pending", get(list_pairing_requests))
         .route("/v1/agent/pairing/claim", post(claim_pairing))
+        .route("/v1/agent/pairing/register", post(register_pairing))
         .route("/v1/dev/seed", post(dev_seed))
         .route("/v1/dev/event", post(dev_emit_event))
         .layer(cors)
@@ -1918,6 +1919,191 @@ async fn claim_pairing(
         )
             .into_response(),
     }
+}
+
+fn pairing_err(status: StatusCode, msg: &str) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterPairingRequest {
+    request_id: String,
+}
+
+/// POST /v1/agent/pairing/register — the master approves a claimed agent: submit
+/// `registerAgentDevice` on chain for its sandbox-generated device key, then ack
+/// the broker so it clears from pending (#214, §10.2 P.2). The device fields come
+/// from the broker's AUTHORITATIVE pending binding (never the browser). Shells out
+/// to `heima-agent-create.sh --from-pubkey` (the sibling of the master register
+/// script), mirroring `register_master_device`. The Touch-ID scope grant is the
+/// separate `/v1/actors/:id/scope/grant` step (P.3).
+async fn register_pairing(
+    State(state): State<SharedUiBridgeState>,
+    Json(req): Json<RegisterPairingRequest>,
+) -> axum::response::Response {
+    let Some(broker) = state.broker_url.as_deref() else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no broker configured (--broker-url)",
+        );
+    };
+    let j1 = match state.onboarding_session.read().await.as_ref() {
+        Some(s) if !s.j1.is_empty() => s.j1.clone(),
+        _ => {
+            return pairing_err(
+                StatusCode::FORBIDDEN,
+                "no master session — verify email + register the master first",
+            )
+        }
+    };
+    // The agent-create script is the sibling of the master register script (both
+    // live in scripts/); reuse that config rather than a second flag.
+    let Some(master_script) = state.register_master_script.clone() else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "on-chain register not configured (--register-master-script) — cannot register the agent device",
+        );
+    };
+    let agent_script = match std::path::Path::new(&master_script).parent() {
+        Some(dir) => dir.join("heima-agent-create.sh"),
+        None => {
+            return pairing_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot derive heima-agent-create.sh path",
+            )
+        }
+    };
+    // Pull the authoritative binding from the broker (device fields, never the UI).
+    let bindings = match agentkeys_cli::agent_admin::agent_pending_value(broker, &j1).await {
+        Ok(v) => v,
+        Err(e) => {
+            return pairing_err(
+                StatusCode::BAD_GATEWAY,
+                &format!("broker pending-bindings: {e:#}"),
+            )
+        }
+    };
+    let row = bindings
+        .get("pending")
+        .and_then(|p| p.as_array())
+        .and_then(|rows| {
+            rows.iter()
+                .find(|r| {
+                    r.get("request_id").and_then(|v| v.as_str()) == Some(req.request_id.as_str())
+                })
+                .cloned()
+        });
+    let Some(row) = row else {
+        return pairing_err(
+            StatusCode::NOT_FOUND,
+            "no pending binding for that request_id (claim it first, or it was already registered)",
+        );
+    };
+    let field = |k: &str| {
+        row.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let label = field("label");
+    // The binding's `device_pubkey` holds the agent's EVM address (§10.2).
+    let agent_address = field("device_pubkey");
+    let actor_omni = field("child_omni");
+    let device_key_hash = field("device_key_hash");
+    let pop_sig = field("pop_sig");
+    if label.is_empty()
+        || agent_address.is_empty()
+        || actor_omni.is_empty()
+        || device_key_hash.is_empty()
+        || pop_sig.is_empty()
+    {
+        return pairing_err(
+            StatusCode::BAD_GATEWAY,
+            "pending binding is missing device fields (label/address/omni/key-hash/pop-sig)",
+        );
+    }
+    let tx = match register_agent_device(
+        &agent_script.to_string_lossy(),
+        &label,
+        &agent_address,
+        &actor_omni,
+        &device_key_hash,
+        &pop_sig,
+    )
+    .await
+    {
+        Ok(tx) => tx,
+        Err(e) => {
+            return pairing_err(
+                StatusCode::BAD_GATEWAY,
+                &format!("registerAgentDevice: {e}"),
+            )
+        }
+    };
+    // Clear it from the broker's pending list (best-effort — the chain write is
+    // the binding act; a failed ack just leaves a stale pending row).
+    if let Err(e) = agentkeys_cli::agent_admin::agent_ack(broker, &req.request_id, &j1).await {
+        tracing::warn!("ui-bridge: registered agent but broker ack failed: {e:#}");
+    }
+    tracing::info!(
+        target: "agentkeys.daemon.ui_bridge",
+        label = %label,
+        actor_omni = %actor_omni,
+        tx = tx.as_deref().unwrap_or("(already-registered)"),
+        "#214: agent device registered on chain (web pairing)"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "label": label, "actor_omni": actor_omni, "tx_hash": tx })),
+    )
+        .into_response()
+}
+
+/// Shell out to `heima-agent-create.sh --from-pubkey` to submit `registerAgentDevice`
+/// for a SANDBOX-generated device key (the master never holds the agent key).
+/// Mirrors `register_master_device`. Returns the tx hash (None on idempotent skip).
+async fn register_agent_device(
+    script: &str,
+    label: &str,
+    agent_address: &str,
+    actor_omni: &str,
+    device_key_hash: &str,
+    pop_sig: &str,
+) -> Result<Option<String>, String> {
+    let output = tokio::process::Command::new("bash")
+        .arg(script)
+        .arg("--label")
+        .arg(label)
+        .arg("--agent-address")
+        .arg(agent_address)
+        .arg("--actor-omni")
+        .arg(actor_omni)
+        .arg("--device-key-hash")
+        .arg(device_key_hash)
+        .arg("--pop-sig")
+        .arg(pop_sig)
+        .output()
+        .await
+        .map_err(|e| format!("spawn {script}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut lines: Vec<&str> = stderr.lines().rev().take(6).collect();
+        lines.reverse();
+        return Err(format!(
+            "heima-agent-create.sh exited {}: {}",
+            output.status,
+            lines.join("\n")
+        ));
+    }
+    // The script logs to stderr + prints a final JSON line to stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tx = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .and_then(|v| v.get("tx_hash").and_then(|t| t.as_str()).map(String::from));
+    Ok(tx)
 }
 
 async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
