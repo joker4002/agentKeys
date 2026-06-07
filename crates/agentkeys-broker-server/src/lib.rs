@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod oidc;
 pub mod plugins;
 pub mod sponsor;
+pub mod sponsored_accept;
 pub mod state;
 pub mod storage;
 pub mod sts;
