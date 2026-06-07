@@ -46,8 +46,8 @@ bash dev.sh                          # master web console:  UI :3113 · daemon :
 
 Then in <http://localhost:3113>: **onboard** → **credentials** ⊕ store your LLM key →
 **pairing** ⊕ claim the agent's code (Touch ID). To produce a code, in the sandbox run
-`agentkeys-daemon --request-pairing --broker-url https://broker.litentry.org`. Full flow
-(incl. the post-claim `--retrieve-pairing`): **Path A — details**, below.
+`agentkeys-daemon --request-pairing` (it defaults to the prod broker). Full flow (incl.
+the post-claim `--retrieve-pairing`): **Path A — details**, below.
 
 ### Path B — CLI · quick start
 
@@ -138,10 +138,11 @@ The table shows `openrouter · ai-services · cred:openrouter`.
 **B. Pair + authorize an agent (#214)** — the agent shows a code, you claim it in the
 UI, the agent retrieves its session:
 
-1. **Sandbox** — open the request (a fresh in-sandbox device key; needs `--broker-url`;
-   prints a `pairing_code` + a state file holding the `request_id`):
+1. **Sandbox** — open the request (a fresh in-sandbox device key; prints a `pairing_code`
+   + a state file holding the `request_id`). The broker **defaults to prod**;
+   `--broker-url` / `AGENTKEYS_BROKER_URL` overrides (e.g. a test broker):
    ```bash
-   agentkeys-daemon --request-pairing --broker-url https://broker.litentry.org
+   agentkeys-daemon --request-pairing
    #  → {"pairing_code":"yXIN…","agent_address":"0x…","state_file":"~/.agentkeys/pairing-request-0x….json", …}
    ```
 2. **Web UI** → **pairing** → paste the `pairing_code` + a label → **⊕ claim** → review
@@ -153,8 +154,7 @@ UI, the agent retrieves its session:
    # request_id from the newest pairing-request state file (use step 1's exact
    # state_file path if you have several):
    agentkeys-daemon --retrieve-pairing \
-     --request-id "$(jq -r .request_id "$(ls -t ~/.agentkeys/pairing-request-*.json | head -1)")" \
-     --broker-url https://broker.litentry.org
+     --request-id "$(jq -r .request_id "$(ls -t ~/.agentkeys/pairing-request-*.json | head -1)")"
    ```
 
 **C. Agent fetches + runs on the vault key.** With the agent paired + scoped, it fetches
