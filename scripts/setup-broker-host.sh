@@ -680,14 +680,27 @@ setup_build_cache
 # or by touching any source. (sccache — set up above — only makes a recompile that DOES
 # run fast; this guard avoids the recompile entirely when nothing changed.)
 BUILD_STAMP="$REPO_ROOT/target/release/.agentkeys-build-commit"
+# git refuses to operate in a tree owned by a different user ("detected dubious
+# ownership", fatal exit 128). On the broker this script runs as ROOT (the CI SSM
+# command + `sudo` invocations both run as root) while the checkout is owned by
+# agentkey/ubuntu — so a plain `git` here aborts 128, and under `set -e` that kills
+# the whole deploy before the build even starts (the real #219 CI failure). `-c
+# safe.directory` trusts THIS tree for THIS invocation only — no ~/.gitconfig write,
+# and a no-op when the caller already owns the repo. `-C` runs in-repo, no subshell.
+git_repo() { git -C "$REPO_ROOT" -c safe.directory="$REPO_ROOT" "$@"; }
 build_stamp_value() {
-  local head; head="$( cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null )" || return 1
+  local head; head="$( git_repo rev-parse HEAD 2>/dev/null )" || return 1
   printf '%s workers=%s' "$head" "$WITH_WORKERS"
 }
 SKIP_SERVER_BUILD=0
 if have git; then
   _want_stamp="$(build_stamp_value || true)"
-  _dirty="$( cd "$REPO_ROOT" && git status --porcelain 2>/dev/null | head -1 )"
+  # Capture porcelain WITHOUT a `| head` pipe: on a dirty tree (many lines) head
+  # closes the pipe early, git takes SIGPIPE, and under `pipefail` that surfaces as
+  # 141 — another way this assignment would trip `set -e`. Tolerate ANY git failure
+  # → treat as "can't prove the tree is clean" → fall through to a rebuild. The guard
+  # is an optimization; failing it safe (rebuild) is always correct, crashing is not.
+  _dirty="$( git_repo status --porcelain 2>/dev/null )" || _dirty="dirty"
   _bins_ok=1
   _req_bins=(agentkeys-mock-server agentkeys-broker-server)
   [[ "$WITH_WORKERS" == "yes" ]] && _req_bins+=(agentkeys-worker-audit agentkeys-worker-email \
