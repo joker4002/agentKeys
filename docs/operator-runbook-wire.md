@@ -28,16 +28,43 @@ identical** either way; the paths differ only in how the master authorizes.
    over-cap action is **deterministically denied** (no LLM in the decision) and
    complies on revocation.
 
-## The two paths (same agent side, different master side)
+## Two independent paths — pick one
 
-The master authorizes the agent two ways; the agent side (fetch → wire → run, in the
-sandbox) is identical:
+The two paths are **fully independent**: each is a complete way to test the wire, and
+you never run one to set up the other. They differ only in **how the master
+authorizes** the agent. Both assume the shared infra from **Fresh start** (below).
 
-| | **Path A — Web app** | **Path B — CLI** |
-|---|---|---|
-| Vault the LLM key | parent-control UI → *credentials* | `agentkeys cred store` (or the daemon) |
-| Pair + authorize the agent | parent-control UI → *pairing* (claim code → Touch ID) | `agentkeys agent claim` (phase1-wire Phase P) |
-| Drives the agent side | the sandbox (harness) | the sandbox (harness) |
+### Path A — Web app · quick start
+
+The master vaults + pairs through the parent-control UI; you push the agent binaries to
+the sandbox yourself.
+
+```bash
+bash harness/sandbox-build-push.sh   # cross-build your CURRENT agentkeys → upload to the sandbox (re-run after any local change)
+bash dev.sh                          # master web console:  UI :3113 · daemon :3114 · mcp :18088
+```
+
+Then in <http://localhost:3113>: **onboard** → **credentials** ⊕ store your LLM key →
+**pairing** ⊕ claim the agent's code (Touch ID). To produce a code, run
+`agentkeys-daemon --request-pairing` in the sandbox. Detail + caveats: **Path A —
+details**, below.
+
+### Path B — CLI · quick start
+
+One harness automates the whole master **and** agent flow — cross-build + upload, §10.2
+pairing (Touch ID), wire, and the memory surprise:
+
+```bash
+bash harness/phase1-wire-demo.sh --real --webauthn
+```
+
+Detail: **Path B walkthrough**, below.
+
+### Neither path — fastest headless check
+
+Not a path; a one-command sanity check that the whole stack works master-self (no UI, no
+Touch ID): `bash harness/cred-wire-demo.sh` (vault → fetch → plant → Hermes runs on the
+vault key). See **Fastest test**, below.
 
 ## Fastest test — one headless command (no UI, no Touch ID)
 
@@ -78,16 +105,22 @@ master-authorizes-a-distinct-agent UX on top.
 Then pick **Path A** (web app) or **Path B** (CLI) below — or just run the **fastest
 test** above.
 
-## Path A — Web app (the master authorizes through the UI)
+## Path A — details
 
 The parent-control web app is **only the master's console** — it vaults the key and
 claims an agent's pairing in the browser. It does **not** provision the agent device:
 the agent runs in the **sandbox** and needs the compiled `agentkeys` /
 `agentkeys-daemon` / `agentkeys-mcp-server` **cross-built for the sandbox's Linux arch
-and uploaded** there (the sandbox is aarch64/x86 Linux, not your Mac), plus Hermes —
-the same agent-side machinery Path B's harness provisions (its Phase 1 does the
-`target/sandbox-linux` cross-build in an arm64 rust container → `sbx_put` to the
-sandbox's `~/.local/bin`; see **Prerequisites**).
+and uploaded** (the sandbox is aarch64 Linux, not your Mac). One standalone command does
+that — and it **only builds + pushes**, never pairs or wires:
+
+```bash
+bash harness/sandbox-build-push.sh   # cross-build (cached arm64 builder) → upload the 3 binaries to the sandbox's ~/.local/bin
+```
+
+Re-run it after any local code change so the in-sandbox agent runs your **current**
+source (a warm tree re-pushes in seconds). Install Hermes in the sandbox too if absent
+(see **Prerequisites**).
 
 **Start the master's console:**
 ```bash
@@ -100,38 +133,26 @@ starts unseeded — onboarding authorizes its cap-mint).
 **A. Vault the LLM key — fully standalone, no sandbox needed.** Go to **credentials**,
 enter `openrouter` + your key, **⊕ store** → `/v1/master/credentials/store` → cap-mint
 (cred-store) → per-actor STS → cred worker → S3 `bots/<you>/credentials/openrouter.enc`.
-The table shows `openrouter · ai-services · cred:openrouter`. This is the clean,
-self-contained web piece.
+The table shows `openrouter · ai-services · cred:openrouter`.
 
-**B. Pair + authorize an agent (#214) — needs the agent side in the sandbox.** The
-**pairing** page claims a one-time code the agent *shows*; for the agent to show one,
-its binaries must be in the sandbox and `agentkeys-daemon --request-pairing` running
-there. ⚠️ **The harness does NOT cleanly stage "binaries only":** `phase1-wire-demo.sh`'s
-Phase 1 cross-builds + uploads the binaries **and then pairs the agent via the CLI**
-(Phase P = `agentkeys agent claim`, which lives *inside* Phase 1) — so running it leaves
-the agent already CLI-paired, with nothing for the web page to claim. To drive the **web**
-claim end-to-end today you orchestrate the agent side by hand: cross-build + upload the
-binaries (Appendix B / the Phase-1 mechanism), run `agentkeys-daemon --request-pairing`
-in the sandbox to open a request, then **pairing** → paste the code → review scope
-(`cred:openrouter` + `memory:<ns>`) → **accept · Touch ID** (submits `registerAgentDevice`
-+ the grants on-chain). A one-command web-pairing flow isn't wired yet.
+**B. Pair + authorize an agent (#214).** In the sandbox, open a pairing request with the
+binary you pushed — `agentkeys-daemon --request-pairing` generates a fresh in-sandbox
+device key and shows a one-time code (the §10.2 agent side). Then in the web UI:
+**pairing** → paste the code + a label → **⊕ claim** → review the device + requested
+scope (`cred:openrouter` + `memory:<ns>`) → **accept · Touch ID**. That one approval
+submits `registerAgentDevice` + the scope grants on-chain.
 
-**C. Agent fetches + runs on the vault key.** The end-to-end (agent fetches its
-authorized key + memory, wires Hermes, runs) is proven headless by the **fastest test**
-(`cred-wire-demo.sh`); the operator-interactive agent side is **Path B**.
+**C. Agent fetches + runs on the vault key.** With the agent paired + scoped, it fetches
+its authorized key + memory and wires Hermes; verify per **Verifying it worked**, below.
 
-> **What's wired vs. pending (be honest with yourself when testing):** the web **vault**
-> (A) is real + standalone today; the web **pairing claim** (B) is the real #214
-> master-side route but needs a manually-opened agent request (the harness CLI-pairs, so
-> it doesn't drive the web claim — and the binaries must be cross-built + uploaded to the
-> sandbox first). The final hop — the agent fetching **this** vaulted key with
-> **its own** (actor = agent) identity — needs the master to provision the key into
-> the **agent's** vault prefix (`bots/<agent>/…`), which needs dual bearers
-> (operator session for the cap-mint + agent session for the STS tag). That
-> master-provisioning is **#214's authorization side and is not wired yet**. Until it
-> lands, the **master-self** fastest test (`cred-wire-demo.sh`) is the end-to-end
-> proof of fetch → wire → run, and Path B's Phase 4.0b fetches **vault-first with an
-> env fallback**. (Tracked in [#216](https://github.com/litentry/agentKeys/issues/216).)
+> **What's wired vs. pending (be honest when testing):** the web **vault** (A) and the
+> **pairing claim** (B, #214) are real + on-chain today. The final hop — the agent
+> fetching **this** vaulted key with **its own** (actor = agent) identity — needs the
+> master to provision the key into the **agent's** vault prefix (`bots/<agent>/…`), which
+> needs dual bearers (operator session for the cap-mint + agent session for the STS tag).
+> That master-provisioning is **#214's authorization side and is not wired yet**. Until it
+> lands, the **master-self** fastest test (`cred-wire-demo.sh`) is the end-to-end proof of
+> fetch → wire → run. (Tracked in [#216](https://github.com/litentry/agentKeys/issues/216).)
 
 ## Path B — CLI (the `phase1-wire-demo.sh` walkthrough)
 
@@ -507,7 +528,8 @@ echo '{"tool_name":"x"}'                  | agentkeys hook audit                
 ## Cross-references
 
 - [`harness/cred-wire-demo.sh`](../harness/cred-wire-demo.sh) — the **fastest test** (#216 full vault→fetch→wire→run e2e, headless) · [`harness/cred-fetch-demo.sh`](../harness/cred-fetch-demo.sh) — the cred store→fetch round-trip
-- [`harness/phase1-wire-demo.sh`](../harness/phase1-wire-demo.sh) — Path B (the CLI walkthrough this runbook drives) · [`dev.sh`](../dev.sh) — Path A (the web-app dev stack: daemon + MCP + UI)
+- **Path A:** [`harness/sandbox-build-push.sh`](../harness/sandbox-build-push.sh) — cross-build your current agentkeys → upload to the sandbox · [`dev.sh`](../dev.sh) — the master web console (daemon + MCP + UI)
+- **Path B:** [`harness/phase1-wire-demo.sh`](../harness/phase1-wire-demo.sh) — the one-command CLI walkthrough (this runbook's Path B detail)
 - `agentkeys cred store <service> --secret-env NAME` / `agentkeys cred fetch <service>` — the master-self vault + agent-fetch CLI primitives (#216)
 - [`docs/plan/phase1-wire-harness-test-plan.md`](plan/phase1-wire-harness-test-plan.md) — the action table + automation decisions
 - [Issue #216](https://github.com/litentry/agentKeys/issues/216) — agent-side vaulted-key wire · [Issue #214](https://github.com/litentry/agentKeys/issues/214) — master-side web pairing
