@@ -45,9 +45,9 @@ bash dev.sh                          # master web console:  UI :3113 · daemon :
 ```
 
 Then in <http://localhost:3113>: **onboard** → **credentials** ⊕ store your LLM key →
-**pairing** ⊕ claim the agent's code (Touch ID). To produce a code, run
-`agentkeys-daemon --request-pairing` in the sandbox. Detail + caveats: **Path A —
-details**, below.
+**pairing** ⊕ claim the agent's code (Touch ID). To produce a code, in the sandbox run
+`agentkeys-daemon --request-pairing --broker-url https://broker.litentry.org`. Full flow
+(incl. the post-claim `--retrieve-pairing`): **Path A — details**, below.
 
 ### Path B — CLI · quick start
 
@@ -135,12 +135,27 @@ enter `openrouter` + your key, **⊕ store** → `/v1/master/credentials/store` 
 (cred-store) → per-actor STS → cred worker → S3 `bots/<you>/credentials/openrouter.enc`.
 The table shows `openrouter · ai-services · cred:openrouter`.
 
-**B. Pair + authorize an agent (#214).** In the sandbox, open a pairing request with the
-binary you pushed — `agentkeys-daemon --request-pairing` generates a fresh in-sandbox
-device key and shows a one-time code (the §10.2 agent side). Then in the web UI:
-**pairing** → paste the code + a label → **⊕ claim** → review the device + requested
-scope (`cred:openrouter` + `memory:<ns>`) → **accept · Touch ID**. That one approval
-submits `registerAgentDevice` + the scope grants on-chain.
+**B. Pair + authorize an agent (#214)** — the agent shows a code, you claim it in the
+UI, the agent retrieves its session:
+
+1. **Sandbox** — open the request (a fresh in-sandbox device key; needs `--broker-url`;
+   prints a `pairing_code` + a state file holding the `request_id`):
+   ```bash
+   agentkeys-daemon --request-pairing --broker-url https://broker.litentry.org
+   #  → {"pairing_code":"yXIN…","agent_address":"0x…","state_file":"~/.agentkeys/pairing-request-0x….json", …}
+   ```
+2. **Web UI** → **pairing** → paste the `pairing_code` + a label → **⊕ claim** → review
+   the device + requested scope (`cred:openrouter` + `memory:<ns>`) → **accept · Touch
+   ID** (submits `registerAgentDevice` + the scope grants on-chain).
+3. **Sandbox** — after the master claims, the agent retrieves its session (`request_id`
+   is read from the state file the request wrote):
+   ```bash
+   # request_id from the newest pairing-request state file (use step 1's exact
+   # state_file path if you have several):
+   agentkeys-daemon --retrieve-pairing \
+     --request-id "$(jq -r .request_id "$(ls -t ~/.agentkeys/pairing-request-*.json | head -1)")" \
+     --broker-url https://broker.litentry.org
+   ```
 
 **C. Agent fetches + runs on the vault key.** With the agent paired + scoped, it fetches
 its authorized key + memory and wires Hermes; verify per **Verifying it worked**, below.
