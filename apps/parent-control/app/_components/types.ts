@@ -91,6 +91,10 @@ export interface PairingRequest {
   runtime: string;
   dpub: string;
   dpubFull: string;
+  // #224 — the cross-verifiable device identity: the agent's `--request-pairing`
+  // prints `device_key_hash`, so the operator confirms it matches before approving.
+  deviceKeyHash: string;
+  deviceKeyHashShort: string;
   pairCode: string;
   derivation: string;
   requested: RequestedPerm[];

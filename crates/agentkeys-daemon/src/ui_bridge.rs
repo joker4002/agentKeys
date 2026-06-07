@@ -1975,6 +1975,7 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
     let request_id = field("request_id");
     let label = field("label");
     let device_pubkey = field("device_pubkey");
+    let device_key_hash = field("device_key_hash");
     let pop_sig = field("pop_sig");
     let requested_scope = field("requested_scope");
     // char-safe head…tail elision for long hex handles.
@@ -2013,6 +2014,14 @@ fn pending_binding_to_request(b: &serde_json::Value) -> serde_json::Value {
         "runtime": "hermes",
         "dpub": short(&device_pubkey),
         "dpubFull": device_pubkey,
+        // #224: the agent's one-time pairing code is consumed at claim, so the
+        // master verifies the request against the DEVICE instead — `deviceKeyHash`
+        // (+ `dpubFull`) are both printed by the agent's `--request-pairing`, so the
+        // operator cross-checks them before `accept · Touch ID`. `id` (above) is the
+        // full request_id (the master-side handle). `pairCode` is kept only for
+        // back-compat (it was the truncated request_id, never the agent's code).
+        "deviceKeyHash": device_key_hash.clone(),
+        "deviceKeyHashShort": short(&device_key_hash),
         "pairCode": short(&request_id),
         "derivation": format!("//{label}"),
         "requested": requested,
@@ -3854,6 +3863,7 @@ mod tests {
             "label": "demo-agent",
             "requested_scope": "memory:travel,memory:family",
             "device_pubkey": "0x04aabbccddeeff00112233445566778899aabbcc",
+            "device_key_hash": "0x6d02e352b9bd71d3aa35677c35492bfdc39bacda89cc7d0506d31e2754abf2a5",
             "pop_sig": "0xsignaturedeadbeef0011223344556677",
         });
         let pr = pending_binding_to_request(&row);
@@ -3861,6 +3871,11 @@ mod tests {
         assert_eq!(pr["agent"], "demo-agent");
         assert_eq!(pr["derivation"], "//demo-agent");
         assert_eq!(pr["dpubFull"], "0x04aabbccddeeff00112233445566778899aabbcc");
+        // #224 — the cross-verifiable device identity must be surfaced full.
+        assert_eq!(
+            pr["deviceKeyHash"],
+            "0x6d02e352b9bd71d3aa35677c35492bfdc39bacda89cc7d0506d31e2754abf2a5"
+        );
         let requested = pr["requested"].as_array().expect("requested is an array");
         assert_eq!(requested.len(), 2, "two scope tokens");
         assert_eq!(requested[0]["cap"], "memory");

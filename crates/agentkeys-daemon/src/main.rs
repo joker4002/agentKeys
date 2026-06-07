@@ -783,7 +783,8 @@ async fn run_request_pairing(args: Args) -> anyhow::Result<()> {
     info!(
         target: "agentkeys.daemon.init",
         device = %device_pubkey,
-        "agentkeys-daemon opened §10.2 pairing request — show this code to your owner to claim: {pairing_code}"
+        device_key_hash = %device_key_hash,
+        "agentkeys-daemon opened §10.2 pairing request — show your owner the code to claim: {pairing_code}; they cross-check device_key_hash={device_key_hash} on the master before approving (#224)"
     );
 
     // Machine artifact on STDOUT (logs are on stderr). The owner reads

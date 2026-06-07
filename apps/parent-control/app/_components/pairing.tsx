@@ -98,12 +98,18 @@ export function PairingPage({
                 <div className="pair-v">{req.runtime}</div>
               </div>
               <div>
-                <div className="pair-k">pair-code</div>
-                <div className="pair-v mono" style={{ fontSize: 16, letterSpacing: '0.1em' }}>{req.pairCode}</div>
+                {/* #224 — verify-on-agent: the one-time pairing code is consumed at
+                    claim, so the operator confirms the DEVICE instead. device_key_hash
+                    + D_pub are both printed by the agent's `--request-pairing`; they
+                    must match here before approving. request id is the master handle. */}
+                <div className="pair-k">device key hash · verify on agent</div>
+                <div className="pair-v mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>{req.deviceKeyHash || req.deviceKeyHashShort}</div>
+                <div className="pair-k">D_pub · verify on agent</div>
+                <div className="pair-v mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{req.dpubFull || req.dpub}</div>
+                <div className="pair-k">request id</div>
+                <div className="pair-v mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{req.id}</div>
                 <div className="pair-k">derivation</div>
                 <div className="pair-v mono">O_master{req.derivation}</div>
-                <div className="pair-k">D_pub</div>
-                <div className="pair-v mono" style={{ fontSize: 11 }}>{req.dpub}</div>
               </div>
             </div>
 
