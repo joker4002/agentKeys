@@ -1964,14 +1964,30 @@ async fn register_pairing(
             "on-chain register not configured (--register-master-script) — cannot register the agent device",
         );
     };
-    let agent_script = match std::path::Path::new(&master_script).parent() {
-        Some(dir) => dir.join("heima-agent-create.sh"),
-        None => {
-            return pairing_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot derive heima-agent-create.sh path",
-            )
-        }
+    // `heima-agent-create.sh` canonically lives in `<repo>/scripts/`, while the
+    // master register script (`--register-master-script`) may be in
+    // `<repo>/harness/scripts/` (dev.sh) — so it is NOT always a sibling. Try the
+    // sibling first (co-located case), then `<repo>/scripts/` derived from the
+    // master script path. (#214 register-pairing path-mismatch fix — a missing
+    // script otherwise surfaced as a confusing 502 on `accept pairing`.)
+    let master_path = std::path::Path::new(&master_script);
+    let agent_script_candidates = [
+        master_path.parent().map(|d| d.join("heima-agent-create.sh")),
+        master_path
+            .parent()
+            .and_then(|d| d.parent())
+            .and_then(|d| d.parent())
+            .map(|repo| repo.join("scripts").join("heima-agent-create.sh")),
+    ];
+    let Some(agent_script) = agent_script_candidates
+        .into_iter()
+        .flatten()
+        .find(|p| p.exists())
+    else {
+        return pairing_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "heima-agent-create.sh not found (looked next to --register-master-script and in <repo>/scripts/)",
+        );
     };
     // Pull the authoritative binding from the broker (device fields, never the UI).
     let bindings = match agentkeys_cli::agent_admin::agent_pending_value(broker, &j1).await {
