@@ -1,32 +1,140 @@
-# Operator runbook — run the `agentkeys wire` demo
+# Test the agent wire — web app + CLI, from fresh
 
-**This is the single doc to follow to run the demo.** It drives the harness
-`harness/phase1-wire-demo.sh`, which automates the whole flow and stops only at
-the essential manual gates. Goal: see the Agent IAM "surprise" — a device that
-reads only its permitted memory, is deterministically denied an over-cap action
-(no LLM in the decision), and complies on revocation.
+**This is the single source of truth for testing the AgentKeys "wire".** The wire
+is what makes an agent run on **exactly what its master authorized** — its **LLM
+key fetched from the master's vault** (never an ambient env var, #216) and the
+**memory namespaces it was granted** — behind IAM-guarantee hooks the LLM cannot
+bypass. This doc takes you from a **fresh machine** to a green end-to-end test
+**two ways**: the **web app** (the master authorizes through the parent-control UI)
+and the **CLI** (the master authorizes from the shell). The **agent side is
+identical** either way; the paths differ only in how the master authorizes.
 
 > **Architecture (1 paragraph)**: AgentKeys is the **Authority Host**; the Task
-> Host (Hermes) does the work. `agentkeys wire hermes` writes IAM-guarantee
-> **hooks** into Hermes's config so the LLM cannot bypass `permission.check` /
-> `audit.append` / memory injection. Background: [`docs/agent-iam-strategy.md`](agent-iam-strategy.md)
-> §3.6–3.7, [`docs/arch.md`](arch.md) §22d, [`docs/wiki/agent-iam-guarantee-glossary.md`](wiki/agent-iam-guarantee-glossary.md).
+> Host (Hermes) does the work. `agentkeys wire hermes` plants the **vault-fetched
+> LLM key** into Hermes' model config (#216) AND writes IAM-guarantee **hooks** so
+> the LLM cannot bypass `permission.check` / `audit.append` / memory injection.
+> Background: [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.6–3.7,
+> [`docs/arch.md`](arch.md) §22d / §10.2 (agent pairing),
+> [`docs/wiki/agent-iam-guarantee-glossary.md`](wiki/agent-iam-guarantee-glossary.md).
 > Full action table + automation decisions: [`docs/plan/phase1-wire-harness-test-plan.md`](plan/phase1-wire-harness-test-plan.md).
 
-## TL;DR — one command
+## What the wire proves (two guarantees)
 
-> **Real memory only (#207):** the in-memory `--light` mode was **removed** —
-> there is no fake/self-contained path anymore. The sandbox MCP always runs
-> `--backend http` against the real broker + workers + Heima mainnet. `--real`
-> is the only mode (and the default).
+1. **Authorized LLM key (#216)** — the agent's Hermes runs on the **key the master
+   vaulted + authorized**, fetched via the agent's `cred:<service>` scope (cap-mint
+   → per-actor STS → cred worker → decrypt). **No `OPENROUTER_API_KEY` in the agent's
+   env.**
+2. **Permissioned memory** — the agent reads **only** the granted namespaces; an
+   over-cap action is **deterministically denied** (no LLM in the decision) and
+   complies on revocation.
+
+## The two paths (same agent side, different master side)
+
+The master authorizes the agent two ways; the agent side (fetch → wire → run, in the
+sandbox) is identical:
+
+| | **Path A — Web app** | **Path B — CLI** |
+|---|---|---|
+| Vault the LLM key | parent-control UI → *credentials* | `agentkeys cred store` (or the daemon) |
+| Pair + authorize the agent | parent-control UI → *pairing* (claim code → Touch ID) | `agentkeys agent claim` (phase1-wire Phase P) |
+| Drives the agent side | the sandbox (harness) | the sandbox (harness) |
+
+## Fastest test — one headless command (no UI, no Touch ID)
+
+To confirm the #216 wire works end-to-end against the live stack, run the headless
+full e2e. It vaults a key, fetches it back **as the agent**, plants it into the
+sandbox Hermes, and asserts Hermes answers on the **vault** key (a real LLM call):
+
+```bash
+bash harness/cred-wire-demo.sh
+#   step 4  ok agent fetched the vaulted key from the vault — no env read
+#   step 6  ok 6.1 vault-sourced — the key Hermes uses == the master-vaulted key, NOT an env var
+#   step 6  ok 6.2 llm smoke — Hermes answered using the VAULT-FETCHED key: "OK"
+```
+
+It is **master-self** (operator == actor), so it needs no Touch ID and proves the
+vault → fetch → plant → run mechanism. (Its store→fetch primitive alone:
+`bash harness/cred-fetch-demo.sh`.) Paths A and B add the real
+master-authorizes-a-distinct-agent UX on top.
+
+> **Real data only (#207):** the in-memory `--light` mode was **removed** — there is
+> no fake/self-contained path. The sandbox MCP always runs `--backend http` against
+> the real broker + workers + Heima mainnet. `--real` is the only mode (and default).
+
+## Fresh start — do this first (both paths)
+
+1. **Bring up the live infra** — the three idempotent setup scripts (detailed under
+   **Setup entry points**, below): `setup-cloud.sh` (laptop) → `setup-broker-host.sh`
+   (broker host) → `setup-heima.sh` (laptop). These give you the broker, the **cred
+   worker**, the other workers, and the chain contracts + your registered master.
+2. **The agent host** — Docker + the aiosandbox running (the agent + Hermes live
+   here). See **Prerequisites**, below.
+3. **The LLM key to vault** — `export OPENROUTER_API_KEY=…` (the master's key; the
+   point is the agent reads it back from the **vault**, not the env).
+4. **Your master identity** — `setup-heima.sh` registered it; `OPERATOR_KEY_FILE`
+   (default `~/.agentkeys/heima-deployer.key`) is the master key the daemon/CLI sign
+   sessions with.
+
+Then pick **Path A** (web app) or **Path B** (CLI) below — or just run the **fastest
+test** above.
+
+## Path A — Web app (the master authorizes through the UI)
+
+The parent-control web app is the master's console: it **vaults the key** and **pairs
++ authorizes the agent** through the real daemon → broker/worker chain (no mock data).
+
+1. **Start the stack** (builds the daemon + MCP if needed; sources
+   `scripts/operator-workstation.env` so the daemon inherits the cred/vault/memory
+   env — `VAULT_ROLE_ARN`, `AGENTKEYS_WORKER_CRED_URL`, …):
+   ```bash
+   bash dev.sh
+   #   [daemon] http://localhost:3114   [mcp] http://localhost:18088   [ui] http://localhost:3113
+   ```
+2. **Onboard the master** — open <http://localhost:3113> and complete onboarding
+   (email magic-link verify → on-chain master register). You land on the dashboard
+   with a live master session (the daemon starts **unseeded** — onboarding is what
+   authorizes its cap-mint).
+3. **Vault the LLM key** — go to **credentials**, enter `openrouter` + your OpenRouter
+   API key, **⊕ store**. This POSTs `/v1/master/credentials/store` → cap-mint
+   (cred-store) → per-actor STS → cred worker → encrypt + S3
+   `bots/<you>/credentials/openrouter.enc`. The table shows
+   `openrouter · ai-services · cred:openrouter`.
+4. **Pair + authorize the agent** — the agent (in the sandbox) shows a one-time
+   pairing code (`agentkeys-daemon --request-pairing`; this is the §10.2 **agent
+   side**). Go to **pairing** → paste the code + a label → **⊕ claim** → review the
+   device + requested scope (incl. `cred:openrouter` + `memory:<ns>`) → **accept
+   pairing · Touch ID**. That one approval submits `registerAgentDevice` + the scope
+   grants on-chain (#214 / arch §10.2).
+5. **Run the agent side** — the sandbox agent fetches its authorized key + memory and
+   wires Hermes; verify per **Verifying it worked**, below. (The fully-automated
+   agent side is the harness — Path B / the fastest test.)
+
+> **What's wired vs. pending (be honest with yourself when testing):** the web
+> *credentials* vault (step 3) and the *pairing* authorize (step 4) are **real +
+> on-chain today**. The final hop — the agent fetching **this** vaulted key with
+> **its own** (actor = agent) identity — needs the master to provision the key into
+> the **agent's** vault prefix (`bots/<agent>/…`), which needs dual bearers
+> (operator session for the cap-mint + agent session for the STS tag). That
+> master-provisioning is **#214's authorization side and is not wired yet**. Until it
+> lands, the **master-self** fastest test (`cred-wire-demo.sh`) is the end-to-end
+> proof of fetch → wire → run, and Path B's Phase 4.0b fetches **vault-first with an
+> env fallback**. (Tracked in [#216](https://github.com/litentry/agentKeys/issues/216).)
+
+## Path B — CLI (the `phase1-wire-demo.sh` walkthrough)
+
+The CLI path automates the whole master + agent flow in one harness — the master side
+is the shell (`agentkeys cred store` for the key, `agentkeys agent claim` for the
+pairing), the agent side is the sandbox, and it stops only at the essential manual
+gates. It prints a loud `MODE:` banner, then `ok proceeding` / `skip <reason>` /
+`fail <reason>` per step; it is idempotent — re-running is safe. (Passing the old
+`--light` flag now errors with a pointer to `--real`.)
 
 ```bash
 # The live product on your heima account + real broker/workers + Heima mainnet.
 # Runs a FRESH §10.2 pairing EACH run: the agent generates its own key IN THE
 # SANDBOX (never on the master), the master binds it on-chain, and --webauthn
-# "approves" the memory scope via Touch ID. Then it seeds + recalls the Chengdu
-# memory. Each run DEPAIRS the prior device (revoke) + re-pairs a fresh K10
-# (register), so expect ONE Touch ID + ~2 on-chain txs per run.
+# "approves" the memory scope via Touch ID. Each run DEPAIRS the prior device
+# (revoke) + re-pairs a fresh K10 (register) — ONE Touch ID + ~2 on-chain txs/run.
 bash harness/phase1-wire-demo.sh --real --webauthn
 
 # VERIFY — deterministic, no LLM. Run IN THE SANDBOX after setup (the harness
@@ -37,11 +145,7 @@ docker exec -it <sandbox-container> bash -lc "hermes hooks test pre_llm_call"
 #   → stdout: {}   ❌  (MCP down / scope not granted / session bad)
 ```
 
-The harness prints a loud `MODE:` banner, then `ok proceeding` / `skip <reason>` /
-`fail <reason>` per step; it is idempotent — re-running is safe. (Passing the old
-`--light` flag now errors with a pointer to `--real`.)
-
-## How to run — the `--real --webauthn` walkthrough
+### Path B walkthrough — what happens, step by step
 
 One command runs the whole "install an app → approve its permissions → use it"
 story. Each run does a **genuine fresh pairing** — it **depairs** the prior device
@@ -154,7 +258,7 @@ All three are **idempotent + unattended by default** — re-running converges an
 
 ## The manual gates (the "test through" essence)
 
-- **LLM key** — auto from `OPENROUTER_API_KEY` (or `LLM_API_KEY`); only prompts if absent. Phase 4.0 writes it to the sandbox `~/.hermes/.env` and sets `provider: openrouter` + `model.default` (default `deepseek/deepseek-v4-flash`; override `LLM_MODEL`). A non-fatal `4.1 model smoke` confirms the model is live before the surprise.
+- **LLM key** — **#216: Phase 4.0b fetches the agent's key from the master's VAULT first** (`agentkeys cred fetch` over the agent's `cred:<service>` scope); `OPENROUTER_API_KEY`/`LLM_API_KEY` is a **dev-only fallback**, used only when the vault fetch is unavailable. Whichever source wins, Phase 4.0 writes it to the sandbox `~/.hermes/.env` and sets `provider: openrouter` + `model.default` (default `deepseek/deepseek-v4-flash`; override `LLM_MODEL`) — the `4.0 ok` line prints **which source** was used. A non-fatal `4.1 model smoke` confirms the model is live before the surprise.
 - **Install (pair)** — `--real` only: **Phase P** — `P.depair` revokes any prior device + wipes the sandbox K10 so the re-pair is genuine, the agent daemon (`agentkeys-daemon --request-pairing`) generates a **fresh** device key **in the sandbox** + shows a pairing code (`P.0`), the master **claims** it (`P.1`), the agent daemon (`agentkeys-daemon --retrieve-pairing`) retrieves `J1_agent` (`P.1b`), the master does a real `registerAgentDevice` (`P.2`), and — with `--webauthn` — the master **approves** the agent's memory scope via Touch ID (`P.3`). Every run depairs + re-pairs the same agent with a fresh device key (~2 on-chain txs). `--reuse-agent` skips all of Phase P.
 - **Real Touch ID** — in real mode with `--webauthn`: **Phase P (P.3)** grants the freshly-paired agent's memory scope via `heima-scope-set.sh --webauthn`. The banner prints `webauthn=<flag>` so you know upfront whether a Touch ID ceremony will run. It's a hardware prompt — `--yes` does NOT bypass it (it only auto-confirms the software "proceed?" gates). Without `--webauthn`, `P.3` is skipped (the agent won't be able to read memory) — re-run with `--real --webauthn`.
 - **Seed the real memory worker** (`--real` only) — after pairing, step **1.5** (re)writes the Chengdu fixture into the agent's memory namespace (keyed by the **stable** omni; 1.5 overwrites each run). Override `SEED_MEMORY_CONTENT` / `SEED_SCOPE_SERVICES` (the latter is the service set Phase P grants — it **sets** the full list).
@@ -214,6 +318,16 @@ calls `EntryPoint.handleOps` directly. Full design + cutover status:
 > yet `recover()`; the E3/E5-complete account ships at the coordinated cutover redeploy.
 
 ## Verifying it worked — deterministically (no LLM inference)
+
+There are **two** deterministic checks, one per guarantee:
+
+- **Authorized key (#216)** — `harness/cred-wire-demo.sh` **step 6** asserts the key
+  in the sandbox `~/.hermes/.env` is **byte-identical (sha) to the master-vaulted
+  key** and arrived via the vault fetch, not an ambient env var. (Path B's `4.0 ok`
+  line also prints the key source — `the master's VAULT …` vs `operator env … (DEV
+  fallback)`.)
+- **Permissioned memory** — `hermes hooks test pre_llm_call` (below) asserts the
+  granted memory reached the LLM request.
 
 **Do NOT judge success by the chat reply.** An LLM may phrase a memory-aware
 answer many ways, treat a past-dated memory as "not this weekend", or even
@@ -286,6 +400,9 @@ Re-running `agentkeys wire hermes` is always safe — unchanged scripts/config s
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| **Path A** UI shows "disconnected" / empty states | the web app can't reach the daemon | confirm `bash dev.sh` is up (daemon on `:3114`); the UI needs `NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon` + `NEXT_PUBLIC_AGENTKEYS_DAEMON_URL=http://localhost:3114` (dev.sh sets both). Check the daemon `/healthz`. |
+| **Path A** vault store → error / `no cred worker configured` | the daemon didn't inherit the cred env | the daemon reads `AGENTKEYS_WORKER_CRED_URL` + `VAULT_ROLE_ARN` from its env; `dev.sh` sources `scripts/operator-workstation.env`, so set them there + restart `dev.sh`. |
+| `agentkeys cred fetch` → `ServiceNotInScope` / empty | the actor isn't scoped for `cred:<service>`, or nothing's vaulted under that actor's prefix | **master-self** (operator == actor) skips the scope check — use it for the fastest test. For a distinct agent the cred scope must be granted (pairing P.3) AND the key vaulted at `bots/<agent>/credentials/<service>.enc` (the #214 master-provisioning — see Path A's "wired vs pending" note). |
 | cap-mint → 401 `ExpiredSignature` | the operator session JWT expired | the harness now auto-mints a fresh one at `0.7` via `wallet_sig` (`OPERATOR_KEY_FILE`). If it didn't: ensure `cast` is on PATH and `OPERATOR_KEY_FILE` exists |
 | cap-mint → 401/`OperatorMismatch` (`session_omni != operator_omni`) | the session is for a *different* operator (e.g. the legacy `alice` email session, omni `4231cd8f…` ≠ agent operator `941cb1c3…`) | `0.7` now detects the omni mismatch and re-mints from `OPERATOR_KEY_FILE`. If `0.7` fails with "wrong operator", point `OPERATOR_KEY_FILE` at the master key whose broker omni == `operator_omni` |
 | memory put/get → HTTP **502** `{"reason":"s3_put"}` / `{"reason":"s3_get"}` | the MCP `http` backend didn't forward per-actor STS creds, so the worker fell back to its EC2 instance profile (SES-only, **no S3**) → AccessDenied on every op. cap-mint + chain-verify themselves SUCCEED (the agent IS authorized); the gap was the credential **relay**. | **Fixed (issue #90):** the backend now mints agent-tagged STS creds (`0.8` agent session → broker `/v1/mint-oidc-jwt` → `AssumeRoleWithWebIdentity(memory-role)`, tagged `agentkeys_actor_omni`) and forwards them as `X-Aws-*` headers, so AWS scopes S3 to `bots/<actor>/memory/`. If it still 502s: confirm `P.1b retrieve` shows "agent retrieved J1_agent in-sandbox" (or `0.8 agent session` under `--reuse-agent`) and `P.3 grant` granted the scope; the relay needs the in-sandbox agent session + `MEMORY_ROLE_ARN`/`VAULT_ROLE_ARN`/`REGION` from `operator-workstation.env`. Optional strict enforcement: set `AGENTKEYS_WORKER_REQUIRE_STS=1` in the worker env (rejects credless requests with 401 instead of falling back). |
@@ -340,6 +457,16 @@ Each `~/.hermes/agent-hooks/*.sh` bakes the identity env (actor, operator, MCP U
 The harness does these for you; run them manually only to understand the flow.
 
 ```bash
+# 0. #216 — vault the LLM key (master-self), then fetch it back as the agent.
+#    (master-self: operator == actor; for a distinct agent set --actor-omni to the agent.)
+agentkeys cred store openrouter --secret-env OPENROUTER_API_KEY \
+  --operator-omni 0x<master> --actor-omni 0x<master> --device-key-hash 0x<dkh> \
+  --session-bearer "$J1" --broker-url … --cred-url … --vault-role-arn "$VAULT_ROLE_ARN" --region us-east-1
+agentkeys cred fetch openrouter \
+  --operator-omni 0x<master> --actor-omni 0x<master> --device-key-hash 0x<dkh> \
+  --session-bearer "$J1" --broker-url … --cred-url … --vault-role-arn "$VAULT_ROLE_ARN" --region us-east-1
+#   → prints the exact secret (decrypt-on-read) — this is what Phase 4.0b plants into ~/.hermes/.env.
+
 # 1. Sandbox (see Prerequisites).
 # 2. MCP server (real http backend — the only backend; in-memory was removed #207):
 ./target/release/agentkeys-mcp-server --backend http --transport http --listen 127.0.0.1:18088 \
@@ -366,8 +493,11 @@ echo '{"tool_name":"x"}'                  | agentkeys hook audit                
 
 ## Cross-references
 
-- [`harness/phase1-wire-demo.sh`](../harness/phase1-wire-demo.sh) — the harness this runbook drives
+- [`harness/cred-wire-demo.sh`](../harness/cred-wire-demo.sh) — the **fastest test** (#216 full vault→fetch→wire→run e2e, headless) · [`harness/cred-fetch-demo.sh`](../harness/cred-fetch-demo.sh) — the cred store→fetch round-trip
+- [`harness/phase1-wire-demo.sh`](../harness/phase1-wire-demo.sh) — Path B (the CLI walkthrough this runbook drives) · [`dev.sh`](../dev.sh) — Path A (the web-app dev stack: daemon + MCP + UI)
+- `agentkeys cred store <service> --secret-env NAME` / `agentkeys cred fetch <service>` — the master-self vault + agent-fetch CLI primitives (#216)
 - [`docs/plan/phase1-wire-harness-test-plan.md`](plan/phase1-wire-harness-test-plan.md) — the action table + automation decisions
+- [Issue #216](https://github.com/litentry/agentKeys/issues/216) — agent-side vaulted-key wire · [Issue #214](https://github.com/litentry/agentKeys/issues/214) — master-side web pairing
 - [`docs/agent-iam-strategy.md`](agent-iam-strategy.md) §3.6/§3.7/§4.3 · [`docs/arch.md`](arch.md) §22d · [`docs/wiki/agent-iam-guarantee-glossary.md`](wiki/agent-iam-guarantee-glossary.md)
 - [Issue #133](https://github.com/litentry/agentKeys/issues/133) — multi-runtime hook reference configs (Phase 1.b)
 - [Issue #152](https://github.com/litentry/agentKeys/issues/152) — **scope:** this runbook covers the **Local-LLM / Task-agent** path only (stdio MCP server built + run *in the sandbox*). The **Hosted-LLM** path (xiaozhi / vendor-cloud — a broker-hosted `mcp-endpoint` the remote LLM connects *into*, per arch.md §22c.2 / §22d.3) is deferred to #152.
