@@ -21,6 +21,11 @@ use crate::sponsor::{assemble_paymaster_and_data, broker_cosign, pack_u128_pair,
 use agentkeys_core::erc4337::{accept_batch_calldata, AgentRegister, ScopeGrant};
 use anyhow::Result;
 use k256::ecdsa::SigningKey;
+use serde::{Deserialize, Serialize};
+
+fn hex0x(b: &[u8]) -> String {
+    format!("0x{}", hex::encode(b))
+}
 
 /// Everything the composer needs that isn't the broker key. Chain-derived values
 /// (nonce, gas, fees, validity window, addresses) are inputs — nothing hardcoded;
@@ -128,6 +133,66 @@ pub fn assemble_accept_userop(
         user_op_hash,
         paymaster_get_hash,
     })
+}
+
+/// Broker-side mirror of `agentkeys_backend_client::protocol::WireUserOp` — the
+/// hex-encoded ERC-4337 `PackedUserOperation` on the `/v1/accept/*` wire. The
+/// broker doesn't depend on `backend-client`; the frozen key-set test there + the
+/// one below pin the two shapes together (same discipline as `BrokerCapRequest`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireUserOp {
+    pub sender: String,
+    pub nonce: String,
+    pub init_code: String,
+    pub call_data: String,
+    pub account_gas_limits: String,
+    pub pre_verification_gas: String,
+    pub gas_fees: String,
+    pub paymaster_and_data: String,
+    pub signature: String,
+}
+
+impl WireUserOp {
+    pub fn from_packed(op: &PackedUserOp) -> Self {
+        Self {
+            sender: hex0x(&op.sender),
+            nonce: hex0x(&op.nonce),
+            init_code: hex0x(&op.init_code),
+            call_data: hex0x(&op.call_data),
+            account_gas_limits: hex0x(&op.account_gas_limits),
+            pre_verification_gas: hex0x(&op.pre_verification_gas),
+            gas_fees: hex0x(&op.gas_fees),
+            paymaster_and_data: hex0x(&op.paymaster_and_data),
+            signature: hex0x(&op.signature),
+        }
+    }
+}
+
+/// Broker-side mirror of `BuildAcceptUserOpResponse` — the `/v1/accept/build` body
+/// the daemon receives, then K11-signs `user_op_hash` and returns the filled
+/// `user_op` to `/v1/accept/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildAcceptResponse {
+    pub user_op: WireUserOp,
+    pub user_op_hash: String,
+    pub entry_point: String,
+    pub chain_id: u64,
+}
+
+impl AssembledAcceptUserOp {
+    /// Shape the assembled op into the `/v1/accept/build` response body.
+    pub fn into_build_response(
+        &self,
+        entry_point: &[u8; 20],
+        chain_id: u64,
+    ) -> BuildAcceptResponse {
+        BuildAcceptResponse {
+            user_op: WireUserOp::from_packed(&self.user_op),
+            user_op_hash: hex0x(&self.user_op_hash),
+            entry_point: hex0x(entry_point),
+            chain_id,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -277,5 +342,76 @@ mod tests {
             .unwrap()
             .user_op_hash;
         assert_ne!(h_a, h_b);
+    }
+
+    fn assembled() -> (AssembledAcceptUserOp, [u8; 20], u64, Vec<u8>) {
+        let sk = SigningKey::random(&mut rand_core::OsRng);
+        let broker_addr = evm_address(&VerifyingKey::from(&sk));
+        let broker_bytes: [u8; 20] = hex::decode(broker_addr.trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let reg = sample_register();
+        let grant = sample_grant();
+        let p = params(&reg, &grant, broker_bytes);
+        let expected_calldata = accept_batch_calldata(&p.registry, &p.scope, &reg, &grant);
+        let out = assemble_accept_userop(&p, &sk).unwrap();
+        (out, p.entry_point, p.chain_id, expected_calldata)
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        hex::decode(s.trim_start_matches("0x")).unwrap()
+    }
+
+    #[test]
+    fn wire_user_op_round_trips_every_field() {
+        let (out, _, _, _) = assembled();
+        let w = WireUserOp::from_packed(&out.user_op);
+        assert_eq!(unhex(&w.sender), out.user_op.sender);
+        assert_eq!(unhex(&w.nonce), out.user_op.nonce);
+        assert_eq!(unhex(&w.init_code), out.user_op.init_code);
+        assert_eq!(unhex(&w.call_data), out.user_op.call_data);
+        assert_eq!(unhex(&w.account_gas_limits), out.user_op.account_gas_limits);
+        assert_eq!(
+            unhex(&w.pre_verification_gas),
+            out.user_op.pre_verification_gas
+        );
+        assert_eq!(unhex(&w.gas_fees), out.user_op.gas_fees);
+        assert_eq!(unhex(&w.paymaster_and_data), out.user_op.paymaster_and_data);
+        assert_eq!(unhex(&w.signature), out.user_op.signature);
+    }
+
+    #[test]
+    fn build_response_carries_the_batch_calldata_and_hash() {
+        let (out, entry_point, chain_id, expected_calldata) = assembled();
+        let resp = out.into_build_response(&entry_point, chain_id);
+        assert_eq!(unhex(&resp.user_op.call_data), expected_calldata);
+        assert_eq!(unhex(&resp.user_op_hash), out.user_op_hash);
+        assert_eq!(unhex(&resp.entry_point), entry_point);
+        assert_eq!(resp.chain_id, chain_id);
+    }
+
+    #[test]
+    fn wire_user_op_keys_match_backend_client_shape() {
+        // Server-side half of the #204 pin: a broker-side rename trips here, the
+        // backend-client `wire_user_op_keys_frozen` test catches the client side.
+        let (out, _, _, _) = assembled();
+        let v = serde_json::to_value(WireUserOp::from_packed(&out.user_op)).unwrap();
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "account_gas_limits",
+                "call_data",
+                "gas_fees",
+                "init_code",
+                "nonce",
+                "paymaster_and_data",
+                "pre_verification_gas",
+                "sender",
+                "signature",
+            ]
+        );
     }
 }
