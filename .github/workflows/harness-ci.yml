@@ -307,35 +307,57 @@ jobs:
           role-session-name: gh-deploy-${{ github.run_id }}
 
       - name: Sanity-check the test broker EC2 is SSM-managed
-        # Fail fast with a clear remediation path. Three failure modes are
-        # distinguished:
-        #   - AccessDenied → deploy role lacks ssm:DescribeInstanceInformation.
-        #     Operator re-runs provision-ci-deploy-role.sh on their laptop;
-        #     the inline policy is idempotently refreshed to include it.
-        #   - Empty/None  → instance genuinely not registered (no agent, no
-        #     profile, wrong region). Operator SSH-debugs or re-runs
-        #     setup-broker-host.sh which auto-installs amazon-ssm-agent.
-        #   - Other state → unexpected; fail loud with the value for triage.
+        # Retry-tolerant SSM reachability check. A transient throttle/timeout/
+        # network blip on describe-instance-information must NOT read as an
+        # unregistered broker — PR #219 CI false-failed exactly this way (the
+        # call errored, the old `|| echo ""` swallowed it to empty → "None" →
+        # exit 1) while the agent was Online the whole time. Per attempt:
+        #   - call fails with AccessDenied → terminal: deploy role lacks
+        #     ssm:DescribeInstanceInformation; re-run provision-ci-deploy-role.sh.
+        #   - call fails otherwise → transient: warn + retry (up to 5×, ~10s).
+        #   - call succeeds → Online passes; None/empty retries a few times
+        #     (agent may be mid-registration) then judges on the final value.
+        # Only a SUCCESSFUL call returning None across all retries concludes
+        # "not SSM-managed"; a persistently failing call fails as "API unreachable".
         env:
           REGION: ${{ secrets.TEST_AWS_REGION || 'us-east-1' }}
           INSTANCE_ID: ${{ secrets.TEST_BROKER_INSTANCE_ID }}
         run: |
           set -euo pipefail
           stderr_file=$(mktemp)
-          state=$(aws ssm describe-instance-information \
-            --region "$REGION" \
-            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-            --query 'InstanceInformationList[0].PingStatus' \
-            --output text 2>"$stderr_file" || echo "")
-          if grep -q "AccessDenied" "$stderr_file"; then
-            echo "::error::Deploy role lacks ssm:DescribeInstanceInformation."
-            echo "::error::Fix: re-run scripts/provision-ci-deploy-role.sh on the operator laptop —"
-            echo "::error::the inline policy is now refreshed with the missing perm (idempotent)."
-            rm -f "$stderr_file"
-            exit 1
-          fi
-          rm -f "$stderr_file"
-          [ -z "$state" ] && state="None"
+          trap 'rm -f "$stderr_file"' EXIT
+          attempts=5
+          backoff=10
+          attempt=0
+          state=""
+          while :; do
+            attempt=$((attempt + 1))
+            if state=$(aws ssm describe-instance-information \
+                --region "$REGION" \
+                --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+                --query 'InstanceInformationList[0].PingStatus' \
+                --output text 2>"$stderr_file"); then
+              if [ -z "$state" ]; then state="None"; fi
+              if [ "$state" = "Online" ] || [ "$attempt" -ge "$attempts" ]; then
+                break
+              fi
+              echo "::warning::SSM state=$state on $INSTANCE_ID (attempt $attempt/$attempts) — not Online yet, retrying in ${backoff}s"
+            else
+              if grep -q "AccessDenied" "$stderr_file"; then
+                echo "::error::Deploy role lacks ssm:DescribeInstanceInformation."
+                echo "::error::Fix: re-run scripts/provision-ci-deploy-role.sh on the operator laptop —"
+                echo "::error::the inline policy is now refreshed with the missing perm (idempotent)."
+                exit 1
+              fi
+              echo "::warning::ssm describe-instance-information failed (attempt $attempt/$attempts) — transient API error, retrying in ${backoff}s:"
+              cat "$stderr_file" >&2 || true
+              if [ "$attempt" -ge "$attempts" ]; then
+                echo "::error::ssm describe-instance-information failed $attempts times — AWS SSM API unreachable, not a broker fault. Re-run the deploy."
+                exit 1
+              fi
+            fi
+            sleep "$backoff"
+          done
           case "$state" in
             Online)
               echo "::notice::SSM agent online on $INSTANCE_ID"
