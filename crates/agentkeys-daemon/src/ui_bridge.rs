@@ -2434,7 +2434,7 @@ async fn mint_master_cap(
         "cred-fetch" => CapMintOp::CredFetch,
         other => return Err(format!("mint_master_cap: unknown cap route {other}")),
     };
-    let client = BackendClient::new(
+    let mut client = BackendClient::new(
         Some(broker.to_string()),
         None,
         None,
@@ -2444,6 +2444,19 @@ async fn mint_master_cap(
         None,
         String::new(),
     );
+    // K10 cap-mint proof-of-possession (issue #76). Sign the master-self cap with
+    // the master's device key (the same owner-only file the daemon loaded at
+    // startup) so a compromised broker can't mint a usable master cap.
+    match agentkeys_core::device_crypto::load_device_key_from_env() {
+        Some(dk) => client = client.with_device_key(std::sync::Arc::new(dk)),
+        None => {
+            return Err(
+                "master K10 device key not found (set AGENTKEYS_DEVICE_KEY_FILE); \
+                 cap-mint requires it for the issue-#76 proof-of-possession"
+                    .to_string(),
+            )
+        }
+    }
     client
         .cap_mint(
             op,

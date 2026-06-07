@@ -215,9 +215,22 @@ if should_run_step 6; then
     jwt=$(echo "$verify" | jq -r '.session_jwt // .jwt // empty')
     [ -n "$jwt" ] || die "wallet/verify returned no session JWT: $verify"
     # master-self memory cap, NO scope grant (operator == actor == deployer omni).
+    # Master K10 cap-mint proof-of-possession (issue #76): sign with the master's
+    # secp256k1 K10 (registered as a CAP_MINT device by heima-register-master-k10.sh).
+    # device_key_hash = keccak(K10 addr). ⚠️ NEEDS-LIVE-VERIFICATION: cast EIP-191
+    # must match device_crypto::eip191_sign.
+    k10_key_file="${AGENTKEYS_DEVICE_KEY_FILE:-$HOME/.agentkeys/agent-device.key}"
+    k10_priv=$(tr -d '[:space:]' < "$k10_key_file" 2>/dev/null || true)
+    [ -n "$k10_priv" ] || die "master K10 not found at $k10_key_file (issue #76: cap-mint needs it)"
+    k10_dkh=$(cast keccak "$(cast wallet address --private-key "$k10_priv" | tr '[:upper:]' '[:lower:]')")
+    cp_nonce=$(openssl rand -hex 16); cp_ts=$(date +%s)
+    cp_svc_hash=$(cast keccak "memory:bootstrap-proof")
+    cp_sig=$(cast wallet sign --private-key "$k10_priv" \
+      "$(cast keccak "agentkeys-cap-pop:v1:${DEPLOYER_OMNI}:${DEPLOYER_OMNI}:${cp_svc_hash#0x}:store:memory:${cp_nonce}:${cp_ts}")")
     # @backend-fixture: cap_mint_request  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
-    body=$(jq -n --arg o "0x$DEPLOYER_OMNI" --arg s "memory:bootstrap-proof" --arg d "$MASTER_DKH" \
-      '{operator_omni:$o, actor_omni:$o, service:$s, device_key_hash:$d, ttl_seconds:300}')
+    body=$(jq -n --arg o "0x$DEPLOYER_OMNI" --arg s "memory:bootstrap-proof" --arg d "$k10_dkh" \
+      --arg sig "$cp_sig" --arg nonce "$cp_nonce" --argjson ts "$cp_ts" \
+      '{operator_omni:$o, actor_omni:$o, service:$s, device_key_hash:$d, ttl_seconds:300, client_sig:$sig, client_nonce:$nonce, client_ts:$ts}')
     rc=$(curl -sS -o /tmp/wmcap.$$.json -w '%{http_code}' -X POST "$OIDC_ISSUER/v1/cap/memory-put" \
       -H "authorization: Bearer $jwt" -H 'content-type: application/json' -d "$body" 2>&1 || echo 000)
     rbody=$(cat /tmp/wmcap.$$.json 2>/dev/null || true); rm -f /tmp/wmcap.$$.json

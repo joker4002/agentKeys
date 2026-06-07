@@ -119,12 +119,33 @@ if should_run 2; then
   ok "J1 minted"
 fi
 
+# Master K10 — the per-request cap-mint proof-of-possession key (issue #76),
+# registered as a CAP_MINT device by scripts/heima-register-master-k10.sh. The
+# SAME secp256k1 key the daemon loads; device_key_hash = keccak(K10 addr).
+K10_KEY_FILE="${AGENTKEYS_DEVICE_KEY_FILE:-$HOME/.agentkeys/agent-device.key}"
+K10_PRIV=$(tr -d '[:space:]' < "$K10_KEY_FILE" 2>/dev/null || true)
+[ -n "$K10_PRIV" ] || die "master K10 not found at $K10_KEY_FILE (issue #76: cap-mint needs it)"
+K10_DKH=$(cast keccak "$(cast wallet address --private-key "$K10_PRIV" | tr '[:upper:]' '[:lower:]')")
+
+# EIP-191 cap-PoP signature over agentkeys_core::device_crypto::cap_pop_payload.
+# ⚠️ NEEDS-LIVE-VERIFICATION: confirm `cast wallet sign` of the 32-byte preimage
+# matches device_crypto::eip191_sign (recovery byte 27/28; ecrecover accepts it).
+cap_pop_sign() { local operator="$1" actor="$2" service="$3" op="$4" dc="$5" nonce="$6" ts="$7"
+  local svc_hash preimage
+  svc_hash=$(cast keccak "$(printf '%s' "$service" | tr '[:upper:]' '[:lower:]')")
+  preimage=$(cast keccak "agentkeys-cap-pop:v1:${operator#0x}:${actor#0x}:${svc_hash#0x}:${op}:${dc}:${nonce}:${ts}")
+  cast wallet sign --private-key "$K10_PRIV" "$preimage"; }
+
 # Mint a cap (op=memory-put|memory-get) for the master's own actor (no scope grant).
 mint_cap() { local op="$1" ns="$2"
+  local opstr nonce ts sig; case "$op" in memory-put) opstr=store;; memory-get) opstr=fetch;; *) opstr="$op";; esac
+  nonce=$(openssl rand -hex 16); ts=$(date +%s)
+  sig=$(cap_pop_sign "0x$DEPLOYER_OMNI" "0x$DEPLOYER_OMNI" "memory:$ns" "$opstr" memory "$nonce" "$ts")
   # @backend-fixture: cap_mint_request  (issue #203 — gated by scripts/check-backend-fixture-drift.sh)
-  curl -sS -X POST "$BROKER/v1/cap/$op" -H "authorization: Bearer $J1" -H 'content-type: application/json' \
-    -d "$(jq -n --arg o "0x$DEPLOYER_OMNI" --arg s "memory:$ns" --arg d "$MASTER_DKH" \
-      '{operator_omni:$o, actor_omni:$o, service:$s, device_key_hash:$d, ttl_seconds:300}')"; }
+  local body; body=$(jq -n --arg o "0x$DEPLOYER_OMNI" --arg s "memory:$ns" --arg d "$K10_DKH" \
+      --arg sig "$sig" --arg nonce "$nonce" --argjson ts "$ts" \
+      '{operator_omni:$o, actor_omni:$o, service:$s, device_key_hash:$d, ttl_seconds:300, client_sig:$sig, client_nonce:$nonce, client_ts:$ts}')
+  curl -sS -X POST "$BROKER/v1/cap/$op" -H "authorization: Bearer $J1" -H 'content-type: application/json' -d "$body"; }
 
 # STS relay: broker OIDC JWT → AssumeRoleWithWebIdentity → export AWS_* for the worker headers.
 sts_relay() {

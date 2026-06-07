@@ -38,6 +38,9 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         service: "memory:<namespace>".into(),
         device_key_hash: "0x<device_key_hash>".into(),
         ttl_seconds: 300,
+        client_sig: "0x<k10_cap_pop_sig>".into(),
+        client_nonce: "<client_nonce_hex>".into(),
+        client_ts: 0,
     };
     let memory_put = MemoryPutBody {
         cap: json!("<cap-token>"),
@@ -126,6 +129,9 @@ mod tests {
             keys_of("cap_mint_request"),
             vec![
                 "actor_omni",
+                "client_nonce",
+                "client_sig",
+                "client_ts",
                 "device_key_hash",
                 "operator_omni",
                 "service",

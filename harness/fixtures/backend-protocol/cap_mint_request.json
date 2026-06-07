@@ -1,5 +1,8 @@
 {
   "actor_omni": "0x<actor_omni>",
+  "client_nonce": "<client_nonce_hex>",
+  "client_sig": "0x<k10_cap_pop_sig>",
+  "client_ts": 0,
   "device_key_hash": "0x<device_key_hash>",
   "operator_omni": "0x<operator_omni>",
   "service": "memory:<namespace>",

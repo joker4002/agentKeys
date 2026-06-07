@@ -17,7 +17,8 @@
 #  12. Set scope (if --webauthn — else skipped)
 #  13. Append a smoke-test audit row (V1 path)
 #  14. Tier-A audit relay + worker /healthz smoke
-#  15. Summary
+#  15. Register master K10 as CAP_MINT device (issue #76 — K11-gated)
+#  16. Summary
 #
 # Per CLAUDE.md "Heima chain (single entry point)" + "Idempotent
 # remote-setup rule": every step pre-checks chain/AWS state and short-
@@ -81,7 +82,7 @@ USE_WEBAUTHN=0
 YES=0
 FROM_STEP=1
 TO_STEP=15
-STEP_TOTAL=15
+STEP_TOTAL=16
 
 # Colors only when stderr is a TTY.
 if [ -t 2 ]; then
@@ -317,7 +318,21 @@ do_step_14() {
 }
 
 do_step_15() {
-  CUR_STEP=15; step "Summary"
+  CUR_STEP=15; step "Register master K10 as CAP_MINT device (issue #76 — K11-gated)"
+  # The master's per-request cap-mint proof-of-possession key (secp256k1 K10),
+  # registered as an ADDITIONAL master device (roles=CAP_MINT) authorized by the
+  # primary K11. Closes the broker-SPOF for the master's OWN data (master-self
+  # cap-mint then carries a K10 PoP the worker re-verifies). Needs --webauthn
+  # (the primary K11 assertion); skipped in stub mode.
+  if [ "$USE_WEBAUTHN" != "1" ]; then
+    skip "master-K10 register needs --webauthn (primary K11 assertion); re-run with --webauthn"
+    return
+  fi
+  bash "$SCRIPT_DIR/heima-register-master-k10.sh"
+}
+
+do_step_16() {
+  CUR_STEP=16; step "Summary"
   local profile_uc registry_addr session_file
   profile_uc=$(printf '%s' "$AGENTKEYS_CHAIN" | tr 'a-z-' 'A-Z_')
   registry_addr=$(eval "echo \${SIDECAR_REGISTRY_ADDRESS_${profile_uc}:-}")
@@ -337,7 +352,8 @@ do_step_15() {
   printf "    bash scripts/heima-device-register.sh   --session-id %s\n" "$SESSION_ID" >&2
   printf "    bash scripts/heima-agent-create.sh      --label %s\n" "$AGENT_LABEL" >&2
   printf "    bash scripts/heima-scope-set.sh         --agent %s --services %s\n" "$AGENT_LABEL" "$SMOKE_SERVICE" >&2
-  printf "    bash scripts/heima-credential-audit.sh  --actor %s --service %s --op store\n\n" "$AGENT_LABEL" "$SMOKE_SERVICE" >&2
+  printf "    bash scripts/heima-credential-audit.sh  --actor %s --service %s --op store\n" "$AGENT_LABEL" "$SMOKE_SERVICE" >&2
+  printf "    bash harness/scripts/heima-register-master-k10.sh   # issue #76: master cap-mint K10 (K11-gated)\n\n" >&2
 }
 
 main() {
@@ -356,6 +372,7 @@ main() {
   in_scope 13 && do_step_13
   in_scope 14 && do_step_14
   in_scope 15 && do_step_15
+  in_scope 16 && do_step_16
 }
 
 main "$@"
