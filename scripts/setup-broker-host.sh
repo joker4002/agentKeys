@@ -651,14 +651,72 @@ setup_build_cache() {
   have sccache || { warn "sccache not on PATH after install — plain cargo"; return 0; }
   export SCCACHE_DIR="${SCCACHE_DIR:-/var/cache/agentkeys-sccache}"
   sudo install -d -m 0777 "$SCCACHE_DIR" 2>/dev/null || true
+  # sccache runs as the (unprivileged) BUILD user, but `sudo install -d` made the dir
+  # root-owned, and sccache's shard subdirs inherit the FIRST writer's ownership. If an
+  # early root/sudo build populated them they're root:root 0750 — and the build user
+  # CANNOT store into them, so every compile MISSES and nothing ever caches (silently:
+  # the build still succeeds via direct rustc). Own the whole tree to the build user so
+  # sccache can always write (also re-heals an already root-owned cache from a past run).
+  sudo chown -R "$(id -un):$(id -gn)" "$SCCACHE_DIR" 2>/dev/null || true
   export RUSTC_WRAPPER; RUSTC_WRAPPER="$(command -v sccache)"
+  # Restart the server so it adopts THIS SCCACHE_DIR — an already-running server (from a
+  # prior shell/build) keeps its OLD cache location, another way the cache silently misses.
+  sccache --stop-server >/dev/null 2>&1 || true
   sccache --start-server >/dev/null 2>&1 || true
-  log "sccache enabled (RUSTC_WRAPPER=$RUSTC_WRAPPER, SCCACHE_DIR=$SCCACHE_DIR)"
+  log "sccache enabled (RUSTC_WRAPPER=$RUSTC_WRAPPER, SCCACHE_DIR=$SCCACHE_DIR, owner=$(id -un))"
 }
 setup_build_cache
 
+# ─── Build-skip guard — the real fix for "re-deploy recompiles the workspace" ──
+# cargo's freshness check is MTIME-based. The --ref git step (`git checkout -f` /
+# `git reset --hard`) rewrites source-file mtimes to "now" whenever origin advances,
+# so cargo re-fingerprints + recompiles the whole workspace (agentkeys-types → EVERY
+# agentkeys-worker-*) even when the bytes are identical — exactly the recompile an
+# operator sees on a re-deploy. cargo can't tell an unchanged-content rewrite from a
+# real change; we can, by COMMIT. Stamp the built commit; on a re-run, if HEAD + the
+# worker-set are unchanged, the tree is clean, and every binary is present, the prior
+# build is authoritative → skip the cargo builds (the install/restart steps below
+# still run, idempotently). Force a rebuild with `rm target/release/.agentkeys-build-commit`
+# or by touching any source. (sccache — set up above — only makes a recompile that DOES
+# run fast; this guard avoids the recompile entirely when nothing changed.)
+BUILD_STAMP="$REPO_ROOT/target/release/.agentkeys-build-commit"
+# git refuses to operate in a tree owned by a different user ("detected dubious
+# ownership", fatal exit 128). On the broker this script runs as ROOT (the CI SSM
+# command + `sudo` invocations both run as root) while the checkout is owned by
+# agentkey/ubuntu — so a plain `git` here aborts 128, and under `set -e` that kills
+# the whole deploy before the build even starts (the real #219 CI failure). `-c
+# safe.directory` trusts THIS tree for THIS invocation only — no ~/.gitconfig write,
+# and a no-op when the caller already owns the repo. `-C` runs in-repo, no subshell.
+git_repo() { git -C "$REPO_ROOT" -c safe.directory="$REPO_ROOT" "$@"; }
+build_stamp_value() {
+  local head; head="$( git_repo rev-parse HEAD 2>/dev/null )" || return 1
+  printf '%s workers=%s' "$head" "$WITH_WORKERS"
+}
+SKIP_SERVER_BUILD=0
+if have git; then
+  _want_stamp="$(build_stamp_value || true)"
+  # Capture porcelain WITHOUT a `| head` pipe: on a dirty tree (many lines) head
+  # closes the pipe early, git takes SIGPIPE, and under `pipefail` that surfaces as
+  # 141 — another way this assignment would trip `set -e`. Tolerate ANY git failure
+  # → treat as "can't prove the tree is clean" → fall through to a rebuild. The guard
+  # is an optimization; failing it safe (rebuild) is always correct, crashing is not.
+  _dirty="$( git_repo status --porcelain 2>/dev/null )" || _dirty="dirty"
+  _bins_ok=1
+  _req_bins=(agentkeys-mock-server agentkeys-broker-server)
+  [[ "$WITH_WORKERS" == "yes" ]] && _req_bins+=(agentkeys-worker-audit agentkeys-worker-email \
+    agentkeys-worker-creds agentkeys-worker-memory agentkeys-worker-config agentkeys-worker-classify)
+  for _b in "${_req_bins[@]}"; do [[ -x "$REPO_ROOT/target/release/$_b" ]] || _bins_ok=0; done
+  if [[ -n "$_want_stamp" && -z "$_dirty" && "$_bins_ok" == 1 \
+        && -f "$BUILD_STAMP" && "$(cat "$BUILD_STAMP" 2>/dev/null)" == "$_want_stamp" ]]; then
+    SKIP_SERVER_BUILD=1
+    log "skip build — binaries already built at this commit ($_want_stamp); HEAD unchanged + tree clean + all binaries present. Skipping cargo (it would recompile the workspace from the git step's mtime churn, not a real change)."
+  fi
+fi
+
+if [[ "$SKIP_SERVER_BUILD" != 1 ]]; then
 log "Building agentkeys-mock-server (release)"
 ( cd "$REPO_ROOT" && cargo build --release --locked -p agentkeys-mock-server )
+fi
 
 # Build agentkeys-broker-server with auth-email-link, asserting via
 # cargo's --message-format=json output that the feature is actually
@@ -713,6 +771,7 @@ assert_feature_enabled() {
   esac
 }
 
+if [[ "$SKIP_SERVER_BUILD" != 1 ]]; then
 build_broker_with_features
 
 log "Verifying broker binary has auth-email-link compiled in"
@@ -733,6 +792,7 @@ if ! assert_feature_enabled; then
      5. cat $REPO_ROOT/Cargo.lock | head -5  (committed lockfile drift?)
    Then file a repro for the issue tracker."
   fi
+fi
 fi
 
 # Belt-and-suspenders: nm symbol-table check (more reliable than strings,
@@ -794,7 +854,7 @@ done
 # ─── 2b. Build service workers (audit + email + creds + memory + config) ─────
 # Co-located on the broker host for dev (CLAUDE.md "for production, we will
 # isolate all the services"). One cargo invocation builds all 5 in parallel.
-if [[ "$WITH_WORKERS" == "yes" ]]; then
+if [[ "$WITH_WORKERS" == "yes" && "$SKIP_SERVER_BUILD" != 1 ]]; then
   log "Building service workers (audit + email + creds + memory + config + classify, release)"
   ( cd "$REPO_ROOT" && cargo build --release --locked \
       -p agentkeys-worker-audit \
@@ -803,6 +863,14 @@ if [[ "$WITH_WORKERS" == "yes" ]]; then
       -p agentkeys-worker-memory \
       -p agentkeys-worker-config \
       -p agentkeys-worker-classify )
+fi
+
+# Stamp the built commit so an unchanged re-deploy skips the rebuild (see the
+# build-skip guard above). Written only after a REAL build (mock + broker + workers
+# all succeeded above); a skipped run leaves the prior stamp intact.
+if [[ "$SKIP_SERVER_BUILD" != 1 ]] && have git; then
+  build_stamp_value > "$BUILD_STAMP" 2>/dev/null \
+    && log "stamped build commit → .agentkeys-build-commit ($(cat "$BUILD_STAMP" 2>/dev/null))" || true
 fi
 
 # sccache hit/miss readout — visible proof the compiler cache is working. On a
