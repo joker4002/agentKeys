@@ -193,53 +193,56 @@ async fn handle_cap(
         upstream_path
     );
 
-    // K10 cap-mint proof-of-possession (issue #76 — broker-SPOF defense). Sign
-    // the request with the agent's device key; the broker validates it and the
-    // worker re-verifies it independently, so a compromised broker can't mint a
-    // usable cap. The proxy serves only the credentials class. `device_key_hash`
-    // is derived from the SAME key we sign with (consistency with the broker's
-    // keccak(ecrecover)==device_key_hash check).
-    let Some(device_key) = state.device_key.as_ref() else {
-        emit_audit_line(&req, op_label, "fail_no_device_key", false);
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorBody {
-                error: "agent K10 device key not loaded (set AGENTKEYS_DEVICE_KEY_FILE)"
-                    .to_string(),
-                reason: "no_device_key",
-            }),
-        )
-            .into_response();
-    };
-    let pop = match device_key.cap_pop_now(
-        &req.operator_omni,
-        &req.actor_omni,
-        &req.service,
-        op_label,
-        "credentials",
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            emit_audit_line(&req, op_label, "cap_pop_sign_error", false);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody {
-                    error: e.to_string(),
-                    reason: "cap_pop_sign_error",
-                }),
-            )
-                .into_response();
+    // K10 cap-mint proof-of-possession (issue #76 — broker-SPOF defense). When
+    // the agent's K10 is loaded, sign the request: the broker validates it and
+    // the worker re-verifies it independently, so a compromised broker can't mint
+    // a usable cap, and `device_key_hash` is derived from the SAME key we sign
+    // with. Graceful during rollout: with no K10 loaded, forward the caller's
+    // `device_key_hash` and no PoP — the worker accepts it unless
+    // AGENTKEYS_WORKER_REQUIRE_CAP_POP=1. The proxy serves only the creds class.
+    let outbound = match state.device_key.as_ref() {
+        Some(device_key) => {
+            let pop = match device_key.cap_pop_now(
+                &req.operator_omni,
+                &req.actor_omni,
+                &req.service,
+                op_label,
+                "credentials",
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    emit_audit_line(&req, op_label, "cap_pop_sign_error", false);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorBody {
+                            error: e.to_string(),
+                            reason: "cap_pop_sign_error",
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            agentkeys_backend_client::BrokerCapRequest {
+                operator_omni: req.operator_omni.clone(),
+                actor_omni: req.actor_omni.clone(),
+                service: req.service.clone(),
+                device_key_hash: device_key.device_key_hash().unwrap_or_default(),
+                ttl_seconds: req.ttl_seconds.unwrap_or(300),
+                client_sig: Some(pop.client_sig),
+                client_nonce: Some(pop.client_nonce),
+                client_ts: Some(pop.client_ts),
+            }
         }
-    };
-    let outbound = agentkeys_backend_client::BrokerCapRequest {
-        operator_omni: req.operator_omni.clone(),
-        actor_omni: req.actor_omni.clone(),
-        service: req.service.clone(),
-        device_key_hash: device_key.device_key_hash().unwrap_or_default(),
-        ttl_seconds: req.ttl_seconds.unwrap_or(300),
-        client_sig: pop.client_sig,
-        client_nonce: pop.client_nonce,
-        client_ts: pop.client_ts,
+        None => agentkeys_backend_client::BrokerCapRequest {
+            operator_omni: req.operator_omni.clone(),
+            actor_omni: req.actor_omni.clone(),
+            service: req.service.clone(),
+            device_key_hash: req.device_key_hash.clone(),
+            ttl_seconds: req.ttl_seconds.unwrap_or(300),
+            client_sig: None,
+            client_nonce: None,
+            client_ts: None,
+        },
     };
 
     let resp = state

@@ -112,9 +112,19 @@ pub struct BrokerCapRequest {
     pub service: String,
     pub device_key_hash: String,
     pub ttl_seconds: u64,
-    pub client_sig: String,
-    pub client_nonce: String,
-    pub client_ts: u64,
+    // The K10 cap-PoP is OPTIONAL on the wire (issue #76 staged rollout): a caller
+    // that holds the actor's K10 signs (the broker validates + the worker
+    // re-verifies); a caller without one (e.g. a master before its K10 is
+    // registered) omits these. Enforcement (reject-if-absent) is opt-in via the
+    // worker's AGENTKEYS_WORKER_REQUIRE_CAP_POP — until then the PoP is
+    // verified-when-present. `skip_serializing_if` keeps the no-PoP body
+    // byte-identical to the pre-#76 shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_sig: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ts: Option<u64>,
 }
 
 /// Opaque cap-token blob — the broker signs it and the worker verifies the

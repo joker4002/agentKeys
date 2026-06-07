@@ -210,12 +210,8 @@ async fn verify_cap(
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
     // K10 proof-of-possession (issue #76 — broker-SPOF defense). See the cred
-    // worker for the rationale; the check lives in the shared verify module so
-    // every data class enforces it identically.
-    if verify::cap_pop_required() {
-        verify::check_client_pop(cap, verify::CAP_POP_MAX_AGE_SECS)
-            .map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
-    }
+    // worker / verify::enforce_client_pop; shared across data classes.
+    verify::enforce_client_pop(cap).map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
     verify::check_op(cap, expected_op).map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
     // Per-data-class isolation gate (issue #90 followup): a credentials-class
     // cap MUST NOT be honoured at the memory worker. Symmetric with the cred

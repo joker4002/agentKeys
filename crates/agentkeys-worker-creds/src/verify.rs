@@ -209,10 +209,29 @@ pub const CAP_POP_MAX_AGE_SECS: u64 = 300;
 /// default = enforce; set `AGENTKEYS_WORKER_REQUIRE_CAP_POP=0` only for a
 /// staged rollout against a pre-#76 broker. Mirrors `AGENTKEYS_WORKER_REQUIRE_STS`.
 pub fn cap_pop_required() -> bool {
-    !matches!(
+    matches!(
         std::env::var("AGENTKEYS_WORKER_REQUIRE_CAP_POP").as_deref(),
-        Ok("0") | Ok("false") | Ok("no")
+        Ok("1") | Ok("true") | Ok("yes")
     )
+}
+
+/// Staged-rollout K10 cap-PoP gate (issue #76) — the ONE call the worker
+/// handlers make. Policy:
+///   - a supplied `client_sig` is ALWAYS verified (a present-but-invalid PoP is
+///     rejected — so the agent path, which always signs, is protected even
+///     before enforcement is switched on);
+///   - a MISSING PoP is rejected only when `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`
+///     (default OFF during rollout — a master before its K10 is registered mints
+///     no PoP). Flip the flag to enforce once every actor's K10 is registered;
+///     that is the point at which the broker SPOF is fully closed.
+pub fn enforce_client_pop(token: &CapToken) -> Result<(), VerifyError> {
+    if token.client_sig.is_some() {
+        check_client_pop(token, CAP_POP_MAX_AGE_SECS)
+    } else if cap_pop_required() {
+        Err(VerifyError::CapPopMissing)
+    } else {
+        Ok(())
+    }
 }
 
 /// K10 proof-of-possession check (issue #76 — the broker-SPOF defense).

@@ -188,36 +188,49 @@ impl BackendClient {
         let url = format!("{}{}", self.broker()?, op.broker_path());
 
         // K10 cap-mint proof-of-possession (issue #76 — the broker-SPOF fix).
-        // Sign the request with the caller's K10 device key; the broker validates
-        // it and the worker re-verifies it independently, so a compromised broker
-        // cannot mint a usable cap. `device_key_hash` is derived from the SAME
-        // key we sign with, so the broker's `keccak(ecrecover)==device_key_hash`
-        // check is consistent by construction.
-        let device_key = self
-            .device_key
-            .as_ref()
-            .ok_or(BackendError::NotConfigured("device_key"))?;
-        let pop = device_key
-            .cap_pop_now(
-                &req.operator_omni,
-                &req.actor_omni,
-                &req.service,
-                op.op_str(),
-                op.data_class(),
-            )
-            .map_err(|e| BackendError::Transport(format!("cap-PoP sign: {e}")))?;
-        let device_key_hash = device_key
-            .device_key_hash()
-            .map_err(|e| BackendError::Transport(format!("device_key_hash: {e}")))?;
-        let body = BrokerCapRequest {
-            operator_omni: req.operator_omni,
-            actor_omni: req.actor_omni,
-            service: req.service,
-            device_key_hash,
-            ttl_seconds: req.ttl_seconds,
-            client_sig: pop.client_sig,
-            client_nonce: pop.client_nonce,
-            client_ts: pop.client_ts,
+        // OPTIONAL + graceful (staged rollout): when this client holds the
+        // actor's K10, sign the request — the broker validates it and the worker
+        // re-verifies it independently, so a compromised broker cannot mint a
+        // usable cap, and `device_key_hash` is derived from the SAME key we sign
+        // with (consistent with the broker's `keccak(ecrecover)==device_key_hash`
+        // check). When no K10 is configured (e.g. a master before its K10 is
+        // registered), send NO PoP and the caller-supplied `device_key_hash`;
+        // the worker accepts it unless AGENTKEYS_WORKER_REQUIRE_CAP_POP=1.
+        let body = match self.device_key.as_ref() {
+            Some(device_key) => {
+                let pop = device_key
+                    .cap_pop_now(
+                        &req.operator_omni,
+                        &req.actor_omni,
+                        &req.service,
+                        op.op_str(),
+                        op.data_class(),
+                    )
+                    .map_err(|e| BackendError::Transport(format!("cap-PoP sign: {e}")))?;
+                let device_key_hash = device_key
+                    .device_key_hash()
+                    .map_err(|e| BackendError::Transport(format!("device_key_hash: {e}")))?;
+                BrokerCapRequest {
+                    operator_omni: req.operator_omni,
+                    actor_omni: req.actor_omni,
+                    service: req.service,
+                    device_key_hash,
+                    ttl_seconds: req.ttl_seconds,
+                    client_sig: Some(pop.client_sig),
+                    client_nonce: Some(pop.client_nonce),
+                    client_ts: Some(pop.client_ts),
+                }
+            }
+            None => BrokerCapRequest {
+                operator_omni: req.operator_omni,
+                actor_omni: req.actor_omni,
+                service: req.service,
+                device_key_hash: req.device_key_hash,
+                ttl_seconds: req.ttl_seconds,
+                client_sig: None,
+                client_nonce: None,
+                client_ts: None,
+            },
         };
 
         let resp = self

@@ -2445,17 +2445,13 @@ async fn mint_master_cap(
         String::new(),
     );
     // K10 cap-mint proof-of-possession (issue #76). Sign the master-self cap with
-    // the master's device key (the same owner-only file the daemon loaded at
-    // startup) so a compromised broker can't mint a usable master cap.
-    match agentkeys_core::device_crypto::load_device_key_from_env() {
-        Some(dk) => client = client.with_device_key(std::sync::Arc::new(dk)),
-        None => {
-            return Err(
-                "master K10 device key not found (set AGENTKEYS_DEVICE_KEY_FILE); \
-                 cap-mint requires it for the issue-#76 proof-of-possession"
-                    .to_string(),
-            )
-        }
+    // the master's K10 (the same owner-only file the daemon loaded at startup)
+    // WHEN it's registered + present, so a compromised broker can't mint a usable
+    // master cap. Graceful during rollout: when no K10 is available (a master
+    // before its K10 is registered), mint without a PoP — the worker accepts it
+    // unless AGENTKEYS_WORKER_REQUIRE_CAP_POP=1.
+    if let Some(dk) = agentkeys_core::device_crypto::load_device_key_from_env() {
+        client = client.with_device_key(std::sync::Arc::new(dk));
     }
     client
         .cap_mint(

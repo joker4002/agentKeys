@@ -172,7 +172,7 @@ flowchart TB
 | **AWS account** | This operator's data scope only. Per-actor PrincipalTag prefix isolation contains it: agent A's S3 prefix is inaccessible from agent B's STS session. | None of the chain-anchored boundaries above. AWS compromise is its own incident class; mitigated by independent chain anchoring of audit. |
 | **One chain validator** (one out of N) | Standard chain-security properties (≤51% honest); ScopeContract / SidecarRegistry / K3EpochCounter remain authoritative as long as honest-majority holds. | Cannot bypass on-chain verification at workers (workers re-verify against the chain on every cap). |
 
-**Headline guarantee:** every cap-bearing request is independently re-verified against the chain by the worker before any S3 / KEK / STS / payment operation. Broker-only compromise cannot mint a usable cap — every cap carries a **K10 proof-of-possession** the worker re-verifies independently of the broker (issue #76, §22b.4), and the K10 private key never reaches the broker; chain-only compromise cannot bypass K10 / K11 / actor-binding gates; signer-only compromise cannot escape the chain's scope assertions.
+**Headline guarantee:** every cap-bearing request is independently re-verified against the chain by the worker before any S3 / KEK / STS / payment operation. A cap carries a **K10 proof-of-possession** the worker re-verifies independently of the broker (issue #76, §22b.4) — the K10 private key never reaches the broker, so once enforcement is on (`AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`, after every actor's K10 is registered) **broker-only compromise cannot mint a usable cap**; during the staged rollout the PoP is verified-when-present (the agent path is already covered); chain-only compromise cannot bypass K10 / K11 / actor-binding gates; signer-only compromise cannot escape the chain's scope assertions.
 
 ---
 
@@ -1898,38 +1898,46 @@ The **port from `erc4337-webauthn-sign.py` to Rust changed none of this** — th
 - For master devices: a real attestation blob (webauthn-rs attestation statement) covering both K10 device-key authenticity and K11 platform-passkey binding.
 - For agent devices: a fresh `link_code_redemption` authorization the master submits at `registerAgentDevice` (the broker/agent never writes chain — §10.2); on-chain check that the redemption matches the per-operator unspent set.
 
-### 22b.4 Cap-mint K10 proof-of-possession — **LANDED (issue #76)**
+### 22b.4 Cap-mint K10 proof-of-possession — **mechanism landed (issue #76); enforcement is a staged flip**
 
-**Status: RESOLVED.** This was the stage-1 simplification (session JWT + on-chain
-device binding only, no K10 signature on the request) — the gap that made the
-broker a true single point of compromise for the data plane: a compromised broker
-could mint a valid cap for any already-registered device + in-scope service
-(`device_key_hash` is a public identifier, and the only signature the worker
-checked was the broker's own `broker_sig`). arch.md's headline guarantee
-(*"broker-only compromise cannot mint a usable cap"*) was aspirational until this
-landed.
+**Status: mechanism shipped, enforcement opt-in.** This was the stage-1
+simplification (session JWT + on-chain device binding only, no K10 signature on the
+request) — the gap that made the broker a true single point of compromise for the
+data plane: a compromised broker could mint a valid cap for any already-registered
+device + in-scope service (`device_key_hash` is a public identifier, and the only
+signature the worker checked was the broker's own `broker_sig`).
 
 **What landed (issue #76):**
-- Every cap-mint request carries a `client_sig`: an EIP-191 signature by the
-  caller's **K10 device key** over `device_crypto::cap_pop_payload(operator, actor,
-  service, op, data_class, client_nonce, client_ts)` (domain-separated,
-  request-bound). Signed by the cap-mint clients (MCP server, daemon ui-bridge,
-  daemon proxy) via the shared `agentkeys-backend-client` (`BackendClient::with_device_key`).
-- The **broker** (`handlers/cap.rs::verify_cap_pop`) validates that `client_sig`
-  recovers to an address whose `keccak == device_key_hash` (which the on-chain
-  device check independently binds to the operator/actor) + freshness.
-- The **worker** (`verify::check_client_pop`, shared across the cred/memory/config
-  workers) re-verifies the **same** proof independently of the broker, and a cap
-  lacking a valid `client_sig` is **rejected** (`cap_pop_invalid`). The K10 private
-  key never reaches the broker, so a **compromised broker cannot forge it** → cannot
-  mint a usable cap. This is what finally makes the headline guarantee true.
-- Rollout flag `AGENTKEYS_WORKER_REQUIRE_CAP_POP` (default **enforce**; set `=0` only
-  for a staged rollout against a pre-#76 broker), mirroring `AGENTKEYS_WORKER_REQUIRE_STS`.
+- A cap-mint request MAY carry a `client_sig`: an EIP-191 signature by the caller's
+  **K10 device key** over `device_crypto::cap_pop_payload(operator, actor, service,
+  op, data_class, client_nonce, client_ts)` (domain-separated, request-bound). The
+  cap-mint clients (MCP server, daemon ui-bridge, daemon proxy) sign via the shared
+  `agentkeys-backend-client` (`BackendClient::with_device_key`) **when a K10 is
+  available**.
+- The **broker** (`handlers/cap.rs::verify_cap_pop`) validates a supplied `client_sig`
+  recovers to an address whose `keccak == device_key_hash` (which the on-chain device
+  check independently binds to the operator/actor) + freshness.
+- The **worker** (`verify::enforce_client_pop`, shared across the cred/memory/config/
+  classify workers) **always verifies a supplied PoP** (a present-but-invalid PoP →
+  `cap_pop_invalid`), and **rejects a MISSING PoP only when
+  `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`** (default off). The K10 private key never
+  reaches the broker, so once enforcement is on a compromised broker cannot forge it
+  → cannot mint a usable cap.
+- **Why staged, not default-on:** agents already register `device_key_hash =
+  keccak(K10 addr)`, so the agent path signs + is verified immediately. The **master**
+  registers `device_key_hash = keccak(operator_omni)` (the #164 passkey account) and
+  needs its secp256k1 K10 registered as an additional CAP_MINT device first
+  (`harness/scripts/heima-register-master-k10.sh`, `registerAdditionalMasterDevice`,
+  K11-gated; `setup-heima.sh` step 15). Enabling `REQUIRE_CAP_POP=1` before that
+  rollout completes would break master-self cap-mint. **Flipping the flag once every
+  actor's K10 is registered is the point at which the broker SPOF is fully closed.**
 
-**Residual hardening (follow-ups, not blocking):** per-`client_nonce` replay LRU at
-the worker (freshness window bounds it today); signer-call K10 PoP on the signer's
-own sign endpoints (the original #76 step 1c — deferred, the signer is slated for
-TEE replacement #74).
+**Residual hardening (follow-ups):** per-`client_nonce` replay LRU at the worker
+(the freshness window bounds it today); the master-K10 on-chain registration is
+authored but **needs live verification** (the `cast`/ABI run + the EOA-vs-#164-UserOp
+`msg.sender` path — see the script header); signer-call K10 PoP on the signer's own
+sign endpoints (original #76 step 1c — deferred, the signer is slated for TEE
+replacement #74).
 
 ### 22b.5 Audit chain anchoring — direct tx per audit entry (tier C)
 
@@ -1949,7 +1957,7 @@ Known sites at HEAD:
 - `crates/agentkeys-cli/src/k11_webauthn.rs` — real WebAuthn ceremony (§22b.1).
 - `crates/agentkeys-worker-creds/src/state.rs` — `AGENTKEYS_WORKER_KEK_HEX` (§22b.2).
 - `crates/agentkeys-worker-memory/src/state.rs` — `AGENTKEYS_MEMORY_KEK_HEX` (§22b.2).
-- ~~`crates/agentkeys-broker-server/src/handlers/cap.rs` — no K10 signature requirement (§22b.4).~~ **Resolved (issue #76):** cap.rs now REQUIRES + validates a K10 cap-PoP (`verify_cap_pop`); the worker re-verifies (`verify::check_client_pop`). No longer a stage-1 shortcut.
+- `crates/agentkeys-broker-server/src/handlers/cap.rs` — K10 cap-PoP **validated when present** (`verify_cap_pop`); the worker re-verifies + enforces presence under `AGENTKEYS_WORKER_REQUIRE_CAP_POP` (`verify::enforce_client_pop`). The shortcut is closed once that flag is flipped after the master-K10 rollout (§22b.4) — staged, not a permanent stage-1 omission.
 - `scripts/heima-device-register.sh` — empty attestation + empty K11 assertion on first call (§22b.1, §22b.3).
 - `scripts/heima-agent-create.sh` — empty K11 / link-code-redemption stubs (§22b.3).
 - `scripts/heima-scope-set.sh` — stub K11 assertion (§22b.1).

@@ -102,12 +102,8 @@ async fn verify_classify_cap(
     verify::verify_signature(&state.config.broker_pubkey_pem, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
     // K10 proof-of-possession (issue #76 — broker-SPOF defense). Same shared
-    // check the storage workers run; the classify cap is minted under the
-    // actor's K10 too.
-    if verify::cap_pop_required() {
-        verify::check_client_pop(cap, verify::CAP_POP_MAX_AGE_SECS)
-            .map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
-    }
+    // gate the storage workers run (verify::enforce_client_pop).
+    verify::enforce_client_pop(cap).map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
     verify::check_op(cap, CapOp::Classify)
         .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
     verify::check_data_class(cap, expected_class)
