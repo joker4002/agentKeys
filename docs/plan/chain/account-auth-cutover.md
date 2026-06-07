@@ -19,7 +19,7 @@ Run via the new orchestrator `scripts/heima-cutover-account-auth.sh` (wired into
 | **0. Pre-flight** | Confirm the local `SidecarRegistry.sol` exposes the account-auth shape (e.g. `setScope(bytes32,bytes32,bytes32[],bool,uint128,uint128,uint128,uint32)` selector present in the ABI, NOT `setScopeWithWebauthn`). Back up the current `*_ADDRESS_*` env values to `operator-workstation.env.pre-cutover.bak`. | backup file already exists |
 | **1. Redeploy v2 set** | `FORCE_DEPLOY=1 bash scripts/heima-bring-up.sh` → new registry/scope/epoch/audit/verifiers; its `env_set` writes the new addresses. | a `CUTOVER_DONE_${PROFILE}=1` marker is set in env AND the live scope answers `setScope` (account-auth selector) — see Idempotency below |
 | **2. Redeploy P256AccountFactory** | Deploy the E5-complete `P256AccountFactory` (embeds the recover()-capable `P256Account`); `env_set P256_ACCOUNT_FACTORY_ADDRESS_${PROFILE}`. | `cast code` on the stored factory AND its embedded account has `recover()` (selector probe) |
-| **3. Onboarding-as-account** | `scripts/heima-deploy-master-account.sh`: from the master's enrolled K11 pubkey, `factory.getAddress(...)` → `cast code` → `createAccount(...)` if absent; fund the EntryPoint deposit (≥ ED); then `registerFirstMasterDevice(operatorOmni, account, …)` so `operatorMasterWallet[omni] == account`. | account already deployed + `operatorMasterWallet == account` |
+| **3. Onboarding-as-account** | **Reuse the existing `harness/scripts/erc4337-register-master.sh`** (`build` then `submit`) — it already does `factory.getAddress`→`cast code`→`createAccount`, funds the EntryPoint deposit, and registers the master via a passkey-account UserOp so `operatorMasterWallet[omni] == account`. Do **not** write a new helper. | its `build` already prints `{skipped:"already-registered"}` when the device exists |
 | **4. Re-bootstrap actors** | Re-register each agent (`heima-agent-create.sh`) + re-grant scopes (`heima-scope-set.sh`, now `setScope` path) on the new contracts. | `isActive(deviceKeyHash)` / `getScope` already matches |
 | **5. Code + doc updates** | `heima-scope-set.sh` `setScopeWithWebauthn`→`setScope`; `verify-heima-contracts.sh` (account-auth assertions); **arch.md §10/§12** (master = account; scope grant = `setScope`); the broker reads scope via env so no code change, just the new `SCOPE_CONTRACT_ADDRESS_*`. | files already at account-auth form (grep guard) |
 | **6. Broker redeploy** | `bash scripts/setup-broker-host.sh --ref main` on the broker host → picks up new registry/scope addresses + the `sponsored_accept` module + (when landed) the `/v1/accept/*` routes. | broker already on the target ref + env |
@@ -35,9 +35,15 @@ A re-run with both present logs `skip already-cut-over` and exits 0. `--force-cu
 
 ## Scripts to implement (the deliverable this spec defines)
 
+Only **one** new script is needed — every other phase reuses an existing idempotent helper:
+
 - `scripts/heima-cutover-account-auth.sh` — the Phase 0/1/2/5 orchestrator (idempotent, `ok`/`skip`/`fail` logging, `--force-cutover`, env-namespaced, no hardcoded values). Wired into `setup-heima.sh` behind `--cutover-account-auth` (destructive ⇒ opt-in, NOT in the plain flow — the one allowed exception to "plain = prod" because a redeploy resets state).
-- `scripts/heima-deploy-master-account.sh` — Phase 3 (onboarding-as-account), idempotent, mirrors `harness/erc4337-master-e8.sh`'s `factory.createAccount` + EntryPoint-deposit steps.
-- Phase 4 reuses the existing `heima-agent-create.sh` / `heima-scope-set.sh` (idempotent already).
+- Phase 3 reuses **`erc4337-register-master.sh`** (`build`+`submit`) — already deploys the account + funds + registers-as-account.
+- Phase 4 reuses `heima-agent-create.sh` / `heima-scope-set.sh` (idempotent already).
+
+### Decoupling — master-as-account does NOT need the cutover
+
+`erc4337-register-master.sh`'s header confirms it is *viable on the live pre-cutover registry* (no EOA-only guard), so `operatorMasterWallet[omni]` can be set to the `P256Account` **today**. What still needs the cutover is the **accept batch's `setScope` (P.3)**: the live scope contract only has `setScopeWithWebauthn`, not the `msg.sender`-gated `setScope` the batch calls. So the work can stage as: (a) register the master-as-account now (Phase 3, no disruption), exercise `/v1/accept/build` against it; (b) the disruptive registry/scope redeploy (Phases 1–2) only when the account-auth `setScope` is required end-to-end. This shrinks the blast radius — the `registerAgentDevice` half of the batch may even work pre-cutover if the live registry already carries the `msg.sender == master` guard (verify with a `cast call` probe before relying on it).
 
 ## Env discipline (HARD — any new key)
 
