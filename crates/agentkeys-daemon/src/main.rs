@@ -220,7 +220,10 @@ struct Args {
 
     /// W3 real-memory: the memory worker base URL (e.g. https://memory.litentry.org).
     /// Unset ⇒ master-memory plant/list use the in-memory fallback (dev/no-infra).
-    #[arg(long, env = "AGENTKEYS_MEMORY_URL")]
+    /// Canonical env is `AGENTKEYS_WORKER_MEMORY_URL` (the AGENTKEYS_WORKER_<svc>_URL
+    /// family in operator-workstation.env, matching --config-url below); the legacy
+    /// bare `AGENTKEYS_MEMORY_URL` is still accepted as a fallback at consumption.
+    #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
     memory_url: Option<String>,
 
     /// W3 real-memory: per-actor memory IAM role ARN for the STS relay (sourced from
@@ -1146,7 +1149,10 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.broker_url.clone(),
         args.signer_url.clone(),
         args.init_chain_id,
-        args.memory_url.clone(),
+        args
+            .memory_url
+            .clone()
+            .or_else(|| std::env::var("AGENTKEYS_MEMORY_URL").ok().filter(|v| !v.is_empty())),
         args.memory_role_arn.clone(),
         args.config_url.clone(),
         args.config_role_arn.clone(),

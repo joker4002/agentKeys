@@ -45,12 +45,16 @@ pub struct Cli {
     #[arg(long, env = "AGENTKEYS_BROKER_URL")]
     pub broker_url: Option<String>,
 
-    /// Memory worker base URL.
-    #[arg(long, env = "AGENTKEYS_MEMORY_URL")]
+    /// Memory worker base URL. Canonical env is `AGENTKEYS_WORKER_MEMORY_URL`
+    /// (the `AGENTKEYS_WORKER_<svc>_URL` family in operator-workstation.env);
+    /// the legacy bare `AGENTKEYS_MEMORY_URL` is still accepted as a fallback in
+    /// `Config::from_cli` for un-redeployed `/etc/agentkeys/mcp.env` hosts.
+    #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
     pub memory_url: Option<String>,
 
-    /// Audit worker base URL.
-    #[arg(long, env = "AGENTKEYS_AUDIT_URL")]
+    /// Audit worker base URL. Canonical env is `AGENTKEYS_WORKER_AUDIT_URL`;
+    /// legacy bare `AGENTKEYS_AUDIT_URL` accepted as a fallback (see above).
+    #[arg(long, env = "AGENTKEYS_WORKER_AUDIT_URL")]
     pub audit_url: Option<String>,
 
     /// Comma-separated `<vendor_id>:<bearer_token>` pairs that the HTTP
@@ -224,14 +228,26 @@ impl Config {
             },
         };
 
+        // Zero-downtime env-name migration (terminology-drift follow-up): the
+        // clap `env` above reads the canonical AGENTKEYS_WORKER_{MEMORY,AUDIT}_URL
+        // (the AGENTKEYS_WORKER_<svc>_URL family in operator-workstation.env). A
+        // deployed MCP host still has the LEGACY bare names in
+        // /etc/agentkeys/mcp.env (written by an older setup-mcp-host.sh) until its
+        // next redeploy, so accept both: fall back to the legacy
+        // AGENTKEYS_{MEMORY,AUDIT}_URL only when the canonical var (and the
+        // --memory-url/--audit-url flag) is unset.
+        let legacy_env = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
+        let memory_url = cli.memory_url.or_else(|| legacy_env("AGENTKEYS_MEMORY_URL"));
+        let audit_url = cli.audit_url.or_else(|| legacy_env("AGENTKEYS_AUDIT_URL"));
+
         Ok(Self {
             transport,
             backend,
             listen: cli.listen,
             mcp_endpoint: cli.mcp_endpoint,
             broker_url: cli.broker_url,
-            memory_url: cli.memory_url,
-            audit_url: cli.audit_url,
+            memory_url,
+            audit_url,
             vendor_tokens,
             default_daily_spend_cap_rmb: cli.default_daily_spend_cap_rmb,
             default_actor,
