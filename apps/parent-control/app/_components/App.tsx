@@ -367,6 +367,11 @@ export function App() {
     }
     showToast(`Registered ${req.agent} on chain. Grant its scope next (Touch ID).`);
     await refreshPairing();
+    // The newly-registered agent now exists in the actor tree — re-fetch it so the
+    // paired device appears in the device/permission views immediately, without the
+    // operator having to reload the page (matches finishPairingCeremony's refresh).
+    const a = await client.listActors();
+    if (a.ok) setActors(a.data);
   };
   const declinePairing = (id: string) => {
     setPairingRequests((prev) => prev.filter((r) => r.id !== id));
