@@ -104,7 +104,7 @@ export function PairingPage({
                     must match here before approving. request id is the master handle. */}
                 <div className="pair-k">device key hash · verify on agent</div>
                 <div className="pair-v mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>{req.deviceKeyHash || req.deviceKeyHashShort}</div>
-                <div className="pair-k">D_pub · verify on agent</div>
+                <div className="pair-k">device public address · verify on agent</div>
                 <div className="pair-v mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{req.dpubFull || req.dpub}</div>
                 <div className="pair-k">request id</div>
                 <div className="pair-v mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{req.id}</div>
