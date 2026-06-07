@@ -436,15 +436,34 @@ mod tests {
         let preimage = cap_pop_payload(operator, actor, service, op, dc, nonce, ts);
         let recovered = ecrecover_eip191(&preimage, &sig).unwrap();
         assert_eq!(recovered, dk.address());
-        assert_eq!(device_key_hash(recovered.as_str()).unwrap(), dk.device_key_hash().unwrap());
+        assert_eq!(
+            device_key_hash(recovered.as_str()).unwrap(),
+            dk.device_key_hash().unwrap()
+        );
     }
 
     #[test]
     fn cap_pop_payload_canonicalizes_omni_prefix_and_case() {
         // 0x-prefix + case must not change the preimage (client and worker may
         // hold the omni in different forms).
-        let a = cap_pop_payload("0xABCD", "0xEF01", "openrouter", "fetch", "credentials", "ab", 9);
-        let b = cap_pop_payload("abcd", "ef01", "openrouter", "fetch", "credentials", "ab", 9);
+        let a = cap_pop_payload(
+            "0xABCD",
+            "0xEF01",
+            "openrouter",
+            "fetch",
+            "credentials",
+            "ab",
+            9,
+        );
+        let b = cap_pop_payload(
+            "abcd",
+            "ef01",
+            "openrouter",
+            "fetch",
+            "credentials",
+            "ab",
+            9,
+        );
         assert_eq!(a, b);
     }
 
@@ -453,8 +472,14 @@ mod tests {
         // A different op or data_class → different preimage (defense-in-depth
         // vs cross-op cap reuse).
         let base = cap_pop_payload("a", "b", "s", "store", "credentials", "n", 1);
-        assert_ne!(base, cap_pop_payload("a", "b", "s", "fetch", "credentials", "n", 1));
-        assert_ne!(base, cap_pop_payload("a", "b", "s", "store", "memory", "n", 1));
+        assert_ne!(
+            base,
+            cap_pop_payload("a", "b", "s", "fetch", "credentials", "n", 1)
+        );
+        assert_ne!(
+            base,
+            cap_pop_payload("a", "b", "s", "store", "memory", "n", 1)
+        );
     }
 
     #[test]

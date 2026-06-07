@@ -838,11 +838,7 @@ mod tests {
 
     /// Build a token whose `client_sig` is a valid K10 PoP signed by `dk` over
     /// the token's own payload fields at time `ts`.
-    fn sign_pop_into(
-        token: &mut CapToken,
-        dk: &agentkeys_core::device_crypto::DeviceKey,
-        ts: u64,
-    ) {
+    fn sign_pop_into(token: &mut CapToken, dk: &agentkeys_core::device_crypto::DeviceKey, ts: u64) {
         let nonce = "0011223344556677".to_string();
         let sig = dk
             .cap_pop_sig(
@@ -895,7 +891,7 @@ mod tests {
         let other = fresh_device("ak-verify-pop-other.key");
         let mut token = sample_token_with_class(CapOp::Store, DataClass::Memory);
         sign_pop_into(&mut token, &dk, now_secs()); // sets the real device_key_hash
-        // overwrite the sig with one from `other` over the same preimage
+                                                    // overwrite the sig with one from `other` over the same preimage
         let nonce = token.client_nonce.clone().unwrap();
         token.client_sig = Some(
             other

@@ -880,11 +880,8 @@ mod tests {
     fn verify_cap_pop_accepts_valid_rejects_forged_and_wrong_op() {
         use agentkeys_core::device_crypto::DeviceKey;
         let dir = std::env::temp_dir();
-        let dk = DeviceKey::load_or_generate(
-            dir.join("ak-cap-pop-a.key").to_str().unwrap(),
-            true,
-        )
-        .unwrap();
+        let dk = DeviceKey::load_or_generate(dir.join("ak-cap-pop-a.key").to_str().unwrap(), true)
+            .unwrap();
         let dkh = dk.device_key_hash().unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -913,11 +910,9 @@ mod tests {
         // Forged: a valid signature from a DIFFERENT key (what a compromised
         // broker that lacks the user's K10 could at best produce) → rejected
         // because keccak(recovered) != device_key_hash. THIS is the SPOF fix.
-        let other = DeviceKey::load_or_generate(
-            dir.join("ak-cap-pop-b.key").to_str().unwrap(),
-            true,
-        )
-        .unwrap();
+        let other =
+            DeviceKey::load_or_generate(dir.join("ak-cap-pop-b.key").to_str().unwrap(), true)
+                .unwrap();
         let forged = other
             .cap_pop_sig(&operator, &actor, service, "store", "memory", &nonce, now)
             .unwrap();
@@ -930,7 +925,9 @@ mod tests {
         // Stale timestamp → rejected.
         let stale_ts = now.saturating_sub(CAP_POP_MAX_AGE_SECS + 60);
         let stale_sig = dk
-            .cap_pop_sig(&operator, &actor, service, "store", "memory", &nonce, stale_ts)
+            .cap_pop_sig(
+                &operator, &actor, service, "store", "memory", &nonce, stale_ts,
+            )
             .unwrap();
         let stale = cap_req_with(&dkh, stale_sig, nonce, stale_ts);
         assert!(matches!(

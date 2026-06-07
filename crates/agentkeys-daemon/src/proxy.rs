@@ -204,7 +204,8 @@ async fn handle_cap(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorBody {
-                error: "agent K10 device key not loaded (set AGENTKEYS_DEVICE_KEY_FILE)".to_string(),
+                error: "agent K10 device key not loaded (set AGENTKEYS_DEVICE_KEY_FILE)"
+                    .to_string(),
                 reason: "no_device_key",
             }),
         )
