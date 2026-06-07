@@ -80,38 +80,51 @@ test** above.
 
 ## Path A — Web app (the master authorizes through the UI)
 
-The parent-control web app is the master's console: it **vaults the key** and **pairs
-+ authorizes the agent** through the real daemon → broker/worker chain (no mock data).
+The parent-control web app is **only the master's console** — it vaults the key and
+claims an agent's pairing in the browser. It does **not** provision the agent device:
+the agent runs in the **sandbox** and needs the compiled `agentkeys` /
+`agentkeys-daemon` / `agentkeys-mcp-server` **cross-built for the sandbox's Linux arch
+and uploaded** there (the sandbox is aarch64/x86 Linux, not your Mac), plus Hermes —
+the same agent-side machinery Path B's harness provisions (its Phase 1 does the
+`target/sandbox-linux` cross-build in an arm64 rust container → `sbx_put` to the
+sandbox's `~/.local/bin`; see **Prerequisites**).
 
-1. **Start the stack** (builds the daemon + MCP if needed; sources
-   `scripts/operator-workstation.env` so the daemon inherits the cred/vault/memory
-   env — `VAULT_ROLE_ARN`, `AGENTKEYS_WORKER_CRED_URL`, …):
-   ```bash
-   bash dev.sh
-   #   [daemon] http://localhost:3114   [mcp] http://localhost:18088   [ui] http://localhost:3113
-   ```
-2. **Onboard the master** — open <http://localhost:3113> and complete onboarding
-   (email magic-link verify → on-chain master register). You land on the dashboard
-   with a live master session (the daemon starts **unseeded** — onboarding is what
-   authorizes its cap-mint).
-3. **Vault the LLM key** — go to **credentials**, enter `openrouter` + your OpenRouter
-   API key, **⊕ store**. This POSTs `/v1/master/credentials/store` → cap-mint
-   (cred-store) → per-actor STS → cred worker → encrypt + S3
-   `bots/<you>/credentials/openrouter.enc`. The table shows
-   `openrouter · ai-services · cred:openrouter`.
-4. **Pair + authorize the agent** — the agent (in the sandbox) shows a one-time
-   pairing code (`agentkeys-daemon --request-pairing`; this is the §10.2 **agent
-   side**). Go to **pairing** → paste the code + a label → **⊕ claim** → review the
-   device + requested scope (incl. `cred:openrouter` + `memory:<ns>`) → **accept
-   pairing · Touch ID**. That one approval submits `registerAgentDevice` + the scope
-   grants on-chain (#214 / arch §10.2).
-5. **Run the agent side** — the sandbox agent fetches its authorized key + memory and
-   wires Hermes; verify per **Verifying it worked**, below. (The fully-automated
-   agent side is the harness — Path B / the fastest test.)
+**Start the master's console:**
+```bash
+bash dev.sh   # [daemon] :3114   [mcp] :18088   [ui] :3113 — sources operator-workstation.env so the daemon has the cred/vault env
+```
+Open <http://localhost:3113> and complete onboarding (email magic-link → on-chain
+master register); you land on the dashboard with a live master session (the daemon
+starts unseeded — onboarding authorizes its cap-mint).
 
-> **What's wired vs. pending (be honest with yourself when testing):** the web
-> *credentials* vault (step 3) and the *pairing* authorize (step 4) are **real +
-> on-chain today**. The final hop — the agent fetching **this** vaulted key with
+**A. Vault the LLM key — fully standalone, no sandbox needed.** Go to **credentials**,
+enter `openrouter` + your key, **⊕ store** → `/v1/master/credentials/store` → cap-mint
+(cred-store) → per-actor STS → cred worker → S3 `bots/<you>/credentials/openrouter.enc`.
+The table shows `openrouter · ai-services · cred:openrouter`. This is the clean,
+self-contained web piece.
+
+**B. Pair + authorize an agent (#214) — needs the agent side in the sandbox.** The
+**pairing** page claims a one-time code the agent *shows*; for the agent to show one,
+its binaries must be in the sandbox and `agentkeys-daemon --request-pairing` running
+there. ⚠️ **The harness does NOT cleanly stage "binaries only":** `phase1-wire-demo.sh`'s
+Phase 1 cross-builds + uploads the binaries **and then pairs the agent via the CLI**
+(Phase P = `agentkeys agent claim`, which lives *inside* Phase 1) — so running it leaves
+the agent already CLI-paired, with nothing for the web page to claim. To drive the **web**
+claim end-to-end today you orchestrate the agent side by hand: cross-build + upload the
+binaries (Appendix B / the Phase-1 mechanism), run `agentkeys-daemon --request-pairing`
+in the sandbox to open a request, then **pairing** → paste the code → review scope
+(`cred:openrouter` + `memory:<ns>`) → **accept · Touch ID** (submits `registerAgentDevice`
++ the grants on-chain). A one-command web-pairing flow isn't wired yet.
+
+**C. Agent fetches + runs on the vault key.** The end-to-end (agent fetches its
+authorized key + memory, wires Hermes, runs) is proven headless by the **fastest test**
+(`cred-wire-demo.sh`); the operator-interactive agent side is **Path B**.
+
+> **What's wired vs. pending (be honest with yourself when testing):** the web **vault**
+> (A) is real + standalone today; the web **pairing claim** (B) is the real #214
+> master-side route but needs a manually-opened agent request (the harness CLI-pairs, so
+> it doesn't drive the web claim — and the binaries must be cross-built + uploaded to the
+> sandbox first). The final hop — the agent fetching **this** vaulted key with
 > **its own** (actor = agent) identity — needs the master to provision the key into
 > the **agent's** vault prefix (`bots/<agent>/…`), which needs dual bearers
 > (operator session for the cap-mint + agent session for the STS tag). That
