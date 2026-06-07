@@ -651,9 +651,19 @@ setup_build_cache() {
   have sccache || { warn "sccache not on PATH after install — plain cargo"; return 0; }
   export SCCACHE_DIR="${SCCACHE_DIR:-/var/cache/agentkeys-sccache}"
   sudo install -d -m 0777 "$SCCACHE_DIR" 2>/dev/null || true
+  # sccache runs as the (unprivileged) BUILD user, but `sudo install -d` made the dir
+  # root-owned, and sccache's shard subdirs inherit the FIRST writer's ownership. If an
+  # early root/sudo build populated them they're root:root 0750 — and the build user
+  # CANNOT store into them, so every compile MISSES and nothing ever caches (silently:
+  # the build still succeeds via direct rustc). Own the whole tree to the build user so
+  # sccache can always write (also re-heals an already root-owned cache from a past run).
+  sudo chown -R "$(id -un):$(id -gn)" "$SCCACHE_DIR" 2>/dev/null || true
   export RUSTC_WRAPPER; RUSTC_WRAPPER="$(command -v sccache)"
+  # Restart the server so it adopts THIS SCCACHE_DIR — an already-running server (from a
+  # prior shell/build) keeps its OLD cache location, another way the cache silently misses.
+  sccache --stop-server >/dev/null 2>&1 || true
   sccache --start-server >/dev/null 2>&1 || true
-  log "sccache enabled (RUSTC_WRAPPER=$RUSTC_WRAPPER, SCCACHE_DIR=$SCCACHE_DIR)"
+  log "sccache enabled (RUSTC_WRAPPER=$RUSTC_WRAPPER, SCCACHE_DIR=$SCCACHE_DIR, owner=$(id -un))"
 }
 setup_build_cache
 
