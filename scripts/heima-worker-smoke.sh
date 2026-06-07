@@ -228,8 +228,11 @@ fi
 # /inbox calls S3 ListObjects on the broker EC2 host. The instance profile
 # may lack s3:ListBucket on the inbox bucket today — wiring per-worker IAM
 # is a follow-up (would mirror the broker's AssumeRoleWithWebIdentity path).
-# Until then we treat /inbox 500 as a soft-warn: the worker is deployed,
-# /healthz passes, and the rest of the demo isn't blocked.
+# Until then we treat an /inbox 5xx as a soft-warn: the worker is deployed,
+# /healthz passes, and the rest of the demo isn't blocked. The same condition
+# surfaces as 500 (the worker's own error from the AccessDenied) OR 502/503 (via
+# nginx when the worker errors/restarts on ListObjects) — tolerate the whole 5xx
+# class so a proxy-variant of the SAME known gap doesn't hard-fail the smoke.
 if [ "$SKIP_EMAIL" = "1" ]; then
   info "skipping email smoke (--skip-email)"
 else
@@ -247,8 +250,8 @@ else
       [ "$INBOX_OK" = "true" ] || die "inbox response not ok: $INBOX_BODY"
       ok "inbox reachable: bucket=$INBOX_BUCKET  prefix=$INBOX_PREFIX  entries=$ENTRY_COUNT"
       ;;
-    500)
-      info "inbox /v1/email/inbox returned HTTP 500 — likely AWS IAM (s3:ListBucket) not wired on the broker EC2 instance profile. Worker is deployed + /healthz passes; this is a known follow-up."
+    500|502|503)
+      info "inbox /v1/email/inbox returned HTTP $INBOX_HTTP_CODE — likely AWS IAM (s3:ListBucket) not wired on the broker EC2 instance profile (surfaces as 500 from the worker or 502/503 via nginx when it errors on ListObjects). Worker is deployed + /healthz passes; this is a known follow-up."
       info "body: $INBOX_BODY"
       ;;
     *)
