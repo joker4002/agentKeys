@@ -12,7 +12,7 @@
 
 ## Procedure (idempotent; each phase pre-checks + short-circuits)
 
-Run via the new orchestrator `scripts/heima-cutover-account-auth.sh` (wired into `setup-heima.sh` as a NEW, explicitly-opt-in step — it is NOT part of a plain `setup-heima.sh` run because it is destructive; gate it behind `--cutover-account-auth`). All addresses are env-namespaced (`*_HEIMA` / `*_HEIMA_PASEO`) via `env_set`; nothing hardcoded.
+Run via the new orchestrator `scripts/heima-cutover-account-auth.sh`. It is a **directly-callable surgical helper** — classified with the existing destructive `heima-*-revoke` / `heima-k3-rotate` helpers under the three-entry-points exemption ("tools, run on their own"), NOT wired into `setup-heima.sh`'s plain flow (a plain run must never reset on-chain state). All addresses are env-namespaced (`*_HEIMA` / `*_HEIMA_PASEO`) via `env_set`; nothing hardcoded.
 
 | Phase | Action | Idempotency check (skip when…) |
 |---|---|---|
@@ -37,7 +37,7 @@ A re-run with both present logs `skip already-cut-over` and exits 0. `--force-cu
 
 Only **one** new script is needed — every other phase reuses an existing idempotent helper:
 
-- `scripts/heima-cutover-account-auth.sh` — the Phase 0/1/2/5 orchestrator (idempotent, `ok`/`skip`/`fail` logging, `--force-cutover`, env-namespaced, no hardcoded values). Wired into `setup-heima.sh` behind `--cutover-account-auth` (destructive ⇒ opt-in, NOT in the plain flow — the one allowed exception to "plain = prod" because a redeploy resets state).
+- `scripts/heima-cutover-account-auth.sh` ✅ **written** — the Phase 0/1/2 orchestrator (idempotent via the `CUTOVER_DONE_<profile>` marker + the live `setScope`-selector `d8e9e3c6` bytecode probe; `ok`/`skip`/`fail` logging; `--yes` gate on the destructive redeploy; `--force-cutover`; env-namespaced; no hardcoded values; `bash -n` clean). A **directly-callable surgical helper** (the three-entry-points exemption for destructive `heima-*-revoke`/`-rotate` tools) — NOT in `setup-heima.sh`'s plain flow. Phase 1 delegates to `FORCE_DEPLOY=1 heima-bring-up.sh`; Phase 2 only *checks* the factory (the E5 `recover()` redeploy is a separate manual concern, not needed for accept). Phase 5 (the `heima-scope-set.sh` `setScopeWithWebauthn`→`setScope` + arch.md edits) are repo commits, printed as follow-ups by the script, not done at runtime.
 - Phase 3 reuses **`erc4337-register-master.sh`** (`build`+`submit`) — already deploys the account + funds + registers-as-account.
 - Phase 4 reuses `heima-agent-create.sh` / `heima-scope-set.sh` (idempotent already).
 
