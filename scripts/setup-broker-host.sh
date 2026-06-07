@@ -657,8 +657,43 @@ setup_build_cache() {
 }
 setup_build_cache
 
+# ─── Build-skip guard — the real fix for "re-deploy recompiles the workspace" ──
+# cargo's freshness check is MTIME-based. The --ref git step (`git checkout -f` /
+# `git reset --hard`) rewrites source-file mtimes to "now" whenever origin advances,
+# so cargo re-fingerprints + recompiles the whole workspace (agentkeys-types → EVERY
+# agentkeys-worker-*) even when the bytes are identical — exactly the recompile an
+# operator sees on a re-deploy. cargo can't tell an unchanged-content rewrite from a
+# real change; we can, by COMMIT. Stamp the built commit; on a re-run, if HEAD + the
+# worker-set are unchanged, the tree is clean, and every binary is present, the prior
+# build is authoritative → skip the cargo builds (the install/restart steps below
+# still run, idempotently). Force a rebuild with `rm target/release/.agentkeys-build-commit`
+# or by touching any source. (sccache — set up above — only makes a recompile that DOES
+# run fast; this guard avoids the recompile entirely when nothing changed.)
+BUILD_STAMP="$REPO_ROOT/target/release/.agentkeys-build-commit"
+build_stamp_value() {
+  local head; head="$( cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null )" || return 1
+  printf '%s workers=%s' "$head" "$WITH_WORKERS"
+}
+SKIP_SERVER_BUILD=0
+if have git; then
+  _want_stamp="$(build_stamp_value || true)"
+  _dirty="$( cd "$REPO_ROOT" && git status --porcelain 2>/dev/null | head -1 )"
+  _bins_ok=1
+  _req_bins=(agentkeys-mock-server agentkeys-broker-server)
+  [[ "$WITH_WORKERS" == "yes" ]] && _req_bins+=(agentkeys-worker-audit agentkeys-worker-email \
+    agentkeys-worker-creds agentkeys-worker-memory agentkeys-worker-config agentkeys-worker-classify)
+  for _b in "${_req_bins[@]}"; do [[ -x "$REPO_ROOT/target/release/$_b" ]] || _bins_ok=0; done
+  if [[ -n "$_want_stamp" && -z "$_dirty" && "$_bins_ok" == 1 \
+        && -f "$BUILD_STAMP" && "$(cat "$BUILD_STAMP" 2>/dev/null)" == "$_want_stamp" ]]; then
+    SKIP_SERVER_BUILD=1
+    log "skip build — binaries already built at this commit ($_want_stamp); HEAD unchanged + tree clean + all binaries present. Skipping cargo (it would recompile the workspace from the git step's mtime churn, not a real change)."
+  fi
+fi
+
+if [[ "$SKIP_SERVER_BUILD" != 1 ]]; then
 log "Building agentkeys-mock-server (release)"
 ( cd "$REPO_ROOT" && cargo build --release --locked -p agentkeys-mock-server )
+fi
 
 # Build agentkeys-broker-server with auth-email-link, asserting via
 # cargo's --message-format=json output that the feature is actually
@@ -713,6 +748,7 @@ assert_feature_enabled() {
   esac
 }
 
+if [[ "$SKIP_SERVER_BUILD" != 1 ]]; then
 build_broker_with_features
 
 log "Verifying broker binary has auth-email-link compiled in"
@@ -733,6 +769,7 @@ if ! assert_feature_enabled; then
      5. cat $REPO_ROOT/Cargo.lock | head -5  (committed lockfile drift?)
    Then file a repro for the issue tracker."
   fi
+fi
 fi
 
 # Belt-and-suspenders: nm symbol-table check (more reliable than strings,
@@ -794,7 +831,7 @@ done
 # ─── 2b. Build service workers (audit + email + creds + memory + config) ─────
 # Co-located on the broker host for dev (CLAUDE.md "for production, we will
 # isolate all the services"). One cargo invocation builds all 5 in parallel.
-if [[ "$WITH_WORKERS" == "yes" ]]; then
+if [[ "$WITH_WORKERS" == "yes" && "$SKIP_SERVER_BUILD" != 1 ]]; then
   log "Building service workers (audit + email + creds + memory + config + classify, release)"
   ( cd "$REPO_ROOT" && cargo build --release --locked \
       -p agentkeys-worker-audit \
@@ -803,6 +840,14 @@ if [[ "$WITH_WORKERS" == "yes" ]]; then
       -p agentkeys-worker-memory \
       -p agentkeys-worker-config \
       -p agentkeys-worker-classify )
+fi
+
+# Stamp the built commit so an unchanged re-deploy skips the rebuild (see the
+# build-skip guard above). Written only after a REAL build (mock + broker + workers
+# all succeeded above); a skipped run leaves the prior stamp intact.
+if [[ "$SKIP_SERVER_BUILD" != 1 ]] && have git; then
+  build_stamp_value > "$BUILD_STAMP" 2>/dev/null \
+    && log "stamped build commit → .agentkeys-build-commit ($(cat "$BUILD_STAMP" 2>/dev/null))" || true
 fi
 
 # sccache hit/miss readout — visible proof the compiler cache is working. On a
