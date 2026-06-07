@@ -2137,7 +2137,9 @@ async fn register_pairing(
     // script otherwise surfaced as a confusing 502 on `accept pairing`.)
     let master_path = std::path::Path::new(&master_script);
     let agent_script_candidates = [
-        master_path.parent().map(|d| d.join("heima-agent-create.sh")),
+        master_path
+            .parent()
+            .map(|d| d.join("heima-agent-create.sh")),
         master_path
             .parent()
             .and_then(|d| d.parent())
