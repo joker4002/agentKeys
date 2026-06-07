@@ -2485,9 +2485,7 @@ async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, 
                     (one passkey prompt) to restore it (no re-onboarding needed)"
                     .into());
             }
-            return Err(
-                "real chain: no local master session — complete onboarding first".into(),
-            );
+            return Err("real chain: no local master session — complete onboarding first".into());
         }
     };
     if session.omni.is_empty() || session.j1.is_empty() {
@@ -2506,15 +2504,16 @@ async fn resolve_session_coords(state: &UiBridgeState) -> Result<SessionCoords, 
     //   3. derive keccak(operator_omni) — the deterministic SidecarRegistry key
     //      (issue #220), so a restart needs neither a cached register nor the flag.
     //      The on-chain binding is the source of truth; this reproduces its key.
-    let device_key_hash = match state.registered_master.read().await.as_ref() {
-        Some(rm) => rm.device_key_hash.clone(),
-        None => match state.master_device_key_hash.clone() {
-            Some(h) => h,
-            None => agentkeys_core::device_crypto::device_key_hash_from_omni(&omni).map_err(
-                |e| format!("real chain: cannot derive master device hash from omni: {e}"),
-            )?,
-        },
-    };
+    let device_key_hash =
+        match state.registered_master.read().await.as_ref() {
+            Some(rm) => rm.device_key_hash.clone(),
+            None => match state.master_device_key_hash.clone() {
+                Some(h) => h,
+                None => agentkeys_core::device_crypto::device_key_hash_from_omni(&omni).map_err(
+                    |e| format!("real chain: cannot derive master device hash from omni: {e}"),
+                )?,
+            },
+        };
     Ok(SessionCoords {
         broker,
         region: state.region.clone(),
@@ -4012,9 +4011,10 @@ mod tests {
             j1: "eyJ.fake.jwt".into(),
             wallet: "0xWALLET".into(),
         });
-        let coords = resolve_session_coords(&state).await.expect("coords resolve");
-        let expected =
-            agentkeys_core::device_crypto::device_key_hash_from_omni(&omni).unwrap();
+        let coords = resolve_session_coords(&state)
+            .await
+            .expect("coords resolve");
+        let expected = agentkeys_core::device_crypto::device_key_hash_from_omni(&omni).unwrap();
         assert_eq!(coords.device_key_hash, expected);
         assert_eq!(coords.omni, omni);
     }
@@ -4048,7 +4048,10 @@ mod tests {
     async fn onboarding_state_reports_session_signal() {
         let state = make_state();
         // none initially.
-        assert_eq!(onboarding_state(State(state.clone())).await.0.session, "none");
+        assert_eq!(
+            onboarding_state(State(state.clone())).await.0.session,
+            "none"
+        );
         // Persisted but no live session ⇒ "expired" (drives one passkey re-auth).
         *state.master_session.write().await =
             Some(persisted_record(&format!("0x{}", "22".repeat(32)), 1));
@@ -4075,7 +4078,9 @@ mod tests {
         let store = MasterSessionStore::new(tmp.path().join(".agentkeys"));
         let omni = format!("0x{}", "33".repeat(32));
         let far_future = master_session::now_unix() + 10_000;
-        store.save(&persisted_record(&omni, far_future)).expect("save");
+        store
+            .save(&persisted_record(&omni, far_future))
+            .expect("save");
 
         let state = make_state_real(Some(store));
         rehydrate_master_session(&state).await;

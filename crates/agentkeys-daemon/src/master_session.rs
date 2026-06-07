@@ -112,7 +112,8 @@ impl MasterSessionStore {
     }
 
     fn session_dir(&self, key: &str) -> PathBuf {
-        self.base.join(format!("{DAEMON_DIR_PREFIX}{}", safe_key(key)))
+        self.base
+            .join(format!("{DAEMON_DIR_PREFIX}{}", safe_key(key)))
     }
 
     fn session_path(&self, key: &str) -> PathBuf {
@@ -350,7 +351,10 @@ mod tests {
     fn j1_valid_at_false_when_j1_empty() {
         let mut s = sample("0xW", 0, u64::MAX);
         s.j1 = String::new();
-        assert!(!s.j1_valid_at(0), "empty J1 is never valid even with a far exp");
+        assert!(
+            !s.j1_valid_at(0),
+            "empty J1 is never valid even with a far exp"
+        );
     }
 
     #[test]
@@ -373,7 +377,10 @@ mod tests {
     #[test]
     fn j1_expiry_for_falls_back_to_default_ttl() {
         // No parseable exp → created_at + 18000.
-        assert_eq!(j1_expiry_for("not.a.jwt", 1_000), 1_000 + DEFAULT_J1_TTL_SECS);
+        assert_eq!(
+            j1_expiry_for("not.a.jwt", 1_000),
+            1_000 + DEFAULT_J1_TTL_SECS
+        );
     }
 
     #[test]
