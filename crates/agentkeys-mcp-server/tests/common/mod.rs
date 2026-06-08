@@ -8,7 +8,8 @@ use std::sync::Mutex;
 
 use agentkeys_mcp_server::backend::{
     AuditAppendInput, AuditAppendResult, Backend, BackendError, CapMintOp, CapMintRequest,
-    CapToken, MemoryGetInput, MemoryGetResult, MemoryPutInput, MemoryPutResult, RevokeResult,
+    CapToken, CredFetchInput, CredFetchResult, CredStoreInput, CredStoreResult, MemoryGetInput,
+    MemoryGetResult, MemoryPutInput, MemoryPutResult, RevokeResult,
 };
 
 #[derive(Default)]
@@ -20,6 +21,8 @@ pub struct MockBackend {
 struct MockInner {
     /// (actor_omni, namespace) → plaintext
     memory: HashMap<(String, String), String>,
+    /// (actor_omni, service) → plaintext
+    credentials: HashMap<(String, String), String>,
     cap_mints: Vec<(CapMintOp, CapMintRequest)>,
     audit: Vec<AuditAppendInput>,
     revokes: Vec<String>,
@@ -144,6 +147,69 @@ impl Backend for MockBackend {
                 content.as_bytes(),
             ),
             namespace: input.namespace,
+        })
+    }
+
+    async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError> {
+        let payload = input.cap.get("payload").unwrap_or(&Value::Null);
+        let actor = payload
+            .get("actor_omni")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let service = payload
+            .get("service")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let plaintext = String::from_utf8(
+            base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &input.plaintext_b64,
+            )
+            .map_err(|e| BackendError::Parse(e.to_string()))?,
+        )
+        .map_err(|e| BackendError::Parse(e.to_string()))?;
+
+        let mut g = self.inner.lock().unwrap();
+        g.credentials
+            .insert((actor.clone(), service.clone()), plaintext);
+        Ok(CredStoreResult {
+            ok: true,
+            s3_key: format!("bots/{actor}/credentials/{service}.enc"),
+            envelope_size: input.plaintext_b64.len(),
+        })
+    }
+
+    async fn cred_fetch(&self, input: CredFetchInput) -> Result<CredFetchResult, BackendError> {
+        let payload = input.cap.get("payload").unwrap_or(&Value::Null);
+        let actor = payload
+            .get("actor_omni")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let service = payload
+            .get("service")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let g = self.inner.lock().unwrap();
+        let content = g
+            .credentials
+            .get(&(actor, service.clone()))
+            .cloned()
+            .ok_or_else(|| BackendError::Http {
+                status: 404,
+                body: format!("no credential for service `{service}`"),
+            })?;
+
+        Ok(CredFetchResult {
+            ok: true,
+            plaintext_b64: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                content.as_bytes(),
+            ),
         })
     }
 

@@ -173,7 +173,23 @@ pub struct ConfigGetResp {
     pub plaintext_b64: String,
 }
 
-// ── cred worker (`/v1/cred/fetch`) — #216 agent-side vaulted-key fetch ────────
+// ── cred worker (`/v1/cred/{store,fetch}`) — agent-side vaulted-key ops ──────
+
+/// Cred-worker `/v1/cred/store` request body. Mirrors
+/// `agentkeys_worker_creds::handlers::StoreRequest` — the credential `service`
+/// rides INSIDE the cap payload (it can't be spoofed at the body level).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreBody {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CredStoreResp {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+}
 
 /// Cred-worker `/v1/cred/fetch` request body. Mirrors
 /// `agentkeys_worker_creds::handlers::FetchRequest` — just the signed cap; the
@@ -247,6 +263,19 @@ pub struct MemoryGetResult {
     pub ok: bool,
     pub plaintext_b64: String,
     pub namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreInput {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreResult {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

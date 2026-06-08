@@ -18,8 +18,8 @@
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    AuditAppendV2, BrokerCapRequest, ConfigGetBody, ConfigPutBody, MemoryGetBody, MemoryPutBody,
-    ENVELOPE_VERSION,
+    AuditAppendV2, BrokerCapRequest, ConfigGetBody, ConfigPutBody, CredFetchBody, CredStoreBody,
+    MemoryGetBody, MemoryPutBody, ENVELOPE_VERSION,
 };
 
 /// One canonical fixture: the on-disk file stem + the sample body.
@@ -55,6 +55,13 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
     let config_get = ConfigGetBody {
         cap: json!("<cap-token>"),
     };
+    let cred_store = CredStoreBody {
+        cap: json!("<cap-token>"),
+        plaintext_b64: "<base64-plaintext>".into(),
+    };
+    let cred_fetch = CredFetchBody {
+        cap: json!("<cap-token>"),
+    };
     let audit = AuditAppendV2 {
         version: ENVELOPE_VERSION,
         ts_unix: 0,
@@ -86,6 +93,14 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
         Fixture {
             name: "config_get_body",
             body: serde_json::to_value(&config_get).expect("config_get serializes"),
+        },
+        Fixture {
+            name: "cred_store_body",
+            body: serde_json::to_value(&cred_store).expect("cred_store serializes"),
+        },
+        Fixture {
+            name: "cred_fetch_body",
+            body: serde_json::to_value(&cred_fetch).expect("cred_fetch serializes"),
         },
         Fixture {
             name: "audit_append_v2",
@@ -155,6 +170,16 @@ mod tests {
     #[test]
     fn config_get_body_keys_frozen() {
         assert_eq!(keys_of("config_get_body"), vec!["cap"]);
+    }
+
+    #[test]
+    fn cred_store_body_keys_frozen() {
+        assert_eq!(keys_of("cred_store_body"), vec!["cap", "plaintext_b64"]);
+    }
+
+    #[test]
+    fn cred_fetch_body_keys_frozen() {
+        assert_eq!(keys_of("cred_fetch_body"), vec!["cap"]);
     }
 
     #[test]

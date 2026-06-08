@@ -387,6 +387,14 @@ enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    #[command(
+        about = "Agent-owned credential helpers (real cred worker)",
+        long_about = "Direct agent-owned credential operations against the AgentKeys MCP server. `store` writes a service credential using the sandbox-held agent session; `fetch` reads it back. This is separate from the legacy master-side `store/read` commands."
+    )]
+    Cred {
+        #[command(subcommand)]
+        action: CredAction,
+    },
     /// Agent-side device bootstrap (interim §10.2 — full ceremony: issue #144).
     Agent {
         #[command(subcommand)]
@@ -747,6 +755,39 @@ enum MemoryAction {
         actor: Option<String>,
         #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
         operator: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CredAction {
+    /// Store this agent's own service credential through the real cred worker.
+    #[command(about = "Store an agent-owned service credential via agentkeys.cred.store")]
+    Store {
+        /// Service name to store (e.g. `openrouter`).
+        #[arg(long)]
+        service: String,
+        /// Plaintext credential value to store.
+        #[arg(long)]
+        content: String,
+        #[arg(long, env = "AGENTKEYS_MCP_URL")]
+        mcp_url: Option<String>,
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
+        vendor_token: Option<String>,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor: Option<String>,
+    },
+    /// Fetch this agent's own service credential through the real cred worker.
+    #[command(about = "Fetch an agent-owned service credential via agentkeys.cred.fetch")]
+    Fetch {
+        /// Service name to fetch (e.g. `openrouter`).
+        #[arg(long)]
+        service: String,
+        #[arg(long, env = "AGENTKEYS_MCP_URL")]
+        mcp_url: Option<String>,
+        #[arg(long, env = "AGENTKEYS_MCP_VENDOR_TOKEN")]
+        vendor_token: Option<String>,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor: Option<String>,
     },
 }
 
@@ -1351,6 +1392,38 @@ async fn main() {
                     vendor_token.clone(),
                     actor.clone(),
                     operator.clone(),
+                )
+                .await
+            }
+        },
+        Commands::Cred { action } => match action {
+            CredAction::Store {
+                service,
+                content,
+                mcp_url,
+                vendor_token,
+                actor,
+            } => {
+                agentkeys_cli::hook::cred_store(
+                    service,
+                    content,
+                    mcp_url.clone(),
+                    vendor_token.clone(),
+                    actor.clone(),
+                )
+                .await
+            }
+            CredAction::Fetch {
+                service,
+                mcp_url,
+                vendor_token,
+                actor,
+            } => {
+                agentkeys_cli::hook::cred_fetch(
+                    service,
+                    mcp_url.clone(),
+                    vendor_token.clone(),
+                    actor.clone(),
                 )
                 .await
             }

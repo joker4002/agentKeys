@@ -24,7 +24,8 @@ use agentkeys_backend_client::BackendClient;
 // existing `crate::backend::CapMintOp` / `BackendError` / … paths keep working.
 pub use agentkeys_backend_client::{
     AuditAppendInput, AuditAppendResult, BackendError, CapMintOp, CapMintRequest, CapToken,
-    MemoryGetInput, MemoryGetResult, MemoryPutInput, MemoryPutResult, RevokeResult,
+    CredFetchInput, CredFetchResult, CredStoreInput, CredStoreResult, MemoryGetInput,
+    MemoryGetResult, MemoryPutInput, MemoryPutResult, RevokeResult,
 };
 
 #[async_trait]
@@ -41,6 +42,10 @@ pub trait Backend: Send + Sync {
     async fn memory_put(&self, input: MemoryPutInput) -> Result<MemoryPutResult, BackendError>;
 
     async fn memory_get(&self, input: MemoryGetInput) -> Result<MemoryGetResult, BackendError>;
+
+    async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError>;
+
+    async fn cred_fetch(&self, input: CredFetchInput) -> Result<CredFetchResult, BackendError>;
 
     async fn audit_append(
         &self,
@@ -79,6 +84,14 @@ impl Backend for BackendClient {
 
     async fn memory_get(&self, input: MemoryGetInput) -> Result<MemoryGetResult, BackendError> {
         self.memory_get(input).await
+    }
+
+    async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError> {
+        self.cred_store(input).await
+    }
+
+    async fn cred_fetch(&self, input: CredFetchInput) -> Result<CredFetchResult, BackendError> {
+        self.cred_fetch(input).await
     }
 
     async fn audit_append(

@@ -135,8 +135,8 @@ async fn tools_list_works_through_http() {
     let tools = body["result"]["tools"].as_array().expect("tools array");
     assert_eq!(
         tools.len(),
-        7,
-        "should expose 7 active tools (M4 schema-only stubs are dispatchable via tools/call but not advertised in tools/list — see tools/mod.rs)"
+        9,
+        "should expose 9 active tools (M4 schema-only stubs are dispatchable via tools/call but not advertised in tools/list — see tools/mod.rs)"
     );
 
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
@@ -144,6 +144,8 @@ async fn tools_list_works_through_http() {
         "agentkeys.identity.whoami",
         "agentkeys.memory.get",
         "agentkeys.memory.put",
+        "agentkeys.cred.fetch",
+        "agentkeys.cred.store",
         "agentkeys.permission.check",
         "agentkeys.cap.mint",
         "agentkeys.cap.revoke",

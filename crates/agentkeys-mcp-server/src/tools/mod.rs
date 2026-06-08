@@ -1,4 +1,5 @@
-//! Tool registry — the 7 active + 3 schema-only tools listed in issue #107.
+//! Tool registry — active tools plus the M4 schema-only stubs listed in issue
+//! #107.
 //!
 //! Tool naming follows the issue verbatim: dotted `agentkeys.<area>.<verb>`.
 //! Each handler returns a `Value` that gets wrapped in the MCP `tools/call`
@@ -6,6 +7,7 @@
 
 pub mod audit;
 pub mod cap;
+pub mod cred;
 pub mod identity;
 pub mod memory;
 pub mod permission;
@@ -17,6 +19,8 @@ use serde_json::json;
 pub const TOOL_IDENTITY_WHOAMI: &str = "agentkeys.identity.whoami";
 pub const TOOL_MEMORY_GET: &str = "agentkeys.memory.get";
 pub const TOOL_MEMORY_PUT: &str = "agentkeys.memory.put";
+pub const TOOL_CRED_FETCH: &str = "agentkeys.cred.fetch";
+pub const TOOL_CRED_STORE: &str = "agentkeys.cred.store";
 pub const TOOL_PERMISSION_CHECK: &str = "agentkeys.permission.check";
 pub const TOOL_CAP_MINT: &str = "agentkeys.cap.mint";
 pub const TOOL_CAP_REVOKE: &str = "agentkeys.cap.revoke";
@@ -86,6 +90,33 @@ Group by topic via `namespace`.".into(),
                     "content": {"type": "string", "description": "The note in natural language. 笔记内容。"}
                 },
                 "required": ["namespace", "content"]
+            }),
+        },
+        ToolDescriptor {
+            name: TOOL_CRED_STORE.into(),
+            description: "Store this agent's own service credential in the AgentKeys vault. \
+保存当前智能体自己的服务凭证。Use only for agent-owned credentials; the credential is scoped by actor identity and service.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "description": "Service id, e.g. 'openrouter'."},
+                    "content": {"type": "string", "description": "Credential plaintext to store."},
+                    "actor": {"type": "string", "description": "Optional. Server uses configured default."}
+                },
+                "required": ["service", "content"]
+            }),
+        },
+        ToolDescriptor {
+            name: TOOL_CRED_FETCH.into(),
+            description: "Fetch this agent's own service credential from the AgentKeys vault. \
+读取当前智能体自己的服务凭证。Returns plaintext under `content` after worker-side cap verification.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "description": "Service id, e.g. 'openrouter'."},
+                    "actor": {"type": "string", "description": "Optional. Server uses configured default."}
+                },
+                "required": ["service"]
             }),
         },
         ToolDescriptor {

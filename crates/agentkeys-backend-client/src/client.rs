@@ -13,8 +13,9 @@ use reqwest::Client;
 use crate::protocol::{
     AuditAppendInput, AuditAppendResult, AuditAppendV2, AuditAppendV2Resp, BrokerCapRequest,
     CapMintOp, CapMintRequest, CapToken, CredFetchBody, CredFetchInput, CredFetchResp,
-    CredFetchResult, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody,
-    MemoryPutInput, MemoryPutResp, MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
+    CredFetchResult, CredStoreBody, CredStoreInput, CredStoreResp, CredStoreResult, MemoryGetBody,
+    MemoryGetInput, MemoryGetResp, MemoryGetResult, MemoryPutBody, MemoryPutInput, MemoryPutResp,
+    MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -275,6 +276,42 @@ impl BackendClient {
             ok: parsed.ok,
             plaintext_b64: parsed.plaintext_b64,
             namespace: input.namespace,
+        })
+    }
+
+    /// `POST /v1/cred/store` — encrypt + store a credential's plaintext. The
+    /// `cap` (a cred-store cap with the `service` signed inside) is minted
+    /// separately via [`Self::cap_mint`]; this forwards per-actor STS creds
+    /// under the VAULT role so the cred worker's S3 PUT is scoped to
+    /// `bots/<actor>/credentials/<service>.enc`.
+    pub async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError> {
+        let url = format!("{}/v1/cred/store", self.cred()?);
+        let mut req = self.client.post(&url).json(&CredStoreBody {
+            cap: input.cap,
+            plaintext_b64: input.plaintext_b64,
+        });
+        if let Some(headers) = self.sts_headers(self.vault_role_arn.as_ref()).await? {
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(BackendError::Http { status, body });
+        }
+        let parsed: CredStoreResp = resp
+            .json()
+            .await
+            .map_err(|e| BackendError::Parse(e.to_string()))?;
+        Ok(CredStoreResult {
+            ok: parsed.ok,
+            s3_key: parsed.s3_key,
+            envelope_size: parsed.envelope_size,
         })
     }
 

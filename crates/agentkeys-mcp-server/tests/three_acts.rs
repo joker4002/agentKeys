@@ -200,6 +200,68 @@ async fn act_3_revoke_then_audit_append_records_event() {
 }
 
 #[tokio::test]
+async fn agent_owned_cred_store_then_fetch_roundtrips() {
+    let backend = Arc::new(MockBackend::new());
+    let server = server_with(backend.clone());
+
+    let resp = server
+        .dispatch(
+            &caller(),
+            "agent-session-bearer",
+            call_tool(
+                "agentkeys.cred.store",
+                json!({
+                    "actor": ACTOR,
+                    "service": "openrouter",
+                    "content": "sk-agent-owned",
+                    "device_key_hash": DEVICE_KEY_HASH
+                }),
+            ),
+        )
+        .await;
+    assert!(resp.error.is_none(), "cred.store err: {:?}", resp.error);
+
+    let resp = server
+        .dispatch(
+            &caller(),
+            "agent-session-bearer",
+            call_tool(
+                "agentkeys.cred.fetch",
+                json!({
+                    "actor": ACTOR,
+                    "service": "openrouter",
+                    "device_key_hash": DEVICE_KEY_HASH
+                }),
+            ),
+        )
+        .await;
+    assert!(resp.error.is_none(), "cred.fetch err: {:?}", resp.error);
+    let inner = &resp.result.unwrap()["structuredContent"];
+    assert_eq!(inner["service"], "openrouter");
+    assert_eq!(inner["content"], "sk-agent-owned");
+
+    let mints = backend.cap_mints();
+    assert!(
+        mints.iter().any(|(op, req)| {
+            matches!(op, agentkeys_mcp_server::backend::CapMintOp::CredStore)
+                && req.operator_omni == ACTOR
+                && req.actor_omni == ACTOR
+                && req.service == "openrouter"
+        }),
+        "expected self-owned CredStore cap mint, got {mints:?}"
+    );
+    assert!(
+        mints.iter().any(|(op, req)| {
+            matches!(op, agentkeys_mcp_server::backend::CapMintOp::CredFetch)
+                && req.operator_omni == ACTOR
+                && req.actor_omni == ACTOR
+                && req.service == "openrouter"
+        }),
+        "expected self-owned CredFetch cap mint, got {mints:?}"
+    );
+}
+
+#[tokio::test]
 async fn cap_mint_memory_get_returns_cap_for_worker() {
     let backend = Arc::new(MockBackend::new());
     let server = server_with(backend.clone());

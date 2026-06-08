@@ -359,6 +359,54 @@ pub async fn memory_put(
     Ok(result.to_string())
 }
 
+/// `agentkeys cred store --service <svc> --content <secret>` — write an
+/// agent-owned credential via `agentkeys.cred.store`. The MCP tool mints a
+/// cred-store cap as the agent itself (`operator_omni == actor_omni`), then
+/// sends the plaintext to the cred worker through the vault-role STS relay.
+pub async fn cred_store(
+    service: &str,
+    content: &str,
+    mcp_url: Option<String>,
+    vendor_token: Option<String>,
+    actor: Option<String>,
+) -> Result<String> {
+    let client = HookClient::resolve(mcp_url, vendor_token, actor, None);
+    let mut args = json!({"service": service, "content": content});
+    if !client.actor.is_empty() {
+        args["actor"] = json!(client.actor);
+    }
+    let result = client
+        .call_tool("agentkeys.cred.store", args)
+        .await
+        .context("cred.store")?;
+    Ok(result.to_string())
+}
+
+/// `agentkeys cred fetch --service <svc>` — fetch an agent-owned credential via
+/// `agentkeys.cred.fetch`. Plaintext is returned to stdout to support shell
+/// roundtrip checks; callers should avoid logging real secrets.
+pub async fn cred_fetch(
+    service: &str,
+    mcp_url: Option<String>,
+    vendor_token: Option<String>,
+    actor: Option<String>,
+) -> Result<String> {
+    let client = HookClient::resolve(mcp_url, vendor_token, actor, None);
+    let mut args = json!({"service": service});
+    if !client.actor.is_empty() {
+        args["actor"] = json!(client.actor);
+    }
+    let result = client
+        .call_tool("agentkeys.cred.fetch", args)
+        .await
+        .context("cred.fetch")?;
+    if let Some(content) = result.get("content").and_then(|v| v.as_str()) {
+        Ok(content.to_string())
+    } else {
+        Ok(result.to_string())
+    }
+}
+
 /// Extract the `content` field of an `agentkeys.memory.get` result. The
 /// MCP tool layer already base64-decodes the worker's `plaintext_b64`
 /// into a UTF-8 `content` string (see

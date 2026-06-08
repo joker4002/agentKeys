@@ -25,10 +25,13 @@ both the fixture `--check` (these files match the Rust types) and the bash gate
 | `memory_get_body.json` | `MemoryGetBody` | `POST /v1/memory/get` |
 | `config_put_body.json` | `ConfigPutBody` | `POST /v1/config/put` (#201) |
 | `config_get_body.json` | `ConfigGetBody` | `POST /v1/config/get` (#201) |
+| `cred_store_body.json` | `CredStoreBody` | `POST /v1/cred/store` |
+| `cred_fetch_body.json` | `CredFetchBody` | `POST /v1/cred/fetch` |
 | `audit_append_v2.json` | `AuditAppendV2` | `POST /v1/audit/append/v2` |
 
-> **Gate note:** `config_put_body` (`{cap, plaintext_b64}`) and `config_get_body`
-> (`{cap}`) are key-set-identical to the cred-worker store/fetch bodies, so the
+> **Gate note:** `config_put_body` / `cred_store_body` (`{cap, plaintext_b64}`)
+> and `config_get_body` / `cred_fetch_body` (`{cap}`) share key sets, so the
 > `check-backend-fixture-drift.sh` **pass-2** auto-detector deliberately excludes
-> them (it would false-positive on every cred `{cap}` body). Config bodies are
-> gated via **explicit `# @backend-fixture: config_*` annotation** (pass 1) only.
+> config bodies (it would false-positive on every cred `{cap}` body). Config bodies
+> are gated via **explicit `# @backend-fixture: config_*` annotation** (pass 1)
+> only.

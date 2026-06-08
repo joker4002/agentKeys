@@ -176,6 +176,26 @@ impl Server {
                 )
                 .await
             }
+            tools::TOOL_CRED_STORE => {
+                tools::cred::store(
+                    caller,
+                    self.backend.clone(),
+                    &self.config,
+                    session_bearer,
+                    &args,
+                )
+                .await
+            }
+            tools::TOOL_CRED_FETCH => {
+                tools::cred::fetch(
+                    caller,
+                    self.backend.clone(),
+                    &self.config,
+                    session_bearer,
+                    &args,
+                )
+                .await
+            }
             tools::TOOL_AUDIT_APPEND => {
                 tools::audit::call(caller, self.backend.clone(), &args).await
             }
