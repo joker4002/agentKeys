@@ -50,7 +50,7 @@ and run the real-agent proof (it signs with the agent's **sandbox-held** key):
 
 ```bash
 # in the SANDBOX shell:
-bash "$HOME/sandbox-agent-isolation.sh"   # the REAL agent: the deferred roundtrip (steps 11-12 / 14-15), sandbox-held key
+bash "$HOME/sandbox-agent-isolation.sh"   # the REAL agent: deferred memory + credential roundtrips (steps 11-12 / 14-15), sandbox-held key
 ```
 
 (If `v2-demo.sh` reported the wire phase **skipped — no aiosandbox**, the agent wasn't paired:

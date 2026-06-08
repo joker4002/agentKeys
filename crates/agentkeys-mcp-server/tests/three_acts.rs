@@ -262,6 +262,40 @@ async fn agent_owned_cred_store_then_fetch_roundtrips() {
 }
 
 #[tokio::test]
+async fn agent_owned_cred_store_rejects_cross_actor_param() {
+    let backend = Arc::new(MockBackend::new());
+    let server = server_with(backend.clone());
+
+    // caller() authenticates as ACTOR; asking to store under a DIFFERENT actor
+    // must be refused by the MCP per-actor gate (check_actor_param) BEFORE any
+    // cap is minted — an agent can only write its OWN credentials/ prefix.
+    let resp = server
+        .dispatch(
+            &caller(),
+            "agent-session-bearer",
+            call_tool(
+                "agentkeys.cred.store",
+                json!({
+                    "actor": "O_mallory_999",
+                    "service": "openrouter",
+                    "content": "sk-not-yours",
+                    "device_key_hash": DEVICE_KEY_HASH
+                }),
+            ),
+        )
+        .await;
+    assert!(
+        resp.error.is_some(),
+        "cross-actor cred.store must be rejected, got ok"
+    );
+    assert!(
+        backend.cap_mints().is_empty(),
+        "no cap may be minted for a rejected cross-actor cred.store, got {:?}",
+        backend.cap_mints()
+    );
+}
+
+#[tokio::test]
 async fn cap_mint_memory_get_returns_cap_for_worker() {
     let backend = Arc::new(MockBackend::new());
     let server = server_with(backend.clone());

@@ -25,6 +25,13 @@ cred_service="${SANDBOX_CRED_SERVICE:-sandbox-isolation-proof}"
 cred_secret="sandbox-cred-proof-$$-$(date +%s 2>/dev/null || echo n)"
 echo "== §10.2 agent isolation — the agent signs with its SANDBOX-held key (not the master) ==" >&2
 
+# Resolve the agent's session JWT and export AGENTKEYS_SESSION_BEARER BEFORE
+# either roundtrip. BOTH the memory and credential paths cap-mint AS the agent
+# (operator_omni == actor_omni), and the broker validates the bearer's
+# `agentkeys.omni_account` claim against operator_omni — so a missing bearer
+# fails the FIRST (memory) roundtrip, not just cred. The CLI forwards this env
+# var to the in-sandbox MCP server as the x-agentkeys-session-bearer header.
+# Already set in the environment? keep it; otherwise load the paired session file.
 agent_session_file=""
 if [ -n "${SANDBOX_AGENT_SESSION_FILE:-}" ] && [ -r "$SANDBOX_AGENT_SESSION_FILE" ]; then
   agent_session_file="$SANDBOX_AGENT_SESSION_FILE"
@@ -36,6 +43,20 @@ elif [ -n "${AGENTKEYS_ACTOR_OMNI:-}" ]; then
       break
     fi
   done
+fi
+if [ -z "$agent_session_file" ] && [ -z "${AGENTKEYS_SESSION_BEARER:-}" ]; then
+  set -- "$HOME"/.agentkeys/agent-session-*.jwt
+  if [ "$#" -eq 1 ] && [ -r "$1" ]; then
+    agent_session_file="$1"
+  fi
+fi
+if [ -n "$agent_session_file" ]; then
+  AGENTKEYS_SESSION_BEARER="$(tr -d '\r\n' < "$agent_session_file")"
+  export AGENTKEYS_SESSION_BEARER
+fi
+if [ -z "${AGENTKEYS_SESSION_BEARER:-}" ]; then
+  echo "FAIL: no agent session bearer for self-owned cap-mint. Set AGENTKEYS_SESSION_BEARER or SANDBOX_AGENT_SESSION_FILE, or place ~/.agentkeys/agent-session-<actor>.jwt — run 'phase1-wire-demo.sh --real' on the operator host first." >&2
+  exit 1
 fi
 
 # POSITIVE: the agent stores + reads back its OWN memory namespace. This is the real
@@ -54,20 +75,9 @@ else
 fi
 
 # POSITIVE: the same sandbox-held agent identity stores + fetches an OWN
-# credential through the credentials worker. The service name is deliberately a
-# synthetic proof key so this never overwrites a real provider credential.
-if [ -z "$agent_session_file" ]; then
-  set -- "$HOME"/.agentkeys/agent-session-*.jwt
-  if [ "$#" -eq 1 ] && [ -r "$1" ]; then
-    agent_session_file="$1"
-  fi
-fi
-if [ -z "$agent_session_file" ]; then
-  echo "FAIL: no sandbox agent session bearer file found for self-owned cred cap-mint. Expected ~/.agentkeys/agent-session-<actor>.jwt or SANDBOX_AGENT_SESSION_FILE." >&2
-  exit 1
-fi
-AGENTKEYS_SESSION_BEARER="$(tr -d '\r\n' < "$agent_session_file")"
-export AGENTKEYS_SESSION_BEARER
+# credential through the credentials worker (bearer already exported above). The
+# service name is deliberately a synthetic proof key so this never overwrites a
+# real provider credential.
 if ! "$AGENT_BIN" cred store --service "$cred_service" --content "$cred_secret" >&2; then
   echo "FAIL: agent cred store (own prefix) — check in-sandbox MCP + broker/cred-worker/vault-role reachability." >&2
   exit 1
