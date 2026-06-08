@@ -41,8 +41,8 @@ pub struct BackendClient {
     pub broker_url: Option<String>,
     pub memory_url: Option<String>,
     pub audit_url: Option<String>,
-    /// Cred worker base URL (#216 agent-side vaulted-key fetch). `None` → no
-    /// cred-fetch available.
+    /// Cred worker base URL — backs `/v1/cred/{store,fetch}` (the
+    /// `agentkeys.cred.*` tools). `None` → cred store/fetch unavailable.
     pub cred_url: Option<String>,
     /// Agent session JWT (omni == the actor). Used to mint per-actor STS creds
     /// for the worker S3 relay (issue #90). `None` → no relay (worker falls
