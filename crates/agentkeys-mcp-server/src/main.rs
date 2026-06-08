@@ -11,6 +11,25 @@ use agentkeys_mcp_server::{
     transport,
 };
 
+/// Build the real HTTP backend from config. Extracted so a unit test can assert
+/// every worker URL is plumbed through — `cred_url` regressed to a hardcoded
+/// `None` once (PR #228 review): the server advertised `agentkeys.cred.{store,
+/// fetch}` while the client had no cred URL, so every real call failed with
+/// `NotConfigured("cred_url")` before reaching the worker. A `MockBackend` test
+/// can't catch that; only asserting the wiring here can.
+fn build_http_backend(config: &Config) -> BackendClient {
+    BackendClient::new(
+        config.broker_url.clone(),
+        config.memory_url.clone(),
+        config.audit_url.clone(),
+        config.cred_url.clone(),
+        config.agent_session_bearer.clone(),
+        config.memory_role_arn.clone(),
+        config.vault_role_arn.clone(),
+        config.aws_region.clone(),
+    )
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // rustls 0.23 requires a process-level CryptoProvider. tokio-tungstenite
@@ -38,16 +57,7 @@ async fn main() -> anyhow::Result<()> {
     // `HttpBackend` delegate; `Backend` is impl'd directly on `BackendClient`).
     // The in-memory fixture backend was removed.
     let backend: Arc<dyn Backend> = match config.backend {
-        BackendKind::Http => Arc::new(BackendClient::new(
-            config.broker_url.clone(),
-            config.memory_url.clone(),
-            config.audit_url.clone(),
-            None, // cred_url — no MCP cred tool yet; #216 cred-fetch is the CLI path
-            config.agent_session_bearer.clone(),
-            config.memory_role_arn.clone(),
-            config.vault_role_arn.clone(),
-            config.aws_region.clone(),
-        )),
+        BackendKind::Http => Arc::new(build_http_backend(&config)),
     };
     let server = Arc::new(Server::new(config.clone(), backend));
 
@@ -79,4 +89,32 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_backend_plumbs_every_worker_url_from_config() {
+        let mut config = Config::for_tests();
+        config.broker_url = Some("https://broker.example".into());
+        config.memory_url = Some("https://memory.example".into());
+        config.audit_url = Some("https://audit.example".into());
+        config.cred_url = Some("https://cred.example".into());
+
+        let backend = build_http_backend(&config);
+
+        assert_eq!(
+            backend.broker_url.as_deref(),
+            Some("https://broker.example")
+        );
+        assert_eq!(
+            backend.memory_url.as_deref(),
+            Some("https://memory.example")
+        );
+        assert_eq!(backend.audit_url.as_deref(), Some("https://audit.example"));
+        // Regression guard: cred_url must flow from config, never a hardcoded None.
+        assert_eq!(backend.cred_url.as_deref(), Some("https://cred.example"));
+    }
 }

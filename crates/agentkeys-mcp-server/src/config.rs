@@ -53,6 +53,11 @@ pub struct Cli {
     #[arg(long, env = "AGENTKEYS_AUDIT_URL")]
     pub audit_url: Option<String>,
 
+    /// Credentials worker base URL — backs `agentkeys.cred.{store,fetch}`.
+    /// `None` → those tools fail with `NotConfigured("cred_url")`.
+    #[arg(long, env = "AGENTKEYS_CRED_URL")]
+    pub cred_url: Option<String>,
+
     /// Comma-separated `<vendor_id>:<bearer_token>` pairs that the HTTP
     /// transport will accept. Empty = HTTP refuses every request with 401.
     /// Format intentionally simple — vendor onboarding portal in M2 will
@@ -122,6 +127,7 @@ pub struct Config {
     pub broker_url: Option<String>,
     pub memory_url: Option<String>,
     pub audit_url: Option<String>,
+    pub cred_url: Option<String>,
     /// vendor_id → bearer_token
     pub vendor_tokens: HashMap<String, String>,
     pub default_daily_spend_cap_rmb: u64,
@@ -178,7 +184,7 @@ impl Config {
             "in-memory" | "in_memory" => anyhow::bail!(
                 "the in-memory backend was removed (real-data-only). The MCP server \
                  only supports `--backend http` — point it at a real broker + workers \
-                 via --broker-url / --memory-url / --audit-url."
+                 via --broker-url / --memory-url / --audit-url / --cred-url."
             ),
             other => anyhow::bail!("unknown backend `{other}` (expected http)"),
         };
@@ -232,6 +238,7 @@ impl Config {
             broker_url: cli.broker_url,
             memory_url: cli.memory_url,
             audit_url: cli.audit_url,
+            cred_url: cli.cred_url,
             vendor_tokens,
             default_daily_spend_cap_rmb: cli.default_daily_spend_cap_rmb,
             default_actor,
@@ -254,6 +261,7 @@ impl Config {
             broker_url: None,
             memory_url: None,
             audit_url: None,
+            cred_url: None,
             vendor_tokens: HashMap::new(),
             default_daily_spend_cap_rmb: 500,
             default_actor: None,

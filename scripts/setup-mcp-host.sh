@@ -376,6 +376,7 @@ MCP_ENDPOINT=${XIAOZHI_ENDPOINT}
 AGENTKEYS_BROKER_URL=https://broker.litentry.org
 AGENTKEYS_MEMORY_URL=https://memory.litentry.org
 AGENTKEYS_AUDIT_URL=https://audit.litentry.org
+AGENTKEYS_CRED_URL=https://cred.litentry.org
 EOF
 )
 else
@@ -385,11 +386,12 @@ else
 MCP_TRANSPORT=mcp-endpoint
 MCP_BACKEND=http
 MCP_ENDPOINT=ws://127.0.0.1:${RELAY_PORT}/mcp_endpoint/mcp/?token=${TOKEN}
-# These three are placeholders — paste the live broker / worker URLs in
+# These four are placeholders — paste the live broker / worker URLs in
 # after running setup-broker-host.sh on the same host.
 AGENTKEYS_BROKER_URL=https://broker.litentry.org
 AGENTKEYS_MEMORY_URL=https://memory.litentry.org
 AGENTKEYS_AUDIT_URL=https://audit.litentry.org
+AGENTKEYS_CRED_URL=https://cred.litentry.org
 EOF
 )
 fi
